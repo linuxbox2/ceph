@@ -666,6 +666,9 @@ OPTION(threadpool_default_timeout, OPT_INT, 60)
 // default wait time for an empty queue before pinging the hb timeout
 OPTION(threadpool_empty_queue_max_wait, OPT_INT, 2)
 
+OPTION(osd_module_dir, OPT_STR, CEPH_LIBDIR "/os-modules") // ObjectStore libraries
+OPTION(osd_modules, OPT_STR, "") // comma-separated list of ObjectStore modules
+
 OPTION(leveldb_write_buffer_size, OPT_U64, 8 *1024*1024) // leveldb write buffer size
 OPTION(leveldb_cache_size, OPT_U64, 128 *1024*1024) // leveldb cache size
 OPTION(leveldb_block_size, OPT_U64, 0) // leveldb block size
