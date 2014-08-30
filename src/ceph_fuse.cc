@@ -121,8 +121,8 @@ int main(int argc, const char **argv, const char *envp[]) {
 
     // start up network
     messenger = Messenger::create(g_ceph_context,
-				  entity_name_t::CLIENT(), "client",
-				  getpid());
+                                  entity_name_t::CLIENT(), "client",
+                                  getpid());
     messenger->set_default_policy(Messenger::Policy::lossy_client(0, 0));
     messenger->set_policy(entity_name_t::TYPE_MDS,
 			  Messenger::Policy::lossless_client(0, 0));

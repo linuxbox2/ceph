@@ -128,6 +128,7 @@ public:
   string name;
   int rank;
   Messenger *messenger;
+  Messenger *xmsgr;
   ConnectionRef con_self;
   Mutex lock;
   SafeTimer timer;
