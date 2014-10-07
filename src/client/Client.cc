@@ -48,6 +48,7 @@ using namespace std;
 #include "messages/MClientLease.h"
 #include "messages/MClientSnap.h"
 #include "messages/MCommandReply.h"
+#include "messages/MOSDMap.h"
 
 #include "messages/MGenericMessage.h"
 
@@ -1980,6 +1981,27 @@ void Client::handle_client_reply(MClientReply *reply)
 }
 
 
+void Client::handle_osd_map(MOSDMap *m)
+{
+  const OSDMap *osdmap = objecter->get_osdmap_read();
+  ldout(cct, 1) << __func__ << ": epoch " << osdmap->get_epoch() << dendl;
+  const bool full = osdmap->test_flag(CEPH_OSDMAP_FULL);
+  objecter->put_osdmap_read();
+
+  if (full) {
+    ldout(cct, 1) << __func__ << ": FULL: cancelling outstanding operations" << dendl;
+    // Cancel all outstanding ops with -ENOSPC: it is necessary to do this rather than blocking,
+    // because otherwise when we fill up we potentially lock caps forever on files with
+    // dirty pages, and we need to be able to release those caps to the MDS so that it can
+    // delete files and free up space.
+
+    objecter->op_cancel_writes(-ENOSPC);
+  }
+
+  m->put();
+}
+
+
 // ------------------------
 // incoming messages
 
@@ -2002,7 +2024,7 @@ bool Client::ms_dispatch(Message *m)
     break;
 
   case CEPH_MSG_OSD_MAP:
-    m->put();
+    handle_osd_map(static_cast<MOSDMap*>(m));
     break;
 
     // requests
