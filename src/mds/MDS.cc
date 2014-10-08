@@ -108,6 +108,7 @@ MDS::MDS(const std::string &n, Messenger *m, MonClient *mc) :
   op_tracker(cct, m->cct->_conf->mds_enable_op_tracker, 
                      m->cct->_conf->osd_num_op_tracker_shard),
   finisher(cct),
+  osd_epoch_barrier(0),
   sessionmap(this),
   progress_thread(this),
   asok_hook(NULL)
@@ -2856,4 +2857,36 @@ void MDS::ProgressThread::shutdown()
   mds->mds_lock.Unlock();
   join();
   mds->mds_lock.Lock();
+}
+
+/**
+ * This is used whenever a RADOS operation has been cancelled
+ * or a RADOS client has been blacklisted.
+ *
+ * The purpose is to ensure that when we hand out any capabilities
+ * which might allow touching the same RADOS objects, the clients
+ * we hand out the capabilities too must have a sufficiently recent
+ * OSD map to not race with cancelled operations.
+ *
+ * The two cases for this at time of writing are:
+ *  * Client eviction (where the client is blacklisted and other clients
+ *    must wait for a post-blacklist epoch to touch the same objects)
+ *  * OSD map full flag handling in the client (where the client may
+ *    cancel some OSD ops from a pre-full epoch, so other clients must
+ *    wait until the full epoch or later before touching the same objects).
+ *
+ * Note that this is a global value for simplicity: we could maintain this on
+ * a per-inode basis.  We don't, because:
+ *  A) It would be more complicated
+ *  B) It would use an extra 4 bytes of memory for every inode
+ *  C) It would not be much more efficient as almost always everyone has the latest
+ *     OSD map anyway, in most cases everyone will breeze through this barrier
+ *     rather than waiting.
+ *  C) We only do this barrier in very rare cases, so any benefit from per-inode
+ *     granularity would only very rarely be seen.
+ */
+void MDS::set_osd_epoch_barrier(epoch_t e)
+{
+  dout(4) << __func__ << ": epoch=" << e << dendl;
+  osd_epoch_barrier = e;
 }
