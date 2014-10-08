@@ -255,6 +255,9 @@ public:
   Messenger *messenger;  
   client_t whoami;
 
+  void set_cap_epoch_barrier(epoch_t e);
+  epoch_t cap_epoch_barrier;
+
   // mds sessions
   map<mds_rank_t, MetaSession*> mds_sessions;  // mds -> push seq
   list<Cond*> waiting_for_mdsmap;
@@ -500,6 +503,7 @@ protected:
 			      vector<snapid_t>& snaps);
 
   void handle_snap(struct MClientSnap *m);
+  void _retry_handle_caps(class MClientCaps *m);
   void handle_caps(class MClientCaps *m);
   void handle_cap_import(MetaSession *session, Inode *in, class MClientCaps *m);
   void handle_cap_export(MetaSession *session, Inode *in, class MClientCaps *m);
