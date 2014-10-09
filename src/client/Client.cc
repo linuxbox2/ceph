@@ -3050,6 +3050,21 @@ bool Client::_flush(Inode *in, Context *onfinish)
   if (!onfinish) {
     onfinish = new C_Client_PutInode(this, in);
   }
+
+  {
+    const OSDMap *osdmap = objecter->get_osdmap_read();
+    bool full = osdmap->test_flag(CEPH_OSDMAP_FULL);
+    objecter->put_osdmap_read();
+    if (full) {
+      ldout(cct, 1) << __func__ << ": FULL, purging for ENOSPC" << dendl;
+      if (onfinish) {
+        onfinish->complete(-ENOSPC);
+      }
+      objectcacher->purge_set(&in->oset);
+      return true;
+    }
+  }
+
   return objectcacher->flush_set(&in->oset, onfinish);
 }
 
