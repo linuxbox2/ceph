@@ -436,6 +436,7 @@ protected:
   
   void dump_inode(Formatter *f, Inode *in, set<Inode*>& did, bool disconnected);
   void dump_cache(Formatter *f);  // debug
+  void dump_status(Formatter *f);  // debug
   
   // trace generation
   ofstream traceout;
