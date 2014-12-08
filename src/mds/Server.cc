@@ -1303,6 +1303,7 @@ void Server::dispatch_client_request(MDRequestRef& mdr)
         req->get_op() == CEPH_MDS_OP_SETDIRLAYOUT ||
         req->get_op() == CEPH_MDS_OP_SETLAYOUT ||
         req->get_op() == CEPH_MDS_OP_RMXATTR ||
+        req->get_op() == CEPH_MDS_OP_SETXATTR ||
         req->get_op() == CEPH_MDS_OP_SETFILELOCK ||
         req->get_op() == CEPH_MDS_OP_CREATE ||
         req->get_op() == CEPH_MDS_OP_LINK ||
@@ -3380,6 +3381,14 @@ void Server::handle_client_setattr(MDRequestRef& mdr)
   inode_t *pi = cur->get_projected_inode();
 
   uint64_t old_size = MAX(pi->size, req->head.args.setattr.old_size);
+
+  // ENOSPC on growing file while full, but allow shrinks
+  if (is_full && req->head.args.setattr.size > old_size) {
+    dout(20) << __func__ << ": full, responding ENOSPC to setattr with larger size" << dendl;
+    respond_to_request(mdr, -ENOSPC);
+    return;
+  }
+
   bool truncating_smaller = false;
   if (mask & CEPH_SETATTR_SIZE) {
     truncating_smaller = req->head.args.setattr.size < old_size;
