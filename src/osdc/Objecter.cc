@@ -40,10 +40,13 @@
 #include "messages/MCommand.h"
 #include "messages/MCommandReply.h"
 
+#include "messages/MWatchNotify.h"
+
 #include <errno.h>
 
 #include "common/config.h"
 #include "common/perf_counters.h"
+#include "common/Finisher.h"
 #include "include/str_list.h"
 #include "common/errno.h"
 
@@ -100,6 +103,7 @@ enum {
   l_osdc_linger_active,
   l_osdc_linger_send,
   l_osdc_linger_resend,
+  l_osdc_linger_ping,
 
   l_osdc_poolop_active,
   l_osdc_poolop_send,
@@ -223,6 +227,7 @@ void Objecter::init()
     pcb.add_u64(l_osdc_linger_active, "linger_active");
     pcb.add_u64_counter(l_osdc_linger_send, "linger_send");
     pcb.add_u64_counter(l_osdc_linger_resend, "linger_resend");
+    pcb.add_u64_counter(l_osdc_linger_ping, "linger_ping");
 
     pcb.add_u64(l_osdc_poolop_active, "poolop_active");
     pcb.add_u64_counter(l_osdc_poolop_send, "poolop_send");
@@ -348,6 +353,7 @@ void Objecter::shutdown()
       _session_linger_op_remove(homeless_session, lop);
     }
     linger_ops.erase(lop->linger_id);
+    linger_ops_set.erase(lop);
     lop->put();
   }
 
@@ -411,11 +417,24 @@ void Objecter::_send_linger(LingerOp *info)
 
   RWLock::Context lc(rwlock, RWLock::Context::TakenForWrite);
 
-  ldout(cct, 15) << "send_linger " << info->linger_id << dendl;
-  vector<OSDOp> opv = info->ops; // need to pass a copy to ops
-  Context *onack = (!info->registered && info->on_reg_ack) ?
-    new C_Linger_Ack(this, info) : NULL;
-  Context *oncommit = new C_Linger_Commit(this, info);
+  vector<OSDOp> opv;
+  Context *onack = NULL;
+  Context *oncommit = NULL;
+  if (info->registered && info->is_watch) {
+    ldout(cct, 15) << "send_linger " << info->linger_id << " reconnect" << dendl;
+    opv.push_back(OSDOp());
+    opv.back().op.op = CEPH_OSD_OP_WATCH;
+    opv.back().op.watch.cookie = info->get_cookie();
+    opv.back().op.watch.op = CEPH_OSD_WATCH_OP_RECONNECT;
+    opv.back().op.watch.gen = ++info->register_gen;
+    oncommit = new C_Linger_Reconnect(this, info);
+  } else {
+    ldout(cct, 15) << "send_linger " << info->linger_id << " register" << dendl;
+    opv = info->ops;
+    if (info->on_reg_ack)
+      onack = new C_Linger_Register(this, info);
+    oncommit = new C_Linger_Commit(this, info);
+  }
   Op *o = new Op(info->target.base_oid, info->target.base_oloc,
 		 opv, info->target.flags | CEPH_OSD_FLAG_READ,
 		 onack, oncommit,
@@ -449,9 +468,9 @@ void Objecter::_send_linger(LingerOp *info)
   logger->inc(l_osdc_linger_send);
 }
 
-void Objecter::_linger_ack(LingerOp *info, int r) 
+void Objecter::_linger_register(LingerOp *info, int r)
 {
-  ldout(cct, 10) << "_linger_ack " << info->linger_id << dendl;
+  ldout(cct, 10) << "_linger_register " << info->linger_id << dendl;
   if (info->on_reg_ack) {
     info->on_reg_ack->complete(r);
     info->on_reg_ack = NULL;
@@ -471,26 +490,133 @@ void Objecter::_linger_commit(LingerOp *info, int r)
   info->pobjver = NULL;
 }
 
-void Objecter::unregister_linger(uint64_t linger_id)
+struct C_DoWatchError : public Context {
+  Objecter::LingerOp *info;
+  int err;
+  C_DoWatchError(Objecter::LingerOp *i, int r) : info(i), err(r) {
+    info->get();
+    info->_queued_async();
+  }
+  void finish(int r) {
+    info->watch_context->handle_error(info->linger_id, err);
+    info->finished_async();
+    info->put();
+  }
+};
+
+void Objecter::_linger_reconnect(LingerOp *info, int r)
 {
-  RWLock::WLocker wl(rwlock);
-  _unregister_linger(linger_id);
+  ldout(cct, 10) << __func__ << " " << info->linger_id << " = " << r
+		 << " (last_error " << info->last_error << ")" << dendl;
+  if (r < 0) {
+    info->watch_lock.get_write();
+    info->last_error = r;
+    if (info->watch_context)
+      finisher->queue(new C_DoWatchError(info, r));
+    info->watch_lock.put_write();
+  }
 }
 
-void Objecter::_unregister_linger(uint64_t linger_id)
+void Objecter::_send_linger_ping(LingerOp *info)
+{
+  assert(rwlock.is_locked());
+  assert(info->session->lock.is_locked());
+
+  if (cct->_conf->objecter_inject_no_watch_ping) {
+    ldout(cct, 10) << __func__ << " " << info->linger_id << " SKIPPING" << dendl;
+    return;
+  }
+  if (osdmap->test_flag(CEPH_OSDMAP_PAUSERD)) {
+    ldout(cct, 10) << __func__ << " PAUSERD" << dendl;
+    return;
+  }
+
+  utime_t now = ceph_clock_now(NULL);
+  ldout(cct, 10) << __func__ << " " << info->linger_id << " now " << now << dendl;
+
+  RWLock::Context lc(rwlock, RWLock::Context::TakenForRead);
+
+  vector<OSDOp> opv(1);
+  opv[0].op.op = CEPH_OSD_OP_WATCH;
+  opv[0].op.watch.cookie = info->get_cookie();
+  opv[0].op.watch.op = CEPH_OSD_WATCH_OP_PING;
+  opv[0].op.watch.gen = info->register_gen;
+  C_Linger_Ping *onack = new C_Linger_Ping(this, info);
+  Op *o = new Op(info->target.base_oid, info->target.base_oloc,
+		 opv, info->target.flags | CEPH_OSD_FLAG_READ,
+		 onack, NULL, NULL);
+  o->target = info->target;
+  o->should_resend = false;
+  _send_op_account(o);
+  MOSDOp *m = _prepare_osd_op(o);
+  o->tid = last_tid.inc();
+  _session_op_assign(info->session, o);
+  _send_op(o, m);
+  info->ping_tid = o->tid;
+
+  onack->sent = now;
+  logger->inc(l_osdc_linger_ping);
+}
+
+void Objecter::_linger_ping(LingerOp *info, int r, utime_t sent,
+			    uint32_t register_gen)
+{
+  RWLock::WLocker l(info->watch_lock);
+  ldout(cct, 10) << __func__ << " " << info->linger_id
+		 << " sent " << sent << " gen " << register_gen << " = " << r
+		 << " (last_error " << info->last_error
+		 << " register_gen " << info->register_gen << ")" << dendl;
+  if (info->register_gen == register_gen) {
+    if (r == 0) {
+      info->watch_valid_thru = sent;
+    } else if (r < 0) {
+      info->last_error = r;
+      if (info->watch_context)
+	finisher->queue(new C_DoWatchError(info, r));
+    }
+  } else {
+    ldout(cct, 20) << " ignoring old gen" << dendl;
+  }
+}
+
+int Objecter::linger_check(LingerOp *info)
+{
+  RWLock::RLocker l(info->watch_lock);
+
+  utime_t stamp = info->watch_valid_thru;
+  if (!info->watch_pending_async.empty())
+    stamp = MIN(info->watch_valid_thru, info->watch_pending_async.front());
+  utime_t age = ceph_clock_now(NULL) - stamp;
+
+  ldout(cct, 10) << __func__ << " " << info->linger_id
+		 << " err " << info->last_error
+		 << " age " << age << dendl;
+  if (info->last_error)
+    return info->last_error;
+  return age.to_msec();
+}
+
+void Objecter::linger_cancel(LingerOp *info)
+{
+  RWLock::WLocker wl(rwlock);
+  _linger_cancel(info);
+  info->put();
+}
+
+void Objecter::_linger_cancel(LingerOp *info)
 {
   assert(rwlock.is_wlocked());
-  ldout(cct, 20) << __func__ << " linger_id=" << linger_id << dendl;
-
-  map<uint64_t, LingerOp*>::iterator iter = linger_ops.find(linger_id);
-  if (iter != linger_ops.end()) {
-    LingerOp *info = iter->second;
+  ldout(cct, 20) << __func__ << " linger_id=" << info->linger_id << dendl;
+  if (!info->canceled) {
     OSDSession *s = info->session;
     s->lock.get_write();
     _session_linger_op_remove(s, info);
     s->lock.unlock();
 
-    linger_ops.erase(iter);
+    linger_ops.erase(info->linger_id);
+    linger_ops_set.erase(info);
+    assert(linger_ops.size() == linger_ops_set.size());
+
     info->canceled = true;
     info->put();
 
@@ -498,47 +624,70 @@ void Objecter::_unregister_linger(uint64_t linger_id)
   }
 }
 
-ceph_tid_t Objecter::linger_mutate(const object_t& oid, const object_locator_t& oloc,
-			      ObjectOperation& op,
-			      const SnapContext& snapc, utime_t mtime,
-			      bufferlist& inbl, int flags,
-			      Context *onack, Context *oncommit,
-			      version_t *objver)
+
+
+Objecter::LingerOp *Objecter::linger_register(const object_t& oid,
+					      const object_locator_t& oloc,
+					      int flags)
 {
   LingerOp *info = new LingerOp;
   info->target.base_oid = oid;
   info->target.base_oloc = oloc;
   if (info->target.base_oloc.key == oid)
     info->target.base_oloc.key.clear();
+  info->target.flags = flags;
+  info->watch_valid_thru = ceph_clock_now(NULL);
+
+  RWLock::Context lc(rwlock, RWLock::Context::TakenForWrite);
+
+  // Acquire linger ID
+  info->linger_id = ++max_linger_id;
+  ldout(cct, 10) << __func__ << " info " << info
+		 << " linger_id " << info->linger_id
+		 << " cookie " << info->get_cookie()
+		 << dendl;
+  linger_ops[info->linger_id] = info;
+  linger_ops_set.insert(info);
+  assert(linger_ops.size() == linger_ops_set.size());
+
+  info->get(); // for the caller
+  return info;
+}
+
+ceph_tid_t Objecter::linger_watch(LingerOp *info,
+				  ObjectOperation& op,
+				  const SnapContext& snapc, utime_t mtime,
+				  bufferlist& inbl,
+				  Context *oncommit,
+				  version_t *objver)
+{
+  info->is_watch = true;
   info->snapc = snapc;
   info->mtime = mtime;
-  info->target.flags = flags | CEPH_OSD_FLAG_WRITE;
+  info->target.flags |= CEPH_OSD_FLAG_WRITE;
   info->ops = op.ops;
   info->inbl = inbl;
   info->poutbl = NULL;
   info->pobjver = objver;
-  info->on_reg_ack = onack;
+  info->on_reg_ack = NULL;
   info->on_reg_commit = oncommit;
 
   RWLock::WLocker wl(rwlock);
   _linger_submit(info);
   logger->inc(l_osdc_linger_active);
+
   return info->linger_id;
 }
 
-ceph_tid_t Objecter::linger_read(const object_t& oid, const object_locator_t& oloc,
-			    ObjectOperation& op,
-			    snapid_t snap, bufferlist& inbl, bufferlist *poutbl, int flags,
-			    Context *onfinish,
-			    version_t *objver)
+ceph_tid_t Objecter::linger_notify(LingerOp *info,
+				   ObjectOperation& op,
+				   snapid_t snap, bufferlist& inbl,
+				   bufferlist *poutbl,
+				   Context *onfinish,
+				   version_t *objver)
 {
-  LingerOp *info = new LingerOp;
-  info->target.base_oid = oid;
-  info->target.base_oloc = oloc;
-  if (info->target.base_oloc.key == oid)
-    info->target.base_oloc.key.clear();
   info->snap = snap;
-  info->target.flags = flags | CEPH_OSD_FLAG_READ;
+  info->target.flags |= CEPH_OSD_FLAG_READ;
   info->ops = op.ops;
   info->inbl = inbl;
   info->poutbl = poutbl;
@@ -548,6 +697,7 @@ ceph_tid_t Objecter::linger_read(const object_t& oid, const object_locator_t& ol
   RWLock::WLocker wl(rwlock);
   _linger_submit(info);
   logger->inc(l_osdc_linger_active);
+
   return info->linger_id;
 }
 
@@ -556,11 +706,7 @@ void Objecter::_linger_submit(LingerOp *info)
   assert(rwlock.is_wlocked());
   RWLock::Context lc(rwlock, RWLock::Context::TakenForWrite);
 
-  // Acquire linger ID
-  info->linger_id = ++max_linger_id;
-  ldout(cct, 10) << __func__ << " info " << info
-		 << " linger_id " << info->linger_id << dendl;
-  linger_ops[info->linger_id] = info;
+  assert(info->linger_id);
 
   // Populate Op::target
   OSDSession *s = NULL;
@@ -577,6 +723,85 @@ void Objecter::_linger_submit(LingerOp *info)
   _send_linger(info);
 }
 
+struct C_DoWatchNotify : public Context {
+  Objecter *objecter;
+  Objecter::LingerOp *info;
+  MWatchNotify *msg;
+  C_DoWatchNotify(Objecter *o, Objecter::LingerOp *i, MWatchNotify *m)
+    : objecter(o), info(i), msg(m) {
+    info->get();
+    info->_queued_async();
+    msg->get();
+  }
+  void finish(int r) {
+    objecter->_do_watch_notify(info, msg);
+  }
+};
+
+void Objecter::handle_watch_notify(MWatchNotify *m)
+{
+  RWLock::RLocker l(rwlock);
+  if (!initialized.read()) {
+    return;
+  }
+
+  LingerOp *info = reinterpret_cast<LingerOp*>(m->cookie);
+  if (linger_ops_set.count(info) == 0) {
+    ldout(cct, 7) << __func__ << " cookie " << m->cookie << " dne" << dendl;
+    return;
+  }
+  RWLock::WLocker wl(info->watch_lock);
+  if (m->opcode == CEPH_WATCH_EVENT_DISCONNECT) {
+    info->last_error = -ENOTCONN;
+  }
+  finisher->queue(new C_DoWatchNotify(this, info, m));
+}
+
+void Objecter::_do_watch_notify(LingerOp *info, MWatchNotify *m)
+{
+  ldout(cct, 10) << __func__ << " " << *m << dendl;
+
+  rwlock.get_read();
+  if (!initialized.read()) {
+    rwlock.put_read();
+    goto out;
+  }
+
+  if (info->canceled) {
+    rwlock.put_read();
+    goto out;
+  }
+
+  // notify completion?
+  if (!info->is_watch) {
+    assert(info->on_notify_finish);
+    info->notify_result_bl->claim(m->get_data());
+    rwlock.put_read();
+    info->on_notify_finish->complete(m->return_code);
+    goto out;
+  }
+
+  assert(info->is_watch);
+  assert(info->watch_context);
+  rwlock.put_read();
+
+  switch (m->opcode) {
+  case CEPH_WATCH_EVENT_NOTIFY:
+    info->watch_context->handle_notify(m->notify_id, m->cookie,
+				       m->notifier_gid, m->bl);
+    break;
+
+  case CEPH_WATCH_EVENT_DISCONNECT:
+    info->watch_context->handle_error(m->cookie, -ENOTCONN);
+    break;
+  }
+
+ out:
+  info->finished_async();
+  info->put();
+  m->put();
+}
+
 bool Objecter::ms_dispatch(Message *m)
 {
   ldout(cct, 10) << __func__ << " " << cct << " " << *m << dendl;
@@ -587,6 +812,11 @@ bool Objecter::ms_dispatch(Message *m)
     // these we exlusively handle
   case CEPH_MSG_OSD_OPREPLY:
     handle_osd_op_reply(static_cast<MOSDOpReply*>(m));
+    return true;
+
+  case CEPH_MSG_WATCH_NOTIFY:
+    handle_watch_notify(static_cast<MWatchNotify*>(m));
+    m->put();
     return true;
 
   case MSG_COMMAND_REPLY:
@@ -628,7 +858,7 @@ void Objecter::_scan_requests(OSDSession *s,
 {
   assert(rwlock.is_wlocked());
 
-  list<uint64_t> unregister_lingers;
+  list<LingerOp*> unregister_lingers;
 
   RWLock::Context lc(rwlock, RWLock::Context::TakenForWrite);
 
@@ -655,8 +885,10 @@ void Objecter::_scan_requests(OSDSession *s,
     case RECALC_OP_TARGET_POOL_DNE:
       _check_linger_pool_dne(op, &unregister);
       if (unregister) {
-        ldout(cct, 10) << " need to unregister linger op " << op->linger_id << dendl;
-        unregister_lingers.push_back(op->linger_id);
+        ldout(cct, 10) << " need to unregister linger op "
+		       << op->linger_id << dendl;
+	op->get();
+        unregister_lingers.push_back(op);
       }
       break;
     }
@@ -718,8 +950,11 @@ void Objecter::_scan_requests(OSDSession *s,
 
   s->lock.unlock();
 
-  for (list<uint64_t>::iterator iter = unregister_lingers.begin(); iter != unregister_lingers.end(); ++iter) {
-    _unregister_linger(*iter);
+  for (list<LingerOp*>::iterator iter = unregister_lingers.begin();
+       iter != unregister_lingers.end();
+       ++iter) {
+    _linger_cancel(*iter);
+    (*iter)->put();
   }
 }
 
@@ -1101,7 +1336,7 @@ void Objecter::C_Linger_Map_Latest::finish(int r)
   objecter->_check_linger_pool_dne(op, &unregister);
 
   if (unregister) {
-    objecter->_unregister_linger(op->linger_id);
+    objecter->_linger_cancel(op);
   }
 
   op->put();
@@ -1313,21 +1548,21 @@ void Objecter::close_session(OSDSession *s)
   std::list<CommandOp*> homeless_commands;
   std::list<Op*> homeless_ops;
 
-  while(!s->linger_ops.empty()) {
+  while (!s->linger_ops.empty()) {
     std::map<uint64_t, LingerOp*>::iterator i = s->linger_ops.begin();
     ldout(cct, 10) << " linger_op " << i->first << dendl;
     homeless_lingers.push_back(i->second);
     _session_linger_op_remove(s, i->second);
   }
 
-  while(!s->ops.empty()) {
+  while (!s->ops.empty()) {
     std::map<ceph_tid_t, Op*>::iterator i = s->ops.begin();
     ldout(cct, 10) << " op " << i->first << dendl;
     homeless_ops.push_back(i->second);
     _session_op_remove(s, i->second);
   }
 
-  while(!s->command_ops.empty()) {
+  while (!s->command_ops.empty()) {
     std::map<ceph_tid_t, CommandOp*>::iterator i = s->command_ops.begin();
     ldout(cct, 10) << " command_op " << i->first << dendl;
     homeless_commands.push_back(i->second);
@@ -1596,6 +1831,8 @@ void Objecter::tick()
         assert(op->session);
         ldout(cct, 10) << " pinging osd that serves lingering tid " << p->first << " (osd." << op->session->osd << ")" << dendl;
         toping.insert(op->session);
+	if (op->is_watch && !op->last_error)
+	  _send_linger_ping(op);
       }
       for (map<uint64_t,CommandOp*>::iterator p = s->command_ops.begin();
            p != s->command_ops.end();
@@ -1726,33 +1963,8 @@ ceph_tid_t Objecter::_op_submit_with_budget(Op *op, RWLock::Context& lc, int *ct
   return tid;
 }
 
-ceph_tid_t Objecter::_op_submit(Op *op, RWLock::Context& lc)
+void Objecter::_send_op_account(Op *op)
 {
-  assert(rwlock.is_locked());
-
-  ldout(cct, 10) << __func__ << " op " << op << dendl;
-
-  // pick target
-  assert(op->session == NULL);
-  OSDSession *s = NULL;
-
-  bool const check_for_latest_map = _calc_target(&op->target) == RECALC_OP_TARGET_POOL_DNE;
-
-  // Try to get a session, including a retry if we need to take write lock
-  int r = _get_session(op->target.osd, &s, lc);
-  if (r == -EAGAIN) {
-    assert(s == NULL);
-    lc.promote();
-    r = _get_session(op->target.osd, &s, lc);
-  }
-  assert(r == 0);
-  assert(s);  // may be homeless
-
-  // We may need to take wlock if we will need to _set_op_map_check later.
-  if (check_for_latest_map && !lc.is_wlocked()) {
-    lc.promote();
-  }
-
   inflight_ops.inc();
 
   // add to gather set(s)
@@ -1811,6 +2023,36 @@ ceph_tid_t Objecter::_op_submit(Op *op, RWLock::Context& lc)
     if (code)
       logger->inc(code);
   }
+}
+
+ceph_tid_t Objecter::_op_submit(Op *op, RWLock::Context& lc)
+{
+  assert(rwlock.is_locked());
+
+  ldout(cct, 10) << __func__ << " op " << op << dendl;
+
+  // pick target
+  assert(op->session == NULL);
+  OSDSession *s = NULL;
+
+  bool const check_for_latest_map = _calc_target(&op->target) == RECALC_OP_TARGET_POOL_DNE;
+
+  // Try to get a session, including a retry if we need to take write lock
+  int r = _get_session(op->target.osd, &s, lc);
+  if (r == -EAGAIN) {
+    assert(s == NULL);
+    lc.promote();
+    r = _get_session(op->target.osd, &s, lc);
+  }
+  assert(r == 0);
+  assert(s);  // may be homeless
+
+  // We may need to take wlock if we will need to _set_op_map_check later.
+  if (check_for_latest_map && !lc.is_wlocked()) {
+    lc.promote();
+  }
+
+  _send_op_account(op);
 
   // send?
   ldout(cct, 10) << "_op_submit oid " << op->target.base_oid
@@ -2525,7 +2767,6 @@ void Objecter::handle_osd_op_reply(MOSDOpReply *m)
     m->put();
     return;
   }
-
   RWLock::Context lc(rwlock, RWLock::Context::TakenForRead);
 
   map<int, OSDSession *>::iterator siter = osd_sessions.find(osd_num);

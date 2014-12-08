@@ -1009,7 +1009,8 @@ CEPH_RADOS_API int rados_ioctx_snap_rollback(rados_ioctx_t io, const char *oid,
  * @warning Deprecated: Use rados_ioctx_snap_rollback() instead
  */
 CEPH_RADOS_API int rados_rollback(rados_ioctx_t io, const char *oid,
-            	            	  const char *snapname);
+				  const char *snapname)
+  __attribute__((deprecated));
 
 /**
  * Set the snapshot from which reads are performed.
@@ -1862,14 +1863,50 @@ CEPH_RADOS_API int rados_aio_cancel(rados_ioctx_t io,
  * @typedef rados_watchcb_t
  *
  * Callback activated when a notify is received on a watched
- * object. Parameters are:
- * - opcode undefined
- * - ver version of the watched object
- * - arg application-specific data
+ * object.
+ *
+ * @param opcode undefined
+ * @param ver version of the watched object
+ * @param arg application-specific data
  *
  * @note BUG: opcode is an internal detail that shouldn't be exposed
+ * @note BUG: ver is unused
  */
 typedef void (*rados_watchcb_t)(uint8_t opcode, uint64_t ver, void *arg);
+
+/**
+ * @typedef rados_watchcb2_t
+ *
+ * Callback activated when a notify is received on a watched
+ * object.
+ *
+ * @param arg opaque user-defined value provided to rados_watch2()
+ * @param notify_id an id for this notify event
+ * @param handle the watcher handle we are notifying
+ * @param notifier_id the unique client id for the notifier
+ * @param data payload from the notifier
+ * @param datalen length of payload buffer
+ */
+typedef void (*rados_watchcb2_t)(void *arg,
+				 uint64_t notify_id,
+				 uint64_t handle,
+				 uint64_t notifier_id,
+				 void *data,
+				 size_t data_len);
+
+/**
+ * @typedef rados_watcherrcb_t
+ *
+ * Callback activated when we encounter an error with the watch session.
+ * This can happen when the location of the objects moves within the
+ * cluster and we fail to register our watch with the new object location,
+ * or when our connection with the object OSD is otherwise interrupted and
+ * we may have missed notify events.
+ *
+ * @param pre opaque user-defined value provided to rados_watch2()
+ * @param err error code
+ */
+  typedef void (*rados_watcherrcb_t)(void *pre, uint64_t cookie, int err);
 
 /**
  * Register an interest in an object
@@ -1890,15 +1927,59 @@ typedef void (*rados_watchcb_t)(uint8_t opcode, uint64_t ver, void *arg);
  * @param io the pool the object is in
  * @param o the object to watch
  * @param ver expected version of the object
- * @param handle where to store the internal id assigned to this watch
+ * @param cookie where to store the internal id assigned to this watch
  * @param watchcb what to do when a notify is received on this object
  * @param arg application defined data to pass when watchcb is called
  * @returns 0 on success, negative error code on failure
  * @returns -ERANGE if the version of the object is greater than ver
  */
 CEPH_RADOS_API int rados_watch(rados_ioctx_t io, const char *o, uint64_t ver,
-                               uint64_t *handle, rados_watchcb_t watchcb,
-                               void *arg);
+			       uint64_t *cookie,
+			       rados_watchcb_t watchcb, void *arg)
+  __attribute__((deprecated));
+
+
+/**
+ * Register an interest in an object
+ *
+ * A watch operation registers the client as being interested in
+ * notifications on an object. OSDs keep track of watches on
+ * persistent storage, so they are preserved across cluster changes by
+ * the normal recovery process. If the client loses its connection to
+ * the primary OSD for a watched object, the watch will be removed
+ * after 30 seconds. Watches are automatically reestablished when a new
+ * connection is made, or a placement group switches OSDs.
+ *
+ * @note BUG: watch timeout should be configurable
+ *
+ * @param io the pool the object is in
+ * @param o the object to watch
+ * @param cookie where to store the internal id assigned to this watch
+ * @param watchcb2 what to do when a notify is received on this object
+ * @param watcherrcb what to do when the watch session encounters an error
+ * @param arg opaque value to pass to the callback
+ * @returns 0 on success, negative error code on failure
+ */
+CEPH_RADOS_API int rados_watch2(rados_ioctx_t io, const char *o, uint64_t *cookie,
+				rados_watchcb2_t watchcb,
+				rados_watcherrcb_t watcherrcb,
+				void *arg);
+
+/**
+ * Check on the status of a watch
+ *
+ * Return the number of milliseconds since the watch was last confirmed.
+ * Or, if there has been an error, return that.
+ *
+ * If there is an error, the watch is no longer valid, and should be
+ * destroyed with rados_unwatch2().  The the user is still interested
+ * in the object, a new watch should be created with rados_watch2().
+ *
+ * @param io the pool the object is in
+ * @param cookie the watch handle
+ * @returns ms since last confirmed on success, negative error code on failure
+ */
+CEPH_RADOS_API int rados_watch_check(rados_ioctx_t io, uint64_t cookie);
 
 /**
  * Unregister an interest in an object
@@ -1907,12 +1988,24 @@ CEPH_RADOS_API int rados_watch(rados_ioctx_t io, const char *o, uint64_t ver,
  * watch. This should be called to clean up unneeded watchers.
  *
  * @param io the pool the object is in
- * @param o the name of the watched object
- * @param handle which watch to unregister
+ * @param o the name of the watched object (ignored)
+ * @param cookie which watch to unregister
  * @returns 0 on success, negative error code on failure
  */
-CEPH_RADOS_API int rados_unwatch(rados_ioctx_t io, const char *o,
-                                 uint64_t handle);
+CEPH_RADOS_API int rados_unwatch(rados_ioctx_t io, const char *o, uint64_t cookie)
+  __attribute__((deprecated));
+
+/**
+ * Unregister an interest in an object
+ *
+ * Once this completes, no more notifies will be sent to us for this
+ * watch. This should be called to clean up unneeded watchers.
+ *
+ * @param io the pool the object is in
+ * @param cookie which watch to unregister
+ * @returns 0 on success, negative error code on failure
+ */
+CEPH_RADOS_API int rados_unwatch2(rados_ioctx_t io, uint64_t cookie);
 
 /**
  * Sychronously notify watchers of an object
@@ -1931,7 +2024,74 @@ CEPH_RADOS_API int rados_unwatch(rados_ioctx_t io, const char *o,
  * @returns 0 on success, negative error code on failure
  */
 CEPH_RADOS_API int rados_notify(rados_ioctx_t io, const char *o, uint64_t ver,
-                                const char *buf, int buf_len);
+				const char *buf, int buf_len)
+  __attribute__((deprecated));
+
+/**
+ * Sychronously notify watchers of an object
+ *
+ * This blocks until all watchers of the object have received and
+ * reacted to the notify, or a timeout is reached.
+ *
+ * The reply buffer is optional.  If specified, the client will get
+ * back an encoded buffer that includes the ids of the clients that
+ * acknowledged the notify as well as their notify ack payloads (if
+ * any).  Clients that timed out are not included.  Even clients that
+ * do not include a notify ack payload are included in the list but
+ * have a 0-length payload associated with them.  The format:
+ *
+ *    le32 num_acks
+ *    {
+ *      le64 gid     global id for the client (for client.1234 that's 1234)
+ *      le64 cookie  cookie for the client
+ *      le32 buflen  length of reply message buffer
+ *      u8 * buflen  payload
+ *    } * num_acks
+ *    le32 num_timeouts
+ *    {
+ *      le64 gid     global id for the client
+ *      le64 cookie  cookie for the client
+ *    } * num_timeouts
+ *
+ * Note: There may be multiple instances of the same gid if there are
+ * multiple watchers registered via the same client.
+ *
+ * Note: The buffer must be released with rados_buffer_free() when the
+ * user is done with it.
+ *
+ * Note: Since the result buffer includes clients that time out, it
+ * will be set even when rados_notify() returns an error code (like
+ * -ETIMEDOUT).
+ *
+ * @param io the pool the object is in
+ * @param o the name of the object
+ * @param buf data to send to watchers
+ * @param buf_len length of buf in bytes
+ * @param timeout_ms notify timeout (in ms)
+ * @param reply_buffer pointer to reply buffer pointer (free with rados_buffer_free)
+ * @param reply_buffer_len pointer to size of reply buffer
+ * @returns 0 on success, negative error code on failure
+ */
+CEPH_RADOS_API int rados_notify2(rados_ioctx_t io, const char *o,
+				 const char *buf, int buf_len,
+				 uint64_t timeout_ms,
+				 char **reply_buffer, size_t *reply_buffer_len);
+
+/**
+ * Acknolwedge receipt of a notify
+ *
+ * @param io the pool the object is in
+ * @param o the name of the object
+ * @param notify_id the notify_id we got on the watchcb2_t callback
+ * @param cookie the watcher handle
+ * @param buf payload to return to notifier (optional)
+ * @param buf_len payload length
+ * @returns 0 on success
+ */
+CEPH_RADOS_API int rados_notify_ack(rados_ioctx_t io, const char *o,
+				    uint64_t notify_id, uint64_t cookie,
+				    const char *buf, int buf_len);
+
 
 /** @} Watch/Notify */
 
@@ -2067,6 +2227,7 @@ CEPH_RADOS_API void rados_write_op_rmxattr(rados_write_op_t write_op,
  * @param exclusive set to either LIBRADOS_CREATE_EXCLUSIVE or
    LIBRADOS_CREATE_IDEMPOTENT
  * will error if the object already exists.
+ * @param category category string (DEPRECATED, HAS NO EFFECT)
  */
 CEPH_RADOS_API void rados_write_op_create(rados_write_op_t write_op,
                                           int exclusive,

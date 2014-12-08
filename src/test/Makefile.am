@@ -529,6 +529,11 @@ unittest_context_LDADD = $(UNITTEST_LDADD) $(CEPH_GLOBAL)
 unittest_context_CXXFLAGS = $(UNITTEST_CXXFLAGS)
 check_PROGRAMS += unittest_context
 
+unittest_safe_io_SOURCES = test/common/test_safe_io.cc
+unittest_safe_io_LDADD = $(UNITTEST_LDADD) $(CEPH_GLOBAL)
+unittest_safe_io_CXXFLAGS = $(UNITTEST_CXXFLAGS)
+check_PROGRAMS += unittest_safe_io
+
 unittest_heartbeatmap_SOURCES = test/heartbeat_map.cc
 unittest_heartbeatmap_LDADD = $(LIBCOMMON) $(UNITTEST_LDADD) $(CEPH_GLOBAL)
 unittest_heartbeatmap_CXXFLAGS = $(UNITTEST_CXXFLAGS)
@@ -885,6 +890,11 @@ ceph_test_libcephfs_SOURCES = \
 ceph_test_libcephfs_LDADD = $(LIBCEPHFS) $(UNITTEST_LDADD)
 ceph_test_libcephfs_CXXFLAGS = $(UNITTEST_CXXFLAGS)
 bin_DEBUGPROGRAMS += ceph_test_libcephfs
+
+ceph_perf_objectstore_SOURCES = test/objectstore/ObjectStoreTransactionBenchmark.cc
+ceph_perf_objectstore_LDADD = $(LIBOS) $(UNITTEST_LDADD) $(CEPH_GLOBAL)
+ceph_perf_objectstore_CXXFLAGS = $(UNITTEST_CXXFLAGS)
+bin_DEBUGPROGRAMS += ceph_perf_objectstore
 
 if LINUX
 ceph_test_objectstore_SOURCES = test/objectstore/store_test.cc
