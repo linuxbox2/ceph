@@ -738,7 +738,7 @@ void Objecter::handle_osd_map(MOSDMap *m)
   }
 
   bool was_pauserd = osdmap->test_flag(CEPH_OSDMAP_PAUSERD);
-  bool was_full = osdmap_full_flag();
+  bool was_full = _osdmap_full_flag();
   bool was_pausewr = osdmap->test_flag(CEPH_OSDMAP_PAUSEWR) || was_full;
 
   list<LingerOp*> need_resend_linger;
@@ -792,7 +792,7 @@ void Objecter::handle_osd_map(MOSDMap *m)
 	}
 	logger->set(l_osdc_map_epoch, osdmap->get_epoch());
 
-	was_full = was_full || osdmap_full_flag();
+	was_full = was_full || _osdmap_full_flag();
 	_scan_requests(homeless_session, skipped_map, was_full,
 		       need_resend, need_resend_linger,
 		       need_resend_command);
@@ -841,7 +841,7 @@ void Objecter::handle_osd_map(MOSDMap *m)
   }
 
   bool pauserd = osdmap->test_flag(CEPH_OSDMAP_PAUSERD);
-  bool pausewr = osdmap->test_flag(CEPH_OSDMAP_PAUSEWR) || osdmap_full_flag();
+  bool pausewr = osdmap->test_flag(CEPH_OSDMAP_PAUSEWR) || _osdmap_full_flag();
 
   // was/is paused?
   if (was_pauserd || was_pausewr || pauserd || pausewr) {
@@ -1436,7 +1436,7 @@ int Objecter::_maybe_request_map()
 {
   assert(rwlock.is_locked());
   int flag = 0;
-  if (osdmap_full_flag()
+  if (_osdmap_full_flag()
       || osdmap->test_flag(CEPH_OSDMAP_PAUSERD)
       || osdmap->test_flag(CEPH_OSDMAP_PAUSEWR)) {
     ldout(cct, 10) << "_maybe_request_map subscribing (continuous) to next osd map (FULL flag is set)" << dendl;
@@ -1856,7 +1856,7 @@ ceph_tid_t Objecter::_op_submit(Op *op, RWLock::Context& lc)
     ldout(cct, 10) << " paused read " << op << " tid " << last_tid.read() << dendl;
     op->target.paused = true;
     _maybe_request_map();
-  } else if ((op->target.flags & CEPH_OSD_FLAG_WRITE) && osdmap_full_flag()) {
+  } else if ((op->target.flags & CEPH_OSD_FLAG_WRITE) && _osdmap_full_flag()) {
     ldout(cct, 0) << " FULL, paused modify " << op << " tid " << last_tid.read() << dendl;
     op->target.paused = true;
     _maybe_request_map();
@@ -2045,17 +2045,26 @@ bool Objecter::is_pg_changed(
 bool Objecter::target_should_be_paused(op_target_t *t)
 {
   bool pauserd = osdmap->test_flag(CEPH_OSDMAP_PAUSERD);
-  bool pausewr = osdmap->test_flag(CEPH_OSDMAP_PAUSEWR) || osdmap_full_flag();
+  bool pausewr = osdmap->test_flag(CEPH_OSDMAP_PAUSEWR) || _osdmap_full_flag();
 
   return (t->flags & CEPH_OSD_FLAG_READ && pauserd) ||
          (t->flags & CEPH_OSD_FLAG_WRITE && pausewr);
 }
 
+/**
+ * Locking public accessor for _osdmap_full_flag
+ */
+bool Objecter::osdmap_full_flag() const
+{
+  RWLock::RLocker rl(rwlock);
+
+  return _osdmap_full_flag();
+}
 
 /**
  * Wrapper around osdmap->test_flag for special handling of the FULL flag.
  */
-bool Objecter::osdmap_full_flag() const
+bool Objecter::_osdmap_full_flag() const
 {
   // Ignore the FULL flag if the caller has honor_osdmap_full
   return osdmap->test_flag(CEPH_OSDMAP_FULL) && honor_osdmap_full;

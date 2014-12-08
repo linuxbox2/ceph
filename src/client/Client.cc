@@ -2007,12 +2007,7 @@ void Client::handle_client_reply(MClientReply *reply)
 
 void Client::handle_osd_map(MOSDMap *m)
 {
-  const OSDMap *osdmap = objecter->get_osdmap_read();
-  ldout(cct, 1) << __func__ << ": epoch " << osdmap->get_epoch() << dendl;
-  const bool full = osdmap->test_flag(CEPH_OSDMAP_FULL);
-  objecter->put_osdmap_read();
-
-  if (full) {
+  if (objecter->osdmap_full_flag()) {
     ldout(cct, 1) << __func__ << ": FULL: cancelling outstanding operations" << dendl;
     // Cancel all outstanding ops with -ENOSPC: it is necessary to do this rather than blocking,
     // because otherwise when we fill up we potentially lock caps forever on files with
@@ -3102,10 +3097,7 @@ bool Client::_flush(Inode *in, Context *onfinish)
   }
 
   {
-    const OSDMap *osdmap = objecter->get_osdmap_read();
-    bool full = osdmap->test_flag(CEPH_OSDMAP_FULL);
-    objecter->put_osdmap_read();
-    if (full) {
+    if (objecter->osdmap_full_flag()) {
       ldout(cct, 1) << __func__ << ": FULL, purging for ENOSPC" << dendl;
       if (onfinish) {
         onfinish->complete(-ENOSPC);
@@ -6976,12 +6968,8 @@ int Client::_write(Fh *f, int64_t offset, uint64_t size, const char *buf)
   if ((uint64_t)(offset+size) > mdsmap->get_max_filesize()) //too large!
     return -EFBIG;
 
-  {
-    const OSDMap *osdmap = objecter->get_osdmap_read();
-    bool full = osdmap->test_flag(CEPH_OSDMAP_FULL);
-    objecter->put_osdmap_read();
-    if (full)
-      return -ENOSPC;
+  if (objecter->osdmap_full_flag()) {
+    return -ENOSPC;
   }
 
   //ldout(cct, 7) << "write fh " << fh << " size " << size << " offset " << offset << dendl;
@@ -9584,13 +9572,8 @@ int Client::_fallocate(Fh *fh, int mode, int64_t offset, int64_t length)
   if ((mode & FALLOC_FL_PUNCH_HOLE) && !(mode & FALLOC_FL_KEEP_SIZE))
     return -EOPNOTSUPP;
 
-  {
-    const OSDMap *osdmap = objecter->get_osdmap_read();
-    bool full = osdmap->test_flag(CEPH_OSDMAP_FULL);
-    objecter->put_osdmap_read();
-    if (full && !(mode & FALLOC_FL_PUNCH_HOLE))
-      return -ENOSPC;
-  }
+  if (objecter->osdmap_full_flag() && !(mode & FALLOC_FL_PUNCH_HOLE))
+    return -ENOSPC;
 
   Inode *in = fh->inode;
 

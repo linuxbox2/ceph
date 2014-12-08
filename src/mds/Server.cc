@@ -1281,10 +1281,8 @@ void Server::handle_client_request(MClientRequest *req)
 
 void Server::handle_osd_map()
 {
-  const OSDMap *osdmap = mds->objecter->get_osdmap_read();
-  is_full = osdmap->test_flag(CEPH_OSDMAP_FULL);
-  dout(7) << __func__ << ": full = " << is_full << " epoch = " << osdmap->get_epoch() << dendl;
-  mds->objecter->put_osdmap_read();
+  is_full = mds->objecter->osdmap_full_flag();
+  dout(7) << __func__ << ": full = " << is_full << dendl;
 }
 
 void Server::dispatch_client_request(MDRequestRef& mdr)
