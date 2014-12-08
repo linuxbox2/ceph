@@ -20,8 +20,7 @@
 
 
 class MClientCaps : public Message {
-
-  static const int HEAD_VERSION = 5;   // added flock metadata, inline data
+  static const int HEAD_VERSION = 5;
   static const int COMPAT_VERSION = 1;
 
  public:
