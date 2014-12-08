@@ -502,6 +502,27 @@ static simple_spinlock_t buffer_debug_lock = SIMPLE_SPINLOCK_INITIALIZER;
     }
   };
 
+  class buffer::raw_unshareable : public buffer::raw {
+  public:
+    raw_unshareable(unsigned l) : raw(l) {
+      if (len)
+	data = new char[len];
+      else
+	data = 0;
+    }
+    raw_unshareable(unsigned l, char *b) : raw(b, l) {
+    }
+    raw* clone_empty() {
+      return new raw_char(len);
+    }
+    bool shareable() {
+      return false; // !shareable, will force clone_nonshareable()
+    }
+    ~raw_unshareable() {
+      delete[] data;
+    }
+  };
+
   class buffer::raw_static : public buffer::raw {
   public:
     raw_static(const char *d, unsigned l) : raw((char*)d, l) { }
@@ -607,6 +628,10 @@ static simple_spinlock_t buffer_debug_lock = SIMPLE_SPINLOCK_INITIALIZER;
 #else
     throw error_code(-ENOTSUP);
 #endif
+  }
+
+  buffer::raw* buffer::create_unshareable(unsigned len) {
+    return new raw_unshareable(len);
   }
 
   buffer::ptr::ptr(raw *r) : _raw(r), _off(0), _len(r->len)   // no lock needed; this is an unref raw.
