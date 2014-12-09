@@ -273,9 +273,6 @@ Rados object in state %s." % (self.state))
         self.shutdown()
         return False
 
-    def __del__(self):
-        self.shutdown()
-
     def version(self):
         """
         Get the version number of the ``librados`` C library.
