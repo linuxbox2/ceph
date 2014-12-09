@@ -2902,29 +2902,10 @@ void MDS::ProgressThread::shutdown()
 
 /**
  * This is used whenever a RADOS operation has been cancelled
- * or a RADOS client has been blacklisted.
+ * or a RADOS client has been blacklisted, to cause the MDS and
+ * any clients to wait for this OSD epoch before using any new caps.
  *
- * The purpose is to ensure that when we hand out any capabilities
- * which might allow touching the same RADOS objects, the clients
- * we hand out the capabilities too must have a sufficiently recent
- * OSD map to not race with cancelled operations.
- *
- * The two cases for this at time of writing are:
- *  * Client eviction (where the client is blacklisted and other clients
- *    must wait for a post-blacklist epoch to touch the same objects)
- *  * OSD map full flag handling in the client (where the client may
- *    cancel some OSD ops from a pre-full epoch, so other clients must
- *    wait until the full epoch or later before touching the same objects).
- *
- * Note that this is a global value for simplicity: we could maintain this on
- * a per-inode basis.  We don't, because:
- *  A) It would be more complicated
- *  B) It would use an extra 4 bytes of memory for every inode
- *  C) It would not be much more efficient as almost always everyone has the latest
- *     OSD map anyway, in most cases everyone will breeze through this barrier
- *     rather than waiting.
- *  C) We only do this barrier in very rare cases, so any benefit from per-inode
- *     granularity would only very rarely be seen.
+ * See doc/cephfs/eviction
  */
 void MDS::set_osd_epoch_barrier(epoch_t e)
 {
