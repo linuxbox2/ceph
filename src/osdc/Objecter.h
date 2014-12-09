@@ -1710,7 +1710,8 @@ public:
     mon_timeout(mon_timeout),
     osd_timeout(osd_timeout),
     op_throttle_bytes(cct, "objecter_bytes", cct->_conf->objecter_inflight_op_bytes),
-    op_throttle_ops(cct, "objecter_ops", cct->_conf->objecter_inflight_ops)
+    op_throttle_ops(cct, "objecter_ops", cct->_conf->objecter_inflight_ops),
+    epoch_barrier(0)
   { }
   ~Objecter();
 
@@ -2398,6 +2399,11 @@ public:
 			 bool force_new);
 
   void blacklist_self(bool set);
+
+private:
+  epoch_t epoch_barrier;
+public:
+  void set_epoch_barrier(epoch_t epoch);
 };
 
 #endif
