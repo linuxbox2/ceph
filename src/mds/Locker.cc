@@ -2478,24 +2478,13 @@ void Locker::handle_client_caps(MClientCaps *m)
   }
 
   if (m->osd_epoch_barrier && !mds->objecter->have_map(m->osd_epoch_barrier)) {
-    MDSInternalContext *retry = new C_MDS_RetryMessage(mds, m);
-    MDSIOContext *w = new C_IO_Wrapper(mds, retry);
-    Context *f = new C_OnFinisher(w, &mds->finisher);
-    bool ready = mds->objecter->wait_for_map(m->osd_epoch_barrier, f);
-    if (!ready) {
-      dout(5) << __func__ << ": waiting for osd epoch " << m->osd_epoch_barrier << dendl;
-      return;
-    } else {
-      dout(20) << __func__ << ": already have at least osd epoch " << m->osd_epoch_barrier << dendl;
-      // We are already ready, won't need these
-      delete f;
-      delete w;
-      delete retry;
+    // Pause RADOS operations until we see the required epoch
+    mds->objecter->set_epoch_barrier(m->osd_epoch_barrier);
+  }
 
-      // So that any time we issue caps on this inode to anyone else they
-      // will have to have this OSD map too.
-      mds->set_osd_epoch_barrier(m->osd_epoch_barrier);
-    }
+  if (mds->get_osd_epoch_barrier() < m->osd_epoch_barrier) {
+    // Record the barrier so that we will retransmit it to clients
+    mds->set_osd_epoch_barrier(m->osd_epoch_barrier);
   }
 
   CInode *in = mdcache->pick_inode_snap(head_in, follows);
