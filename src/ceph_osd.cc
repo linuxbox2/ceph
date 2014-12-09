@@ -507,7 +507,8 @@ int main(int argc, const char **argv)
   }
 
   // Now close the standard file descriptors
-  global_init_shutdown_stderr(g_ceph_context);
+  if (g_conf->daemonize)
+    global_init_shutdown_stderr(g_ceph_context);
 
   ms_public->start();
   ms_hbclient->start();
