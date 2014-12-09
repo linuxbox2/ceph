@@ -3798,20 +3798,12 @@ void Client::handle_caps(MClientCaps *m)
   }
 
   if (m->osd_epoch_barrier && !objecter->have_map(m->osd_epoch_barrier)) {
-    RetryCapMessage *rcm = new RetryCapMessage(this, m);
-    C_OnFinisher *cof = new C_OnFinisher(rcm, &objecter_finisher);
-
-    if (objecter->wait_for_map(m->osd_epoch_barrier, cof)) {
-      // Never mind, already have map, proceed
-      delete cof;
-      delete rcm;
-    } else {
-      ldout(cct, 5) << __func__ << ": waiting for OSD epoch " << m->osd_epoch_barrier << dendl;
-      return;
-    }
+    // Pause RADOS operations until we see the required epoch
+    objecter->set_epoch_barrier(m->osd_epoch_barrier);
   }
 
   if (m->osd_epoch_barrier > cap_epoch_barrier) {
+    // Record the barrier so that we will retransmit it to clients
     set_cap_epoch_barrier(m->osd_epoch_barrier);
   }
 
