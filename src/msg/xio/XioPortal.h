@@ -238,11 +238,10 @@ public:
       do {
 	submit_q.deq(send_q);
 
-      restart_1:
 	/* shutdown() barrier */
 	pthread_spin_lock(&sp);
 
-      restart_2:
+      restart:
 	size = send_q.size();
 
 	if (_shutdown) {
@@ -263,7 +262,7 @@ public:
 	    if (unlikely((xcon->send_ctr + xmsg->hdr.msg_cnt) >
 			 xio_qdepth_high)) {
 	      requeue_all_xcon(xmsg, xcon, q_iter, send_q);
-	      goto restart_2;
+	      goto restart;
 	    }
 
 	    q_iter = send_q.erase(q_iter);
@@ -286,7 +285,7 @@ public:
 		case XIO_E_TX_QUEUE_OVERFLOW:
 		{
 		  requeue_all_xcon(xmsg, xcon, q_iter, send_q);
-		  goto restart_2;
+		  goto restart;
 		}
 		  break;
 		default:
@@ -302,19 +301,11 @@ public:
 	      /* INCOMING_MSG_RELEASE */
 	      release_xio_rsp(static_cast<XioRsp*>(xs));
 	      break;
-	    }
-	  }
-	}
+	    } /* switch (xs->type) */
+	  } /* while */
+	} /* size > 0 */
 
 	pthread_spin_unlock(&sp);
-
-	/* submit_q.deq returns early if work is found in any lane, but if
-	 * nothing was found, no lane had work */
-	submit_q.deq(send_q);
-	size = send_q.size();
-	if (size > 0)
-	  goto restart_1;
-
 	xio_context_run_loop(ctx, 300);
 
       } while ((!_shutdown) || (!drained));
@@ -330,7 +321,6 @@ public:
   void shutdown()
     {
 	pthread_spin_lock(&sp);
-	xio_context_stop_loop(ctx);
 	_shutdown = true;
 	pthread_spin_unlock(&sp);
     }
