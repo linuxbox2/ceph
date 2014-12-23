@@ -211,8 +211,6 @@ public:
   public:
     CompletionHook(Message *_m) : m(_m) {}
     virtual void set_message(Message *_m) { m = _m; }
-    virtual void finish(int r) = 0;
-    virtual ~CompletionHook() {}
   };
 
   typedef bi::list< Message,
