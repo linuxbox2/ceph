@@ -227,6 +227,7 @@ private:
   int on_disconnect_event() {
     connected.set(false);
     pthread_spin_lock(&sp);
+    discard_input_queue(CState::OP_FLAG_LOCKED);
     if (!conn)
       this->put();
     pthread_spin_unlock(&sp);

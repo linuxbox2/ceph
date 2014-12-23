@@ -503,13 +503,25 @@ int XioConnection::flush_input_queue(uint32_t flags) {
 int XioConnection::discard_input_queue(uint32_t flags)
 {
   Message::Queue disc_q;
+  XioSubmit::Queue deferred_q;
+
   if (! (flags & CState::OP_FLAG_LOCKED))
     pthread_spin_lock(&sp);
+
+  /* the two send queues contain different objects:
+   * - anything on the mqueue is a Message
+   * - anything on the requeue is an XioMsg
+   */
   Message::Queue::const_iterator i1 = disc_q.end();
   disc_q.splice(i1, outgoing.mqueue);
+
+  XioSubmit::Queue::const_iterator i2 = deferred_q.end();
+  deferred_q.splice(i2, outgoing.requeue);
+
   if (! (flags & CState::OP_FLAG_LOCKED))
     pthread_spin_unlock(&sp);
 
+  // mqueue
   int ix, q_size =  disc_q.size();
   for (ix = 0; ix < q_size; ++ix) {
     Message::Queue::iterator q_iter = disc_q.begin();
@@ -517,6 +529,20 @@ int XioConnection::discard_input_queue(uint32_t flags)
     disc_q.erase(q_iter);
     m->put();
   }
+
+  // requeue
+  q_size =  deferred_q.size();
+  for (ix = 0; ix < q_size; ++ix) {
+    XioSubmit::Queue::iterator q_iter = deferred_q.begin();
+    XioSubmit* xs = &(*q_iter);
+    assert(xs->type == XioSubmit::OUTGOING_MSG);
+    XioMsg* xmsg = static_cast<XioMsg*>(xs);
+    deferred_q.erase(q_iter);
+    // release once for each chained xio_msg
+    for (ix = 0; ix < int(xmsg->hdr.msg_cnt); ++ix)
+      xmsg->put();
+  }
+
   return 0;
 }
 
@@ -575,8 +601,8 @@ int XioConnection::_mark_down(uint32_t flags)
   // Accelio disconnect
   xio_disconnect(conn);
 
-  // XXX always discrd input--but are we in startup?  ie, should mark_down
-  // be forcing a disconnect?
+  /* XXX this will almost certainly be called again from
+   * on_disconnect_event() */
   discard_input_queue(flags|CState::OP_FLAG_LOCKED);
 
   if (! (flags & CState::OP_FLAG_LOCKED))
