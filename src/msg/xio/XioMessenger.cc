@@ -58,8 +58,8 @@ static const level_pair LEVELS[] = {
   make_pair("fatal", 0),
   make_pair("error", 0),
   make_pair("warn", 1),
-  make_pair("info", 5),
-  make_pair("debug", 10),
+  make_pair("info", 1),
+  make_pair("debug", 2),
   make_pair("trace", 20)
 };
 
@@ -399,7 +399,7 @@ int XioMessenger::session_event(struct xio_session *session,
   case XIO_SESSION_CONNECTION_ESTABLISHED_EVENT:
     xcon = static_cast<XioConnection*>(event_data->conn_user_context);
 
-    ldout(cct,4) << "connection established " << event_data->conn
+    ldout(cct,2) << "connection established " << event_data->conn
       << " session " << session << " xcon " << xcon << dendl;
 
     /* notify hook */
@@ -442,12 +442,12 @@ int XioMessenger::session_event(struct xio_session *session,
      * it's peer address */
     conns_sp.unlock();
 
-    ldout(cct,4) << "new connection session " << session
+    ldout(cct,2) << "new connection session " << session
       << " xcon " << xcon << dendl;
   }
   break;
   case XIO_SESSION_CONNECTION_ERROR_EVENT:
-    ldout(cct,4) << xio_session_event_types[event_data->event]
+    ldout(cct,2) << xio_session_event_types[event_data->event]
       << " user_context " << event_data->conn_user_context << dendl;
     /* informational (Eyal)*/
     break;
@@ -955,6 +955,9 @@ ConnectionRef XioMessenger::get_connection(const entity_inst_t& dest)
 
     /* XXXX pre-merge of session startup negotiation ONLY! */
     xcon->cstate.state_up_ready(XioConnection::CState::OP_FLAG_NONE);
+
+    ldout(cct,2) << "new connection xcon: " << xcon <<
+      " up_ready on session " << xcon->session << dendl;
 
     return xcon->get(); /* nref +1 */
   }
