@@ -292,6 +292,7 @@ public:
 		default:
 		  q_iter = send_q.erase(q_iter);
 		  xs->xcon->msg_send_fail(xmsg, code);
+		  continue;
 		  break;
 		};
 	      } else {
