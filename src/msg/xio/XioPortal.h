@@ -290,6 +290,7 @@ public:
 		}
 		  break;
 		default:
+		  q_iter = send_q.erase(q_iter);
 		  xs->xcon->msg_send_fail(xmsg, code);
 		  break;
 		};
@@ -300,11 +301,11 @@ public:
 	      break;
 	    default:
 	      /* INCOMING_MSG_RELEASE */
-              q_iter = send_q.erase(q_iter);
+	      q_iter = send_q.erase(q_iter);
 	      release_xio_rsp(static_cast<XioRsp*>(xs));
 	      continue;
 	    } /* switch (xs->type) */
-            q_iter = send_q.erase(q_iter);
+	    q_iter = send_q.erase(q_iter);
 	  } /* while */
 	} /* size > 0 */
 
