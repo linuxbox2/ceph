@@ -745,6 +745,11 @@ AC_CHECK_LIB(boost_system-mt, main, [],
     [AC_CHECK_LIB(boost_system, main, [],
         AC_MSG_NOTICE(["Boost system library not found."]))])
 
+# Also regex, used in address_helper
+AC_CHECK_LIB(boost_regex, main, [],
+    [AC_CHECK_LIB(boost_regex, main, [],
+        AC_MSG_NOTICE(["Boost regex library not found."]))])
+
 # Find the right boost_thread library.
 BOOST_THREAD_LIBS=""
 saved_LIBS="${LIBS}"
