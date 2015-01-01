@@ -67,7 +67,8 @@ libmsg_la_SOURCES += \
 	msg/xio/XioConnection.cc \
 	msg/xio/XioMessenger.cc \
 	msg/xio/XioMsg.cc \
-	msg/xio/XioPortal.cc
+	msg/xio/XioPortal.cc \
+	msg/xio/XioPool.cc
 
 noinst_HEADERS += \
 	msg/xio/DispatchStrategy.h \
