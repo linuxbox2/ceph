@@ -199,6 +199,10 @@ int librados::RadosClient::connect()
     return -EISCONN;
   state = CONNECTING;
 
+  Messenger::Proplist ms_hot_opts;
+  ms_hot_opts.insert(
+    Messenger::Property("xio_portal_threads", cct->_conf->xio_portal_threads));
+
   // get monmap
   err = monclient.build_initial_monmap();
   if (err < 0)
@@ -206,8 +210,9 @@ int librados::RadosClient::connect()
 
   err = -ENOMEM;
   nonce = getpid() + (1000000 * (uint64_t)rados_instance.inc());
-  messenger = Messenger::create(cct, cct->_conf->ms_type, entity_name_t::CLIENT(-1),
-				"radosclient", nonce);
+  messenger = Messenger::create(cct, cct->_conf->ms_type,
+				entity_name_t::CLIENT(-1),
+				"radosclient", nonce, &ms_hot_opts);
   if (!messenger)
     goto out;
 

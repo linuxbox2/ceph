@@ -31,6 +31,7 @@ using namespace std;
 
 #include <errno.h>
 #include <sstream>
+#include <boost/variant.hpp>
 
 class MDS;
 class Timer;
@@ -56,6 +57,14 @@ public:
    */
   CephContext *cct;
   int crcflags;
+
+  /**
+   * Proplist notation for passing general parameters to Messenger::create()
+   * or similar methods.
+   */
+  typedef boost::variant< int32_t, std::string > PropElt;
+  typedef map<std::string, PropElt > Proplist;
+  typedef Proplist::value_type Property;
 
   /**
    * A Policy describes the rules of a Connection. Is there a limit on how
@@ -148,10 +157,11 @@ public:
    * @param nonce nonce value to uniquely identify this instance on the current host
    */
   static Messenger *create(CephContext *cct,
-                           const string &type,
-                           entity_name_t name,
+			   const string &type,
+			   entity_name_t name,
 			   string lname,
-                           uint64_t nonce);
+			   uint64_t nonce,
+			   Messenger::Proplist *opts = NULL);
 
   /**
    * @defgroup Accessors

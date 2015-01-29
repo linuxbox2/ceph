@@ -85,11 +85,18 @@ int main(int argc, const char **argv)
 	else
 	  dstrategy = new QueueStrategy(2);
 
-	messenger = new XioMessenger(g_ceph_context,
-				     entity_name_t::MON(-1),
-				     "xio_server",
-				     0 /* nonce */,
-				     dstrategy);
+	{
+	  Messenger::Proplist ms_hot_opts;
+	  ms_hot_opts.insert(
+	    Messenger::Property("xio_portal_threads",
+				g_ceph_context->_conf->xio_portal_threads));
+	  messenger = new XioMessenger(g_ceph_context,
+				       entity_name_t::MON(-1),
+				       "xio_server",
+				       0 /* nonce */,
+				       &ms_hot_opts,
+				       dstrategy);
+	}
 
 	static_cast<XioMessenger*>(messenger)->set_magic(
 	  MSG_MAGIC_REDUPE /* resubmit messages on delivery (REQUIRED) */ |

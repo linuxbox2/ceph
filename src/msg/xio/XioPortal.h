@@ -341,6 +341,8 @@ private:
   char **p_vec;
   int n;
 
+  friend class XioMessenger;
+
 public:
   XioPortals(Messenger *msgr, int _n) : p_vec(NULL), n(_n)
     {

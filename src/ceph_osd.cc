@@ -368,24 +368,45 @@ int main(int argc, const char **argv)
 	 << TEXT_NORMAL << dendl;
   }
 
-  Messenger *ms_public = Messenger::create(g_ceph_context, g_conf->ms_type,
-					   entity_name_t::OSD(whoami), "client",
+  Messenger *ms_public, *ms_cluster, *ms_hbclient, *ms_hb_back_server,
+    *ms_hb_front_server, *ms_objecter;
+
+  {
+    Messenger::Proplist ms_hot_opts;
+    ms_hot_opts.insert(
+      Messenger::Property("xio_portal_threads",
+			  g_conf->xio_portal_threads));
+    ms_public =
+      Messenger::create(g_ceph_context, g_conf->ms_type,
+			entity_name_t::OSD(whoami), "client",
+			getpid(),
+			&ms_hot_opts);
+    ms_cluster = Messenger::create(g_ceph_context, g_conf->ms_type,
+				   entity_name_t::OSD(whoami),
+				   "cluster",
+				   getpid(),
+				   &ms_hot_opts);
+    ms_hbclient = Messenger::create(g_ceph_context, g_conf->ms_type,
+				    entity_name_t::OSD(whoami),
+				    "hbclient",
+				    getpid());
+    ms_hb_back_server = Messenger::create(g_ceph_context,
+					  g_conf->ms_type,
+					  entity_name_t::OSD(whoami),
+					  "hb_back_server",
+					  getpid());
+    ms_hb_front_server = Messenger::create(g_ceph_context,
+					   g_conf->ms_type,
+					   entity_name_t::OSD(whoami),
+					   "hb_front_server",
 					   getpid());
-  Messenger *ms_cluster = Messenger::create(g_ceph_context, g_conf->ms_type,
-					    entity_name_t::OSD(whoami), "cluster",
-					    getpid());
-  Messenger *ms_hbclient = Messenger::create(g_ceph_context, g_conf->ms_type,
-					     entity_name_t::OSD(whoami), "hbclient",
-					     getpid());
-  Messenger *ms_hb_back_server = Messenger::create(g_ceph_context, g_conf->ms_type,
-						   entity_name_t::OSD(whoami), "hb_back_server",
-						   getpid());
-  Messenger *ms_hb_front_server = Messenger::create(g_ceph_context, g_conf->ms_type,
-						    entity_name_t::OSD(whoami), "hb_front_server",
-						    getpid());
-  Messenger *ms_objecter = Messenger::create(g_ceph_context, g_conf->ms_type,
-					     entity_name_t::OSD(whoami), "ms_objecter",
-					     getpid());
+    ms_objecter = Messenger::create(g_ceph_context, g_conf->ms_type,
+				    entity_name_t::OSD(whoami),
+				    "ms_objecter",
+				    getpid(),
+				    &ms_hot_opts);
+  }
+
   ms_cluster->set_cluster_protocol(CEPH_OSD_PROTOCOL);
   ms_hbclient->set_cluster_protocol(CEPH_OSD_PROTOCOL);
   ms_hb_back_server->set_cluster_protocol(CEPH_OSD_PROTOCOL);
@@ -406,7 +427,7 @@ int main(int argc, const char **argv)
 		 g_conf->osd_client_message_cap));
 
   uint64_t supported =
-    CEPH_FEATURE_UID | 
+    CEPH_FEATURE_UID |
     CEPH_FEATURE_NOSRCADDR |
     CEPH_FEATURE_PGID64 |
     CEPH_FEATURE_MSG_AUTH |

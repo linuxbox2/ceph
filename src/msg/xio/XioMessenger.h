@@ -48,7 +48,7 @@ private:
 
 public:
   XioMessenger(CephContext *cct, entity_name_t name,
-	       string mname, uint64_t nonce,
+	       string mname, uint64_t nonce, Messenger::Proplist* opts = NULL,
 	       DispatchStrategy* ds = new QueueStrategy(1));
 
   virtual ~XioMessenger();

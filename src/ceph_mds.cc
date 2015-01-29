@@ -152,9 +152,15 @@ int main(int argc, const char **argv)
       "MDS names may not start with a numeric digit." << dendl;
   }
 
-  Messenger *msgr = Messenger::create(g_ceph_context, g_conf->ms_type,
-				      entity_name_t::MDS(-1), "mds",
-				      getpid());
+  Messenger *msgr;
+  {
+    Messenger::Proplist ms_hot_opts;
+    ms_hot_opts.insert(
+      Messenger::Property("xio_portal_threads", g_conf->xio_portal_threads));
+    msgr = Messenger::create(g_ceph_context, g_conf->ms_type,
+			     entity_name_t::MDS(-1), "mds",
+			     getpid(), &ms_hot_opts);
+  }
   msgr->set_cluster_protocol(CEPH_MDS_PROTOCOL);
 
   cout << "starting " << g_conf->name << " at " << msgr->get_myaddr()

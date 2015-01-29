@@ -243,13 +243,14 @@ static string xio_uri_from_entity(const entity_addr_t& addr, bool want_port)
 } /* xio_uri_from_entity */
 
 /* XioMessenger */
-XioMessenger::XioMessenger(CephContext *cct, entity_name_t name,
+XioMessenger::XioMessenger(CephContext* cct, entity_name_t name,
 			   string mname, uint64_t nonce,
-			   DispatchStrategy *ds)
+			   Messenger::Proplist* opts,
+			   DispatchStrategy* ds)
   : SimplePolicyMessenger(cct, name, mname, nonce),
     nsessions(0),
     shutdown_called(false),
-    portals(this, cct->_conf->xio_portal_threads),
+    portals(this, 1),
     dispatch_strategy(ds),
     loop_con(this),
     special_handling(0),
@@ -259,6 +260,13 @@ XioMessenger::XioMessenger(CephContext *cct, entity_name_t name,
 
   if (cct->_conf->xio_trace_xcon)
     magic |= MSG_MAGIC_TRACE_XCON;
+
+  if (opts) {
+    Messenger::Proplist::iterator pr_iter = opts->find("xio_portal_threads");
+    if (pr_iter != opts->end()) {
+      portals.n = boost::get<int>(pr_iter->second);
+    }
+  }
 
   XioPool::trace_mempool = (cct->_conf->xio_trace_mempool);
   XioPool::trace_msgcnt = (cct->_conf->xio_trace_msgcnt);
@@ -286,8 +294,8 @@ XioMessenger::XioMessenger(CephContext *cct, entity_name_t name,
 		  &xopt, sizeof(xopt));
 
       if (g_code_env == CODE_ENVIRONMENT_DAEMON) {
-        xopt = 1;
-        xio_set_opt(NULL, XIO_OPTLEVEL_RDMA, XIO_OPTNAME_ENABLE_FORK_INIT,
+	xopt = 1;
+	xio_set_opt(NULL, XIO_OPTLEVEL_RDMA, XIO_OPTNAME_ENABLE_FORK_INIT,
 		    &xopt, sizeof(xopt));
       }
 
@@ -300,30 +308,30 @@ XioMessenger::XioMessenger(CephContext *cct, entity_name_t name,
       /* enable flow-control */
       xopt = 1;
       xio_set_opt(NULL, XIO_OPTLEVEL_ACCELIO, XIO_OPTNAME_ENABLE_FLOW_CONTROL,
-                 &xopt, sizeof(xopt));
+		  &xopt, sizeof(xopt));
 
       /* and set threshold for buffer callouts */
       xopt = 16384;
       xio_set_opt(NULL, XIO_OPTLEVEL_ACCELIO, XIO_OPTNAME_MAX_INLINE_DATA,
-                 &xopt, sizeof(xopt));
+		  &xopt, sizeof(xopt));
       xopt = 216;
       xio_set_opt(NULL, XIO_OPTLEVEL_ACCELIO, XIO_OPTNAME_MAX_INLINE_HEADER,
-                 &xopt, sizeof(xopt));
+		  &xopt, sizeof(xopt));
 
       struct xio_mempool_config mempool_config = {
-        6,
-        {
-          {1024,  0,  4096,  262144},
-          {4096,  0,  4096,  262144},
-          {16384, 0,  4096,  262144},
-          {65536, 0,  1024,  65536},
-          {262144, 0,  512,  16384},
-          {1048576, 0, 128,  8192}
-        }
+	6,
+	{
+	  {1024,  0,  4096,  262144},
+	  {4096,  0,  4096,  262144},
+	  {16384, 0,  4096,  262144},
+	  {65536, 0,  1024,  65536},
+	  {262144, 0,  512,  16384},
+	  {1048576, 0, 128,  8192}
+	}
       };
       xio_set_opt(NULL,
-                  XIO_OPTLEVEL_ACCELIO, XIO_OPTNAME_CONFIG_MEMPOOL,
-                  &mempool_config, sizeof(mempool_config));
+		  XIO_OPTLEVEL_ACCELIO, XIO_OPTNAME_CONFIG_MEMPOOL,
+		  &mempool_config, sizeof(mempool_config));
 
       /* and unregisterd one */
 #define XMSG_MEMPOOL_QUANTUM 4096
@@ -370,7 +378,7 @@ XioMessenger::XioMessenger(CephContext *cct, entity_name_t name,
   /* update class instance count */
   nInstances.inc();
 
-} /* ctor */
+  } /* ctor */
 
 int XioMessenger::pool_hint(uint32_t dsize) {
   if (dsize > 1024*1024)
