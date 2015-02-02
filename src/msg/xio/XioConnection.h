@@ -235,11 +235,6 @@ private:
   }
 
   int on_teardown_event() {
-    pthread_spin_lock(&sp);
-    if (conn)
-      xio_connection_destroy(conn);
-    conn = NULL;
-    pthread_spin_unlock(&sp);
     this->put();
     return 0;
   }
