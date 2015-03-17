@@ -66,7 +66,8 @@ ceph_dencoder_LDADD = \
 	$(LIBMDS) \
 	$(LIBMON_TYPES) \
 	$(DENCODER_DEPS) \
-	$(CEPH_GLOBAL)
+	$(CEPH_GLOBAL) \
+	@EXTRALIBS@
 
 # These should always use explicit _CFLAGS/_CXXFLAGS so avoid basename conflicts
 ceph_dencoder_CFLAGS = ${AM_CFLAGS}
@@ -80,7 +81,7 @@ endif
 bin_PROGRAMS += ceph-dencoder
 
 get_command_descriptions_SOURCES = test/common/get_command_descriptions.cc
-get_command_descriptions_LDADD = $(LIBMON) $(LIBCOMMON) $(CEPH_GLOBAL)
+get_command_descriptions_LDADD = $(LIBMON) $(LIBCOMMON) $(CEPH_GLOBAL) @EXTRALIBS@
 noinst_PROGRAMS += get_command_descriptions
 
 

@@ -12,7 +12,7 @@ simple_server_CFLAGS = $(AM_CFLAGS)
 simple_server_CXXFLAGS = $(AM_CXXFLAGS)
 
 simple_server_LDADD = \
-	$(LIBOS) $(LIBCOMMON) $(CEPH_GLOBAL) $(PTHREAD_LIBS) $(EXTRALIBS)
+	$(LIBOS) $(LIBCOMMON) $(CEPH_GLOBAL) $(PTHREAD_LIBS) @EXTRALIBS@
 
 if LINUX
 simple_server_LDADD += -ldl
@@ -26,7 +26,7 @@ simple_client_CFLAGS = $(AM_CFLAGS)
 simple_client_CXXFLAGS = $(AM_CXXFLAGS)
 
 simple_client_LDADD = \
-	$(LIBOS) $(LIBCOMMON) $(CEPH_GLOBAL) $(PTHREAD_LIBS) $(EXTRALIBS)
+	$(LIBOS) $(LIBCOMMON) $(CEPH_GLOBAL) $(PTHREAD_LIBS) @EXTRALIBS@
 
 if LINUX
 simple_client_LDADD += -ldl
@@ -47,7 +47,7 @@ xio_server_CFLAGS = $(AM_CFLAGS)
 xio_server_CXXFLAGS = $(AM_CXXFLAGS)
 
 xio_server_LDADD = \
-	$(LIBOS) $(CEPH_GLOBAL) $(LIBCOMMON) $(PTHREAD_LIBS) $(EXTRALIBS)
+	$(LIBOS) $(CEPH_GLOBAL) $(LIBCOMMON) $(PTHREAD_LIBS) @EXTRALIBS@
 
 if LINUX
 xio_server_LDADD += -ldl
@@ -61,7 +61,7 @@ xio_client_CFLAGS = $(AM_CFLAGS)
 xio_client_CXXFLAGS = $(AM_CXXFLAGS)
 
 xio_client_LDADD = \
-	$(LIBOS) $(CEPH_GLOBAL) $(LIBCOMMON) $(PTHREAD_LIBS) $(EXTRALIBS)
+	$(LIBOS) $(CEPH_GLOBAL) $(LIBCOMMON) $(PTHREAD_LIBS) @EXTRALIBS@
 
 if LINUX
 xio_client_LDADD += -ldl

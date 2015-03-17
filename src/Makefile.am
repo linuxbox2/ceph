@@ -1,8 +1,7 @@
 include Makefile-env.am
 
-SUBDIRS += ocf java tracing
+SUBDIRS += accelio ocf java tracing
 DIST_SUBDIRS += gmock ocf libs3 java tracing
-
 
 
 # subdirs
@@ -40,15 +39,15 @@ include tools/Makefile.am
 # core daemons
 
 ceph_mon_SOURCES = ceph_mon.cc
-ceph_mon_LDADD = $(LIBMON) $(LIBOS) $(CEPH_GLOBAL) $(LIBCOMMON)
+ceph_mon_LDADD = $(LIBMON) $(LIBOS) $(CEPH_GLOBAL) $(LIBCOMMON) @EXTRALIBS@
 bin_PROGRAMS += ceph-mon
 
 ceph_osd_SOURCES = ceph_osd.cc
-ceph_osd_LDADD = $(LIBOSD) $(CEPH_GLOBAL) $(LIBCOMMON)
+ceph_osd_LDADD = $(LIBOSD) $(CEPH_GLOBAL) $(LIBCOMMON) @EXTRALIBS@
 bin_PROGRAMS += ceph-osd
 
 ceph_mds_SOURCES = ceph_mds.cc
-ceph_mds_LDADD = $(LIBMDS) $(LIBOSDC) $(CEPH_GLOBAL) $(LIBCOMMON)
+ceph_mds_LDADD = $(LIBMDS) $(LIBOSDC) $(CEPH_GLOBAL) $(LIBCOMMON) @EXTRALIBS@
 bin_PROGRAMS += ceph-mds
 
 
@@ -69,12 +68,12 @@ cephfs_LDADD = $(LIBCOMMON)
 bin_PROGRAMS += cephfs
 
 librados_config_SOURCES = librados-config.cc
-librados_config_LDADD = $(LIBRADOS) $(CEPH_GLOBAL)
+librados_config_LDADD = $(LIBRADOS) $(CEPH_GLOBAL) @EXTRALIBS@
 bin_PROGRAMS += librados-config
 
 ceph_syn_SOURCES = ceph_syn.cc
 ceph_syn_SOURCES += client/SyntheticClient.cc # uses g_conf.. needs cleanup
-ceph_syn_LDADD = $(LIBCLIENT) $(CEPH_GLOBAL)
+ceph_syn_LDADD = $(LIBCLIENT) $(CEPH_GLOBAL) @EXTRALIBS@
 bin_PROGRAMS += ceph-syn
 
 
@@ -85,7 +84,7 @@ noinst_LTLIBRARIES += libkrbd.la
 endif LINUX
 
 rbd_SOURCES = rbd.cc
-rbd_LDADD = $(LIBKRBD) $(LIBRBD) $(LIBRADOS) $(CEPH_GLOBAL)
+rbd_LDADD = $(LIBKRBD) $(LIBRBD) $(LIBRADOS) $(CEPH_GLOBAL) @EXTRALIBS@
 if LINUX
 bin_PROGRAMS += rbd
 endif #LINUX
@@ -95,11 +94,11 @@ endif #LINUX
 
 if WITH_FUSE
 ceph_fuse_SOURCES = ceph_fuse.cc
-ceph_fuse_LDADD = $(LIBCLIENT_FUSE) $(CEPH_GLOBAL)
+ceph_fuse_LDADD = $(LIBCLIENT_FUSE) $(CEPH_GLOBAL) @EXTRALIBS@
 bin_PROGRAMS += ceph-fuse
 
 rbd_fuse_SOURCES = rbd_fuse/rbd-fuse.cc
-rbd_fuse_LDADD = -lfuse $(LIBRBD) $(LIBRADOS) $(CEPH_GLOBAL)
+rbd_fuse_LDADD = -lfuse $(LIBRBD) $(LIBRADOS) $(CEPH_GLOBAL) @EXTRALIBS@
 bin_PROGRAMS += rbd-fuse
 endif # WITH_FUSE
 

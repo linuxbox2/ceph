@@ -12,22 +12,22 @@ ceph_kvstore_tool_CXXFLAGS = $(UNITTEST_CXXFLAGS)
 bin_DEBUGPROGRAMS += ceph-kvstore-tool
 
 ceph_objectstore_tool_SOURCES = tools/ceph_objectstore_tool.cc
-ceph_objectstore_tool_LDADD = $(LIBOSD) $(LIBOS) $(CEPH_GLOBAL) $(BOOST_PROGRAM_OPTIONS_LIBS) $(LIBRADOS)
+ceph_objectstore_tool_LDADD = $(LIBOSD) $(LIBOS) $(CEPH_GLOBAL) $(BOOST_PROGRAM_OPTIONS_LIBS) $(LIBRADOS) @EXTRALIBS@
 if LINUX
 ceph_objectstore_tool_LDADD += -ldl
 endif # LINUX
 bin_PROGRAMS += ceph-objectstore-tool
 
 monmaptool_SOURCES = tools/monmaptool.cc
-monmaptool_LDADD = $(CEPH_GLOBAL) $(LIBCOMMON)
+monmaptool_LDADD = $(CEPH_GLOBAL) $(LIBCOMMON) @EXTRALIBS@
 bin_PROGRAMS += monmaptool
 
 crushtool_SOURCES = tools/crushtool.cc
-crushtool_LDADD = $(CEPH_GLOBAL)
+crushtool_LDADD = $(CEPH_GLOBAL) @EXTRALIBS@
 bin_PROGRAMS += crushtool
 
 osdmaptool_SOURCES = tools/osdmaptool.cc
-osdmaptool_LDADD = $(CEPH_GLOBAL)
+osdmaptool_LDADD = $(CEPH_GLOBAL) @EXTRALIBS@
 bin_PROGRAMS += osdmaptool
 
 ceph_scratchtool_SOURCES = tools/scratchtool.c
@@ -56,7 +56,7 @@ rados_SOURCES = \
 	tools/rados/rados_export.cc \
 	tools/rados/rados_sync.cc
 rados_SOURCES += common/obj_bencher.cc # needs cleanup so it can go in libcommon.la
-rados_LDADD = libcls_lock_client.la $(LIBRADOS) $(CEPH_GLOBAL)
+rados_LDADD = libcls_lock_client.la $(LIBRADOS) $(CEPH_GLOBAL) @EXTRALIBS@
 bin_PROGRAMS += rados
 
 cephfs_journal_tool_SOURCES = \
@@ -68,14 +68,14 @@ cephfs_journal_tool_SOURCES = \
 	tools/cephfs/Dumper.cc \
 	tools/cephfs/Resetter.cc \
 	tools/cephfs/MDSUtility.cc
-cephfs_journal_tool_LDADD = $(LIBMDS) $(LIBRADOS) $(CEPH_GLOBAL)
+cephfs_journal_tool_LDADD = $(LIBMDS) $(LIBRADOS) $(CEPH_GLOBAL) @EXTRALIBS@
 bin_PROGRAMS += cephfs-journal-tool
 
 cephfs_table_tool_SOURCES = \
 	tools/cephfs/cephfs-table-tool.cc \
 	tools/cephfs/TableTool.cc \
 	tools/cephfs/MDSUtility.cc
-cephfs_table_tool_LDADD = $(LIBMDS) $(LIBRADOS) $(CEPH_GLOBAL)
+cephfs_table_tool_LDADD = $(LIBMDS) $(LIBRADOS) $(CEPH_GLOBAL) @EXTRALIBS@
 bin_PROGRAMS += cephfs-table-tool
 
 if WITH_REST_BENCH
@@ -94,11 +94,11 @@ endif # WITH_SYSTEM_LIBS3
 endif # WITH_REST_BENCH
 
 ceph_conf_SOURCES = tools/ceph_conf.cc
-ceph_conf_LDADD = $(CEPH_GLOBAL) $(LIBCOMMON)
+ceph_conf_LDADD = $(CEPH_GLOBAL) $(LIBCOMMON) @EXTRALIBS@
 bin_PROGRAMS += ceph-conf
 
 ceph_authtool_SOURCES = tools/ceph_authtool.cc
-ceph_authtool_LDADD = $(CEPH_GLOBAL) $(LIBCOMMON)
+ceph_authtool_LDADD = $(CEPH_GLOBAL) $(LIBCOMMON) @EXTRALIBS@
 bin_PROGRAMS += ceph-authtool
 
 noinst_HEADERS += \
