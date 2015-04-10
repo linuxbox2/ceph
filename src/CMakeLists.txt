@@ -241,8 +241,6 @@ set(libcommon_files
   ${auth_files}
   ${mds_files})
 set(mon_common_files
-  auth/AuthSessionHandler.cc
-  auth/cephx/CephxSessionHandler.cc
   erasure-code/ErasureCodePlugin.cc)
 add_library(mon_common_objs OBJECT ${mon_common_files})
 set(common_mountcephfs_files
@@ -266,9 +264,14 @@ if(${ENABLE_SHARED})
     $<TARGET_OBJECTS:global_common_objs>)
 endif(${ENABLE_SHARED})
 
-add_library(common STATIC ${libcommon_files}
+add_library(common SHARED ${libcommon_files}
   $<TARGET_OBJECTS:mon_common_objs>
   $<TARGET_OBJECTS:common_mountcephfs_objs>)
+if(${ENABLE_SHARED})
+  set_target_properties(common PROPERTIES OUTPUT_NAME ceph-common
+    VERSION "1.0.0" SOVERSION "1" LINK_FLAGS "-Wl,-export-dynamic")
+endif(${ENABLE_SHARED})
+install(TARGETS common DESTINATION lib)
 
 set_source_files_properties(${CMAKE_SOURCE_DIR}/src/ceph_ver.c
   ${CMAKE_SOURCE_DIR}/src/common/version.cc
@@ -346,15 +349,17 @@ set(rados_srcs
   tools/rados/rados_import.cc
   tools/rados/rados_export.cc
   common/obj_bencher.cc)
+
 add_executable(rados ${rados_srcs} $<TARGET_OBJECTS:heap_profiler_objs>)
-target_link_libraries(rados librados global ${CMAKE_DL_LIBS} ${TCMALLOC_LIBS})
+target_link_libraries(rados librados global boost_filesystem
+  ${CMAKE_DL_LIBS} ${TCMALLOC_LIBS})
 
 set(librados_config_srcs
   librados-config.cc)
 add_executable(librados-config ${librados_config_srcs}
   $<TARGET_OBJECTS:heap_profiler_objs>)
-target_link_libraries(librados-config librados global ${CMAKE_DL_LIBS}
-  ${TCMALLOC_LIBS})
+target_link_libraries(librados-config librados global boost_filesystem
+  ${CMAKE_DL_LIBS} ${TCMALLOC_LIBS})
 
 install(TARGETS rados librados-config DESTINATION bin)
 
@@ -396,14 +401,13 @@ set(ceph_mon_srcs
   ceph_mon.cc
   common/TextTable.cc)
 add_executable(ceph-mon ${ceph_mon_srcs} $<TARGET_OBJECTS:heap_profiler_objs>)
-target_link_libraries(ceph-mon mon boost_thread common os global ${EXTRALIBS}
-  ${CMAKE_DL_LIBS} ${TCMALLOC_LIBS})
+target_link_libraries(ceph-mon mon boost_regex boost_thread
+  common os global leveldb
+  boost_filesystem ${EXTRALIBS} ${CMAKE_DL_LIBS} ${TCMALLOC_LIBS})
 install(TARGETS ceph-mon DESTINATION bin)
 
 # OSD
 set(libos_srcs
-  os/FileJournal.cc
-  os/FileStore.cc
   os/chain_xattr.cc
   os/ObjectStore.cc
   os/Factory.cc
@@ -415,24 +419,65 @@ set(libos_srcs
   os/DBObjectMap.cc 
   os/Transaction.cc
   os/WBThrottle.cc
-  os/GenericFileStoreBackend.cc
-  os/BtrfsFileStoreBackend.cc
-  os/ZFSFileStoreBackend.cc
-  os/XfsFileStoreBackend.cc
-  os/KeyValueStore.cc
-  os/KeyValueDB.cc
-  os/MemStore.cc
   os/GenericObjectMap.cc
   os/HashIndex.cc)
 set(os_mon_files
-  os/LevelDBStore.cc)
+  os/KeyValueDB.cc
+  os/LevelDBStore.cc
+)
 add_library(os_mon_objs OBJECT ${os_mon_files})
-add_library(os STATIC ${libos_srcs} $<TARGET_OBJECTS:os_mon_objs>)
+add_library(os SHARED ${libos_srcs})
 if(${HAVE_LIBAIO})
   target_link_libraries(os aio)
 endif(${HAVE_LIBAIO})
 target_link_libraries(os leveldb snappy)
+if(${ENABLE_SHARED})
+  set_target_properties(os PROPERTIES OUTPUT_NAME ceph-os
+    VERSION "1.0.0" SOVERSION "1" LINK_FLAGS "-Wl,-export-dynamic")
+endif(${ENABLE_SHARED})
+install(TARGETS os DESTINATION lib)
 
+# objectstore modules
+
+#os kvstore
+set(os_kvstore_files
+  os/KeyValueStore.cc
+  os/KeyValueDB.cc
+)
+
+add_library(os_kvstore_objs OBJECT ${os_kvstore_files})
+add_library(os_kvstore SHARED $<TARGET_OBJECTS:os_kvstore_objs>)
+target_link_libraries(os_kvstore os)
+set_target_properties(os_kvstore PROPERTIES VERSION "1.0.0" SOVERSION "1")
+install(TARGETS os_kvstore DESTINATION lib/os-modules)
+
+# os filestore
+set(os_filestore_files
+  os/FileJournal.cc
+  os/FileStore.cc
+  os/GenericFileStoreBackend.cc
+  os/BtrfsFileStoreBackend.cc
+  os/ZFSFileStoreBackend.cc
+)
+
+add_library(os_filestore_objs OBJECT ${os_filestore_files})
+add_library(os_filestore SHARED $<TARGET_OBJECTS:os_filestore_objs>)
+target_link_libraries(os_filestore os)
+set_target_properties(os_filestore PROPERTIES VERSION "1.0.0" SOVERSION "1")
+install(TARGETS os_filestore DESTINATION lib/os-modules)
+
+#os memstore
+set(os_memstore_files
+  os/MemStore.cc
+)
+
+add_library(os_memstore_objs OBJECT ${os_memstore_files})
+add_library(os_memstore SHARED $<TARGET_OBJECTS:os_memstore_objs>)
+target_link_libraries(os_memstore os)
+set_target_properties(os_memstore PROPERTIES VERSION "1.0.0" SOVERSION "1")
+install(TARGETS os_memstore DESTINATION lib/os-modules)
+
+# RADOS classes
 set(cls_references_files objclass/class_api.cc)
 add_library(cls_references_objs OBJECT ${cls_references_files})
 
@@ -475,7 +520,7 @@ set(ceph_osd_srcs
   ceph_osd.cc
   objclass/class_api.cc)
 add_executable(ceph-osd ${ceph_osd_srcs} $<TARGET_OBJECTS:heap_profiler_objs>)
-target_link_libraries(ceph-osd osd os global ${TCMALLOC_LIBS})
+target_link_libraries(ceph-osd osd os global boost_filesystem ${TCMALLOC_LIBS})
 install(TARGETS ceph-osd DESTINATION bin)
 
 # MDS
@@ -684,7 +729,7 @@ if(${WITH_RBD})
     $<TARGET_OBJECTS:heap_profiler_objs>)
   set_target_properties(rbd PROPERTIES OUTPUT_NAME rbd)
   target_link_libraries(rbd global librbd librados common keyutils udev
-    ${BLKID_LIBRARIES} ${CMAKE_DL_LIBS} ${TCMALLOC_LIBS})
+    boost_filesystem ${BLKID_LIBRARIES} ${CMAKE_DL_LIBS} ${TCMALLOC_LIBS})
   install(TARGETS rbd DESTINATION bin)
   install(PROGRAMS ${CMAKE_SOURCE_DIR}/src/ceph-rbdnamer DESTINATION bin)
 endif(${WITH_RBD})
@@ -770,7 +815,7 @@ if(${WITH_RADOSGW})
     cls_rgw_client cls_lock_client cls_refcount_client
     cls_log_client cls_statelog_client cls_version_client
     cls_replica_log_client cls_user_client
-    curl expat global fcgi resolv ${TCMALLOC_LIBS})
+    curl expat global boost_filesystem fcgi resolv ${TCMALLOC_LIBS})
   install(TARGETS radosgw DESTINATION bin)
 
   add_executable(radosgw-admin ${radosgw_admin_srcs} $<TARGET_OBJECTS:heap_profiler_objs>)
@@ -778,6 +823,6 @@ if(${WITH_RADOSGW})
     cls_rgw_client cls_lock_client cls_refcount_client
     cls_log_client cls_statelog_client cls_version_client
     cls_replica_log_client cls_user_client
-    curl expat global fcgi resolv ${TCMALLOC_LIBS})
+    curl expat global boost_filesystem fcgi resolv ${TCMALLOC_LIBS})
   install(TARGETS radosgw-admin DESTINATION bin)
 endif(${WITH_RADOSGW})

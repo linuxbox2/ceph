@@ -94,6 +94,9 @@ protected:
   string path;
 
 public:
+  Logger *logger;
+
+
   /**
    * create - create an ObjectStore instance.
    *
@@ -109,8 +112,6 @@ public:
 			     const string& data,
 			     const string& journal,
 			     osflagbits_t flag = 0);
-
-  Logger *logger;
 
   /**
    * Fetch Object Store statistics.

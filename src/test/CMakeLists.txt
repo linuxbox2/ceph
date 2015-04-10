@@ -44,6 +44,7 @@ add_executable(test_rados
 target_link_libraries(test_rados
   librados
   global
+  boost_filesystem
   ${CMAKE_DL_LIBS}
   ${EXTRALIBS}
   ${TCMALLOC_LIBS}
@@ -56,8 +57,8 @@ add_executable(test_mutate
   test_mutate.cc
   $<TARGET_OBJECTS:heap_profiler_objs>
   )
-target_link_libraries(test_mutate global librados ${CMAKE_DL_LIBS}
-  ${TCMALLOC_LIBS})
+target_link_libraries(test_mutate global librados boost_filesystem
+  ${CMAKE_DL_LIBS} ${TCMALLOC_LIBS})
 
 # test_rewrite_latency
 add_executable(test_rewrite_latency
@@ -73,14 +74,17 @@ add_executable(streamtest
   streamtest.cc
   $<TARGET_OBJECTS:heap_profiler_objs>
   )
-target_link_libraries(streamtest os global ${CMAKE_DL_LIBS} ${TCMALLOC_LIBS})
+target_link_libraries(streamtest os global
+  os_filestore os_kvstore leveldb aio boost_filesystem boost_system
+  ${CMAKE_DL_LIBS} ${TCMALLOC_LIBS})
 
 # test_trans
 add_executable(test_trans
   test_trans.cc
   $<TARGET_OBJECTS:heap_profiler_objs>
   )
-target_link_libraries(test_trans os global ${CMAKE_DL_LIBS} ${TCMALLOC_LIBS})
+target_link_libraries(test_trans os global os_filestore os_kvstore
+  leveldb aio boost_filesystem boost_system ${CMAKE_DL_LIBS} ${TCMALLOC_LIBS})
 
 # test_keys
 add_executable(test_keys
@@ -109,6 +113,7 @@ add_executable(dencoder ${dencoder_srcs} $<TARGET_OBJECTS:heap_profiler_objs>)
 target_link_libraries(dencoder
   librados
   librbd
+  os
   global
   osd
   mds
@@ -117,6 +122,8 @@ target_link_libraries(dencoder
   blkid
   udev
   keyutils
+  boost_filesystem
+  boost_system
   ${EXTRALIBS}
   ${TCMALLOC_LIBS}
   ${CMAKE_DL_LIBS}
@@ -173,7 +180,7 @@ add_executable(smalliobench
   $<TARGET_OBJECTS:heap_profiler_objs>
   )
 target_link_libraries(smalliobench librados boost_program_options global
-  ${CMAKE_DL_LIBS} ${TCMALLOC_LIBS})
+  boost_filesystem ${CMAKE_DL_LIBS} ${TCMALLOC_LIBS})
 
 # smalliobenchfs
 set(smalliobenchfs_srcs
@@ -187,6 +194,7 @@ add_executable(smalliobenchfs
   $<TARGET_OBJECTS:heap_profiler_objs>
   )
 target_link_libraries(smalliobenchfs librados boost_program_options os global
+  os_filestore os_kvstore leveldb aio boost_filesystem boost_system
   ${CMAKE_DL_LIBS} ${TCMALLOC_LIBS})
 
 # smalliobenchdumb
@@ -201,7 +209,7 @@ add_executable(smalliobenchdumb
   $<TARGET_OBJECTS:heap_profiler_objs>
   )
 target_link_libraries(smalliobenchdumb librados boost_program_options os global
-  ${CMAKE_DL_LIBS} ${TCMALLOC_LIBS})
+  boost_filesystem ${CMAKE_DL_LIBS} ${TCMALLOC_LIBS})
 
 # smalliobenchrbd
 set(smalliobenchrbd_srcs
@@ -222,6 +230,7 @@ target_link_libraries(smalliobenchrbd
   os
   global
   boost_program_options
+  boost_filesystem 
   blkid
   udev
   ${CMAKE_DL_LIBS}
@@ -237,8 +246,8 @@ add_executable(tpbench
   ${tpbench_srcs}
   $<TARGET_OBJECTS:heap_profiler_objs>
   )
-target_link_libraries(tpbench librados boost_program_options os global
-  ${CMAKE_DL_LIBS} ${TCMALLOC_LIBS})
+target_link_libraries(tpbench librados boost_filesystem boost_program_options
+  os global ${CMAKE_DL_LIBS} ${TCMALLOC_LIBS})
 
 # omapbench
 set(omapbench_srcs
@@ -253,6 +262,7 @@ target_link_libraries(omapbench
   boost_program_options
   os
   global
+  boost_filesystem
   ${CMAKE_DL_LIBS}
   ${TCMALLOC_LIBS}
   )
@@ -266,8 +276,8 @@ add_executable(kvstorebench
   ${kvstorebench_srcs}
   $<TARGET_OBJECTS:heap_profiler_objs>
   )
-target_link_libraries(kvstorebench librados global ${CMAKE_DL_LIBS}
-  ${TCMALLOC_LIBS})
+target_link_libraries(kvstorebench librados global boost_filesystem
+  ${CMAKE_DL_LIBS} ${TCMALLOC_LIBS})
 
 ## System tests
 
@@ -287,8 +297,8 @@ add_executable(test_rados_list_parallel
   system/rados_list_parallel.cc
   $<TARGET_OBJECTS:heap_profiler_objs>
   )
-target_link_libraries(test_rados_list_parallel librados systest global pthread
-  rt ${CMAKE_DL_LIBS} ${TCMALLOC_LIBS})
+target_link_libraries(test_rados_list_parallel librados systest global
+  boost_filesystem pthread rt ${CMAKE_DL_LIBS} ${TCMALLOC_LIBS})
 
 # test_rados_open_pools_parallel
 set(test_rados_open_pools_parallel_srcs system/rados_open_pools_parallel.cc)
@@ -297,7 +307,7 @@ add_executable(test_rados_open_pools_parallel
   $<TARGET_OBJECTS:heap_profiler_objs>
   )
 target_link_libraries(test_rados_open_pools_parallel librados systest global
-  pthread rt ${CMAKE_DL_LIBS} ${TCMALLOC_LIBS})
+  boost_filesystem pthread rt ${CMAKE_DL_LIBS} ${TCMALLOC_LIBS})
 
 # test_rados_delete_pools_parallel
 set(test_rados_delete_pools_parallel_srcs
@@ -312,7 +322,7 @@ add_executable(test_rados_delete_pools_parallel
   $<TARGET_OBJECTS:heap_profiler_objs>
   )
 target_link_libraries(test_rados_delete_pools_parallel librados systest global
-  pthread rt ${CMAKE_DL_LIBS} ${TCMALLOC_LIBS})
+  boost_filesystem pthread rt ${CMAKE_DL_LIBS} ${TCMALLOC_LIBS})
 
 # test_rados_watch_notify
 set(test_rados_watch_notify_srcs
@@ -328,7 +338,7 @@ add_executable(test_rados_watch_notify
   $<TARGET_OBJECTS:heap_profiler_objs>
   )
 target_link_libraries(test_rados_watch_notify librados systest global
-  pthread rt ${CMAKE_DL_LIBS} ${TCMALLOC_LIBS})
+  boost_filesystem pthread rt ${CMAKE_DL_LIBS} ${TCMALLOC_LIBS})
 
 # bench_log
 set(bench_log_srcs
@@ -342,7 +352,7 @@ target_link_libraries(bench_log global pthread rt ${CMAKE_DL_LIBS} ${TCMALLOC_LI
 
 ## Unit tests
 
-set(UNITTEST_LIBS gmock_main gmock gtest ${PTHREAD_LIBS})
+set(UNITTEST_LIBS gmock_main gmock gtest boost_filesystem ${PTHREAD_LIBS})
 set(UNITTEST_CXX_FLAGS "-I${CMAKE_SOURCE_DIR}/src/gmock/include -I${CMAKE_BINARY_DIR}/src/gmock/include -I${CMAKE_SOURCE_DIR}/src/gmock/gtest/include -I${CMAKE_BINARY_DIR}/src/gmock/gtest/include -fno-strict-aliasing")
   
 # unittest_encoding
@@ -353,7 +363,8 @@ add_executable(unittest_encoding
   ${unittest_encoding_srcs}
   $<TARGET_OBJECTS:heap_profiler_objs>
   )
-target_link_libraries(unittest_encoding cephfs librados pthread rt m
+target_link_libraries(unittest_encoding cephfs librados boost_filesystem
+  pthread rt m
   ${CMAKE_DL_LIBS} ${TCMALLOC_LIBS} ${UNITTEST_LIBS})
 set_target_properties(unittest_encoding
   PROPERTIES COMPILE_FLAGS ${UNITTEST_CXX_FLAGS})
@@ -366,7 +377,8 @@ add_executable(unittest_addrs
   ${unittest_addrs_srcs}
   $<TARGET_OBJECTS:heap_profiler_objs>
   )
-target_link_libraries(unittest_addrs cephfs librados pthread rt m
+target_link_libraries(unittest_addrs
+  cephfs librados boost_filesystem pthread rt m
   ${CMAKE_DL_LIBS} ${TCMALLOC_LIBS} ${UNITTEST_LIBS})
 set_target_properties(unittest_addrs
   PROPERTIES COMPILE_FLAGS ${UNITTEST_CXX_FLAGS})
@@ -621,8 +633,7 @@ add_executable(unittest_librados
   $<TARGET_OBJECTS:heap_profiler_objs>
   )
 target_link_libraries(unittest_librados
-  librados
-  global
+  librados global boost_filesystem
   ${CMAKE_DL_LIBS}
   ${TCMALLOC_LIBS}
   ${UNITTEST_LIBS}
@@ -751,8 +762,7 @@ add_executable(unittest_chain_xattr
 set_target_properties(unittest_chain_xattr PROPERTIES COMPILE_FLAGS
   ${UNITTEST_CXX_FLAGS})
 target_link_libraries(unittest_chain_xattr
-  os
-  global
+  os global boost_filesystem
   ${CMAKE_DL_LIBS}
   ${TCMALLOC_LIBS}
   ${UNITTEST_LIBS}
@@ -767,8 +777,7 @@ add_executable(unittest_flatindex
   $<TARGET_OBJECTS:heap_profiler_objs>
   )
 target_link_libraries(unittest_flatindex
-  os
-  global
+  os global boost_filesystem
   ${CMAKE_DL_LIBS}
   ${TCMALLOC_LIBS}
   ${UNITTEST_LIBS}
@@ -875,7 +884,7 @@ add_executable(unittest_librados_config
   )
 target_link_libraries(unittest_librados_config
   librados
-  global
+  global boost_filesystem
   ${CMAKE_DL_LIBS}
   ${TCMALLOC_LIBS}
   ${UNITTEST_LIBS}
@@ -1092,7 +1101,7 @@ add_executable(multi_stress_watch
   $<TARGET_OBJECTS:heap_profiler_objs>
   )
 target_link_libraries(multi_stress_watch librados global radostest
-  ${CMAKE_DL_LIBS} ${TCMALLOC_LIBS})
+  boost_filesystem ${CMAKE_DL_LIBS} ${TCMALLOC_LIBS})
 
 add_executable(test_librbd
   librbd/test_librbd.cc
@@ -1131,6 +1140,7 @@ target_link_libraries(test_librbd_fsx
   librbd
   librados
   global
+  boost_filesystem
   m
   ${CMAKE_DL_LIBS}
   ${TCMALLOC_LIBS}
@@ -1313,9 +1323,7 @@ add_executable(test_mon_workloadgen
   $<TARGET_OBJECTS:heap_profiler_objs>
   )
 target_link_libraries(test_mon_workloadgen
-  os
-  osdc
-  global
+  os osdc global boost_filesystem
   ${EXTRALIBS}
   ${TCMALLOC_LIBS}
   ${CMAKE_DL_LIBS}
@@ -1376,6 +1384,7 @@ set_target_properties(test_rados_api_c_read_operations PROPERTIES COMPILE_FLAGS
 target_link_libraries(test_rados_api_c_read_operations
   librados
   global
+  boost_filesystem
   ${UNITTEST_LIBS}
   ${EXTRALIBS}
   ${TCMALLOC_LIBS}
@@ -1532,13 +1541,13 @@ endif(${WITH_CEPHFS})
 
 add_executable(test_objectstore
   objectstore/store_test.cc
+  $<TARGET_OBJECTS:os_filestore_objs>
   $<TARGET_OBJECTS:heap_profiler_objs>
   )
 set_target_properties(test_objectstore PROPERTIES COMPILE_FLAGS
   ${UNITTEST_CXX_FLAGS})
 target_link_libraries(test_objectstore
-  os
-  common
+  os os_filestore os_kvstore common boost_filesystem boost_system
   ${UNITTEST_LIBS}
   global
   ${EXTRALIBS}
@@ -1552,8 +1561,7 @@ add_executable(test_objectstore_workloadgen
   $<TARGET_OBJECTS:heap_profiler_objs>
   )
 target_link_libraries(test_objectstore_workloadgen
-  os
-  global
+  os global boost_filesystem
   ${EXTRALIBS}
   ${TCMALLOC_LIBS}
   ${CMAKE_DL_LIBS}
@@ -1566,8 +1574,7 @@ add_executable(test_filestore_idempotent
   $<TARGET_OBJECTS:heap_profiler_objs>
   )
 target_link_libraries(test_filestore_idempotent
-  os
-  global
+  os global os_filestore os_kvstore leveldb aio boost_filesystem boost_system
   ${EXTRALIBS}
   ${TCMALLOC_LIBS}
   ${CMAKE_DL_LIBS}
@@ -1581,8 +1588,7 @@ add_executable(test_filestore_idempotent_sequence
   $<TARGET_OBJECTS:heap_profiler_objs>
   )
 target_link_libraries(test_filestore_idempotent_sequence
-  os
-  global
+  os global os_filestore os_kvstore leveldb aio boost_filesystem boost_system
   ${EXTRALIBS}
   ${TCMALLOC_LIBS}
   ${CMAKE_DL_LIBS}
@@ -1598,7 +1604,7 @@ target_link_libraries(test_xattr_bench
   os
   common
   ${UNITTEST_LIBS}
-  global
+  os_filestore os_kvstore global leveldb aio boost_filesystem boost_system
   ${EXTRALIBS}
   ${TCMALLOC_LIBS}
   ${CMAKE_DL_LIBS}
@@ -1614,7 +1620,7 @@ target_link_libraries(test_filejournal
   os
   common
   ${UNITTEST_LIBS}
-  global
+  global os_filestore os_kvstore leveldb aio boost_filesystem boost_system
   ${EXTRALIBS}
   ${TCMALLOC_LIBS}
   ${CMAKE_DL_LIBS}
@@ -1658,8 +1664,7 @@ add_executable(test_object_map
 set_target_properties(test_object_map PROPERTIES COMPILE_FLAGS
   ${UNITTEST_CXX_FLAGS})
 target_link_libraries(test_object_map
-  os
-  common
+  os common boost_filesystem
   ${UNITTEST_LIBS}
   global
   ${EXTRALIBS}
@@ -1677,7 +1682,7 @@ target_link_libraries(test_keyvaluedb_atomicity
   os
   common
   ${UNITTEST_LIBS}
-  global
+  global boost_filesystem
   ${EXTRALIBS}
   ${TCMALLOC_LIBS}
   ${CMAKE_DL_LIBS}
@@ -1691,8 +1696,7 @@ add_executable(test_keyvaluedb_iterators
 set_target_properties(test_keyvaluedb_iterators PROPERTIES COMPILE_FLAGS
   ${UNITTEST_CXX_FLAGS})
 target_link_libraries(test_keyvaluedb_iterators
-  os
-  common
+  os common boost_filesystem
   ${UNITTEST_LIBS}
   global
   ${EXTRALIBS}
@@ -1707,6 +1711,7 @@ if(${WITH_FUSE})
   target_link_libraries(test_cfuse_cache_invalidate
     global
     os
+    boost_filesystem
     ${EXTRALIBS}
     ${TCMALLOC_LIBS}
     ${CMAKE_DL_LIBS}
@@ -1745,24 +1750,22 @@ add_executable(simple_server
   $<TARGET_OBJECTS:heap_profiler_objs>
   )
 target_link_libraries(simple_server
-  os global common boost_regex
+  os global common boost_filesystem boost_regex
   ${EXTRALIBS}
   ${TCMALLOC_LIBS}
   ${CMAKE_DL_LIBS}
   )
-
 add_executable(simple_client
   messenger/simple_client.cc
   messenger/simple_dispatcher.cc
   $<TARGET_OBJECTS:heap_profiler_objs>
   )
 target_link_libraries(simple_client
-  os global common boost_regex
+  os global common boost_filesystem boost_regex
   ${EXTRALIBS}
   ${TCMALLOC_LIBS}
   ${CMAKE_DL_LIBS}
   )
-
 if(HAVE_XIO)
   add_executable(xio_server
     messenger/xio_server.cc
@@ -1770,20 +1773,19 @@ if(HAVE_XIO)
     $<TARGET_OBJECTS:heap_profiler_objs>
     )
   target_link_libraries(xio_server
-    os global common boost_regex
+    os global common boost_filesystem boost_regex
     ${Xio_LIBRARY} ibverbs rdmacm pthread rt
     ${EXTRALIBS}
     ${TCMALLOC_LIBS}
     ${CMAKE_DL_LIBS}
     )
-
   add_executable(xio_client
     messenger/xio_client.cc
     messenger/xio_dispatcher.cc
     $<TARGET_OBJECTS:heap_profiler_objs>
     )
   target_link_libraries(xio_client
-    os global common boost_regex
+    os global common boost_filesystem boost_regex
     ${Xio_LIBRARY} ibverbs rdmacm pthread rt
     ${EXTRALIBS}
     ${TCMALLOC_LIBS}

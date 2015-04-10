@@ -617,7 +617,7 @@ OPTION(osd_deep_scrub_stride, OPT_INT, 524288)
 OPTION(osd_deep_scrub_update_digest_min_age, OPT_INT, 2*60*60)   // objects must be this old (seconds) before we update the whole-object digest on scrub
 OPTION(osd_scan_list_ping_tp_interval, OPT_U64, 100)
 OPTION(osd_auto_weight, OPT_BOOL, false)
-OPTION(osd_class_dir, OPT_STR, CEPH_LIBDIR "/rados-classes") // where rados plugins are stored
+OPTION(osd_class_dir, OPT_STR, CEPH_PKGLIBDIR "/rados-classes") // where rados plugins are stored
 OPTION(osd_open_classes_on_start, OPT_BOOL, true)
 OPTION(osd_check_for_log_corruption, OPT_BOOL, false)
 OPTION(osd_use_stale_snap, OPT_BOOL, false)
@@ -666,7 +666,7 @@ OPTION(threadpool_default_timeout, OPT_INT, 60)
 // default wait time for an empty queue before pinging the hb timeout
 OPTION(threadpool_empty_queue_max_wait, OPT_INT, 2)
 
-OPTION(osd_module_dir, OPT_STR, CEPH_LIBDIR "/os-modules") // ObjectStore libraries
+OPTION(osd_module_dir, OPT_STR, CEPH_PKGLIBDIR "/os-modules") // ObjectStore libraries
 OPTION(osd_modules, OPT_STR, "") // comma-separated list of ObjectStore modules
 
 OPTION(leveldb_write_buffer_size, OPT_U64, 8 *1024*1024) // leveldb write buffer size
