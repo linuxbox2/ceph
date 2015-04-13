@@ -89,6 +89,18 @@ add_executable(test_keys
   )
 target_link_libraries(test_keys mon global ${CMAKE_DL_LIBS} ${TCMALLOC_LIBS})
 
+set(CLS_LIBS
+  cls_lock_client
+  cls_refcount_client
+  cls_log_client
+  cls_statelog_client
+  cls_version_client
+  cls_replica_log_client
+  cls_kvs
+  cls_rbd
+  cls_lock
+  cls_user_client)
+
 ## dencoder
 set(dencoder_srcs
   encoding/ceph_dencoder.cc
@@ -114,6 +126,7 @@ target_link_libraries(dencoder
   mds
   mon
   osdc
+  ${CLS_LIBS}
   blkid
   udev
   keyutils
@@ -127,15 +140,8 @@ if(${WITH_RADOSGW})
     ${TCMALLOC_LIBS}
     ${CMAKE_DL_LIBS}
     rgw_a
+    ${CLS_LIBS}
     cls_rgw_client
-    cls_lock_client
-    cls_refcount_client
-    cls_log_client
-    cls_statelog_client
-    cls_version_client
-    cls_replica_log_client
-    cls_kvs
-    cls_user_client
     curl
     expat
     fcgi
