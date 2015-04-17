@@ -157,7 +157,7 @@ static int on_ow_msg_send_complete(struct xio_session *session,
     static_cast<XioConnection*>(conn_user_context);
   CephContext *cct = xcon->get_messenger()->cct;
 
-  ldout(cct,25) << "msg delivered session: " << session
+  ldout(cct, 2) << "msg delivered session: " << session
 		<< " msg: " << msg << " conn_user_context "
 		<< conn_user_context << dendl;
 
@@ -795,7 +795,7 @@ int XioMessenger::_send_message_impl(Message* m, XioConnection* xcon)
     return ENOMEM;
   }
 
-  ldout(cct,4) << __func__ << " " << m << " new XioMsg " << xmsg
+  ldout(cct,2) << __func__ << " " << m << " new XioMsg " << xmsg
        << " req_0 " << &xmsg->req_0.msg << " msg type " << m->get_type()
        << " features: " << xcon->get_features()
        << " conn " << xcon->conn << " sess " << xcon->session << dendl;
