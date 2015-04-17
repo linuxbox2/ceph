@@ -3585,6 +3585,7 @@ void OSD::handle_osd_ping(MOSDPing *m)
 	break;
       }
 
+      dout(15) << "sending MOSDPing reply to osd." << from << dendl;
       Message *r = new MOSDPing(monc->get_fsid(),
 				curmap->get_epoch(),
 				MOSDPing::PING_REPLY,
@@ -3616,7 +3617,7 @@ void OSD::handle_osd_ping(MOSDPing *m)
       map<int,HeartbeatInfo>::iterator i = heartbeat_peers.find(from);
       if (i != heartbeat_peers.end()) {
 	if (m->get_connection() == i->second.con_back) {
-	  dout(25) << "handle_osd_ping got reply from osd." << from
+	  dout(15) << "handle_osd_ping got reply from osd." << from
 		   << " first_rx " << i->second.first_tx
 		   << " last_tx " << i->second.last_tx
 		   << " last_rx_back " << i->second.last_rx_back << " -> " << m->stamp
@@ -3627,7 +3628,7 @@ void OSD::handle_osd_ping(MOSDPing *m)
 	  if (i->second.con_front == NULL)
 	    i->second.last_rx_front = m->stamp;
 	} else if (m->get_connection() == i->second.con_front) {
-	  dout(25) << "handle_osd_ping got reply from osd." << from
+	  dout(15) << "handle_osd_ping got reply from osd." << from
 		   << " first_rx " << i->second.first_tx
 		   << " last_tx " << i->second.last_tx
 		   << " last_rx_back " << i->second.last_rx_back
@@ -3768,7 +3769,7 @@ void OSD::heartbeat()
     i->second.last_tx = now;
     if (i->second.first_tx == utime_t())
       i->second.first_tx = now;
-    dout(30) << "heartbeat sending ping to osd." << peer << dendl;
+    dout(15) << "heartbeat sending ping to osd." << peer << dendl;
     i->second.con_back->send_message(new MOSDPing(monc->get_fsid(),
 					  service.get_osdmap()->get_epoch(),
 					  MOSDPing::PING,
