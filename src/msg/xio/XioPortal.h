@@ -26,6 +26,7 @@ extern "C" {
 #include "XioMsg.h"
 
 #include "include/assert.h"
+#include "common/Clock.h"
 #include "common/dout.h"
 
 #ifndef CACHE_LINE_SIZE
@@ -177,8 +178,13 @@ public:
   void enqueue_for_send(XioConnection *xcon, XioSubmit *xs)
     {
       if (! _shutdown) {
+	const utime_t t1 = ceph_clock_now(msgr->cct);
 	submit_q.enq(xcon, xs);
 	xio_context_stop_loop(ctx);
+	const utime_t delta = ceph_clock_now(msgr->cct) - t1;
+	if (delta > utime_t(1, 0)) // print error if it takes > 1s
+	  lsubdout(msgr->cct, xio, -1) << "XioPortal::enqueue_for_send waited "
+	      << delta.sec() << "s for SubmitQueue::enq()" << dendl;
 	return;
       }
 
@@ -240,8 +246,14 @@ public:
       XioMsg *xmsg;
 
       do {
-	submit_q.deq(send_q);
-
+	{
+	  const utime_t t1 = ceph_clock_now(msgr->cct);
+	  submit_q.deq(send_q);
+	  const utime_t delta = ceph_clock_now(msgr->cct) - t1;
+	  if (delta > utime_t(1, 0)) // print error if it takes > 1s
+	    lsubdout(msgr->cct, xio, -1) << "XioPortal::entry waited "
+	        << delta.sec() << "s for SubmitQueue::dec()" << dendl;
+	}
 	/* shutdown() barrier */
 	pthread_spin_lock(&sp);
 
@@ -317,8 +329,14 @@ public:
 	} /* size > 0 */
 
 	pthread_spin_unlock(&sp);
-	xio_context_run_loop(ctx, 300);
-
+	{
+	  const utime_t t1 = ceph_clock_now(msgr->cct);
+	  xio_context_run_loop(ctx, 300);
+	  const utime_t delta = ceph_clock_now(msgr->cct) - t1;
+	  if (delta > utime_t(3, 0)) // print error if it takes > 3s
+	    lsubdout(msgr->cct, xio, -1) << "XioPortal::entry waited "
+	        << delta.sec() << "s for xio_context_run_loop()" << dendl;
+	}
       } while ((!_shutdown) || (!drained));
 
       /* shutting down */
