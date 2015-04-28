@@ -648,6 +648,9 @@ if(WITH_LIBCEPHFS)
 endif(WITH_LIBCEPHFS)
 
 if(${WITH_RBD})
+  set(rbd_mountcephfs_files
+    common/secret.c)
+  add_library(rbd_mountcephfs_objs OBJECT ${rbd_mountcephfs_files})
   set(librbd_srcs
     krbd.cc
     common/ContextCompletion.cc
@@ -669,8 +672,9 @@ if(${WITH_RBD})
     librbd/ObjectMap.cc)
   add_library(librbd ${CEPH_SHARED} ${librbd_srcs}
     $<TARGET_OBJECTS:osdc_rbd_objs>
+    $<TARGET_OBJECTS:rbd_mountcephfs_objs>
     $<TARGET_OBJECTS:common_util_obj>)
-  target_link_libraries(librbd PRIVATE librados common cls_lock_client cls_rbd_client
+  target_link_libraries(librbd PRIVATE librados common cls_lock_client cls_rbd_client udev keyutils
     ${CMAKE_DL_LIBS})
   if(${ENABLE_SHARED})
     set_target_properties(librbd PROPERTIES VERSION "1.0.0" SOVERSION "1"
@@ -679,14 +683,10 @@ if(${WITH_RBD})
   install(TARGETS librados librbd DESTINATION lib)
   set(rbd_srcs
     rbd.cc common/TextTable.cc)
-  set(rbd_mountcephfs_files
-    common/secret.c)
-  add_library(rbd_mountcephfs_objs OBJECT ${rbd_mountcephfs_files})
   add_executable(rbd ${rbd_srcs} $<TARGET_OBJECTS:common_util_obj>
-    $<TARGET_OBJECTS:rbd_mountcephfs_objs>
     $<TARGET_OBJECTS:heap_profiler_objs>)
   set_target_properties(rbd PROPERTIES OUTPUT_NAME rbd)
-  target_link_libraries(rbd global librbd librados common keyutils udev
+  target_link_libraries(rbd global librbd librados common keyutils
     ${BLKID_LIBRARIES} ${CMAKE_DL_LIBS} ${TCMALLOC_LIBS})
   install(TARGETS rbd DESTINATION bin)
   install(PROGRAMS ${CMAKE_SOURCE_DIR}/src/ceph-rbdnamer DESTINATION bin)
