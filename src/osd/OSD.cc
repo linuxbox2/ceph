@@ -1217,6 +1217,7 @@ void OSDService::reply_op_error(OpRequestRef op, int err, eversion_t v,
 				       true);
   reply->set_reply_versions(v, uv);
   m->get_connection()->send_message(reply);
+  assert(op->valid());
 }
 
 void OSDService::handle_misdirected_op(PG *pg, OpRequestRef op)
@@ -5599,6 +5600,7 @@ epoch_t op_required_epoch(OpRequestRef op)
 
 void OSD::dispatch_op(OpRequestRef op)
 {
+  assert(op->valid());
   switch (op->get_req()->get_type()) {
 
   case MSG_OSD_PG_CREATE:
@@ -5639,6 +5641,7 @@ void OSD::dispatch_op(OpRequestRef op)
 
 bool OSD::dispatch_op_fast(OpRequestRef& op, OSDMapRef& osdmap)
 {
+  assert(op->valid());
   if (is_stopping()) {
     // we're shutting down, so drop the op
     return true;
@@ -5708,6 +5711,7 @@ bool OSD::dispatch_op_fast(OpRequestRef& op, OSDMapRef& osdmap)
   default:
     assert(0);
   }
+  assert(op->valid());
   return true;
 }
 
@@ -5768,6 +5772,7 @@ void OSD::_dispatch(Message *m)
       
       // need OSDMap
       dispatch_op(op);
+      assert(op->valid());
     }
   }
 
@@ -7990,6 +7995,7 @@ struct send_map_on_destruct {
 
 void OSD::handle_op(OpRequestRef& op, OSDMapRef& osdmap)
 {
+  assert(op->valid());
   MOSDOp *m = static_cast<MOSDOp*>(op->get_req());
   assert(m->get_type() == CEPH_MSG_OSD_OP);
   if (op_is_discardable(m)) {
@@ -8130,6 +8136,7 @@ void OSD::handle_op(OpRequestRef& op, OSDMapRef& osdmap)
     return;
   }
 
+  assert(op->valid());
   PG *pg = get_pg_or_queue_for_pg(pgid, op);
   if (pg) {
     op->send_map_update = share_map.should_send;
@@ -8142,6 +8149,7 @@ void OSD::handle_op(OpRequestRef& op, OSDMapRef& osdmap)
 template<typename T, int MSGTYPE>
 void OSD::handle_replica_op(OpRequestRef& op, OSDMapRef& osdmap)
 {
+  assert(op->valid());
   T *m = static_cast<T *>(op->get_req());
   assert(m->get_type() == MSGTYPE);
 
@@ -8200,6 +8208,7 @@ bool OSD::op_is_discardable(MOSDOp *op)
 
 void OSD::enqueue_op(PG *pg, OpRequestRef& op)
 {
+  assert(op->valid());
   utime_t latency = ceph_clock_now(cct) - op->get_req()->get_recv_stamp();
   dout(15) << "enqueue_op " << op << " prio " << op->get_req()->get_priority()
 	   << " cost " << op->get_req()->get_cost()
@@ -8248,6 +8257,7 @@ void OSD::ShardedOpWQ::_process(uint32_t thread_index, heartbeat_handle_d *hb ) 
     if (!(sdata->pg_for_processing[&*(item.first)].size()))
       sdata->pg_for_processing.erase(&*(item.first));
   }  
+  assert(op->valid());
 
   // osd:opwq_process marks the point at which an operation has been dequeued
   // and will begin to be handled by a worker thread.
@@ -8341,6 +8351,7 @@ void OSD::dequeue_op(
   PGRef pg, OpRequestRef op,
   ThreadPool::TPHandle &handle)
 {
+  assert(op->valid());
   utime_t now = ceph_clock_now(cct);
   op->set_dequeued_time(now);
   utime_t latency = now - op->get_req()->get_recv_stamp();
@@ -8375,6 +8386,7 @@ void OSD::dequeue_op(
   op->mark_reached_pg();
 
   pg->do_request(op, handle);
+  assert(op->valid());
 
   // finish
   dout(10) << "dequeue_op " << op << " finish" << dendl;

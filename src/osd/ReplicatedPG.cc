@@ -1173,6 +1173,7 @@ void ReplicatedPG::do_pg_op(OpRequestRef op)
   reply->set_result(result);
   reply->set_reply_versions(info.last_update, info.last_user_version);
   osd->send_message_osd_client(reply, m->get_connection());
+  assert(op->valid());
   delete filter;
 }
 
@@ -1242,6 +1243,7 @@ void ReplicatedPG::do_request(
   OpRequestRef& op,
   ThreadPool::TPHandle &handle)
 {
+  assert(op->valid());
   if (!op_has_sufficient_caps(op)) {
     osd->reply_op_error(op, -EPERM);
     return;
@@ -1363,6 +1365,7 @@ bool ReplicatedPG::check_src_targ(const hobject_t& soid, const hobject_t& toid) 
  */
 void ReplicatedPG::do_op(OpRequestRef& op)
 {
+  assert(op->valid());
   MOSDOp *m = static_cast<MOSDOp*>(op->get_req());
   assert(m->get_type() == CEPH_MSG_OSD_OP);
   if (op->includes_pg_op()) {
@@ -1750,6 +1753,7 @@ void ReplicatedPG::do_op(OpRequestRef& op)
   ctx->src_obc = src_obc;
 
   execute_ctx(ctx);
+  assert(op->valid());
 }
 
 bool ReplicatedPG::maybe_handle_cache(OpRequestRef op,
