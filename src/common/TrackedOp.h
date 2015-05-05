@@ -140,6 +140,7 @@ class TrackedOp {
 private:
   friend class OpHistory;
   friend class OpTracker;
+  uint32_t guard[3]; // guard bits for valid()
   xlist<TrackedOp*>::item xitem;
 protected:
   OpTracker *tracker; /// the tracker we are associated with
@@ -160,6 +161,9 @@ protected:
     seq(0),
     warn_interval_multiplier(1)
   {
+    guard[0] = 0xdeadface;
+    guard[1] = 0;
+    guard[2] = 0xdeadface;
     tracker->register_inflight_op(&xitem);
     events.push_back(make_pair(initiated_at, "initiated"));
   }
@@ -175,6 +179,12 @@ protected:
 
 public:
   virtual ~TrackedOp() {}
+
+  bool valid() const {
+    return guard[0] == 0xdeadface
+        && guard[1] == 0
+        && guard[2] == 0xdeadface;
+  }
 
   const utime_t& get_initiated() const {
     return initiated_at;
