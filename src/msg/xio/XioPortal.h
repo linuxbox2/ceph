@@ -46,7 +46,7 @@ private:
     {
       uint32_t size;
       XioMsg::Queue q;
-      pthread_spinlock_t sp;
+      pthread_mutex_t mtx;
       CACHE_PAD(0);
     };
 
@@ -61,7 +61,7 @@ private:
 
 	for (ix = 0; ix < nlanes; ++ix) {
 	  lane = &qlane[ix];
-	  pthread_spin_init(&lane->sp, PTHREAD_PROCESS_PRIVATE);
+          pthread_mutex_init(&lane->mtx, NULL);
 	  lane->size = 0;
 	}
       }
@@ -74,21 +74,21 @@ private:
     void enq(XioConnection *xcon, XioSubmit* xs)
       {
 	Lane* lane = get_lane(xcon);
-	pthread_spin_lock(&lane->sp);
+	pthread_mutex_lock(&lane->mtx);
 	lane->q.push_back(*xs);
 	++(lane->size);
-	pthread_spin_unlock(&lane->sp);
+	pthread_mutex_unlock(&lane->mtx);
       }
 
     void enq(XioConnection *xcon, XioSubmit::Queue& requeue_q)
       {
 	int size = requeue_q.size();
 	Lane* lane = get_lane(xcon);
-	pthread_spin_lock(&lane->sp);
+	pthread_mutex_lock(&lane->mtx);
 	XioSubmit::Queue::const_iterator i1 = lane->q.end();
 	lane->q.splice(i1, requeue_q);
 	lane->size += size;
-	pthread_spin_unlock(&lane->sp);
+	pthread_mutex_unlock(&lane->mtx);
       }
 
     void deq(XioSubmit::Queue& send_q)
@@ -97,16 +97,16 @@ private:
 	int cnt;
 	for (cnt = 0; cnt < nlanes; ++cnt, ++ix, ix = ix % nlanes) {
 	  lane = &qlane[ix];
-	  pthread_spin_lock(&lane->sp);
+	  pthread_mutex_lock(&lane->mtx);
 	  if (lane->size > 0) {
 	    XioSubmit::Queue::const_iterator i1 = send_q.end();
 	    send_q.splice(i1, lane->q);
 	    lane->size = 0;
 	    ++ix, ix = ix % nlanes;
-	    pthread_spin_unlock(&lane->sp);
+	    pthread_mutex_unlock(&lane->mtx);
 	    break;
 	  }
-	  pthread_spin_unlock(&lane->sp);
+	  pthread_mutex_unlock(&lane->mtx);
 	}
       }
 
