@@ -31,6 +31,7 @@ extern "C" {
 class XioMessenger : public SimplePolicyMessenger
 {
 private:
+  const uint64_t nonce;
   static atomic_t nInstances;
   atomic_t nsessions;
   atomic_t shutdown_called;

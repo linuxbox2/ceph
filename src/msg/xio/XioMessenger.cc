@@ -247,6 +247,7 @@ XioMessenger::XioMessenger(CephContext *cct, entity_name_t name,
 			   string mname, uint64_t nonce,
 			   DispatchStrategy *ds)
   : SimplePolicyMessenger(cct, name, mname, nonce),
+    nonce(nonce),
     nsessions(0),
     shutdown_called(false),
     portals(this, cct->_conf->xio_portal_threads),
@@ -679,6 +680,7 @@ int XioMessenger::bind(const entity_addr_t& addr)
   int r = portals.bind(&xio_msgr_ops, base_uri, shift_addr.get_port(), &port0);
   if (r == 0) {
     shift_addr.set_port(port0);
+    shift_addr.nonce = nonce;
     set_myaddr(shift_addr);
   }
   return r;
