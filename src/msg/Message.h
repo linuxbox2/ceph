@@ -240,6 +240,8 @@ public:
 				     bi::list_member_hook<>,
 				     &Message::dispatch_q > > Queue;
 
+  bool is_tracked; // DEBUG: true if TrackedOp holds a reference to us
+
 protected:
   CompletionHook* completion_hook; // owned by Messenger
 
@@ -263,6 +265,7 @@ public:
   Message()
     : connection(NULL),
       magic(0),
+      is_tracked(false),
       completion_hook(NULL),
       byte_throttler(NULL),
       msg_throttler(NULL),
@@ -273,6 +276,7 @@ public:
   Message(int t, int version=1, int compat_version=0)
     : connection(NULL),
       magic(0),
+      is_tracked(false),
       completion_hook(NULL),
       byte_throttler(NULL),
       msg_throttler(NULL),
@@ -299,6 +303,7 @@ protected:
     /* call completion hooks (if any) */
     if (completion_hook)
       completion_hook->complete(0);
+    assert(!is_tracked); // TrackedOp must not still hold a reference
   }
 public:
   inline const ConnectionRef& get_connection() const { return connection; }

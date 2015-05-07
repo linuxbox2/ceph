@@ -102,6 +102,7 @@ protected:
 public:
   ~OpRequest() {
     assert(valid());
+    request->is_tracked = false;
     request->put();
   }
   bool send_map_update;
