@@ -1937,7 +1937,12 @@ int Pipe::read_message(Message **pm, AuthSessionHandler* auth_handler)
   unsigned data_len, data_off;
   int aborted;
   Message *message;
-  utime_t recv_stamp = ceph_clock_now(msgr->cct);
+
+  // XXX: testing broken timestamps for OpTracker debugging
+  unsigned hi, lo;
+  asm volatile("rdtsc" : "=a" (lo), "=d" (hi));
+  uint64_t t = static_cast<uint64_t>(hi) << 32 | lo;
+  const utime_t recv_stamp(static_cast<time_t>(t), 0);
 
   if (policy.throttler_messages) {
     ldout(msgr->cct,10) << "reader wants " << 1 << " message from policy throttler "
