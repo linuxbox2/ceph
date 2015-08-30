@@ -1132,6 +1132,7 @@ if(${WITH_RADOSGW})
     rgw/rgw_process.cc
     rgw/rgw_frontend.cc
     rgw/rgw_rest_lib.cc
+    rgw/rgw_file.cc
     rgw/rgw_object_expirer_core.cc
     )
 
