@@ -281,7 +281,8 @@ public:
       completion_hook(NULL),
       byte_throttler(NULL),
       msg_throttler(NULL),
-      dispatch_throttle_size(0) {
+      dispatch_throttle_size(0),
+      header_encoded(false) {
     memset(&header, 0, sizeof(header));
     header.type = t;
     header.version = version;
@@ -472,6 +473,7 @@ public:
       calc_header_crc();
     header_encoded = true;
   }
+  void set_header_encoded(bool b) { header_encoded = false; }
 };
 typedef boost::intrusive_ptr<Message> MessageRef;
 

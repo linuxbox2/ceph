@@ -58,7 +58,7 @@ private:
     int ix; /* atomicity by portal thread */
 
     SubmitQueue(uint32_t nlanes, uint32_t nspins, uint32_t mpmc_depth)
-      : nspins(nspins)
+      : nspins(nspins), nlanes(nlanes)
       {
 	qlane = static_cast<Lane*>(::operator new(nlanes * sizeof(Lane)));
 	assert(qlane);

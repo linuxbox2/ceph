@@ -188,7 +188,9 @@ void Message::encode(uint64_t features, int flags)
   if (flags & MSG_CRC_HEADER)
     calc_front_crc();
 
-  if (! (flags & MSG_LATE_HEADER))
+  if (flags & MSG_LATE_HEADER)
+    set_header_encoded(false);
+  else
     encode_header(features, flags);
 
   footer.flags = CEPH_MSG_FOOTER_COMPLETE;
