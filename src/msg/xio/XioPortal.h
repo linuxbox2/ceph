@@ -284,19 +284,6 @@ public:
 
 		/* cond set header */
 		msg = &xmsg->req_0.msg;
-		if (! xmsg->m->have_header()) {
-		  /* update header.seq */
-		  xmsg->m->set_seq(xcon->state.next_out_seq());
-		  /* encode it, set as xio header */
-		  xmsg->m->encode_header(xcon->get_features(), msgr->crcflags);
-		  const std::list<buffer::ptr>& header =
-		    xmsg->hdr.get_bl().buffers();
-		  assert(header.size() == 1);
-		  list<bufferptr>::const_iterator pb = header.begin();
-		  msg->out.header.iov_base = (char*) pb->c_str();
-		  msg->out.header.iov_len = pb->length();
-		}
-
 		code = xio_send_msg(xcon->conn, msg);
 		/* header trace moved here to capture xio serial# */
 		if (ldlog_p1(msgr->cct, ceph_subsys_xio, 11)) {

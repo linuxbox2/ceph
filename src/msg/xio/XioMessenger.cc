@@ -928,6 +928,18 @@ int XioMessenger::_send_message_impl(Message* m, XioConnection* xcon)
      }
     tail->next = NULL;
   }
+
+  /* serialize to fix message ordering */
+  lock_guard lck(xcon->lock);
+  xmsg->m->set_seq(xcon->state.next_out_seq());
+  xmsg->m->encode_header(xcon->get_features(), msgr->crcflags);
+  const std::list<buffer::ptr>& header =
+    xmsg->hdr.get_bl().buffers();
+  assert(header.size() == 1);
+  list<bufferptr>::const_iterator pb = header.begin();
+  msg->out.header.iov_base = (char*) pb->c_str();
+  msg->out.header.iov_len = pb->length();
+
   xcon->portal->enqueue_for_send(xcon, xmsg);
 
   return code;
