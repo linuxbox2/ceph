@@ -10,7 +10,7 @@
 
 struct mg_connection;
 
-class RGWMongoose : public RGWClientIO
+class RGWMongoose : public RGWStreamIO
 {
   mg_connection *conn;
 
@@ -40,6 +40,5 @@ public:
   RGWMongoose(mg_connection *_conn, int _port);
   void flush();
 };
-
 
 #endif

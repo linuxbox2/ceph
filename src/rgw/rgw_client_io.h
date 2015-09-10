@@ -11,24 +11,45 @@
 #include "rgw_common.h"
 
 class RGWClientIO {
-  bool account;
-
-  size_t bytes_sent;
-  size_t bytes_received;
+  bool _account;
 
 protected:
   RGWEnv env;
 
   virtual void init_env(CephContext *cct) = 0;
 
+public:
+  virtual ~RGWClientIO() {}
+  RGWClientIO() : _account(false) {}
+
+  void init(CephContext *cct);
+  RGWEnv& get_env() { return env; }
+
+  bool account() { return _account; }
+  void set_account(bool _accnt) {
+    _account = _accnt;
+  }
+
+  virtual int complete_request() = 0; /* XXX signature likely changing */
+
+  virtual uint64_t get_bytes_sent() { return 0; }
+  virtual uint64_t get_bytes_received() { return 0; }
+}; /* RGWClient IO */
+
+/* HTTP IO */
+class RGWStreamIO : public RGWClientIO {
+
+  size_t bytes_sent;
+  size_t bytes_received;
+
+protected:
   virtual int write_data(const char *buf, int len) = 0;
   virtual int read_data(char *buf, int max) = 0;
 
 public:
-  virtual ~RGWClientIO() {}
-  RGWClientIO() : account(false), bytes_sent(0), bytes_received(0) {}
+  virtual ~RGWStreamIO() {}
+  RGWStreamIO() : bytes_sent(0), bytes_received(0) {}
 
-  void init(CephContext *cct);
   int print(const char *format, ...);
   int write(const char *buf, int len);
   virtual void flush() = 0;
@@ -37,17 +58,10 @@ public:
   virtual int send_status(const char *status, const char *status_name) = 0;
   virtual int send_100_continue() = 0;
   virtual int complete_header() = 0;
-  virtual int complete_request() = 0;
   virtual int send_content_length(uint64_t len) = 0;
-
-  RGWEnv& get_env() { return env; }
-
-  void set_account(bool _account) {
-    account = _account;
-  }
 
   uint64_t get_bytes_sent() { return bytes_sent; }
   uint64_t get_bytes_received() { return bytes_received; }
-};
+}; /* RGWStreamIO */
 
 #endif

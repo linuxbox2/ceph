@@ -101,21 +101,16 @@ public:
     : re(_re), user_info(_user_info) {}
 
   void init_env(CephContext *cct);
-
   int set_uid(RGWRados* store, string& uid);
-  const RGWUserInfo& get_user() { return user_info; }
-  int write_data(const char* buf, int len);
-  int read_data(char* buf, int len);
 
-  int send_status(const char* status, const char* status_name);
-  int send_100_continue();
-  int complete_header();
-  int complete_request();
-  int send_content_length(uint64_t len);
+  const RGWUserInfo& get_user() {
+    return user_info;
+  }
 
-  void flush();
-};
+  int complete_request() { /* XXX */
+    return 0;
+  };
 
+}; /* RGWLibIO */
 
-
-#endif
+#endif /* RGW_LIB_H */
