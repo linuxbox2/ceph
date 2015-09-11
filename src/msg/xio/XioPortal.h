@@ -42,9 +42,8 @@ private:
 
   struct SubmitQueue
   {
-
-    int nlanes;
-    int nspins;
+    unsigned int nspins;
+    unsigned int nlanes;
 
     struct Lane
     {
@@ -100,7 +99,7 @@ private:
 
     void deq(XioSubmit::Queue& send_q)
     {
-      int ix, n;
+      unsigned int ix, n;
       Lane* lane;
       XioSubmit* xs;
 

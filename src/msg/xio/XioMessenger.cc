@@ -23,6 +23,7 @@
 #include "XioMessenger.h"
 #include "common/address_helper.h"
 #include "common/code_environment.h"
+#include "common/Mutex.h" /* sorry */
 #include "messages/MNop.h"
 
 #define dout_subsys ceph_subsys_xio
@@ -293,8 +294,8 @@ XioMessenger::XioMessenger(CephContext *cct, entity_name_t name,
 		  &xopt, sizeof(xopt));
 
       if (g_code_env == CODE_ENVIRONMENT_DAEMON) {
-        xopt = 1;
-        xio_set_opt(NULL, XIO_OPTLEVEL_RDMA, XIO_OPTNAME_ENABLE_FORK_INIT,
+	xopt = 1;
+	xio_set_opt(NULL, XIO_OPTLEVEL_RDMA, XIO_OPTNAME_ENABLE_FORK_INIT,
 		    &xopt, sizeof(xopt));
       }
 
@@ -307,30 +308,30 @@ XioMessenger::XioMessenger(CephContext *cct, entity_name_t name,
       /* enable flow-control */
       xopt = 1;
       xio_set_opt(NULL, XIO_OPTLEVEL_ACCELIO, XIO_OPTNAME_ENABLE_FLOW_CONTROL,
-                 &xopt, sizeof(xopt));
+		  &xopt, sizeof(xopt));
 
       /* and set threshold for buffer callouts */
       xopt = max(cct->_conf->xio_max_send_inline, 512);
       xio_set_opt(NULL, XIO_OPTLEVEL_ACCELIO, XIO_OPTNAME_MAX_INLINE_XIO_DATA,
-                 &xopt, sizeof(xopt));
+		  &xopt, sizeof(xopt));
       xopt = 216;
       xio_set_opt(NULL, XIO_OPTLEVEL_ACCELIO, XIO_OPTNAME_MAX_INLINE_XIO_HEADER,
-                 &xopt, sizeof(xopt));
+		  &xopt, sizeof(xopt));
 
       struct xio_mempool_config mempool_config = {
-        6,
-        {
-          {1024,  0,  cct->_conf->xio_queue_depth,  262144},
-          {4096,  0,  cct->_conf->xio_queue_depth,  262144},
-          {16384, 0,  cct->_conf->xio_queue_depth,  262144},
-          {65536, 0,  128,  65536},
-          {262144, 0,  32,  16384},
-          {1048576, 0, 8,  8192}
-        }
+	6,
+	{
+	  {1024,  0,  (size_t) cct->_conf->xio_queue_depth,  262144},
+	  {4096,  0,  (size_t) cct->_conf->xio_queue_depth,  262144},
+	  {16384, 0,  (size_t) cct->_conf->xio_queue_depth,  262144},
+	  {65536, 0,  128,  65536},
+	  {262144, 0,  32,  16384},
+	  {1048576, 0, 8,  8192}
+	}
       };
       xio_set_opt(NULL,
-                  XIO_OPTLEVEL_ACCELIO, XIO_OPTNAME_CONFIG_MEMPOOL,
-                  &mempool_config, sizeof(mempool_config));
+		  XIO_OPTLEVEL_ACCELIO, XIO_OPTNAME_CONFIG_MEMPOOL,
+		  &mempool_config, sizeof(mempool_config));
 
       /* and unregisterd one */
 #define XMSG_MEMPOOL_QUANTUM 4096
@@ -403,7 +404,7 @@ void XioMessenger::learned_addr(const entity_addr_t &peer_addr_for_me)
   if (!need_addr)
     return;
 
-  lock_guard lck(sh_mtx);
+  std::lock_guard<std::mutex> lck(sh_mtx);
   if (need_addr) {
     entity_addr_t t = peer_addr_for_me;
     t.set_port(my_inst.addr.get_port());
@@ -829,7 +830,7 @@ int XioMessenger::_send_message_impl(Message* m, XioConnection* xcon)
   }
 
   m->set_magic(magic); // trace flags and special handling
-  m->encode(xcon->get_features(), this->crcflags|MSG_LATE_HEADER);
+  m->encode(xcon->get_features(), crcflags|MSG_LATE_HEADER);
 
   buffer::list &payload = m->get_payload();
   buffer::list &middle = m->get_middle();
@@ -930,15 +931,15 @@ int XioMessenger::_send_message_impl(Message* m, XioConnection* xcon)
   }
 
   /* serialize to fix message ordering */
-  lock_guard lck(xcon->lock);
+  Mutex::Locker lck(xcon->lock);
   xmsg->m->set_seq(xcon->state.next_out_seq());
-  xmsg->m->encode_header(xcon->get_features(), msgr->crcflags);
+  xmsg->m->encode_header(xcon->get_features(), crcflags);
   const std::list<buffer::ptr>& header =
     xmsg->hdr.get_bl().buffers();
   assert(header.size() == 1);
   list<bufferptr>::const_iterator pb = header.begin();
-  msg->out.header.iov_base = (char*) pb->c_str();
-  msg->out.header.iov_len = pb->length();
+  req->out.header.iov_base = (char*) pb->c_str();
+  req->out.header.iov_len = pb->length();
 
   xcon->portal->enqueue_for_send(xcon, xmsg);
 
