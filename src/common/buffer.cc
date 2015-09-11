@@ -19,10 +19,14 @@
 #include "common/safe_io.h"
 #include "common/simple_spin.h"
 #include "common/strtol.h"
+#include "common/likely.h"
 #include "include/atomic.h"
-#include "common/Mutex.h"
+#include "common/RWLock.h"
 #include "include/types.h"
 #include "include/compat.h"
+#if defined(HAVE_XIO)
+#include "msg/xio/XioMsg.h"
+#endif
 
 #include <errno.h>
 #include <fstream>
@@ -30,6 +34,7 @@
 #include <sys/uio.h>
 #include <limits.h>
 
+#include <ostream>
 namespace ceph {
 
 #ifdef BUFFER_DEBUG
@@ -41,8 +46,8 @@ static simple_spinlock_t buffer_debug_lock = SIMPLE_SPINLOCK_INITIALIZER;
 # define bendl std::endl; }
 #endif
 
-  atomic_t buffer_total_alloc;
-  bool buffer_track_alloc = get_env_bool("CEPH_BUFFER_TRACK");
+  static atomic_t buffer_total_alloc;
+  const bool buffer_track_alloc = get_env_bool("CEPH_BUFFER_TRACK");
 
   void buffer::inc_total_alloc(unsigned len) {
     if (buffer_track_alloc)
@@ -56,9 +61,9 @@ static simple_spinlock_t buffer_debug_lock = SIMPLE_SPINLOCK_INITIALIZER;
     return buffer_total_alloc.read();
   }
 
-  atomic_t buffer_cached_crc;
-  atomic_t buffer_cached_crc_adjusted;
-  bool buffer_track_crc = get_env_bool("CEPH_BUFFER_TRACK");
+  static atomic_t buffer_cached_crc;
+  static atomic_t buffer_cached_crc_adjusted;
+  static bool buffer_track_crc = get_env_bool("CEPH_BUFFER_TRACK");
 
   void buffer::track_cached_crc(bool b) {
     buffer_track_crc = b;
@@ -70,8 +75,8 @@ static simple_spinlock_t buffer_debug_lock = SIMPLE_SPINLOCK_INITIALIZER;
     return buffer_cached_crc_adjusted.read();
   }
 
-  atomic_t buffer_c_str_accesses;
-  bool buffer_track_c_str = get_env_bool("CEPH_BUFFER_TRACK");
+  static atomic_t buffer_c_str_accesses;
+  static bool buffer_track_c_str = get_env_bool("CEPH_BUFFER_TRACK");
 
   void buffer::track_c_str(bool b) {
     buffer_track_c_str = b;
@@ -80,7 +85,7 @@ static simple_spinlock_t buffer_debug_lock = SIMPLE_SPINLOCK_INITIALIZER;
     return buffer_c_str_accesses.read();
   }
 
-  atomic_t buffer_max_pipe_size;
+  static atomic_t buffer_max_pipe_size;
   int update_max_pipe_size() {
 #ifdef CEPH_HAVE_SETPIPE_SZ
     char buf[32];
@@ -123,16 +128,16 @@ static simple_spinlock_t buffer_debug_lock = SIMPLE_SPINLOCK_INITIALIZER;
     unsigned len;
     atomic_t nref;
 
-    mutable Mutex crc_lock;
+    mutable RWLock crc_lock;
     map<pair<size_t, size_t>, pair<uint32_t, uint32_t> > crc_map;
 
     raw(unsigned l)
       : data(NULL), len(l), nref(0),
-	crc_lock("buffer::raw::crc_lock", false, false)
+	crc_lock("buffer::raw::crc_lock", false)
     { }
     raw(char *c, unsigned l)
       : data(c), len(l), nref(0),
-	crc_lock("buffer::raw::crc_lock", false, false)
+	crc_lock("buffer::raw::crc_lock", false)
     { }
     virtual ~raw() {}
 
@@ -161,24 +166,40 @@ static simple_spinlock_t buffer_debug_lock = SIMPLE_SPINLOCK_INITIALIZER;
     bool is_n_page_sized() {
       return (len & ~CEPH_PAGE_MASK) == 0;
     }
+    virtual bool is_shareable() {
+      // true if safe to reference/share the existing buffer copy
+      // false if it is not safe to share the buffer, e.g., due to special
+      // and/or registered memory that is scarce
+      return true;
+    }
     bool get_crc(const pair<size_t, size_t> &fromto,
-		 pair<uint32_t, uint32_t> *crc) const {
-      Mutex::Locker l(crc_lock);
+         pair<uint32_t, uint32_t> *crc) const {
+      crc_lock.get_read();
       map<pair<size_t, size_t>, pair<uint32_t, uint32_t> >::const_iterator i =
-	crc_map.find(fromto);
-      if (i == crc_map.end())
-	return false;
+      crc_map.find(fromto);
+      if (i == crc_map.end()) {
+          crc_lock.unlock();
+          return false;
+      }
       *crc = i->second;
+      crc_lock.unlock();
       return true;
     }
     void set_crc(const pair<size_t, size_t> &fromto,
-		 const pair<uint32_t, uint32_t> &crc) {
-      Mutex::Locker l(crc_lock);
+         const pair<uint32_t, uint32_t> &crc) {
+      crc_lock.get_write();
       crc_map[fromto] = crc;
+      crc_lock.unlock();
     }
     void invalidate_crc() {
-      Mutex::Locker l(crc_lock);
-      crc_map.clear();
+      // don't own the write lock when map is empty
+      crc_lock.get_read();
+      if (crc_map.size() != 0) {
+        crc_lock.unlock();
+        crc_lock.get_write();
+        crc_map.clear();
+      }
+      crc_lock.unlock();
     }
   };
 
@@ -492,6 +513,27 @@ static simple_spinlock_t buffer_debug_lock = SIMPLE_SPINLOCK_INITIALIZER;
     }
   };
 
+  class buffer::raw_unshareable : public buffer::raw {
+  public:
+    raw_unshareable(unsigned l) : raw(l) {
+      if (len)
+	data = new char[len];
+      else
+	data = 0;
+    }
+    raw_unshareable(unsigned l, char *b) : raw(b, l) {
+    }
+    raw* clone_empty() {
+      return new raw_char(len);
+    }
+    bool is_shareable() {
+      return false; // !shareable, will force make_shareable()
+    }
+    ~raw_unshareable() {
+      delete[] data;
+    }
+  };
+
   class buffer::raw_static : public buffer::raw {
   public:
     raw_static(const char *d, unsigned l) : raw((char*)d, l) { }
@@ -500,6 +542,59 @@ static simple_spinlock_t buffer_debug_lock = SIMPLE_SPINLOCK_INITIALIZER;
       return new buffer::raw_char(len);
     }
   };
+
+#if defined(HAVE_XIO)
+  class buffer::xio_msg_buffer : public buffer::raw {
+  private:
+    XioDispatchHook* m_hook;
+  public:
+    xio_msg_buffer(XioDispatchHook* _m_hook, const char *d,
+	unsigned l) :
+      raw((char*)d, l), m_hook(_m_hook->get()) {}
+
+    bool is_shareable() { return false; }
+    static void operator delete(void *p)
+    {
+      xio_msg_buffer *buf = static_cast<xio_msg_buffer*>(p);
+      // return hook ref (counts against pool);  it appears illegal
+      // to do this in our dtor, because this fires after that
+      buf->m_hook->put();
+    }
+    raw* clone_empty() {
+      return new buffer::raw_char(len);
+    }
+  };
+
+  class buffer::xio_mempool : public buffer::raw {
+  public:
+    struct xio_reg_mem *mp;
+    xio_mempool(struct xio_reg_mem *_mp, unsigned l) :
+      raw((char*)mp->addr, l), mp(_mp)
+    { }
+    ~xio_mempool() {}
+    raw* clone_empty() {
+      return new buffer::raw_char(len);
+    }
+  };
+
+  struct xio_reg_mem* get_xio_mp(const buffer::ptr& bp)
+  {
+    buffer::xio_mempool *mb = dynamic_cast<buffer::xio_mempool*>(bp.get_raw());
+    if (mb) {
+      return mb->mp;
+    }
+    return NULL;
+  }
+
+  buffer::raw* buffer::create_msg(
+      unsigned len, char *buf, XioDispatchHook* m_hook) {
+    XioPool& pool = m_hook->get_pool();
+    buffer::raw* bp =
+      static_cast<buffer::raw*>(pool.alloc(sizeof(xio_msg_buffer)));
+    new (bp) xio_msg_buffer(m_hook, buf, len);
+    return bp;
+  }
+#endif /* HAVE_XIO */
 
   buffer::raw* buffer::copy(const char *c, unsigned len) {
     raw* r = new raw_char(len);
@@ -545,6 +640,10 @@ static simple_spinlock_t buffer_debug_lock = SIMPLE_SPINLOCK_INITIALIZER;
 #else
     throw error_code(-ENOTSUP);
 #endif
+  }
+
+  buffer::raw* buffer::create_unshareable(unsigned len) {
+    return new raw_unshareable(len);
   }
 
   buffer::ptr::ptr(raw *r) : _raw(r), _off(0), _len(r->len)   // no lock needed; this is an unref raw.
@@ -600,6 +699,18 @@ static simple_spinlock_t buffer_debug_lock = SIMPLE_SPINLOCK_INITIALIZER;
   buffer::raw *buffer::ptr::clone()
   {
     return _raw->clone();
+  }
+
+  buffer::ptr& buffer::ptr::make_shareable() {
+    if (_raw && !_raw->is_shareable()) {
+      buffer::raw *tr = _raw;
+      _raw = tr->clone();
+      _raw->nref.set(1);
+      if (unlikely(tr->nref.dec() == 0)) {
+        delete tr;
+      }
+    }
+    return *this;
   }
 
   void buffer::ptr::swap(ptr& other)
@@ -1065,12 +1176,23 @@ static simple_spinlock_t buffer_debug_lock = SIMPLE_SPINLOCK_INITIALIZER;
 	 it != _buffers.end();
 	 ++it) {
       if (p + it->length() > o) {
-	if (p >= o && p+it->length() <= o+l)
-	  it->zero();                         // all
-	else if (p >= o) 
-	  it->zero(0, o+l-p);                 // head
-	else
-	  it->zero(o-p, it->length()-(o-p));  // tail
+        if (p >= o && p+it->length() <= o+l) {
+          // 'o'------------- l -----------|
+          //      'p'-- it->length() --|
+	  it->zero();
+        } else if (p >= o) {
+          // 'o'------------- l -----------|
+          //    'p'------- it->length() -------|
+	  it->zero(0, o+l-p);
+        } else if (p + it->length() <= o+l) {
+          //     'o'------------- l -----------|
+          // 'p'------- it->length() -------|
+	  it->zero(o-p, it->length()-(o-p));
+        } else {
+          //       'o'----------- l -----------|
+          // 'p'---------- it->length() ----------|
+          it->zero(o-p, l);
+        }
       }
       p += it->length();
       if (o+l <= p)
@@ -1170,27 +1292,31 @@ void buffer::list::rebuild_page_aligned()
 }
 
   // sort-of-like-assignment-op
-  void buffer::list::claim(list& bl)
+  void buffer::list::claim(list& bl, unsigned int flags)
   {
     // free my buffers
     clear();
-    claim_append(bl);
+    claim_append(bl, flags);
   }
 
-  void buffer::list::claim_append(list& bl)
+  void buffer::list::claim_append(list& bl, unsigned int flags)
   {
     // steal the other guy's buffers
     _len += bl._len;
-    _buffers.splice( _buffers.end(), bl._buffers );
+    if (!(flags & CLAIM_ALLOW_NONSHAREABLE))
+      bl.make_shareable();
+    _buffers.splice(_buffers.end(), bl._buffers );
     bl._len = 0;
     bl.last_p = bl.begin();
   }
 
-  void buffer::list::claim_prepend(list& bl)
+  void buffer::list::claim_prepend(list& bl, unsigned int flags)
   {
     // steal the other guy's buffers
     _len += bl._len;
-    _buffers.splice( _buffers.begin(), bl._buffers );
+    if (!(flags & CLAIM_ALLOW_NONSHAREABLE))
+      bl.make_shareable();
+    _buffers.splice(_buffers.begin(), bl._buffers );
     bl._len = 0;
     bl.last_p = bl.begin();
   }
@@ -1379,9 +1505,24 @@ void buffer::list::rebuild_page_aligned()
     }
 
     if (off + len > curbuf->length()) {
-      // FIXME we'll just rebuild the whole list for now.
-      rebuild();
-      return c_str() + orig_off;
+      bufferlist tmp;
+      unsigned l = off + len;
+
+      do {
+	if (l >= curbuf->length())
+	  l -= curbuf->length();
+	else
+	  l = 0;
+	tmp.append(*curbuf);
+	curbuf = _buffers.erase(curbuf);
+
+      } while (curbuf != _buffers.end() && l > 0);
+
+      assert(l == 0);
+
+      tmp.rebuild();
+      _buffers.insert(curbuf, tmp._buffers.front());
+      return tmp.c_str() + off;
     }
 
     return curbuf->c_str() + off;
@@ -1747,6 +1888,15 @@ __u32 buffer::list::crc32c(__u32 crc) const
   return crc;
 }
 
+void buffer::list::invalidate_crc()
+{
+  for (std::list<ptr>::const_iterator p = _buffers.begin(); p != _buffers.end(); ++p) {
+    raw *r = p->get_raw();
+    if (r) {
+      r->invalidate_crc();
+    }
+  }
+}
 
 /**
  * Binary write all contents to a C++ stream
@@ -1798,5 +1948,34 @@ std::ostream& operator<<(std::ostream& out, const buffer::raw &r) {
   return out << "buffer::raw(" << (void*)r.data << " len " << r.len << " nref " << r.nref.read() << ")";
 }
 
+std::ostream& operator<<(std::ostream& out, const buffer::ptr& bp) {
+  if (bp.have_raw())
+    out << "buffer::ptr(" << bp.offset() << "~" << bp.length()
+	<< " " << (void*)bp.c_str()
+	<< " in raw " << (void*)bp.raw_c_str()
+	<< " len " << bp.raw_length()
+	<< " nref " << bp.raw_nref() << ")";
+  else
+    out << "buffer:ptr(" << bp.offset() << "~" << bp.length() << " no raw)";
+  return out;
+}
+
+std::ostream& operator<<(std::ostream& out, const buffer::list& bl) {
+  out << "buffer::list(len=" << bl.length() << "," << std::endl;
+
+  std::list<buffer::ptr>::const_iterator it = bl.buffers().begin();
+  while (it != bl.buffers().end()) {
+    out << "\t" << *it;
+    if (++it == bl.buffers().end()) break;
+    out << "," << std::endl;
+  }
+  out << std::endl << ")";
+  return out;
+}
+
+std::ostream& operator<<(std::ostream& out, const buffer::error& e)
+{
+  return out << e.what();
+}
 
 }

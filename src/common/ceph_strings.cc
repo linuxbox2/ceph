@@ -42,12 +42,29 @@ const char *ceph_osd_state_name(int s)
 	}	
 }
 
+const char *ceph_osd_watch_op_name(int o)
+{
+	switch (o) {
+	case CEPH_OSD_WATCH_OP_UNWATCH:
+		return "unwatch";
+	case CEPH_OSD_WATCH_OP_WATCH:
+		return "watch";
+	case CEPH_OSD_WATCH_OP_RECONNECT:
+		return "reconnect";
+	case CEPH_OSD_WATCH_OP_PING:
+		return "ping";
+	default:
+		return "???";
+	}
+}
+
 const char *ceph_mds_state_name(int s)
 {
 	switch (s) {
 		/* down and out */
 	case CEPH_MDS_STATE_DNE:        return "down:dne";
 	case CEPH_MDS_STATE_STOPPED:    return "down:stopped";
+	case CEPH_MDS_STATE_DAMAGED:   return "down:damaged";
 		/* up and out */
 	case CEPH_MDS_STATE_BOOT:       return "up:boot";
 	case CEPH_MDS_STATE_STANDBY:    return "up:standby";
@@ -112,6 +129,7 @@ const char *ceph_mds_op_name(int op)
 	case CEPH_MDS_OP_LSSNAP: return "lssnap";
 	case CEPH_MDS_OP_MKSNAP: return "mksnap";
 	case CEPH_MDS_OP_RMSNAP: return "rmsnap";
+	case CEPH_MDS_OP_RENAMESNAP: return "renamesnap";
 	case CEPH_MDS_OP_SETFILELOCK: return "setfilelock";
 	case CEPH_MDS_OP_GETFILELOCK: return "getfilelock";
 	case CEPH_MDS_OP_FRAGMENTDIR: return "fragmentdir";
@@ -160,6 +178,16 @@ const char *ceph_snap_op_name(int o)
 	case CEPH_SNAP_OP_CREATE: return "create";
 	case CEPH_SNAP_OP_DESTROY: return "destroy";
 	case CEPH_SNAP_OP_SPLIT: return "split";
+	}
+	return "???";
+}
+
+const char *ceph_watch_event_name(int e)
+{
+	switch (e) {
+	case CEPH_WATCH_EVENT_NOTIFY: return "notify";
+	case CEPH_WATCH_EVENT_NOTIFY_COMPLETE: return "notify_complete";
+	case CEPH_WATCH_EVENT_DISCONNECT: return "disconnect";
 	}
 	return "???";
 }

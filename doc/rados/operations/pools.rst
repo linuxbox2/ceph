@@ -52,7 +52,9 @@ Create a Pool
 
 Before creating pools, refer to the `Pool, PG and CRUSH Config Reference`_.
 Ideally, you should override the default value for the number of placement
-groups in you Ceph configuration file, as the default is NOT ideal. 
+groups in your Ceph configuration file, as the default is NOT ideal.
+For details on placement group numbers refer to `setting the number of placement groups`_
+
 For example:: 
 
 	osd pool default pg num = 100
@@ -71,7 +73,7 @@ Where:
 
 :Description: The name of the pool. It must be unique.
 :Type: String
-:Required: Yes. Picks up default or Ceph configuration value if not specified.
+:Required: Yes.
 
 ``{pg-num}``
 
@@ -110,15 +112,17 @@ Where:
 
 ``[crush-ruleset-name]``
 
-:Description: The name of the crush ruleset for this pool. If specified ruleset
-              doesn't exist, the creation of **replicated** pool will fail with
-              -ENOENT. But **replicated** pool will create a new erasure 
-              ruleset with specified name.
+:Description: The name of a CRUSH ruleset to use for this pool.  The specified
+              ruleset must exist.
 
 :Type: String
 :Required: No. 
-:Default: "erasure-code" for **erasure pool**. Pick up Ceph configuraion variable
-          **osd_pool_default_crush_replicated_ruleset** for **replicated** pool.
+:Default: For **replicated** pools it is the ruleset specified by the ``osd
+          pool default crush replicated ruleset`` config variable.  This
+          ruleset must exist.
+          For **erasure** pools it is ``erasure-code`` if the ``default``
+          `erasure code profile`_ is used or ``{pool-name}`` otherwise.  This
+          ruleset will be created implicitly if it doesn't exist already.
 
 
 ``[erasure-code-profile=profile]``
@@ -274,6 +278,30 @@ You may set values for the following keys:
 :Version: Version ``0.48`` Argonaut and above.	
 
 
+``nodelete``
+
+:Description: Set/Unset NODELETE flag on a given pool.
+:Type: Integer
+:Valid Range: 1 sets flag, 0 unsets flag
+:Version: Version ``FIXME``
+
+
+``nopgchange``
+
+:Description: Set/Unset NOPGCHANGE flag on a given pool.
+:Type: Integer
+:Valid Range: 1 sets flag, 0 unsets flag
+:Version: Version ``FIXME``
+
+
+``nosizechange``
+
+:Description: Set/Unset NOSIZECHANGE flag on a given pool.
+:Type: Integer
+:Valid Range: 1 sets flag, 0 unsets flag
+:Version: Version ``FIXME``
+
+
 ``hit_set_type``
 
 :Description: Enables hit set tracking for cache pools.
@@ -320,6 +348,16 @@ You may set values for the following keys:
               
 :Type: Double
 :Default: ``.4``
+
+
+``cache_target_dirty_high_ratio``
+
+:Description: The percentage of the cache pool containing modified (dirty)
+              objects before the cache tiering agent will flush them to the
+              backing storage pool with a higher speed.
+
+:Type: Double
+:Default: ``.6``
 
 
 ``cache_target_full_ratio``
@@ -460,6 +498,15 @@ You may get values for the following keys:
 :Type: Double
 
 
+``cache_target_dirty_high_ratio``
+
+:Description: The percentage of the cache pool containing modified (dirty)
+              objects before the cache tiering agent will flush them to the
+              backing storage pool with a higher speed.
+
+:Type: Double
+
+
 ``cache_target_full_ratio``
 
 :Description: The percentage of the cache pool containing unmodified (clean)
@@ -542,3 +589,4 @@ a size of 3).
 
 .. _Pool, PG and CRUSH Config Reference: ../../configuration/pool-pg-config-ref
 .. _Bloom Filter: http://en.wikipedia.org/wiki/Bloom_filter
+.. _setting the number of placement groups: ../placement-groups#set-the-number-of-placement-groups

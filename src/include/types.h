@@ -62,7 +62,6 @@ extern "C" {
 using namespace std;
 
 #include "include/unordered_map.h"
-#include "include/hash_namespace.h"
 
 #include "object.h"
 #include "intarith.h"
@@ -109,6 +108,12 @@ inline ostream& operator<<(ostream& out, const deque<A>& v) {
     out << *p;
   }
   out << ">";
+  return out;
+}
+
+template<class A, class B, class C>
+inline ostream& operator<<(ostream&out, const boost::tuple<A, B, C> &t) {
+  out << boost::get<0>(t) <<"," << boost::get<1>(t) << "," << boost::get<2>(t);
   return out;
 }
 
@@ -297,7 +302,7 @@ inline ostream& operator<<(ostream& out, inodeno_t ino) {
   return out << hex << ino.val << dec;
 }
 
-CEPH_HASH_NAMESPACE_START
+namespace std {
   template<> struct hash< inodeno_t >
   {
     size_t operator()( const inodeno_t& x ) const
@@ -306,7 +311,7 @@ CEPH_HASH_NAMESPACE_START
       return H(x.val);
     }
   };
-CEPH_HASH_NAMESPACE_END
+} // namespace std
 
 
 // file modes
@@ -446,13 +451,30 @@ inline ostream& operator<<(ostream &oss, health_status_t status) {
 }
 #endif
 
+struct weightf_t {
+  float v;
+  weightf_t(float _v) : v(_v) {}
+};
+
+inline ostream& operator<<(ostream& out, const weightf_t& w)
+{
+  if (w.v < -0.01) {
+    return out << "-";
+  } else if (w.v < 0.000001) {
+    return out << "0";
+  } else {
+    std::streamsize p = out.precision();
+    return out << std::fixed << std::setprecision(5) << w.v << std::setprecision(p);
+  }
+}
+
 struct shard_id_t {
-  uint8_t id;
+  int8_t id;
 
   shard_id_t() : id(0) {}
-  explicit shard_id_t(uint8_t _id) : id(_id) {}
+  explicit shard_id_t(int8_t _id) : id(_id) {}
 
-  operator uint8_t() const { return id; }
+  operator int8_t() const { return id; }
 
   const static shard_id_t NO_SHARD;
 

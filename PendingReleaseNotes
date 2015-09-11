@@ -1,30 +1,23 @@
-v0.90
------
-
-* Previously, the formatted output of 'ceph pg stat -f ...' was a full
-  pg dump that included all metadata about all PGs in the system.  It
-  is now a concise summary of high-level PG stats, just like the
-  unformatted 'ceph pg stat' command.
+v9.0.4
+======
 
 
+v9.0.3
+======
 
+* The return code for librbd's rbd_aio_read and Image::aio_read API methods no
+  longer returns the number of bytes read upon success.  Instead, it returns 0
+  upon success and a negative value upon failure.
 
-* All JSON dumps of floating point values were incorrecting surrounding the
-  value with quotes.  These quotes have been removed.  Any consumer of structured
-  JSON output that was consuming the floating point values was previously having
-  to interpret the quoted string and will most likely need to be fixed to take
-  the unquoted number.
+* 'ceph scrub', 'ceph compact' and 'ceph sync force are now DEPRECATED.  Users
+  should instead use 'ceph mon scrub', 'ceph mon compact' and
+  'ceph mon sync force'.
 
-* The 'category' field for objects has been removed.  This was originally added
-  to track PG stat summations over different categories of objects for use by
-  radosgw.  It is no longer has any known users and is prone to abuse because it
-  can lead to a pg_stat_t structure that is unbounded.  The librados API calls
-  that accept this field now ignore it, and the OSD no longers tracks the
-  per-category summations.
+* 'ceph mon_metadata' should now be used as 'ceph mon metadata'. There is no
+  need to deprecate this command (same major release since it was first
+  introduced).
 
-* The output for 'rados df' has changed.  The 'category' level has been
-  eliminated, so there is now a single stat object per pool.  The structure of
-  the JSON output is different, and the plaintext output has one less column.
+* The `--dump-json` option of "osdmaptool" is replaced by `--dump json`.
 
-* The 'rados create <objectname> [category]' optional category argument is no
-  longer supported or recognized.
+* The commands of "pg ls-by-{pool,primary,osd}" and "pg ls" now take "recovering"
+  instead of "recovery", to include the recovering pgs in the listed pgs.

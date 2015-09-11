@@ -64,11 +64,11 @@ class DumbBackend : public Backend {
 
   public:
     WriteQueue(
-      DumbBackend *backend,
+      DumbBackend *_backend,
       time_t ti,
       ThreadPool *tp) :
       ThreadPool::WorkQueue<write_item>("DumbBackend::queue", ti, ti*10, tp),
-      backend(backend) {}
+      backend(_backend) {}
     bool _enqueue(write_item *item) {
       item_queue.push_back(item);
       return true;
@@ -84,6 +84,7 @@ class DumbBackend : public Backend {
     bool _empty() {
       return item_queue.empty();
     }
+    using ThreadPool::WorkQueue<write_item>::_process;
     void _process(write_item *item) {
       return backend->_write(
 	item->oid,

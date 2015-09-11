@@ -19,14 +19,14 @@
 #include "MDSTable.h"
 #include "include/interval_set.h"
 
-class MDS;
+class MDSRank;
 
 class InoTable : public MDSTable {
   interval_set<inodeno_t> free;   // unused ids
   interval_set<inodeno_t> projected_free;
 
  public:
-  InoTable(MDS *m) : MDSTable(m, "inotable", true) { }
+  InoTable(MDSRank *m) : MDSTable(m, "inotable", true) { }
 
   inodeno_t project_alloc_id(inodeno_t id=0);
   void apply_alloc_id(inodeno_t id);
@@ -67,6 +67,22 @@ class InoTable : public MDSTable {
   static void generate_test_instances(list<InoTable*>& ls);
 
   void skip_inos(inodeno_t i);
+
+  /**
+   * If the specified inode is marked as free, mark it as used.
+   * For use in tools, not normal operations.
+   *
+   * @returns true if the inode was previously marked as free
+   */
+  bool force_consume(inodeno_t ino)
+  {
+    if (free.contains(ino)) {
+      free.erase(ino);
+      return true;
+    } else {
+      return false;
+    }
+  }
 };
 
 #endif

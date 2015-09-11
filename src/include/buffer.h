@@ -14,11 +14,7 @@
 #ifndef CEPH_BUFFER_H
 #define CEPH_BUFFER_H
 
-#if defined(__linux__)
-#include <stdlib.h>
-#include <linux/types.h>
-#elif defined(__FreeBSD__)
-#include <sys/types.h>
+#if defined(__linux__) || defined(__FreeBSD__)
 #include <stdlib.h>
 #endif
 
@@ -40,8 +36,7 @@
 # include <sys/mman.h>
 #endif
 
-#include <iostream>
-#include <istream>
+#include <iosfwd>
 #include <iomanip>
 #include <list>
 #include <string>
@@ -60,6 +55,11 @@
   #define CEPH_BUFFER_API  __attribute__ ((visibility ("default")))
 #else
   #define CEPH_BUFFER_API
+#endif
+
+#if defined(HAVE_XIO)
+struct xio_reg_mem;
+class XioDispatchHook;
 #endif
 
 namespace ceph {
@@ -86,8 +86,8 @@ public:
     }
   };
   struct malformed_input : public error {
-    explicit malformed_input(const char *w) {
-      snprintf(buf, sizeof(buf), "buffer::malformed_input: %s", w);
+    explicit malformed_input(const std::string& w) {
+      snprintf(buf, sizeof(buf), "buffer::malformed_input: %s", w.c_str());
     }
     const char *what() const throw () {
       return buf;
@@ -136,10 +136,13 @@ private:
   class raw_hack_aligned;
   class raw_char;
   class raw_pipe;
+  class raw_unshareable; // diagnostic, unshareable char buffer
 
   friend std::ostream& operator<<(std::ostream& out, const raw &r);
 
 public:
+  class xio_mempool;
+  class xio_msg_buffer;
 
   /*
    * named constructors 
@@ -153,6 +156,11 @@ public:
   static raw* create_aligned(unsigned len, unsigned align);
   static raw* create_page_aligned(unsigned len);
   static raw* create_zero_copy(unsigned len, int fd, int64_t *offset);
+  static raw* create_unshareable(unsigned len);
+
+#if defined(HAVE_XIO)
+  static raw* create_msg(unsigned len, char *buf, XioDispatchHook *m_hook);
+#endif
 
   /*
    * a buffer pointer.  references (a subsequence of) a raw buffer.
@@ -179,6 +187,7 @@ public:
 
     raw *clone();
     void swap(ptr& other);
+    ptr& make_shareable();
 
     // misc
     bool at_buffer_head() const { return _off == 0; }
@@ -226,8 +235,14 @@ public:
     bool is_zero() const;
 
     // modifiers
-    void set_offset(unsigned o) { _off = o; }
-    void set_length(unsigned l) { _len = l; }
+    void set_offset(unsigned o) {
+      assert(raw_length() >= o);
+      _off = o;
+    }
+    void set_length(unsigned l) {
+      assert(raw_length() >= l);
+      _len = l;
+    }
 
     void append(char c);
     void append(const char *p, unsigned l);
@@ -268,31 +283,14 @@ public:
       iterator(list *l, unsigned o, std::list<ptr>::iterator ip, unsigned po) : 
 	bl(l), ls(&bl->_buffers), off(o), p(ip), p_off(po) { }
 
-      iterator(const iterator& other) : bl(other.bl),
-					ls(other.ls),
-					off(other.off),
-					p(other.p),
-					p_off(other.p_off) {}
-
-      iterator& operator=(const iterator& other) {
-	if (this != &other) {
-	  bl = other.bl;
-	  ls = other.ls;
-	  off = other.off;
-	  p = other.p;
-	  p_off = other.p_off;
-	}
-	return *this;
-      }
-
       /// get current iterator offset in buffer::list
-      unsigned get_off() { return off; }
+      unsigned get_off() const { return off; }
       
       /// get number of bytes remaining from iterator position to the end of the buffer::list
-      unsigned get_remaining() { return bl->length() - off; }
+      unsigned get_remaining() const { return bl->length() - off; }
 
       /// true if iterator is at the end of the buffer::list
-      bool end() {
+      bool end() const {
 	return p == ls->end();
 	//return off == bl->length();
       }
@@ -302,6 +300,8 @@ public:
       char operator*();
       iterator& operator++();
       ptr get_current_ptr();
+
+      list& get_bl() { return *bl; }
 
       // copy data out.
       // note that these all _append_ to dest!
@@ -329,12 +329,15 @@ public:
       append_buffer.set_length(0);   // unused, so far.
     }
     ~list() {}
-    
-    list(const list& other) : _buffers(other._buffers), _len(other._len), _memcopy_count(other._memcopy_count),last_p(this) { }
+    list(const list& other) : _buffers(other._buffers), _len(other._len),
+			      _memcopy_count(other._memcopy_count), last_p(this) {
+      make_shareable();
+    }
     list& operator= (const list& other) {
       if (this != &other) {
         _buffers = other._buffers;
         _len = other._len;
+	make_shareable();
       }
       return *this;
     }
@@ -404,10 +407,33 @@ public:
 					 unsigned align_memory);
     void rebuild_page_aligned();
 
-    // sort-of-like-assignment-op
-    void claim(list& bl);
-    void claim_append(list& bl);
-    void claim_prepend(list& bl);
+    // assignment-op with move semantics
+    const static unsigned int CLAIM_DEFAULT = 0;
+    const static unsigned int CLAIM_ALLOW_NONSHAREABLE = 1;
+
+    void claim(list& bl, unsigned int flags = CLAIM_DEFAULT);
+    void claim_append(list& bl, unsigned int flags = CLAIM_DEFAULT);
+    void claim_prepend(list& bl, unsigned int flags = CLAIM_DEFAULT);
+
+    // clone non-shareable buffers (make shareable)
+    void make_shareable() {
+      std::list<buffer::ptr>::iterator pb;
+      for (pb = _buffers.begin(); pb != _buffers.end(); ++pb) {
+        (void) pb->make_shareable();
+      }
+    }
+
+    // copy with explicit volatile-sharing semantics
+    void share(const list& bl)
+    {
+      if (this != &bl) {
+        clear();
+        std::list<buffer::ptr>::const_iterator pb;
+        for (pb = bl._buffers.begin(); pb != bl._buffers.end(); ++pb) {
+          push_back(*pb);
+        }
+      }
+    }
 
     iterator begin() {
       return iterator(this, 0);
@@ -463,6 +489,7 @@ public:
     int write_fd(int fd) const;
     int write_fd_zero_copy(int fd) const;
     uint32_t crc32c(uint32_t crc) const;
+	void invalidate_crc();
   };
 
   /*
@@ -485,6 +512,10 @@ public:
     }
   };
 };
+
+#if defined(HAVE_XIO)
+xio_reg_mem* get_xio_mp(const buffer::ptr& bp);
+#endif
 
 typedef buffer::ptr bufferptr;
 typedef buffer::list bufferlist;
@@ -509,7 +540,7 @@ inline bool operator>=(bufferlist& l, bufferlist& r) {
   }
 }
 
-inline bool operator==(bufferlist &l, bufferlist &r) {
+inline bool operator==(const bufferlist &l, const bufferlist &r) {
   if (l.length() != r.length())
     return false;
   for (unsigned p = 0; p < l.length(); p++) {
@@ -526,41 +557,17 @@ inline bool operator<=(bufferlist& l, bufferlist& r) {
 }
 
 
-inline std::ostream& operator<<(std::ostream& out, const buffer::ptr& bp) {
-  if (bp.have_raw())
-    out << "buffer::ptr(" << bp.offset() << "~" << bp.length()
-	<< " " << (void*)bp.c_str() 
-	<< " in raw " << (void*)bp.raw_c_str()
-	<< " len " << bp.raw_length()
-	<< " nref " << bp.raw_nref() << ")";
-  else
-    out << "buffer:ptr(" << bp.offset() << "~" << bp.length() << " no raw)";
-  return out;
-}
+std::ostream& operator<<(std::ostream& out, const buffer::ptr& bp);
 
-inline std::ostream& operator<<(std::ostream& out, const buffer::list& bl) {
-  out << "buffer::list(len=" << bl.length() << "," << std::endl;
 
-  std::list<buffer::ptr>::const_iterator it = bl.buffers().begin();
-  while (it != bl.buffers().end()) {
-    out << "\t" << *it;
-    if (++it == bl.buffers().end()) break;
-    out << "," << std::endl;
-  }
-  out << std::endl << ")";
-  return out;
-}
+std::ostream& operator<<(std::ostream& out, const buffer::list& bl);
 
-inline std::ostream& operator<<(std::ostream& out, buffer::error& e)
-{
-  return out << e.what();
-}
+std::ostream& operator<<(std::ostream& out, const buffer::error& e);
 
 inline bufferhash& operator<<(bufferhash& l, bufferlist &r) {
   l.update(r);
   return l;
 }
-
 }
 
 #endif

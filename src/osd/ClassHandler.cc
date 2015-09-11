@@ -1,3 +1,5 @@
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
+// vim: ts=8 sw=2 smarttab
 
 #include "include/types.h"
 #include "msg/Message.h"
@@ -54,7 +56,7 @@ int ClassHandler::open_all_classes()
 	strncmp(pde->d_name, CLS_PREFIX, sizeof(CLS_PREFIX) - 1) == 0 &&
 	strcmp(pde->d_name + strlen(pde->d_name) - (sizeof(CLS_SUFFIX) - 1), CLS_SUFFIX) == 0) {
       char cname[PATH_MAX + 1];
-      strcpy(cname, pde->d_name + sizeof(CLS_PREFIX) - 1);
+      strncpy(cname, pde->d_name + sizeof(CLS_PREFIX) - 1, sizeof(cname) -1);
       cname[strlen(cname) - (sizeof(CLS_SUFFIX) - 1)] = '\0';
       dout(10) << __func__ << " found " << cname << dendl;
       ClassData *cls;
@@ -106,21 +108,21 @@ int ClassHandler::_load_class(ClassData *cls)
 	     cls->name.c_str());
     dout(10) << "_load_class " << cls->name << " from " << fname << dendl;
 
-    struct stat st;
-    int r = ::stat(fname, &st);
-    if (r < 0) {
-      r = -errno;
-      dout(0) << __func__ << " could not stat class " << fname
-	      << ": " << cpp_strerror(r) << dendl;
-      return r;
-    }
-
     cls->handle = dlopen(fname, RTLD_NOW);
     if (!cls->handle) {
-      dout(0) << "_load_class could not open class " << fname
-	      << " (dlopen failed): " << dlerror() << dendl;
+      struct stat st;
+      int r = ::stat(fname, &st);
+      if (r < 0) {
+        r = -errno;
+        dout(0) << __func__ << " could not stat class " << fname
+                << ": " << cpp_strerror(r) << dendl;
+      } else {
+	dout(0) << "_load_class could not open class " << fname
+      	        << " (dlopen failed): " << dlerror() << dendl;
+      	r = -EIO;
+      }
       cls->status = ClassData::CLASS_MISSING;
-      return -EIO;
+      return r;
     }
 
     cls_deps_t *(*cls_deps)();

@@ -19,7 +19,7 @@
 #include "PGBackend.h"
 #include "osd_types.h"
 #include "ECUtil.h"
-#include <boost/optional.hpp>
+#include <boost/optional/optional_io.hpp>
 #include "erasure-code/ErasureCodeInterface.h"
 
 class ECTransaction : public PGBackend::PGTransaction {
@@ -28,8 +28,9 @@ public:
     hobject_t oid;
     uint64_t off;
     bufferlist bl;
-    AppendOp(const hobject_t &oid, uint64_t off, bufferlist &bl)
-      : oid(oid), off(off), bl(bl) {}
+    uint32_t fadvise_flags;
+    AppendOp(const hobject_t &oid, uint64_t off, bufferlist &bl, uint32_t flags)
+      : oid(oid), off(off), bl(bl), fadvise_flags(flags) {}
   };
   struct CloneOp {
     hobject_t source;
@@ -110,14 +111,15 @@ public:
     const hobject_t &hoid,
     uint64_t off,
     uint64_t len,
-    bufferlist &bl) {
+    bufferlist &bl,
+    uint32_t fadvise_flags) {
     if (len == 0) {
       touch(hoid);
       return;
     }
     written += len;
     assert(len == bl.length());
-    ops.push_back(AppendOp(hoid, off, bl));
+    ops.push_back(AppendOp(hoid, off, bl, fadvise_flags));
   }
   void stash(
     const hobject_t &hoid,

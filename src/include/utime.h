@@ -82,6 +82,9 @@ public:
   uint64_t to_nsec() const {
     return (uint64_t)tv.tv_nsec + (uint64_t)tv.tv_sec * 1000000000ull;
   }
+  uint64_t to_msec() const {
+    return (uint64_t)tv.tv_nsec / 1000000ull + (uint64_t)tv.tv_sec * 1000ull;
+  }
 
   void copy_to_timeval(struct timeval *v) const {
     v->tv_sec = tv.tv_sec;
@@ -275,7 +278,18 @@ public:
         }
       }
     } else {
-      return -EINVAL;
+      int sec, usec;
+      int r = sscanf(date.c_str(), "%d.%d", &sec, &usec);
+      if (r != 2) {
+        return -EINVAL;
+      }
+
+      time_t tt = sec;
+      gmtime_r(&tt, &tm);
+
+      if (nsec) {
+        *nsec = (uint64_t)usec * 1000;
+      }
     }
     time_t t = timegm(&tm);
     if (epoch)

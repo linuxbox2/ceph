@@ -36,7 +36,7 @@ Step 1: Getting librados
 Your client application must bind with ``librados`` to connect to the Ceph
 Storage Cluster. You must install ``librados`` and any required packages to
 write applications that use ``librados``. The ``librados`` API is written in
-C++, with additional bindings for C, Python and Java. 
+C++, with additional bindings for C, Python, Java and PHP. 
 
 
 Getting librados for C/C++
@@ -50,7 +50,7 @@ distributions, execute the following::
 To install ``librados`` development support files for C/C++ on RHEL/CentOS
 distributions, execute the following::
 
-	sudo yum install ceph-devel
+	sudo yum install librados2-devel
 
 Once you install ``librados`` for developers, you can find the required 
 headers for C/C++ under ``/usr/include/rados``. ::
@@ -63,19 +63,19 @@ Getting librados for Python
 
 The ``rados.py`` modules provides ``librados`` support to Python
 applications. The ``librados-dev`` package for Debian/Ubuntu
-and the ``ceph-devel`` package for RHEL/CentOS will install the
-``python-ceph`` package for you. You may install ``python-ceph``
+and the ``librados2-devel`` package for RHEL/CentOS will install the
+``python-rados`` package for you. You may install ``python-rados``
 directly too.
 
 To install ``librados`` development support files for Python on Debian/Ubuntu
 distributions, execute the following::
 
-	sudo apt-get install python-ceph
+	sudo apt-get install python-rados
 
-To install ``librados`` development support files for C/C++ on RHEL/CentOS
+To install ``librados`` development support files for Python on RHEL/CentOS
 distributions, execute the following::
 
-	sudo yum install python-ceph
+	sudo yum install python-rados
 
 You can find the module under ``/usr/share/pyshared`` on Debian systems,
 or under ``/usr/lib/python*/site-packages`` on CentOS/RHEL systems.
@@ -117,6 +117,36 @@ To install ``librados`` for Java, you need to execute the following procedure:
 To build the documentation, execute the following::
 
 	ant docs
+
+
+Getting librados for PHP
+-------------------------
+
+To install the ``librados`` extension for PHP, you need to execute the following procedure:
+
+#. Install php-dev. For Debian/Ubuntu, execute::
+
+	sudo apt-get install php5-dev build-essential
+
+   For CentOS/RHEL, execute::
+
+	sudo yum install php-devel
+
+#. Clone the ``phprados`` repository::
+
+	git clone https://github.com/ceph/phprados.git
+
+#. Build ``phprados``::
+
+	cd phprados
+	phpize
+	./configure
+	make
+	sudo make install
+
+#. Enable ``phprados`` in php.ini by adding::
+
+	extension=rados.so
 
 
 Step 2: Configuring a Cluster Handle
@@ -454,6 +484,29 @@ to specify the classpath. For example::
 
 	javac CephClient.java
 	java CephClient
+
+
+PHP Example
+------------
+
+With the RADOS extension enabled in PHP you can start creating a new cluster handle very easily:
+
+.. code-block:: php
+
+	<?php
+
+	$r = rados_create();
+	rados_conf_read_file($r, '/etc/ceph/ceph.conf');
+	if (!rados_connect($r)) {
+		echo "Failed to connect to Ceph cluster";
+	} else {
+		echo "Successfully connected to Ceph cluster";
+	}
+
+
+Save this as rados.php and run the code::
+
+	php rados.php
 
 
 Step 3: Creating an I/O Context
@@ -875,6 +928,18 @@ Java-Example
 	}
 
 
+PHP Example
+-----------
+
+.. code-block:: php
+
+	<?php
+
+	$io = rados_ioctx_create($r, "mypool");
+	rados_write_full($io, "oidOne", "mycontents");
+	rados_remove("oidOne");
+	rados_ioctx_destroy($io);
+
 
 Step 4: Closing Sessions
 ========================
@@ -913,7 +978,12 @@ Python Example
 	print "Shutting down the handle."
 	cluster.shutdown()
 
+PHP Example
+-----------
 
+.. code-block:: php
+
+	rados_shutdown($r);
 
 
 

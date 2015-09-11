@@ -15,7 +15,7 @@
 #define OS_INDEXMANAGER_H
 
 #include "include/memory.h"
-#include <map>
+#include "include/unordered_map.h"
 
 #include "common/Mutex.h"
 #include "common/Cond.h"
@@ -24,7 +24,6 @@
 
 #include "CollectionIndex.h"
 #include "HashIndex.h"
-#include "FlatIndex.h"
 
 
 /// Public type for Index
@@ -52,7 +51,7 @@ struct Index {
 class IndexManager {
   Mutex lock; ///< Lock for Index Manager
   bool upgrade;
-  map<coll_t, CollectionIndex* > col_indices;
+  ceph::unordered_map<coll_t, CollectionIndex* > col_indices;
 
   /**
    * Index factory
@@ -77,7 +76,7 @@ public:
    * Reserve and return index for c
    *
    * @param [in] c Collection for which to get index
-   * @param [in] path Path to collection
+   * @param [in] baseDir base directory of collections
    * @param [out] index Index for c
    * @return error code
    */

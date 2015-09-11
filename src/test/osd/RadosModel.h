@@ -47,6 +47,7 @@ typename T::iterator rand_choose(T &cont) {
 enum TestOpType {
   TEST_OP_READ,
   TEST_OP_WRITE,
+  TEST_OP_WRITE_EXCL,
   TEST_OP_DELETE,
   TEST_OP_SNAP_CREATE,
   TEST_OP_SNAP_REMOVE,
@@ -61,10 +62,11 @@ enum TestOpType {
   TEST_OP_CACHE_FLUSH,
   TEST_OP_CACHE_TRY_FLUSH,
   TEST_OP_CACHE_EVICT,
-  TEST_OP_APPEND
+  TEST_OP_APPEND,
+  TEST_OP_APPEND_EXCL
 };
 
-class TestWatchContext : public librados::WatchCtx {
+class TestWatchContext : public librados::WatchCtx2 {
   TestWatchContext(const TestWatchContext&);
 public:
   Cond cond;
@@ -73,10 +75,16 @@ public:
   Mutex lock;
   TestWatchContext() : handle(0), waiting(false),
 		       lock("watch lock") {}
-  void notify(uint8_t opcode, uint64_t ver, bufferlist &bl) {
+  void handle_notify(uint64_t notify_id, uint64_t cookie,
+		     uint64_t notifier_id,
+		     bufferlist &bl) {
     Mutex::Locker l(lock);
     waiting = false;
     cond.SignalAll();
+  }
+  void handle_error(uint64_t cookie, int err) {
+    Mutex::Locker l(lock);
+    cout << "watch handle_error " << err << std::endl;
   }
   void start() {
     Mutex::Locker l(lock);
@@ -178,6 +186,7 @@ public:
   AttrGenerator attr_gen;
   const bool no_omap;
   bool pool_snaps;
+  bool write_fadvise_dontneed;
   int snapname_num;
 
   RadosTestContext(const string &pool_name, 
@@ -187,6 +196,7 @@ public:
 		   uint64_t max_stride_size,
 		   bool no_omap,
 		   bool pool_snaps,
+		   bool write_fadvise_dontneed,
 		   const char *id = 0) :
     state_lock("Context Lock"),
     pool_obj_cont(),
@@ -199,9 +209,10 @@ public:
     rados_id(id), initialized(false),
     max_size(max_size), 
     min_stride_size(min_stride_size), max_stride_size(max_stride_size),
-    attr_gen(2000),
+    attr_gen(2000, 20000),
     no_omap(no_omap),
     pool_snaps(pool_snaps),
+    write_fadvise_dontneed(write_fadvise_dontneed),
     snapname_num(0)
   {
   }
@@ -221,6 +232,15 @@ public:
     if (r < 0)
       return r;
     r = rados.ioctx_create(pool_name.c_str(), io_ctx);
+    if (r < 0) {
+      rados.shutdown();
+      return r;
+    }
+    bufferlist inbl;
+    r = rados.mon_command(
+      "{\"prefix\": \"osd pool set\", \"pool\": \"" + pool_name +
+      "\", \"var\": \"write_fadvise_dontneed\", \"val\": \"" + (write_fadvise_dontneed ? "true" : "false") + "\"}",
+      inbl, NULL, NULL);
     if (r < 0) {
       rados.shutdown();
       return r;
@@ -698,14 +718,18 @@ public:
   bufferlist rbuffer;
 
   bool do_append;
+  bool do_excl;
 
   WriteOp(int n,
 	  RadosTestContext *context,
 	  const string &oid,
 	  bool do_append,
+	  bool do_excl,
 	  TestOpStat *stat = 0)
     : TestOp(n, context, stat),
-      oid(oid), waiting_on(0), last_acked_tid(0), do_append(do_append)
+      oid(oid), rcompletion(NULL), waiting_on(0), 
+      last_acked_tid(0), do_append(do_append),
+      do_excl(do_excl)
   {}
 		
   void _begin()
@@ -777,6 +801,8 @@ public:
       } else {
 	op.write(i->first, to_write);
       }
+      if (do_excl && tid == 1)
+	op.assert_exists();
       context->io_ctx.aio_operate(
 	context->prefix+oid, completion,
 	&op);
@@ -855,6 +881,17 @@ public:
 	     << version << std::endl;
 	assert(0 == "racing read got wrong version");
       }
+
+      {
+	ObjectDesc old_value;
+	assert(context->find_object(oid, &old_value, -1));
+	if (old_value.deleted())
+	  std::cout << num << ":  left oid " << oid << " deleted" << std::endl;
+	else
+	  std::cout << num << ":  left oid " << oid << " "
+		    << old_value.most_recent() << std::endl;
+      }
+
       rcompletion->release();
       context->oid_in_use.erase(oid);
       context->oid_not_in_use.insert(oid);
@@ -908,7 +945,15 @@ public:
     interval_set<uint64_t> ranges;
     context->state_lock.Unlock();
 
-    int r = context->io_ctx.remove(context->prefix+oid);
+    int r = 0;
+    if (rand() % 2) {
+      librados::ObjectWriteOperation op;
+      op.assert_exists();
+      op.remove();
+      r = context->io_ctx.operate(context->prefix+oid, &op);
+    } else {
+      r = context->io_ctx.remove(context->prefix+oid);
+    }
     if (r && !(r == -ENOENT && !present)) {
       cerr << "r is " << r << " while deleting " << oid << " and present is " << present << std::endl;
       assert(0);
@@ -929,16 +974,18 @@ public:
 
 class ReadOp : public TestOp {
 public:
-  librados::AioCompletion *completion;
+  vector<librados::AioCompletion *> completions;
   librados::ObjectReadOperation op;
   string oid;
   ObjectDesc old_value;
   int snap;
+  bool balance_reads;
 
   ceph::shared_ptr<int> in_use;
 
-  bufferlist result;
-  int retval;
+  vector<bufferlist> results;
+  vector<int> retvals;
+  uint64_t waiting_on;
 
   map<string, bufferlist> attrs;
   int attrretval;
@@ -953,12 +1000,16 @@ public:
   ReadOp(int n,
 	 RadosTestContext *context,
 	 const string &oid,
+	 bool balance_reads,
 	 TestOpStat *stat = 0)
     : TestOp(n, context, stat),
-      completion(NULL),
+      completions(3),
       oid(oid),
       snap(0),
-      retval(0),
+      balance_reads(balance_reads),
+      results(3),
+      retvals(3),
+      waiting_on(0),
       attrretval(0)
   {}
 		
@@ -973,11 +1024,17 @@ public:
     }
     std::cout << num << ": read oid " << oid << " snap " << snap << std::endl;
     done = 0;
-    completion = context->rados.aio_create_completion((void *) this, &read_callback, 0);
+    for (uint32_t i = 0; i < 3; i++) {
+      completions[i] = context->rados.aio_create_completion((void *) this, &read_callback, 0);
+    }
 
     context->oid_in_use.insert(oid);
     context->oid_not_in_use.erase(oid);
     assert(context->find_object(oid, &old_value, snap));
+    if (old_value.deleted())
+      std::cout << num << ":  expect deleted" << std::endl;
+    else
+      std::cout << num << ":  expect " << old_value.most_recent() << std::endl;
 
     TestWatchContext *ctx = context->get_watch_context(oid);
     context->state_lock.Unlock();
@@ -989,7 +1046,7 @@ public:
       std::cerr << num << ":  started" << std::endl;
       bufferlist bl;
       context->io_ctx.set_notify_timeout(600);
-      int r = context->io_ctx.notify(context->prefix+oid, 0, bl);
+      int r = context->io_ctx.notify2(context->prefix+oid, bl, 0, NULL);
       if (r < 0) {
 	std::cerr << "r is " << r << std::endl;
 	assert(0);
@@ -997,6 +1054,7 @@ public:
       std::cerr << num << ":  notified, waiting" << std::endl;
       ctx->wait();
     }
+    context->state_lock.Lock();
     if (snap >= 0) {
       context->io_ctx.snap_set_read(context->snaps[snap]);
     }
@@ -1004,8 +1062,8 @@ public:
     op.read(0,
 	    !old_value.has_contents() ? 0 :
 	    old_value.most_recent_gen()->get_length(old_value.most_recent()),
-	    &result,
-	    &retval);
+	    &results[0],
+	    &retvals[0]);
 
     for (map<string, ContDesc>::iterator i = old_value.attrs.begin();
 	 i != old_value.attrs.end();
@@ -1025,27 +1083,70 @@ public:
       op.omap_get_header(&header, 0);
     }
     op.getxattrs(&xattrs, 0);
-    assert(!context->io_ctx.aio_operate(context->prefix+oid, completion, &op, 0));
+
+    unsigned flags = 0;
+    if (balance_reads)
+      flags |= librados::OPERATION_BALANCE_READS;
+
+    assert(!context->io_ctx.aio_operate(context->prefix+oid, completions[0], &op,
+					flags, NULL));
+    waiting_on++;
+ 
+    // send 2 pipelined reads on the same object/snap. This can help testing
+    // OSD's read behavior in some scenarios
+    for (uint32_t i = 1; i < 3; ++i) {
+      librados::ObjectReadOperation pipeline_op;
+
+      pipeline_op.read(0,
+                       !old_value.has_contents() ? 0 :
+                       old_value.most_recent_gen()->get_length(old_value.most_recent()),
+                       &results[i],
+                       &retvals[i]);
+      assert(!context->io_ctx.aio_operate(context->prefix+oid, completions[i], &pipeline_op, 0));
+      waiting_on++;
+    }
+
     if (snap >= 0) {
       context->io_ctx.snap_set_read(0);
     }
+    context->state_lock.Unlock();
   }
 
   void _finish(CallbackInfo *info)
   {
-    context->state_lock.Lock();
+    Mutex::Locker l(context->state_lock);
     assert(!done);
+    assert(waiting_on > 0);
+    if (--waiting_on) {
+      return;
+    }
+
     context->oid_in_use.erase(oid);
     context->oid_not_in_use.insert(oid);
-    assert(completion->is_complete());
-    uint64_t version = completion->get_version64();
-    if (int err = completion->get_return_value()) {
-      if (!(err == -ENOENT && old_value.deleted())) {
-	cerr << num << ": Error: oid " << oid << " read returned error code "
-	     << err << std::endl;
+    int retval = completions[0]->get_return_value();
+    for (vector<librados::AioCompletion *>::iterator it = completions.begin();
+         it != completions.end(); ++it) {
+      assert((*it)->is_complete());
+      uint64_t version = (*it)->get_version64();
+      int err = (*it)->get_return_value();
+      if (err != retval) {
+        cerr << num << ": Error: oid " << oid << " read returned different error codes: "
+             << retval << " and " << err << std::endl;
 	assert(0);
       }
-    } else {
+      if (err) {
+        if (!(err == -ENOENT && old_value.deleted())) {
+          cerr << num << ": Error: oid " << oid << " read returned error code "
+               << err << std::endl;
+          assert(0);
+        }
+      } else if (version != old_value.version) {
+	cerr << num << ": oid " << oid << " version is " << version
+	     << " and expected " << old_value.version << std::endl;
+	assert(version == old_value.version);
+      }
+    }
+    if (!retval) {
       map<string, bufferlist>::iterator iter = xattrs.find("_header");
       bufferlist headerbl;
       if (iter == xattrs.end()) {
@@ -1059,8 +1160,12 @@ public:
 	headerbl = iter->second;
 	xattrs.erase(iter);
       }
-      cout << num << ":  expect " << old_value.most_recent() << std::endl;
-      assert(!old_value.deleted());
+      if (old_value.deleted()) {
+	std::cout << num << ":  expect deleted" << std::endl;
+	assert(0 == "expected deleted");
+      } else {
+	std::cout << num << ":  expect " << old_value.most_recent() << std::endl;
+      }
       if (old_value.has_contents()) {
 	ContDesc to_check;
 	bufferlist::iterator p = headerbl.begin();
@@ -1070,9 +1175,12 @@ public:
 	       << ", expected " << old_value.most_recent() << std::endl;
 	  context->errors++;
 	}
-	if (!old_value.check(result)) {
-	  cerr << num << ": oid " << oid << " contents " << to_check << " corrupt" << std::endl;
-	  context->errors++;
+        for (vector<bufferlist>::iterator it = results.begin();
+             it != results.end(); ++it) {
+	  if (!old_value.check(*it)) {
+	    cerr << num << ": oid " << oid << " contents " << to_check << " corrupt" << std::endl;
+	    context->errors++;
+	  }
 	}
 	if (context->errors) assert(0);
       }
@@ -1100,11 +1208,6 @@ public:
 	cerr << num << ": oid " << oid << " xattrs.size() is " << xattrs.size()
 	     << " and old is " << old_value.attrs.size() << std::endl;
 	assert(xattrs.size() == old_value.attrs.size());
-      }
-      if (version != old_value.version) {
-	cerr << num << ": oid " << oid << " version is " << version
-	     << " and expected " << old_value.version << std::endl;
-	assert(version == old_value.version);
       }
       for (map<string, ContDesc>::iterator iter = old_value.attrs.begin();
 	   iter != old_value.attrs.end();
@@ -1151,14 +1254,17 @@ public:
 	}
       }
     }
+    for (vector<librados::AioCompletion *>::iterator it = completions.begin();
+         it != completions.end(); ++it) {
+      (*it)->release();
+    }
     context->kick();
     done = true;
-    context->state_lock.Unlock();
   }
 
   bool finished()
   {
-    return done && completion->is_complete();
+    return done;
   }
 
   string getType()
@@ -1309,13 +1415,11 @@ public:
 	ctx = context->watch(oid);
       }
 
-      r = context->io_ctx.watch(context->prefix+oid,
-				0,
-				&ctx->get_handle(),
-				ctx);
+      r = context->io_ctx.watch2(context->prefix+oid,
+				 &ctx->get_handle(),
+				 ctx);
     } else {
-      r = context->io_ctx.unwatch(context->prefix+oid,
-				  ctx->get_handle());
+      r = context->io_ctx.unwatch2(ctx->get_handle());
       {
 	Mutex::Locker l(context->state_lock);
 	context->unwatch(oid);
@@ -1480,7 +1584,7 @@ public:
     }
 
     string src = context->prefix+oid_src;
-    op.copy_from(src.c_str(), context->io_ctx, src_value.version);
+    op.copy_from(src.c_str(), context->io_ctx, src_value.version, 0);
 
     pair<TestOp*, TestOp::CallbackInfo*> *cb_arg =
       new pair<TestOp*, TestOp::CallbackInfo*>(this,

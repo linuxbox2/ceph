@@ -17,7 +17,7 @@
 #include "common/Mutex.h"
 #include "common/Cond.h"
 #include "common/simple_cache.hpp"
-#include <boost/optional.hpp>
+#include <boost/optional/optional_io.hpp>
 
 /**
  * DBObjectMap: Implements ObjectMap in terms of KeyValueDB
@@ -207,7 +207,7 @@ public:
   int init(bool upgrade = false);
 
   /// Upgrade store to current version
-  int upgrade();
+  int upgrade_to_v2();
 
   /// Consistency check, debug, there must be no parallel writes
   bool check(std::ostream &out);
@@ -322,8 +322,7 @@ public:
   /// String munging (public for testing)
   static string ghobject_key(const ghobject_t &oid);
   static string ghobject_key_v0(coll_t c, const ghobject_t &oid);
-  static bool parse_ghobject_key_v0(const string &in,
-				   coll_t *c, ghobject_t *oid);
+  static int is_buggy_ghobject_key_v1(const string &in);
 private:
   /// Implicit lock on Header->seq
   typedef ceph::shared_ptr<_Header> Header;

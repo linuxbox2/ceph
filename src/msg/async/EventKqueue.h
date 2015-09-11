@@ -29,7 +29,7 @@ class KqueueDriver : public EventDriver {
   int size;
 
  public:
-  KqueueDriver(CephContext *c): kqfd(-1), events(NULL), cct(c) {}
+  KqueueDriver(CephContext *c): kqfd(-1), events(NULL), cct(c), size(0) {}
   virtual ~KqueueDriver() {
     if (kqfd != -1)
       close(kqfd);
@@ -40,7 +40,7 @@ class KqueueDriver : public EventDriver {
 
   int init(int nevent);
   int add_event(int fd, int cur_mask, int add_mask);
-  void del_event(int fd, int cur_mask, int del_mask);
+  int del_event(int fd, int cur_mask, int del_mask);
   int resize_events(int newsize);
   int event_wait(vector<FiredFileEvent> &fired_events, struct timeval *tp);
 };

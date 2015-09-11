@@ -29,9 +29,10 @@
 #include <gtest/gtest.h>
 
 #define LARGE_BLOCK_LEN CHAIN_XATTR_MAX_BLOCK_LEN + 1024
+#define FILENAME "chain_xattr"
 
 TEST(chain_xattr, get_and_set) {
-  const char* file = "testfile";
+  const char* file = FILENAME;
   ::unlink(file);
   int fd = ::open(file, O_CREAT|O_WRONLY|O_TRUNC, 0700);
   const string user("user.");
@@ -147,8 +148,80 @@ TEST(chain_xattr, get_and_set) {
   ::unlink(file);
 }
 
+TEST(chain_xattr, chunk_aligned) {
+  const char* file = FILENAME;
+  ::unlink(file);
+  int fd = ::open(file, O_CREAT|O_WRONLY|O_TRUNC, 0700);
+  const string user("user.");
+
+  // set N* chunk size
+  const string name = "user.foo";
+  const string name2 = "user.bar";
+
+  for (int len = CHAIN_XATTR_MAX_BLOCK_LEN - 10;
+       len < CHAIN_XATTR_MAX_BLOCK_LEN + 10;
+       ++len) {
+    cout << len << std::endl;
+    const string x(len, 'x');
+    char buf[len*2];
+    ASSERT_EQ(len, chain_setxattr(file, name.c_str(), x.c_str(), len));
+    char attrbuf[4096];
+    int l = ceph_os_listxattr(file, attrbuf, sizeof(attrbuf));
+    for (char *p = attrbuf; p - attrbuf < l; p += strlen(p) + 1) {
+      cout << "  attr " << p << std::endl;
+    }
+    ASSERT_EQ(len, chain_getxattr(file, name.c_str(), buf, len*2));
+    ASSERT_EQ(0, chain_removexattr(file, name.c_str()));
+
+    ASSERT_EQ(len, chain_fsetxattr(fd, name2.c_str(), x.c_str(), len));
+    l = ceph_os_flistxattr(fd, attrbuf, sizeof(attrbuf));
+    for (char *p = attrbuf; p - attrbuf < l; p += strlen(p) + 1) {
+      cout << "  attr " << p << std::endl;
+    }
+    ASSERT_EQ(len, chain_fgetxattr(fd, name2.c_str(), buf, len*2));
+    ASSERT_EQ(0, chain_fremovexattr(fd, name2.c_str()));
+  }
+
+  for (int len = CHAIN_XATTR_SHORT_BLOCK_LEN - 10;
+       len < CHAIN_XATTR_SHORT_BLOCK_LEN + 10;
+       ++len) {
+    cout << len << std::endl;
+    const string x(len, 'x');
+    char buf[len*2];
+    ASSERT_EQ(len, chain_setxattr(file, name.c_str(), x.c_str(), len));
+    char attrbuf[4096];
+    int l = ceph_os_listxattr(file, attrbuf, sizeof(attrbuf));
+    for (char *p = attrbuf; p - attrbuf < l; p += strlen(p) + 1) {
+      cout << "  attr " << p << std::endl;
+    }
+    ASSERT_EQ(len, chain_getxattr(file, name.c_str(), buf, len*2));
+  }
+
+  {
+    // test tail path in chain_getxattr
+    const char *aname = "user.baz";
+    char buf[CHAIN_XATTR_SHORT_BLOCK_LEN*3];
+    memset(buf, 'x', sizeof(buf));
+    ASSERT_EQ((int)sizeof(buf), chain_setxattr(file, aname, buf, sizeof(buf)));
+    ASSERT_EQ(-ERANGE, chain_getxattr(file, aname, buf,
+				      CHAIN_XATTR_SHORT_BLOCK_LEN*2));
+  }
+  {
+    // test tail path in chain_fgetxattr
+    const char *aname = "user.biz";
+    char buf[CHAIN_XATTR_SHORT_BLOCK_LEN*3];
+    memset(buf, 'x', sizeof(buf));
+    ASSERT_EQ((int)sizeof(buf), chain_fsetxattr(fd, aname, buf, sizeof(buf)));
+    ASSERT_EQ(-ERANGE, chain_fgetxattr(fd, aname, buf,
+				       CHAIN_XATTR_SHORT_BLOCK_LEN*2));
+  }
+
+  ::close(fd);
+  ::unlink(file);
+}
+
 TEST(chain_xattr, listxattr) {
-  const char* file = "testfile";
+  const char* file = FILENAME;
   ::unlink(file);
   int fd = ::open(file, O_CREAT|O_WRONLY|O_TRUNC, 0700);
   const string user("user.");
@@ -160,7 +233,7 @@ TEST(chain_xattr, listxattr) {
   ASSERT_EQ(LARGE_BLOCK_LEN, chain_setxattr(file, name1.c_str(), x.c_str(), LARGE_BLOCK_LEN));
   ASSERT_EQ((int)sizeof(y), chain_setxattr(file, name2.c_str(), &y, sizeof(y)));
 
-  int buffer_size = name1.size() + sizeof('\0') + name2.size() + sizeof('\0');
+  int buffer_size = name1.size() + sizeof(char) + name2.size() + sizeof(char);
   char* expected = (char*)malloc(buffer_size);
   ::strcpy(expected, name1.c_str());
   ::strcpy(expected + name1.size() + 1, name2.c_str());
@@ -196,7 +269,7 @@ int main(int argc, char **argv) {
   g_ceph_context->_conf->set_val("log_to_stderr", "false");
   g_ceph_context->_conf->apply_changes(NULL);
 
-  const char* file = "testfile";
+  const char* file = FILENAME;
   int x = 1234;
   int y = 0;
   int tmpfd = ::open(file, O_CREAT|O_WRONLY|O_TRUNC, 0700);

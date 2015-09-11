@@ -15,9 +15,10 @@
 #ifndef CEPH_CEPHCONTEXT_H
 #define CEPH_CEPHCONTEXT_H
 
-#include <iostream>
+#include <iosfwd>
 #include <stdint.h>
 #include <string>
+#include <set>
 
 #include "include/buffer.h"
 #include "include/atomic.h"
@@ -30,8 +31,7 @@ class PerfCountersCollection;
 class md_config_obs_t;
 struct md_config_t;
 class CephContextHook;
-class CryptoNone;
-class CryptoAES;
+class CephContextObs;
 class CryptoHandler;
 
 namespace ceph {
@@ -123,6 +123,11 @@ public:
    */
   CryptoHandler *get_crypto_handler(int type);
 
+  /// check if experimental feature is enable, and emit appropriate warnings
+  bool check_experimental_feature_enabled(const std::string& feature);
+  bool check_experimental_feature_enabled(const std::string& feature,
+					  std::ostream *message);
+
 private:
   CephContext(const CephContext &rhs);
   CephContext &operator=(const CephContext &rhs);
@@ -158,8 +163,17 @@ private:
   std::map<std::string, AssociatedSingletonObject*> _associated_objs;
 
   // crypto
-  CryptoNone *_crypto_none;
-  CryptoAES *_crypto_aes;
+  CryptoHandler *_crypto_none;
+  CryptoHandler *_crypto_aes;
+
+  // experimental
+  CephContextObs *_cct_obs;
+  ceph_spinlock_t _feature_lock;
+  std::set<std::string> _experimental_features;
+
+  md_config_obs_t *_lockdep_obs;
+
+  friend class CephContextObs;
 };
 
 #endif

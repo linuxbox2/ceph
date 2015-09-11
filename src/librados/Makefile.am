@@ -1,9 +1,17 @@
+if ENABLE_CLIENT
+if WITH_RADOS
+
 librados_internal_la_SOURCES = \
 	librados/RadosClient.cc \
 	librados/IoCtxImpl.cc \
 	librados/RadosXattrIter.cc \
 	librados/snap_set_diff.cc
 noinst_LTLIBRARIES += librados_internal.la
+
+librados_api_la_SOURCES = \
+	common/buffer.cc \
+	librados/librados.cc
+noinst_LTLIBRARIES += librados_api.la
 
 librados_la_SOURCES = \
 	common/buffer.cc \
@@ -35,3 +43,6 @@ noinst_HEADERS += \
 	librados/RadosClient.h \
 	librados/RadosXattrIter.h \
 	librados/ListObjectImpl.h
+
+endif # WITH_RADOS
+endif # ENABLE_CLIENT

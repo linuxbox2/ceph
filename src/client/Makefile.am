@@ -1,3 +1,4 @@
+if ENABLE_CLIENT
 libclient_la_SOURCES = \
 	client/Client.cc \
 	client/Inode.cc \
@@ -15,6 +16,7 @@ noinst_HEADERS += \
 	client/Dir.h \
 	client/Fh.h \
 	client/Inode.h \
+	client/InodeRef.h \
 	client/MetaRequest.h \
 	client/MetaSession.h \
 	client/ClientSnapRealm.h \
@@ -33,3 +35,4 @@ endif
 ceph_test_ioctls_SOURCES = client/test_ioctls.c
 bin_DEBUGPROGRAMS += ceph_test_ioctls
 
+endif # ENABLE_CLIENT

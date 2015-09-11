@@ -20,7 +20,7 @@ endif
 
 export DEB_HOST_ARCH      ?= $(shell dpkg-architecture -qDEB_HOST_ARCH)
 
-extraopts += --with-ocf --with-rest-bench --with-nss
+extraopts += --with-ocf --with-nss
 extraopts += --with-debug
 extraopts += --enable-cephfs-java
 
@@ -31,12 +31,6 @@ ifeq ($(DEB_HOST_ARCH), armel)
   # armel supports ARMv4t or above instructions sets.
   # libatomic-ops is only usable with Ceph for ARMv6 or above.
   extraopts += --without-libatomic-ops
-endif
-
-ifeq ($(shell lsb_release -sc | egrep -q '(precise|quantal|raring|saucy|wheezy|squeeze)' && echo yes),yes)
-  extraopts += --without-lttng --without-babeltrace
-else
-  extraopts += --with-lttng --with-babeltrace
 endif
 
 configure: configure-stamp
@@ -149,7 +143,6 @@ binary-arch: build install
 	dh_strip -plibrbd1 --dbg-package=librbd1-dbg
 	dh_strip -plibcephfs1 --dbg-package=libcephfs1-dbg
 	dh_strip -pradosgw --dbg-package=radosgw-dbg
-	dh_strip -prest-bench --dbg-package=rest-bench-dbg
 	dh_strip -pceph-test --dbg-package=ceph-test-dbg
 
 	dh_compress -a

@@ -63,7 +63,7 @@ CompatSet get_mdsmap_compat_set_base() {
   feature_incompat_base.insert(MDS_FEATURE_INCOMPAT_BASE);
   CompatSet::FeatureSet feature_ro_compat_base;
 
-  return CompatSet(feature_compat_base, feature_incompat_base, feature_ro_compat_base);
+  return CompatSet(feature_compat_base, feature_ro_compat_base, feature_incompat_base);
 }
 
 void MDSMap::mds_info_t::dump(Formatter *f) const
@@ -122,13 +122,17 @@ void MDSMap::dump(Formatter *f) const
   f->close_section();
   f->open_object_section("up");
   for (map<mds_rank_t,mds_gid_t>::const_iterator p = up.begin(); p != up.end(); ++p) {
-    char s[10];
+    char s[14];
     sprintf(s, "mds_%d", int(p->first));
     f->dump_int(s, p->second);
   }
   f->close_section();
   f->open_array_section("failed");
   for (set<mds_rank_t>::const_iterator p = failed.begin(); p != failed.end(); ++p)
+    f->dump_int("mds", *p);
+  f->close_section();
+  f->open_array_section("damaged");
+  for (set<mds_rank_t>::const_iterator p = damaged.begin(); p != damaged.end(); ++p)
     f->dump_int("mds", *p);
   f->close_section();
   f->open_array_section("stopped");
@@ -187,6 +191,7 @@ void MDSMap::print(ostream& out)
   out << "in\t" << in << "\n"
       << "up\t" << up << "\n"
       << "failed\t" << failed << "\n"
+      << "damaged\t" << damaged << "\n"
       << "stopped\t" << stopped << "\n";
   out << "data_pools\t" << data_pools << "\n";
   out << "metadata_pool\t" << metadata_pool << "\n";
@@ -288,6 +293,14 @@ void MDSMap::print_summary(Formatter *f, ostream *out)
       *out << ", " << failed.size() << " failed";
     }
   }
+
+  if (!damaged.empty()) {
+    if (f) {
+      f->dump_unsigned("damaged", damaged.size());
+    } else {
+      *out << ", " << damaged.size() << " damaged";
+    }
+  }
   //if (stopped.size())
   //out << ", " << stopped.size() << " stopped";
 }
@@ -307,6 +320,23 @@ void MDSMap::get_health(list<pair<health_status_t,string> >& summary,
       for (set<mds_rank_t>::const_iterator p = failed.begin(); p != failed.end(); ++p) {
 	std::ostringstream oss;
 	oss << "mds." << *p << " has failed";
+	detail->push_back(make_pair(HEALTH_ERR, oss.str()));
+      }
+    }
+  }
+
+  if (!damaged.empty()) {
+    std::ostringstream oss;
+    oss << "mds rank"
+	<< ((damaged.size() > 1) ? "s ":" ")
+	<< damaged
+	<< ((damaged.size() > 1) ? " are":" is")
+	<< " damaged";
+    summary.push_back(make_pair(HEALTH_ERR, oss.str()));
+    if (detail) {
+      for (set<mds_rank_t>::const_iterator p = damaged.begin(); p != damaged.end(); ++p) {
+	std::ostringstream oss;
+	oss << "mds." << *p << " is damaged";
 	detail->push_back(make_pair(HEALTH_ERR, oss.str()));
       }
     }
@@ -342,6 +372,9 @@ void MDSMap::get_health(list<pair<health_status_t,string> >& summary,
   set<string> laggy;
   for (; u != u_end; ++u) {
     map<mds_gid_t, mds_info_t>::const_iterator m = mds_info.find(u->second);
+    if (m == m_end) {
+      std::cerr << "Up rank " << u->first << " GID " << u->second << " not found!" << std::endl;
+    }
     assert(m != m_end);
     const mds_info_t &mds_info(m->second);
     if (mds_info.laggy()) {
@@ -499,7 +532,7 @@ void MDSMap::encode(bufferlist& bl, uint64_t features) const
   ::encode(cas_pool, bl);
 
   // kclient ignores everything from here
-  __u16 ev = 8;
+  __u16 ev = 9;
   ::encode(ev, bl);
   ::encode(compat, bl);
   ::encode(metadata_pool, bl);
@@ -517,6 +550,7 @@ void MDSMap::encode(bufferlist& bl, uint64_t features) const
   ::encode(inline_data_enabled, bl);
   ::encode(enabled, bl);
   ::encode(fs_name, bl);
+  ::encode(damaged, bl);
   ENCODE_FINISH(bl);
 }
 
@@ -597,6 +631,10 @@ void MDSMap::decode(bufferlist::iterator& p)
       // filesystem until it's explicitly enabled.
       enabled = false;
     }
+  }
+
+  if (ev >= 9) {
+    ::decode(damaged, p);
   }
   DECODE_FINISH(p);
 }

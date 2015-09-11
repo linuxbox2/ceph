@@ -26,28 +26,30 @@
 
 PerfCounters *perfcounter = NULL;
 
+const uint32_t RGWBucketInfo::NUM_SHARDS_BLIND_BUCKET(UINT32_MAX);
+
 int rgw_perf_start(CephContext *cct)
 {
   PerfCountersBuilder plb(cct, cct->_conf->name.to_str(), l_rgw_first, l_rgw_last);
 
-  plb.add_u64_counter(l_rgw_req, "req");
-  plb.add_u64_counter(l_rgw_failed_req, "failed_req");
+  plb.add_u64_counter(l_rgw_req, "req", "Requests");
+  plb.add_u64_counter(l_rgw_failed_req, "failed_req", "Aborted requests");
 
-  plb.add_u64_counter(l_rgw_get, "get");
-  plb.add_u64_counter(l_rgw_get_b, "get_b");
-  plb.add_time_avg(l_rgw_get_lat, "get_initial_lat");
-  plb.add_u64_counter(l_rgw_put, "put");
-  plb.add_u64_counter(l_rgw_put_b, "put_b");
-  plb.add_time_avg(l_rgw_put_lat, "put_initial_lat");
+  plb.add_u64_counter(l_rgw_get, "get", "Gets");
+  plb.add_u64_counter(l_rgw_get_b, "get_b", "Size of gets");
+  plb.add_time_avg(l_rgw_get_lat, "get_initial_lat", "Get latency");
+  plb.add_u64_counter(l_rgw_put, "put", "Puts");
+  plb.add_u64_counter(l_rgw_put_b, "put_b", "Size of puts");
+  plb.add_time_avg(l_rgw_put_lat, "put_initial_lat", "Put latency");
 
-  plb.add_u64(l_rgw_qlen, "qlen");
-  plb.add_u64(l_rgw_qactive, "qactive");
+  plb.add_u64(l_rgw_qlen, "qlen", "Queue length");
+  plb.add_u64(l_rgw_qactive, "qactive", "Active requests queue");
 
-  plb.add_u64_counter(l_rgw_cache_hit, "cache_hit");
-  plb.add_u64_counter(l_rgw_cache_miss, "cache_miss");
+  plb.add_u64_counter(l_rgw_cache_hit, "cache_hit", "Cache hits");
+  plb.add_u64_counter(l_rgw_cache_miss, "cache_miss", "Cache miss");
 
-  plb.add_u64_counter(l_rgw_keystone_token_cache_hit, "keystone_token_cache_hit");
-  plb.add_u64_counter(l_rgw_keystone_token_cache_miss, "keystone_token_cache_miss");
+  plb.add_u64_counter(l_rgw_keystone_token_cache_hit, "keystone_token_cache_hit", "Keystone token cache hits");
+  plb.add_u64_counter(l_rgw_keystone_token_cache_miss, "keystone_token_cache_miss", "Keystone token cache miss");
 
   perfcounter = plb.create_perf_counters();
   cct->get_perfcounters_collection()->add(perfcounter);
@@ -108,6 +110,21 @@ req_info::req_info(CephContext *cct, class RGWEnv *e) : env(e) {
     request_params = env->get("QUERY_STRING", "");
   }
   host = env->get("HTTP_HOST");
+
+  // strip off any trailing :port from host (added by CrossFTP and maybe others)
+  size_t colon_offset = host.find_last_of(':');
+  if (colon_offset != string::npos) {
+    bool all_digits = true;
+    for (unsigned i = colon_offset + 1; i < host.size(); ++i) {
+      if (!isdigit(host[i])) {
+	all_digits = false;
+	break;
+      }
+    }
+    if (all_digits) {
+      host.resize(colon_offset);
+    }
+  }
 }
 
 void req_info::rebuild_from(req_info& src)
@@ -141,8 +158,6 @@ req_state::req_state(CephContext *_cct, class RGWEnv *e) : cct(_cct), cio(NULL),
   object_acl = NULL;
   expect_cont = false;
 
-  object = NULL;
-
   header_ended = false;
   obj_size = 0;
   prot_flags = 0;
@@ -153,7 +168,6 @@ req_state::req_state(CephContext *_cct, class RGWEnv *e) : cct(_cct), cio(NULL),
   time = ceph_clock_now(cct);
   perm_mask = 0;
   content_length = 0;
-  object = NULL;
   bucket_exists = false;
   has_bad_meta = false;
   length = NULL;
@@ -168,7 +182,18 @@ req_state::~req_state() {
   delete formatter;
   delete bucket_acl;
   delete object_acl;
-  free((void *)object);
+}
+
+void req_state::gen_trans_id()
+{
+  char buf[256];
+  timeval timetest;
+  gettimeofday(&timetest, NULL);
+  if (strftime(buf, sizeof(buf), "%Y%m%d:%H%M%S",gmtime(&(timetest.tv_sec))) ==  0)
+    return;
+
+  snprintf(buf + strlen(buf), sizeof(buf)-strlen(buf) ,":%03ld", timetest.tv_usec/1000);
+  trans_id = req_id + "-" + buf;
 }
 
 struct str_len {
@@ -184,6 +209,7 @@ struct str_len meta_prefixes[] = { STR_LEN_ENTRY("HTTP_X_AMZ"),
                                    STR_LEN_ENTRY("HTTP_X_RGW"),
                                    STR_LEN_ENTRY("HTTP_X_OBJECT"),
                                    STR_LEN_ENTRY("HTTP_X_CONTAINER"),
+                                   STR_LEN_ENTRY("HTTP_X_ACCOUNT"),
                                    {NULL, 0} };
 
 
@@ -419,18 +445,18 @@ int gen_rand_base64(CephContext *cct, char *dest, int size) /* size should be th
   ret = get_random_bytes(buf, sizeof(buf));
   if (ret < 0) {
     lderr(cct) << "cannot get random bytes: " << cpp_strerror(-ret) << dendl;
-    return -1;
+    return ret;
   }
 
   ret = ceph_armor(tmp_dest, &tmp_dest[sizeof(tmp_dest)],
 		   (const char *)buf, ((const char *)buf) + ((size - 1) * 3 + 4 - 1) / 4);
   if (ret < 0) {
     lderr(cct) << "ceph_armor failed" << dendl;
-    return -1;
+    return ret;
   }
   tmp_dest[ret] = '\0';
   memcpy(dest, tmp_dest, size);
-  dest[size] = '\0';
+  dest[size-1] = '\0';
 
   return 0;
 }
@@ -442,7 +468,7 @@ int gen_rand_alphanumeric_upper(CephContext *cct, char *dest, int size) /* size 
   int ret = get_random_bytes(dest, size);
   if (ret < 0) {
     lderr(cct) << "cannot get random bytes: " << cpp_strerror(-ret) << dendl;
-    return -1;
+    return ret;
   }
 
   int i;
@@ -455,6 +481,36 @@ int gen_rand_alphanumeric_upper(CephContext *cct, char *dest, int size) /* size 
   return 0;
 }
 
+static const char alphanum_lower_table[]="0123456789abcdefghijklmnopqrstuvwxyz";
+
+int gen_rand_alphanumeric_lower(CephContext *cct, char *dest, int size) /* size should be the required string size + 1 */
+{
+  int ret = get_random_bytes(dest, size);
+  if (ret < 0) {
+    lderr(cct) << "cannot get random bytes: " << cpp_strerror(-ret) << dendl;
+    return ret;
+  }
+
+  int i;
+  for (i=0; i<size - 1; i++) {
+    int pos = (unsigned)dest[i];
+    dest[i] = alphanum_lower_table[pos % (sizeof(alphanum_lower_table) - 1)];
+  }
+  dest[i] = '\0';
+
+  return 0;
+}
+
+int gen_rand_alphanumeric_lower(CephContext *cct, string *str, int length)
+{
+  char buf[length + 1];
+  int ret = gen_rand_alphanumeric_lower(cct, buf, sizeof(buf));
+  if (ret < 0) {
+    return ret;
+  }
+  *str = buf;
+  return 0;
+}
 
 // this is basically a modified base64 charset, url friendly
 static const char alphanum_table[]="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
@@ -464,13 +520,53 @@ int gen_rand_alphanumeric(CephContext *cct, char *dest, int size) /* size should
   int ret = get_random_bytes(dest, size);
   if (ret < 0) {
     lderr(cct) << "cannot get random bytes: " << cpp_strerror(-ret) << dendl;
-    return -1;
+    return ret;
   }
 
   int i;
   for (i=0; i<size - 1; i++) {
     int pos = (unsigned)dest[i];
     dest[i] = alphanum_table[pos & 63];
+  }
+  dest[i] = '\0';
+
+  return 0;
+}
+
+static const char alphanum_no_underscore_table[]="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-.";
+
+int gen_rand_alphanumeric_no_underscore(CephContext *cct, char *dest, int size) /* size should be the required string size + 1 */
+{
+  int ret = get_random_bytes(dest, size);
+  if (ret < 0) {
+    lderr(cct) << "cannot get random bytes: " << cpp_strerror(-ret) << dendl;
+    return ret;
+  }
+
+  int i;
+  for (i=0; i<size - 1; i++) {
+    int pos = (unsigned)dest[i];
+    dest[i] = alphanum_no_underscore_table[pos & 63];
+  }
+  dest[i] = '\0';
+
+  return 0;
+}
+
+static const char alphanum_plain_table[]="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+
+int gen_rand_alphanumeric_plain(CephContext *cct, char *dest, int size) /* size should be the required string size + 1 */
+{
+  int ret = get_random_bytes(dest, size);
+  if (ret < 0) {
+    lderr(cct) << "cannot get random bytes: " << cpp_strerror(-ret) << dendl;
+    return ret;
+  }
+
+  int i;
+  for (i=0; i<size - 1; i++) {
+    int pos = (unsigned)dest[i];
+    dest[i] = alphanum_plain_table[pos % (sizeof(alphanum_plain_table) - 1)];
   }
   dest[i] = '\0';
 
@@ -494,7 +590,7 @@ int NameVal::parse()
   return ret; 
 }
 
-int XMLArgs::parse()
+int RGWHTTPArgs::parse()
 {
   int pos = 0;
   bool end = false;
@@ -509,7 +605,7 @@ int XMLArgs::parse()
     }
     string substr, nameval;
     substr = str.substr(pos, fpos - pos);
-    url_decode(substr, nameval);
+    url_decode(substr, nameval, true);
     NameVal nv(nameval);
     int ret = nv.parse();
     if (ret >= 0) {
@@ -531,6 +627,8 @@ int XMLArgs::parse()
           (name.compare("partNumber") == 0) ||
           (name.compare("uploadId") == 0) ||
           (name.compare("versionId") == 0) ||
+          (name.compare("versions") == 0) ||
+          (name.compare("versioning") == 0) ||
           (name.compare("torrent") == 0)) {
         sub_resources[name] = val;
       } else if (name[0] == 'r') { // root of all evil
@@ -564,7 +662,7 @@ int XMLArgs::parse()
   return 0;
 }
 
-string& XMLArgs::get(const string& name, bool *exists)
+string& RGWHTTPArgs::get(const string& name, bool *exists)
 {
   map<string, string>::iterator iter;
   iter = val_map.find(name);
@@ -576,14 +674,14 @@ string& XMLArgs::get(const string& name, bool *exists)
   return empty_str;
 }
 
-string& XMLArgs::get(const char *name, bool *exists)
+string& RGWHTTPArgs::get(const char *name, bool *exists)
 {
   string s(name);
   return get(s, exists);
 }
 
 
-int XMLArgs::get_bool(const string& name, bool *val, bool *exists)
+int RGWHTTPArgs::get_bool(const string& name, bool *val, bool *exists)
 {
   map<string, string>::iterator iter;
   iter = val_map.find(name);
@@ -606,10 +704,19 @@ int XMLArgs::get_bool(const string& name, bool *val, bool *exists)
   return 0;
 }
 
-int XMLArgs::get_bool(const char *name, bool *val, bool *exists)
+int RGWHTTPArgs::get_bool(const char *name, bool *val, bool *exists)
 {
   string s(name);
   return get_bool(s, val, exists);
+}
+
+void RGWHTTPArgs::get_bool(const char *name, bool *val, bool def_val)
+{
+  bool exists = false;
+  if ((get_bool(name, val, &exists) < 0) ||
+      !exists) {
+    *val = def_val;
+  }
 }
 
 bool verify_bucket_permission(struct req_state *s, int perm)
@@ -693,14 +800,13 @@ static char hex_to_num(char c)
   return hex_table.to_num(c);
 }
 
-bool url_decode(string& src_str, string& dest_str)
+bool url_decode(string& src_str, string& dest_str, bool in_query)
 {
   const char *src = src_str.c_str();
   char dest[src_str.size() + 1];
   int pos = 0;
   char c;
 
-  bool in_query = false;
   while (*src) {
     if (*src != '%') {
       if (!in_query || *src != '+') {

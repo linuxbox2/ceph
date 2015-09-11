@@ -16,9 +16,9 @@ daemons.
 Install an Operating System
 ===========================
 
-Install a recent release of Debian or Ubuntu (e.g., 12.04, 12.10) on your
-nodes. For additional details on operating systems or to use other operating
-systems other than Debian or Ubuntu, see `OS Recommendations`_.
+Install a recent release of Debian or Ubuntu (e.g., 12.04 LTS, 14.04 LTS) on
+your nodes. For additional details on operating systems or to use other
+operating systems other than Debian or Ubuntu, see `OS Recommendations`_.
 
 
 Install an SSH Server
@@ -102,8 +102,6 @@ Ensure that your Admin node has connectivity to the network and to your Server
 node (e.g., ensure ``iptables``, ``ufw`` or other tools that may prevent
 connections, traffic forwarding, etc. to allow what you need).
 
-.. tip:: The ``ceph-deploy`` tool is new and you may encounter some issues
-   without  effective error messages. 
 
 Once you have completed this pre-flight checklist, you are ready to begin using
 ``ceph-deploy``.

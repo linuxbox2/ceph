@@ -13,6 +13,7 @@
  */
 
 #include <sys/socket.h>
+#include <netinet/ip.h>
 #include <netinet/tcp.h>
 #include <sys/uio.h>
 #include <limits.h>
@@ -36,16 +37,20 @@
 #define dout_subsys ceph_subsys_ms
 
 #undef dout_prefix
-#define dout_prefix _pipe_prefix(_dout)
-ostream& Pipe::_pipe_prefix(std::ostream *_dout) {
-  return *_dout << "-- " << msgr->get_myinst().addr << " >> " << peer_addr << " pipe(" << this
-		<< " sd=" << sd << " :" << port
-		<< " s=" << state
-		<< " pgs=" << peer_global_seq
-		<< " cs=" << connect_seq
-		<< " l=" << policy.lossy
-		<< " c=" << connection_state
-		<< ").";
+#define dout_prefix *_dout << *this
+ostream& Pipe::_pipe_prefix(std::ostream &out) const {
+  return out << "-- " << msgr->get_myinst().addr << " >> " << peer_addr << " pipe(" << this
+	     << " sd=" << sd << " :" << port
+             << " s=" << state
+             << " pgs=" << peer_global_seq
+             << " cs=" << connect_seq
+             << " l=" << policy.lossy
+             << " c=" << connection_state
+             << ").";
+}
+
+ostream& operator<<(ostream &out, const Pipe &pipe) {
+  return pipe._pipe_prefix(out);
 }
 
 /*
@@ -180,7 +185,7 @@ void Pipe::join_reader()
 
 void Pipe::DelayedDelivery::discard()
 {
-  lgeneric_subdout(pipe->msgr->cct, ms, 20) << pipe->_pipe_prefix(_dout) << "DelayedDelivery::discard" << dendl;
+  lgeneric_subdout(pipe->msgr->cct, ms, 20) << *pipe << "DelayedDelivery::discard" << dendl;
   Mutex::Locker l(delay_lock);
   while (!delay_queue.empty()) {
     Message *m = delay_queue.front().second;
@@ -192,7 +197,7 @@ void Pipe::DelayedDelivery::discard()
 
 void Pipe::DelayedDelivery::flush()
 {
-  lgeneric_subdout(pipe->msgr->cct, ms, 20) << pipe->_pipe_prefix(_dout) << "DelayedDelivery::flush" << dendl;
+  lgeneric_subdout(pipe->msgr->cct, ms, 20) << *pipe << "DelayedDelivery::flush" << dendl;
   Mutex::Locker l(delay_lock);
   flush_count = delay_queue.size();
   delay_cond.Signal();
@@ -201,11 +206,11 @@ void Pipe::DelayedDelivery::flush()
 void *Pipe::DelayedDelivery::entry()
 {
   Mutex::Locker locker(delay_lock);
-  lgeneric_subdout(pipe->msgr->cct, ms, 20) << pipe->_pipe_prefix(_dout) << "DelayedDelivery::entry start" << dendl;
+  lgeneric_subdout(pipe->msgr->cct, ms, 20) << *pipe << "DelayedDelivery::entry start" << dendl;
 
   while (!stop_delayed_delivery) {
     if (delay_queue.empty()) {
-      lgeneric_subdout(pipe->msgr->cct, ms, 30) << pipe->_pipe_prefix(_dout) << "DelayedDelivery::entry sleeping on delay_cond because delay queue is empty" << dendl;
+      lgeneric_subdout(pipe->msgr->cct, ms, 30) << *pipe << "DelayedDelivery::entry sleeping on delay_cond because delay queue is empty" << dendl;
       delay_cond.Wait(delay_lock);
       continue;
     }
@@ -215,11 +220,11 @@ void *Pipe::DelayedDelivery::entry()
     if (!flush_count &&
         (release > ceph_clock_now(pipe->msgr->cct) &&
          (delay_msg_type.empty() || m->get_type_name() == delay_msg_type))) {
-      lgeneric_subdout(pipe->msgr->cct, ms, 10) << pipe->_pipe_prefix(_dout) << "DelayedDelivery::entry sleeping on delay_cond until " << release << dendl;
+      lgeneric_subdout(pipe->msgr->cct, ms, 10) << *pipe << "DelayedDelivery::entry sleeping on delay_cond until " << release << dendl;
       delay_cond.WaitUntil(delay_lock, release);
       continue;
     }
-    lgeneric_subdout(pipe->msgr->cct, ms, 10) << pipe->_pipe_prefix(_dout) << "DelayedDelivery::entry dequeuing message " << m << " for delivery, past " << release << dendl;
+    lgeneric_subdout(pipe->msgr->cct, ms, 10) << *pipe << "DelayedDelivery::entry dequeuing message " << m << " for delivery, past " << release << dendl;
     delay_queue.pop_front();
     if (flush_count > 0) {
       --flush_count;
@@ -244,7 +249,7 @@ void *Pipe::DelayedDelivery::entry()
     }
     active_flush = false;
   }
-  lgeneric_subdout(pipe->msgr->cct, ms, 20) << pipe->_pipe_prefix(_dout) << "DelayedDelivery::entry stop" << dendl;
+  lgeneric_subdout(pipe->msgr->cct, ms, 20) << *pipe << "DelayedDelivery::entry stop" << dendl;
   return NULL;
 }
 
@@ -287,7 +292,7 @@ int Pipe::accept()
   int removed; // single-use down below
 
   // this should roughly mirror pseudocode at
-  //  http://ceph.newdream.net/wiki/Messaging_protocol
+  //  http://ceph.com/wiki/Messaging_protocol
   int reply_tag = 0;
   uint64_t existing_seq = -1;
 
@@ -597,7 +602,7 @@ int Pipe::accept()
 	       << " > " << existing->connect_seq << dendl;
       goto replace;
     } // existing
-    else if (policy.resetcheck && connect.connect_seq > 0) {
+    else if (connect.connect_seq > 0) {
       // we reset, and they are opening a new session
       ldout(msgr->cct,0) << "accept we reset (peer sent cseq " << connect.connect_seq << "), sending RESETSESSION" << dendl;
       msgr->lock.Unlock();
@@ -846,6 +851,27 @@ void Pipe::set_socket_options()
     ldout(msgr->cct,0) << "couldn't set SO_NOSIGPIPE: " << cpp_strerror(r) << dendl;
   }
 #endif
+
+  int prio = msgr->get_socket_priority();
+  if (prio >= 0) {
+    int r;
+#ifdef IPTOS_CLASS_CS6
+    int iptos = IPTOS_CLASS_CS6;
+    r = ::setsockopt(sd, IPPROTO_IP, IP_TOS, &iptos, sizeof(iptos));
+    if (r < 0) {
+      ldout(msgr->cct,0) << "couldn't set IP_TOS to " << iptos
+                         << ": " << cpp_strerror(errno) << dendl;
+    }
+#endif
+    // setsockopt(IPTOS_CLASS_CS6) sets the priority of the socket as 0.
+    // See http://goo.gl/QWhvsD and http://goo.gl/laTbjT
+    // We need to call setsockopt(SO_PRIORITY) after it.
+    r = ::setsockopt(sd, SOL_SOCKET, SO_PRIORITY, &prio, sizeof(prio));
+    if (r < 0) {
+      ldout(msgr->cct,0) << "couldn't set SO_PRIORITY to " << prio
+                         << ": " << cpp_strerror(errno) << dendl;
+    }
+  }
 }
 
 int Pipe::connect()
@@ -1328,7 +1354,11 @@ void Pipe::fault(bool onread)
   if (policy.lossy && state != STATE_CONNECTING) {
     ldout(msgr->cct,10) << "fault on lossy channel, failing" << dendl;
 
+    // disconnect from Connection, and mark it failed.  future messages
+    // will be dropped.
+    assert(connection_state);
     stop();
+    bool cleared = connection_state->clear_pipe(this);
 
     // crib locks, blech.  note that Pipe is now STATE_CLOSED and the
     // rank_pipe entry is ignored by others.
@@ -1350,11 +1380,7 @@ void Pipe::fault(bool onread)
       delay_thread->discard();
     in_q->discard_queue(conn_id);
     discard_out_queue();
-
-    // disconnect from Connection, and mark it failed.  future messages
-    // will be dropped.
-    assert(connection_state);
-    if (connection_state->clear_pipe(this))
+    if (cleared)
       msgr->dispatch_queue.queue_reset(connection_state.get());
     return;
   }
@@ -1672,10 +1698,8 @@ void Pipe::writer()
 			<< " policy.server=" << policy.server << dendl;
 
     // standby?
-    if (is_queued() && state == STATE_STANDBY && !policy.server) {
-      connect_seq++;
+    if (is_queued() && state == STATE_STANDBY && !policy.server)
       state = STATE_CONNECTING;
-    }
 
     // connect?
     if (state == STATE_CONNECTING) {
@@ -1773,11 +1797,11 @@ void Pipe::writer()
 			      << " " << m << " " << *m << dendl;
 
 	// encode and copy out of *m
-	m->encode(features, !msgr->cct->_conf->ms_nocrc);
+	m->encode(features, msgr->crcflags);
 
 	// prepare everything
-	ceph_msg_header& header = m->get_header();
-	ceph_msg_footer& footer = m->get_footer();
+	const ceph_msg_header& header = m->get_header();
+	const ceph_msg_footer& footer = m->get_footer();
 
 	// Now that we have all the crcs calculated, handle the
 	// digital signature for the message, if the pipe has session
@@ -1875,12 +1899,14 @@ int Pipe::read_message(Message **pm, AuthSessionHandler* auth_handler)
   
   ceph_msg_header header; 
   ceph_msg_footer footer;
-  __u32 header_crc;
-  
+  __u32 header_crc = 0;
+
   if (connection_state->has_feature(CEPH_FEATURE_NOSRCADDR)) {
     if (tcp_read((char*)&header, sizeof(header)) < 0)
       return -1;
-    header_crc = ceph_crc32c(0, (unsigned char *)&header, sizeof(header) - sizeof(header.crc));
+    if (msgr->crcflags & MSG_CRC_HEADER) {
+      header_crc = ceph_crc32c(0, (unsigned char *)&header, sizeof(header) - sizeof(header.crc));
+    }
   } else {
     ceph_msg_header_old oldheader;
     if (tcp_read((char*)&oldheader, sizeof(oldheader)) < 0)
@@ -1889,8 +1915,10 @@ int Pipe::read_message(Message **pm, AuthSessionHandler* auth_handler)
     memcpy(&header, &oldheader, sizeof(header));
     header.src = oldheader.src.name;
     header.reserved = oldheader.reserved;
-    header.crc = oldheader.crc;
-    header_crc = ceph_crc32c(0, (unsigned char *)&oldheader, sizeof(oldheader) - sizeof(oldheader.crc));
+    if (msgr->crcflags & MSG_CRC_HEADER) {
+      header.crc = oldheader.crc;
+      header_crc = ceph_crc32c(0, (unsigned char *)&oldheader, sizeof(oldheader) - sizeof(oldheader.crc));
+    }
   }
 
   ldout(msgr->cct,20) << "reader got envelope type=" << header.type
@@ -1901,7 +1929,7 @@ int Pipe::read_message(Message **pm, AuthSessionHandler* auth_handler)
            << dendl;
 
   // verify header crc
-  if (header_crc != header.crc) {
+  if ((msgr->crcflags & MSG_CRC_HEADER) && header_crc != header.crc) {
     ldout(msgr->cct,0) << "reader got bad header crc " << header_crc << " != " << header.crc << dendl;
     return -1;
   }
@@ -2045,7 +2073,7 @@ int Pipe::read_message(Message **pm, AuthSessionHandler* auth_handler)
 
   ldout(msgr->cct,20) << "reader got " << front.length() << " + " << middle.length() << " + " << data.length()
 	   << " byte message" << dendl;
-  message = decode_message(msgr->cct, header, footer, front, middle, data);
+  message = decode_message(msgr->cct, msgr->crcflags, header, footer, front, middle, data);
   if (!message) {
     ret = -EINVAL;
     goto out_dethrottle;
@@ -2211,7 +2239,7 @@ int Pipe::write_keepalive2(char tag, const utime_t& t)
 }
 
 
-int Pipe::write_message(ceph_msg_header& header, ceph_msg_footer& footer, bufferlist& blist)
+int Pipe::write_message(const ceph_msg_header& header, const ceph_msg_footer& footer, bufferlist& blist)
 {
   int ret;
 
@@ -2241,8 +2269,12 @@ int Pipe::write_message(ceph_msg_header& header, ceph_msg_footer& footer, buffer
     oldheader.src.addr = connection_state->get_peer_addr();
     oldheader.orig_src = oldheader.src;
     oldheader.reserved = header.reserved;
-    oldheader.crc = ceph_crc32c(0, (unsigned char*)&oldheader,
-				sizeof(oldheader) - sizeof(oldheader.crc));
+    if (msgr->crcflags & MSG_CRC_HEADER) {
+	oldheader.crc = ceph_crc32c(0, (unsigned char*)&oldheader,
+				    sizeof(oldheader) - sizeof(oldheader.crc));
+    } else {
+	oldheader.crc = 0;
+    }
     msgvec[msg.msg_iovlen].iov_base = (char*)&oldheader;
     msgvec[msg.msg_iovlen].iov_len = sizeof(oldheader);
     msglen += sizeof(oldheader);
@@ -2305,9 +2337,13 @@ int Pipe::write_message(ceph_msg_header& header, ceph_msg_footer& footer, buffer
     msglen += sizeof(footer);
     msg.msg_iovlen++;
   } else {
-    old_footer.front_crc = footer.front_crc;   
-    old_footer.middle_crc = footer.middle_crc;   
-    old_footer.data_crc = footer.data_crc;   
+    if (msgr->crcflags & MSG_CRC_HEADER) {
+      old_footer.front_crc = footer.front_crc;
+      old_footer.middle_crc = footer.middle_crc;
+    } else {
+	old_footer.front_crc = old_footer.middle_crc = 0;
+    }
+    old_footer.data_crc = msgr->crcflags & MSG_CRC_DATA ? footer.data_crc : 0;
     old_footer.flags = footer.flags;   
     msgvec[msg.msg_iovlen].iov_base = (char*)&old_footer;
     msgvec[msg.msg_iovlen].iov_len = sizeof(old_footer);

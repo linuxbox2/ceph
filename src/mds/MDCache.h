@@ -21,20 +21,23 @@
 #include "include/filepath.h"
 #include "include/elist.h"
 
+#include "osdc/Filer.h"
 #include "CInode.h"
 #include "CDentry.h"
 #include "CDir.h"
 #include "include/Context.h"
 #include "events/EMetaBlob.h"
 #include "RecoveryQueue.h"
+#include "StrayManager.h"
 #include "MDSContext.h"
+#include "MDSMap.h"
 
 #include "messages/MClientRequest.h"
 #include "messages/MMDSSlaveRequest.h"
 
 class PerfCounters;
 
-class MDS;
+class MDSRank;
 class Session;
 class Migrator;
 
@@ -72,6 +75,39 @@ struct MDRequestImpl;
 typedef ceph::shared_ptr<MDRequestImpl> MDRequestRef;
 struct MDSlaveUpdate;
 
+enum {
+  l_mdc_first = 3000,
+  // How many inodes currently in stray dentries
+  l_mdc_num_strays,
+  // How many stray dentries are currently being purged
+  l_mdc_num_strays_purging,
+  // How many stray dentries are currently delayed for purge due to refs
+  l_mdc_num_strays_delayed,
+  // How many purge RADOS ops might currently be in flight?
+  l_mdc_num_purge_ops,
+  // How many dentries have ever been added to stray dir
+  l_mdc_strays_created,
+  // How many dentries have ever finished purging from stray dir
+  l_mdc_strays_purged,
+  // How many strays have been reintegrated?
+  l_mdc_strays_reintegrated,
+  // How many strays have been migrated?
+  l_mdc_strays_migrated,
+
+  // How many inode sizes currently being recovered
+  l_mdc_num_recovering_processing,
+  // How many inodes currently waiting to have size recovered
+  l_mdc_num_recovering_enqueued,
+  // How many inodes waiting with elevated priority for recovery
+  l_mdc_num_recovering_prioritized,
+  // How many inodes ever started size recovery
+  l_mdc_recovery_started,
+  // How many inodes ever completed size recovery
+  l_mdc_recovery_completed,
+
+  l_mdc_last,
+};
+
 
 // flags for predirty_journal_parents()
 static const int PREDIRTY_PRIMARY = 1; // primary dn, adjust nested accounting
@@ -81,7 +117,7 @@ static const int PREDIRTY_SHALLOW = 4; // only go to immediate parent (for easie
 class MDCache {
  public:
   // my master
-  MDS *mds;
+  MDSRank *mds;
 
   // -- my cache --
   LRU lru;   // dentry lru for expiring items from cache
@@ -89,6 +125,9 @@ class MDCache {
   ceph::unordered_map<vinodeno_t,CInode*> inode_map;  // map of inodes by ino
   CInode *root;                            // root inode
   CInode *myin;                            // .ceph/mds%d dir
+
+  bool readonly;
+  void set_readonly() { readonly = true; }
 
   CInode *strays[NUM_STRAY];         // my stray dir
   int stray_index;
@@ -99,10 +138,27 @@ class MDCache {
 
   set<CInode*> base_inodes;
 
+  PerfCounters *logger;
+
+  Filer filer;
+
 public:
   void advance_stray() {
     stray_index = (stray_index+1)%NUM_STRAY;
   }
+
+  /**
+   * Call this when you know that a CDentry is ready to be passed
+   * on to StrayManager (i.e. this is a stray you've just created)
+   */
+  void notify_stray(CDentry *dn) {
+    assert(dn->get_dir()->get_inode()->is_stray());
+    stray_manager.eval_stray(dn);
+  }
+
+  void maybe_eval_stray(CInode *in, bool delay=false);
+  bool is_readonly() { return readonly; }
+  void force_readonly();
 
   DecayRate decayrate;
 
@@ -111,8 +167,13 @@ public:
 
   unsigned max_dir_commit_size;
 
+  static ceph_file_layout gen_default_file_layout(const MDSMap &mdsmap);
+  static ceph_file_layout gen_default_log_layout(const MDSMap &mdsmap);
+
   ceph_file_layout default_file_layout;
   ceph_file_layout default_log_layout;
+
+  void register_perfcounters();
 
   // -- client leases --
 public:
@@ -124,6 +185,16 @@ public:
   void touch_client_lease(ClientLease *r, int pool, utime_t ttl) {
     client_leases[pool].push_back(&r->item_lease);
     r->ttl = ttl;
+  }
+
+  void notify_stray_removed()
+  {
+    stray_manager.notify_stray_removed();
+  }
+
+  void notify_stray_created()
+  {
+    stray_manager.notify_stray_created();
   }
 
   // -- client caps --
@@ -271,12 +342,14 @@ public:
 			  CInode **pcow_inode=0);
   void journal_dirty_inode(MutationImpl *mut, EMetaBlob *metablob, CInode *in, snapid_t follows=CEPH_NOSNAP);
 
-  void project_rstat_inode_to_frag(CInode *cur, CDir *parent, snapid_t first, int linkunlink);
+  void project_rstat_inode_to_frag(CInode *cur, CDir *parent, snapid_t first,
+				   int linkunlink, SnapRealm *prealm);
   void _project_rstat_inode_to_frag(inode_t& inode, snapid_t ofirst, snapid_t last,
 				    CDir *parent, int linkunlink=0);
   void project_rstat_frag_to_inode(nest_info_t& rstat, nest_info_t& accounted_rstat,
 				   snapid_t ofirst, snapid_t last, 
 				   CInode *pin, bool cow_head);
+  void broadcast_quota_to_client(CInode *in);
   void predirty_journal_parents(MutationRef mut, EMetaBlob *blob,
 				CInode *in, CDir *parent,
 				int flags, int linkunlink=0,
@@ -388,7 +461,7 @@ public:
   }
   void cancel_ambiguous_import(CDir *);
   void finish_ambiguous_import(dirfrag_t dirino);
-  void resolve_start();
+  void resolve_start(MDSInternalContext *resolve_done_);
   void send_resolves();
   void send_slave_resolves();
   void send_subtree_resolves();
@@ -447,8 +520,10 @@ protected:
     if (rejoins_pending)
       rejoin_send_rejoins();
   }
+  MDSInternalContext *rejoin_done;
+  MDSInternalContext *resolve_done;
 public:
-  void rejoin_start();
+  void rejoin_start(MDSInternalContext *rejoin_done_);
   void rejoin_gather_finish();
   void rejoin_send_rejoins();
   void rejoin_export_caps(inodeno_t ino, client_t client, ceph_mds_cap_reconnect& capinfo,
@@ -527,6 +602,9 @@ public:
   friend class Migrator;
   friend class MDBalancer;
 
+  // StrayManager needs to be able to remove_inode() from us
+  // when it is done purging
+  friend class StrayManager;
 
   // File size recovery
 private:
@@ -542,7 +620,7 @@ public:
   Migrator *migrator;
 
  public:
-  MDCache(MDS *m);
+  MDCache(MDSRank *m);
   ~MDCache();
   
   // debug
@@ -572,6 +650,25 @@ public:
     return my_ambiguous_imports.count((dir)->dirfrag()) == 0 &&
 	   uncommitted_slave_rename_olddir.count(dir->inode) == 0;
   }
+
+  /**
+   * For all unreferenced inodes, dirs, dentries below an inode, compose
+   * expiry messages.  This is used when giving up all replicas of entities
+   * for an MDS peer in the 'stopping' state, such that the peer can
+   * empty its cache and finish shutting down.
+   *
+   * We have to make sure we're only expiring un-referenced items to
+   * avoid interfering with ongoing stray-movement (we can't distinguish
+   * between the "moving my strays" and "waiting for my cache to empty"
+   * phases within 'stopping')
+   *
+   * @return false if we completed cleanly, true if caller should stop
+   *         expiring because we hit something with refs.
+   */
+  bool expire_recursive(
+    CInode *in,
+    std::map<mds_rank_t, MCacheExpire*>& expiremap,
+    CDir *subtree);
 
   void trim_client_leases();
   void check_memory_usage();
@@ -797,7 +894,8 @@ protected:
     int64_t pool;
     list<MDSInternalContextBase*> waiters;
     open_ino_info_t() : checking(MDS_RANK_NONE), auth_hint(MDS_RANK_NONE),
-      check_peers(true), fetch_backtrace(true), discover(false) {}
+      check_peers(true), fetch_backtrace(true), discover(false),
+      want_replica(false), want_xlocked(false), tid(0), pool(-1) {}
   };
   ceph_tid_t open_ino_last_tid;
   map<inodeno_t,open_ino_info_t> opening_inodes;
@@ -852,37 +950,14 @@ public:
 
   // -- stray --
 public:
-  elist<CDentry*> delayed_eval_stray;
-
-  void eval_stray(CDentry *dn, bool delay=false);
   void eval_remote(CDentry *dn);
-
-  void maybe_eval_stray(CInode *in, bool delay=false) {
-    if (in->inode.nlink > 0 || in->is_base())
-      return;
-    CDentry *dn = in->get_projected_parent_dn();
-    if (!dn->state_test(CDentry::STATE_PURGING) &&
-	dn->get_projected_linkage()->is_primary() &&
-	dn->get_dir()->get_inode()->is_stray())
-      eval_stray(dn, delay);
-  }
-
   void fetch_backtrace(inodeno_t ino, int64_t pool, bufferlist& bl, Context *fin);
 
 protected:
   void scan_stray_dir(dirfrag_t next=dirfrag_t());
-  void purge_stray(CDentry *dn);
-  void _purge_stray_purged(CDentry *dn, int r=0);
-  void _purge_stray_logged(CDentry *dn, version_t pdv, LogSegment *ls);
-  void _purge_stray_logged_truncate(CDentry *dn, LogSegment *ls);
+  StrayManager stray_manager;
   friend struct C_MDC_RetryScanStray;
   friend class C_IO_MDC_FetchedBacktrace;
-  friend class C_MDC_PurgeStrayLogged;
-  friend class C_MDC_PurgeStrayLoggedTruncate;
-  friend class C_IO_MDC_PurgeStrayPurged;
-  void reintegrate_stray(CDentry *dn, CDentry *rlink);
-  void migrate_stray(CDentry *dn, mds_rank_t dest);
-
 
   // == messages ==
  public:
@@ -951,7 +1026,7 @@ private:
     utime_t last_cum_auth_pins_change;
     int last_cum_auth_pins;
     int num_remote_waiters;	// number of remote authpin waiters
-    fragment_info_t() : all_frozen(false), last_cum_auth_pins(0), num_remote_waiters(0) {}
+    fragment_info_t() : bits(0), all_frozen(false), last_cum_auth_pins(0), num_remote_waiters(0) {}
     bool is_fragmenting() { return !resultfrags.empty(); }
   };
   map<dirfrag_t,fragment_info_t> fragments;
@@ -1018,11 +1093,19 @@ public:
   void process_delayed_expire(CDir *dir);
   void discard_delayed_expire(CDir *dir);
 
+  void notify_mdsmap_changed();
+  void notify_osdmap_changed();
+
+protected:
+  void dump_cache(const char *fn, Formatter *f);
+public:
+  void dump_cache() {dump_cache(NULL, NULL);}
+  void dump_cache(const std::string &filename);
+  void dump_cache(Formatter *f);
 
   // == crap fns ==
  public:
   void show_cache();
-  void dump_cache(const char *fn=0);
   void show_subtrees(int dbl=10);
 
   CInode *hack_pick_random_inode() {

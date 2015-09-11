@@ -1,7 +1,7 @@
 #ifndef CEPH_JSON_H
 #define CEPH_JSON_H
 
-#include <iostream>
+#include <iosfwd>
 #include <include/types.h>
 #include <list>
 
@@ -153,6 +153,21 @@ void decode_json_obj(list<T>& l, JSONObj *obj)
   }
 }
 
+template<class T>
+void decode_json_obj(vector<T>& l, JSONObj *obj)
+{
+  l.clear();
+
+  JSONObjIter iter = obj->find_first();
+
+  for (; !iter.end(); ++iter) {
+    T val;
+    JSONObj *o = *iter;
+    decode_json_obj(val, o);
+    l.push_back(val);
+  }
+}
+
 template<class K, class V>
 void decode_json_obj(map<K, V>& m, JSONObj *obj)
 {
@@ -167,6 +182,23 @@ void decode_json_obj(map<K, V>& m, JSONObj *obj)
     JSONDecoder::decode_json("key", key, o);
     JSONDecoder::decode_json("val", val, o);
     m[key] = val;
+  }
+}
+
+template<class K, class V>
+void decode_json_obj(multimap<K, V>& m, JSONObj *obj)
+{
+  m.clear();
+
+  JSONObjIter iter = obj->find_first();
+
+  for (; !iter.end(); ++iter) {
+    K key;
+    V val;
+    JSONObj *o = *iter;
+    JSONDecoder::decode_json("key", key, o);
+    JSONDecoder::decode_json("val", val, o);
+    m.insert(make_pair(key, val));
   }
 }
 
@@ -287,11 +319,33 @@ static void encode_json(const char *name, const std::map<K, V>& m, ceph::Formatt
   f->close_section();
 }
 
+template<class K, class V>
+static void encode_json(const char *name, const std::multimap<K, V>& m, ceph::Formatter *f)
+{
+  f->open_array_section(name);
+  for (typename std::multimap<K, V>::const_iterator i = m.begin(); i != m.end(); ++i) {
+    f->open_object_section("entry");
+    encode_json("key", i->first, f);
+    encode_json("val", i->second, f);
+    f->close_section();
+  }
+  f->close_section();
+}
 template<class T>
 static void encode_json(const char *name, const std::list<T>& l, ceph::Formatter *f)
 {
   f->open_array_section(name);
   for (typename std::list<T>::const_iterator iter = l.begin(); iter != l.end(); ++iter) {
+    encode_json("obj", *iter, f);
+  }
+  f->close_section();
+}
+
+template<class T>
+static void encode_json(const char *name, const std::vector<T>& l, ceph::Formatter *f)
+{
+  f->open_array_section(name);
+  for (typename std::vector<T>::const_iterator iter = l.begin(); iter != l.end(); ++iter) {
     encode_json("obj", *iter, f);
   }
   f->close_section();

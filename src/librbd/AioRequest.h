@@ -11,11 +11,13 @@
 #include "include/buffer.h"
 #include "include/Context.h"
 #include "include/rados/librados.hpp"
+#include "librbd/ObjectMap.h"
 
 namespace librbd {
 
   struct AioCompletion;
   struct ImageCtx;
+  class CopyupRequest;
 
   /**
    * This class represents an I/O operation to a single RBD data object.
@@ -25,37 +27,32 @@ namespace librbd {
   class AioRequest
   {
   public:
-    AioRequest();
     AioRequest(ImageCtx *ictx, const std::string &oid,
-	       uint64_t objectno, uint64_t off, uint64_t len,
-	       librados::snap_t snap_id, Context *completion,
-	       bool hide_enoent);
-    virtual ~AioRequest();
+               uint64_t objectno, uint64_t off, uint64_t len,
+               librados::snap_t snap_id,
+               Context *completion, bool hide_enoent);
+    virtual ~AioRequest() {}
 
-    void complete(int r)
-    {
-      if (should_complete(r)) {
-	if (m_hide_enoent && r == -ENOENT)
-	  r = 0;
-	m_completion->complete(r);
-	delete this;
-      }
-    }
+    virtual void add_copyup_ops(librados::ObjectWriteOperation *wr) {};
+
+    void complete(int r);
 
     virtual bool should_complete(int r) = 0;
-    virtual int send() = 0;
+    virtual void send() = 0;
+
+    bool has_parent() const {
+      return !m_parent_extents.empty();
+    }
 
   protected:
-    void read_from_parent(vector<pair<uint64_t,uint64_t> >& image_extents);
+    bool compute_parent_extents();
 
     ImageCtx *m_ictx;
-    librados::IoCtx *m_ioctx;
     std::string m_oid;
     uint64_t m_object_no, m_object_off, m_object_len;
     librados::snap_t m_snap_id;
     Context *m_completion;
-    AioCompletion *m_parent_completion;
-    ceph::bufferlist m_read_data;
+    std::vector<std::pair<uint64_t,uint64_t> > m_parent_extents;
     bool m_hide_enoent;
   };
 
@@ -65,19 +62,17 @@ namespace librbd {
 	    uint64_t objectno, uint64_t offset, uint64_t len,
 	    vector<pair<uint64_t,uint64_t> >& be,
 	    librados::snap_t snap_id, bool sparse,
-	    Context *completion)
-      : AioRequest(ictx, oid, objectno, offset, len, snap_id, completion,
-		   false),
-	m_buffer_extents(be),
-	m_tried_parent(false), m_sparse(sparse) {
-    }
-    virtual ~AioRead() {}
+	    Context *completion, int op_flags);
+    virtual ~AioRead();
+
     virtual bool should_complete(int r);
-    virtual int send();
+    virtual void send();
+    void guard_read();
 
     ceph::bufferlist &data() {
       return m_read_data;
     }
+
     std::map<uint64_t, uint64_t> m_ext_map;
 
     friend class C_AioRead;
@@ -86,163 +81,264 @@ namespace librbd {
     vector<pair<uint64_t,uint64_t> > m_buffer_extents;
     bool m_tried_parent;
     bool m_sparse;
+    int m_op_flags;
+    ceph::bufferlist m_read_data;
+    AioCompletion *m_parent_completion;
+
+    /**
+     * Reads go through the following state machine to deal with
+     * layering:
+     *
+     *                          need copyup
+     * LIBRBD_AIO_READ_GUARD ---------------> LIBRBD_AIO_READ_COPYUP
+     *           |                                       |
+     *           v                                       |
+     *         done <------------------------------------/
+     *           ^
+     *           |
+     * LIBRBD_AIO_READ_FLAT
+     *
+     * Reads start in LIBRBD_AIO_READ_GUARD or _FLAT, depending on
+     * whether there is a parent or not.
+     */
+    enum read_state_d {
+      LIBRBD_AIO_READ_GUARD,
+      LIBRBD_AIO_READ_COPYUP,
+      LIBRBD_AIO_READ_FLAT
+    };
+
+    read_state_d m_state;
+
+    void send_copyup();
+    void read_from_parent(const vector<pair<uint64_t,uint64_t> >& image_extents);
   };
 
   class AbstractWrite : public AioRequest {
   public:
-    AbstractWrite();
-    AbstractWrite(ImageCtx *ictx, const std::string &oid,
-		  uint64_t object_no, uint64_t object_off, uint64_t len,
-		  vector<pair<uint64_t,uint64_t> >& objectx, uint64_t object_overlap,
-		  const ::SnapContext &snapc,
-		  librados::snap_t snap_id,
-		  Context *completion,
-		  bool hide_enoent);
+    AbstractWrite(ImageCtx *ictx, const std::string &oid, uint64_t object_no,
+                  uint64_t object_off, uint64_t len, const ::SnapContext &snapc,
+		  Context *completion, bool hide_enoent);
     virtual ~AbstractWrite() {}
-    virtual bool should_complete(int r);
-    virtual int send();
-    void guard_write();
 
-    bool has_parent() const {
-      return !m_object_image_extents.empty();
+    virtual void add_copyup_ops(librados::ObjectWriteOperation *wr)
+    {
+      add_write_ops(wr);
     }
+
+    virtual bool should_complete(int r);
+    virtual void send();
 
   private:
     /**
      * Writes go through the following state machine to deal with
-     * layering:
+     * layering and the object map:
      *
-     *                           need copyup
-     * LIBRBD_AIO_WRITE_GUARD ---------------> LIBRBD_AIO_WRITE_COPYUP
-     *           |        ^                              |
-     *           v        \------------------------------/
-     *         done
-     *           ^
-     *           |
-     * LIBRBD_AIO_WRITE_FLAT
+     * <start>
+     *  .  |
+     *  .  |
+     *  .  \---> LIBRBD_AIO_WRITE_PRE
+     *  .           |         |
+     *  . . . . . . | . . . . | . . . . . . . . . . .
+     *      .       |   -or-  |                     .
+     *      .       |         |                     v
+     *      .       |         \----------------> LIBRBD_AIO_WRITE_FLAT . . .
+     *      .       |                                               |      .
+     *      v       v         need copyup                           |      .
+     * LIBRBD_AIO_WRITE_GUARD -----------> LIBRBD_AIO_WRITE_COPYUP  |      .
+     *  .       |                               |        .          |      .
+     *  .       |                               |        .          |      .
+     *  .       |                         /-----/        .          |      .
+     *  .       |                         |              .          |      .
+     *  .       \-------------------\     |     /-------------------/      .
+     *  .                           |     |     |        .                 .
+     *  .                           v     v     v        .                 .
+     *  .                       LIBRBD_AIO_WRITE_POST    .                 .
+     *  .                               |                .                 .
+     *  .                               |  . . . . . . . .                 .
+     *  .                               |  .                               .
+     *  .                               v  v                               .
+     *  . . . . . . . . . . . . . . > <finish> < . . . . . . . . . . . . . .
      *
-     * Writes start in LIBRBD_AIO_WRITE_GUARD or _FLAT, depending on whether
-     * there is a parent or not.
+     * The _PRE/_POST states are skipped if the object map is disabled.
+     * The write starts in _WRITE_GUARD or _FLAT depending on whether or not
+     * there is a parent overlap.
      */
     enum write_state_d {
       LIBRBD_AIO_WRITE_GUARD,
       LIBRBD_AIO_WRITE_COPYUP,
-      LIBRBD_AIO_WRITE_FLAT
+      LIBRBD_AIO_WRITE_FLAT,
+      LIBRBD_AIO_WRITE_PRE,
+      LIBRBD_AIO_WRITE_POST,
+      LIBRBD_AIO_WRITE_ERROR
     };
 
   protected:
-    virtual void add_copyup_ops() = 0;
-
     write_state_d m_state;
-    vector<pair<uint64_t,uint64_t> > m_object_image_extents;
-    uint64_t m_parent_overlap;
     librados::ObjectWriteOperation m_write;
-    librados::ObjectWriteOperation m_copyup;
     uint64_t m_snap_seq;
     std::vector<librados::snap_t> m_snaps;
 
+    virtual void add_write_ops(librados::ObjectWriteOperation *wr) = 0;
+    virtual const char* get_write_type() const = 0;
+    virtual void guard_write();
+    virtual void pre_object_map_update(uint8_t *new_state) = 0;
+    virtual bool post_object_map_update() {
+      return false;
+    }
+
   private:
+    void send_pre();
+    bool send_post();
+    void send_write();
     void send_copyup();
   };
 
   class AioWrite : public AbstractWrite {
   public:
-    AioWrite(ImageCtx *ictx, const std::string &oid,
-	     uint64_t object_no, uint64_t object_off,
-	     vector<pair<uint64_t,uint64_t> >& objectx, uint64_t object_overlap,
-	     const ceph::bufferlist &data, const ::SnapContext &snapc,
-	     librados::snap_t snap_id,
-	     Context *completion)
-      : AbstractWrite(ictx, oid,
-		      object_no, object_off, data.length(),
-		      objectx, object_overlap,
-		      snapc, snap_id,
+    AioWrite(ImageCtx *ictx, const std::string &oid, uint64_t object_no,
+             uint64_t object_off, const ceph::bufferlist &data,
+             const ::SnapContext &snapc, Context *completion)
+      : AbstractWrite(ictx, oid, object_no, object_off, data.length(), snapc,
 		      completion, false),
-	m_write_data(data) {
-      guard_write();
-      add_write_ops(m_write);
+	m_write_data(data), m_op_flags(0) {
     }
     virtual ~AioWrite() {}
 
+    void set_op_flags(int op_flags) {
+      m_op_flags = op_flags;
+    }
   protected:
-    virtual void add_copyup_ops() {
-      add_write_ops(m_copyup);
+    virtual void add_write_ops(librados::ObjectWriteOperation *wr);
+
+    virtual const char* get_write_type() const {
+      return "write";
+    }
+
+    virtual void pre_object_map_update(uint8_t *new_state) {
+      *new_state = OBJECT_EXISTS;
     }
 
   private:
-    void add_write_ops(librados::ObjectWriteOperation &wr);
     ceph::bufferlist m_write_data;
+    int m_op_flags;
   };
 
   class AioRemove : public AbstractWrite {
   public:
-    AioRemove(ImageCtx *ictx, const std::string &oid,
-	      uint64_t object_no,
-	      vector<pair<uint64_t,uint64_t> >& objectx, uint64_t object_overlap,
-	      const ::SnapContext &snapc, librados::snap_t snap_id,
-	      Context *completion)
-      : AbstractWrite(ictx, oid,
-		      object_no, 0, 0,
-		      objectx, object_overlap,
-		      snapc, snap_id, completion,
-		      true) {
-      if (has_parent())
-	m_write.truncate(0);
-      else
-	m_write.remove();
+    AioRemove(ImageCtx *ictx, const std::string &oid, uint64_t object_no,
+	      const ::SnapContext &snapc, Context *completion)
+      : AbstractWrite(ictx, oid, object_no, 0, 0, snapc, completion, true),
+        m_object_state(OBJECT_NONEXISTENT) {
     }
     virtual ~AioRemove() {}
 
   protected:
-    virtual void add_copyup_ops() {
-      // removing an object never needs to copyup
-      assert(0);
+    virtual void add_write_ops(librados::ObjectWriteOperation *wr) {
+      if (has_parent()) {
+	wr->truncate(0);
+      } else {
+	wr->remove();
+      }
+    }
+
+    virtual const char* get_write_type() const {
+      if (has_parent()) {
+        return "remove (trunc)";
+      }
+      return "remove";
+    }
+    virtual void pre_object_map_update(uint8_t *new_state) {
+      if (has_parent()) {
+	m_object_state = OBJECT_EXISTS;
+      } else {
+	m_object_state = OBJECT_PENDING;
+      }
+      *new_state = m_object_state;
+    }
+
+    virtual bool post_object_map_update() {
+      if (m_object_state == OBJECT_EXISTS) {
+	return false;
+      }
+      return true;
+    }
+
+    virtual void guard_write();
+
+  private:
+    uint8_t m_object_state;
+  };
+
+  class AioTrim : public AbstractWrite {
+  public:
+    AioTrim(ImageCtx *ictx, const std::string &oid, uint64_t object_no,
+            const ::SnapContext &snapc, Context *completion)
+      : AbstractWrite(ictx, oid, object_no, 0, 0, snapc, completion, true) {
+    }
+
+  protected:
+    virtual void add_write_ops(librados::ObjectWriteOperation *wr) {
+      wr->remove();
+    }
+
+    virtual const char* get_write_type() const {
+      return "remove (trim)";
+    }
+
+    virtual void pre_object_map_update(uint8_t *new_state) {
+      *new_state = OBJECT_PENDING;
+    }
+
+    virtual bool post_object_map_update() {
+      return true;
     }
   };
 
   class AioTruncate : public AbstractWrite {
   public:
-    AioTruncate(ImageCtx *ictx, const std::string &oid,
-		uint64_t object_no, uint64_t object_off,
-		vector<pair<uint64_t,uint64_t> >& objectx, uint64_t object_overlap,
-		const ::SnapContext &snapc, librados::snap_t snap_id,
-		Context *completion)
-      : AbstractWrite(ictx, oid,
-		      object_no, object_off, 0,
-		      objectx, object_overlap,
-		      snapc, snap_id, completion,
-		      true) {
-      guard_write();
-      m_write.truncate(object_off);
+    AioTruncate(ImageCtx *ictx, const std::string &oid, uint64_t object_no,
+                uint64_t object_off, const ::SnapContext &snapc,
+                Context *completion)
+      : AbstractWrite(ictx, oid, object_no, object_off, 0, snapc, completion,
+                      true) {
     }
     virtual ~AioTruncate() {}
 
   protected:
-    virtual void add_copyup_ops() {
-      m_copyup.truncate(m_object_off);
+    virtual void add_write_ops(librados::ObjectWriteOperation *wr) {
+      wr->truncate(m_object_off);
+    }
+
+    virtual const char* get_write_type() const {
+      return "truncate";
+    }
+
+    virtual void pre_object_map_update(uint8_t *new_state) {
+      *new_state = OBJECT_EXISTS;
     }
   };
 
   class AioZero : public AbstractWrite {
   public:
-    AioZero(ImageCtx *ictx, const std::string &oid,
-	    uint64_t object_no, uint64_t object_off, uint64_t object_len,
-	    vector<pair<uint64_t,uint64_t> >& objectx, uint64_t object_overlap,
-	    const ::SnapContext &snapc, librados::snap_t snap_id,
-	    Context *completion)
-      : AbstractWrite(ictx, oid,
-		      object_no, object_off, object_len,
-		      objectx, object_overlap,
-		      snapc, snap_id, completion,
-		      true) {
-      guard_write();
-      m_write.zero(object_off, object_len);
+    AioZero(ImageCtx *ictx, const std::string &oid, uint64_t object_no,
+            uint64_t object_off, uint64_t object_len,
+            const ::SnapContext &snapc, Context *completion)
+      : AbstractWrite(ictx, oid, object_no, object_off, object_len, snapc,
+                      completion, true) {
     }
     virtual ~AioZero() {}
 
   protected:
-    virtual void add_copyup_ops() {
-      m_copyup.zero(m_object_off, m_object_len);
+    virtual void add_write_ops(librados::ObjectWriteOperation *wr) {
+      wr->zero(m_object_off, m_object_len);
+    }
+
+    virtual const char* get_write_type() const {
+      return "zero";
+    }
+
+    virtual void pre_object_map_update(uint8_t *new_state) {
+      *new_state = OBJECT_EXISTS;
     }
   };
 

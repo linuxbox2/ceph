@@ -110,8 +110,8 @@ public:
     assert(remote_wrlocks.empty());
   }
 
-  bool is_master() { return slave_to_mds == MDS_RANK_NONE; }
-  bool is_slave() { return slave_to_mds != MDS_RANK_NONE; }
+  bool is_master() const { return slave_to_mds == MDS_RANK_NONE; }
+  bool is_slave() const { return slave_to_mds != MDS_RANK_NONE; }
 
   client_t get_client() {
     if (reqid.name.is_client())
@@ -161,6 +161,8 @@ public:
   virtual void print(ostream &out) {
     out << "mutation(" << this << ")";
   }
+
+  virtual void dump(Formatter *f) const {}
 };
 
 inline ostream& operator<<(ostream& out, MutationImpl &mut)
@@ -198,9 +200,10 @@ struct MDRequestImpl : public MutationImpl, public TrackedOp {
   interval_set<inodeno_t> prealloc_inos;
 
   int snap_caps;
+  int getattr_caps;       ///< caps requested by getattr
   bool did_early_reply;
   bool o_trunc;           ///< request is an O_TRUNC mutation
-  int getattr_caps;       ///< caps requested by getattr
+  bool has_completed;     ///< request has already completed
 
   bufferlist reply_extra_bl;
 
@@ -224,6 +227,7 @@ struct MDRequestImpl : public MutationImpl, public TrackedOp {
   // break rarely-used fields into a separately allocated structure 
   // to save memory for most ops
   struct More {
+    int slave_error;
     set<mds_rank_t> slaves;           // mds nodes that have slave requests to me (implies client_request)
     set<mds_rank_t> waiting_on_slave; // peers i'm waiting for slavereq replies from. 
 
@@ -271,6 +275,7 @@ struct MDRequestImpl : public MutationImpl, public TrackedOp {
     filepath filepath2;
 
     More() : 
+      slave_error(0),
       has_journaled_slaves(false), slave_update_journaled(false),
       srcdn_auth_mds(-1), inode_import_v(0), rename_inode(0),
       is_freeze_authpin(false), is_ambiguous_auth(false),
@@ -298,8 +303,9 @@ struct MDRequestImpl : public MutationImpl, public TrackedOp {
     TrackedOp(tracker, params.initiated),
     session(NULL), item_session_request(this),
     client_request(params.client_req), straydn(NULL), snapid(CEPH_NOSNAP),
-    tracei(NULL), tracedn(NULL), alloc_ino(0), used_prealloc_ino(0), snap_caps(0),
-    did_early_reply(false), o_trunc(false), getattr_caps(0),
+    tracei(NULL), tracedn(NULL), alloc_ino(0), used_prealloc_ino(0),
+    snap_caps(0), getattr_caps(0),
+    did_early_reply(false), o_trunc(false), has_completed(false),
     slave_request(NULL), internal_op(params.internal_op), internal_op_finish(NULL),
     internal_op_private(NULL),
     retry(0),
@@ -332,6 +338,7 @@ struct MDRequestImpl : public MutationImpl, public TrackedOp {
   void set_filepath2(const filepath& fp);
 
   void print(ostream &out);
+  void dump(Formatter *f) const;
 
   // TrackedOp stuff
   typedef ceph::shared_ptr<MDRequestImpl> Ref;

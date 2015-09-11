@@ -75,7 +75,7 @@ struct MonSession : public RefCountedObject {
   bool is_capable(string service, int mask) {
     map<string,string> args;
     return caps.is_capable(g_ceph_context,
-			   inst.name,
+			   entity_name,
 			   service, "", args,
 			   mask & MON_CAP_R, mask & MON_CAP_W, mask & MON_CAP_X);
   }
@@ -123,6 +123,7 @@ struct MonSessionMap {
 
   MonSession *new_session(const entity_inst_t& i, Connection *c) {
     MonSession *s = new MonSession(i, c);
+    assert(s);
     sessions.push_back(&s->item);
     if (i.name.is_osd())
       by_osd.insert(pair<int,MonSession*>(i.name.num(), s));

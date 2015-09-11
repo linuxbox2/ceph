@@ -125,7 +125,7 @@ public:
     int32_t new_flags;
 
     // full (rare)
-    bufferlist fullmap;  // in leiu of below.
+    bufferlist fullmap;  // in lieu of below.
     bufferlist crush;
 
     // incremental
@@ -155,6 +155,10 @@ public:
 
     string cluster_snapshot;
 
+    mutable bool have_crc;      ///< crc values are defined
+    uint32_t full_crc;  ///< crc of the resulting OSDMap
+    mutable uint32_t inc_crc;   ///< crc of this incremental
+
     int get_net_marked_out(const OSDMap *previous) const;
     int get_net_marked_down(const OSDMap *previous) const;
     int identify_osd(uuid_d u) const;
@@ -169,7 +173,8 @@ public:
 
     Incremental(epoch_t e=0) :
       encode_features(0),
-      epoch(e), new_pool_max(-1), new_flags(-1), new_max_osd(-1) {
+      epoch(e), new_pool_max(-1), new_flags(-1), new_max_osd(-1),
+      have_crc(false), full_crc(0), inc_crc(0) {
       memset(&fsid, 0, sizeof(fsid));
     }
     Incremental(bufferlist &bl) {
@@ -240,12 +245,21 @@ private:
   string cluster_snapshot;
   bool new_blacklist_entries;
 
+  mutable uint64_t cached_up_osd_features;
+
+  mutable bool crc_defined;
+  mutable uint32_t crc;
+
+  void _calc_up_osd_features();
+
  public:
+  bool have_crc() const { return crc_defined; }
+  uint32_t get_crc() const { return crc; }
+
   ceph::shared_ptr<CrushWrapper> crush;       // hierarchical map
 
   friend class OSDMonitor;
   friend class PGMonitor;
-  friend class MDS;
 
  public:
   OSDMap() : epoch(0), 
@@ -258,6 +272,8 @@ private:
 	     osd_uuid(new vector<uuid_d>),
 	     cluster_snapshot_epoch(0),
 	     new_blacklist_entries(false),
+	     cached_up_osd_features(0),
+	     crc_defined(false), crc(0),
 	     crush(new CrushWrapper) {
     memset(&fsid, 0, sizeof(fsid));
   }
@@ -319,6 +335,9 @@ public:
   void get_up_osds(set<int32_t>& ls) const;
   unsigned get_num_up_osds() const;
   unsigned get_num_in_osds() const;
+  unsigned get_num_pg_temp() const {
+    return pg_temp->size();
+  }
 
   int get_flags() const { return flags; }
   int test_flag(int f) const { return flags & f; }
@@ -638,9 +657,7 @@ public:
     return acting->size();
   }
   int pg_to_acting_osds(pg_t pg, vector<int>& acting) const {
-    int primary;
-    int r = pg_to_acting_osds(pg, &acting, &primary);
-    return r;
+    return pg_to_acting_osds(pg, &acting, NULL);
   }
   /**
    * This does not apply temp overrides and should not be used
@@ -824,13 +841,12 @@ public:
   void print_pools(ostream& out) const;
   void print_summary(Formatter *f, ostream& out) const;
   void print_oneline_summary(ostream& out) const;
-  void print_tree(ostream *out, Formatter *f) const;
+  void print_tree(Formatter *f, ostream *out) const;
 
   string get_flag_string() const;
   static string get_flag_string(unsigned flags);
   static void dump_erasure_code_profiles(const map<string,map<string,string> > &profiles,
 					 Formatter *f);
-  void dump_json(ostream& out) const;
   void dump(Formatter *f) const;
   static void generate_test_instances(list<OSDMap*>& o);
   bool check_new_blacklist_entries() const { return new_blacklist_entries; }

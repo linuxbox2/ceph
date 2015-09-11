@@ -306,7 +306,7 @@ TEST_F(OSDMapTest, KeepsNecessaryTemps) {
     }
   }
   if (i == (int)get_num_osds())
-    ASSERT_EQ(0, "did not find unused OSD for temp mapping");
+    FAIL() << "did not find unused OSD for temp mapping";
 
   pgtemp_map.new_pg_temp[pgid] = up_osds;
   pgtemp_map.new_primary_temp[pgid] = up_osds[1];
@@ -324,7 +324,7 @@ TEST_F(OSDMapTest, PrimaryAffinity) {
 
   /*
   osdmap.print(cout);
-  Formatter *f = new_formatter("json-pretty");
+  Formatter *f = Formatter::create("json-pretty");
   f->open_object_section("CRUSH");
   osdmap.crush->dump(f);
   f->close_section();

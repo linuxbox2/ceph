@@ -464,8 +464,10 @@ static void fuse_ll_write(fuse_req_t req, fuse_ino_t ino, const char *buf,
 static void fuse_ll_flush(fuse_req_t req, fuse_ino_t ino,
 			  struct fuse_file_info *fi)
 {
-  // NOOP
-  fuse_reply_err(req, 0);
+  CephFuse::Handle *cfuse = (CephFuse::Handle *)fuse_req_userdata(req);
+  Fh *fh = reinterpret_cast<Fh*>(fi->fh);
+  int r = cfuse->client->ll_flush(fh);
+  fuse_reply_err(req, -r);
 }
 
 #ifdef FUSE_IOCTL_COMPAT
@@ -484,7 +486,7 @@ static void fuse_ll_ioctl(fuse_req_t req, fuse_ino_t ino, int cmd, void *arg, st
       struct ceph_file_layout layout;
       struct ceph_ioctl_layout l;
       Fh *fh = (Fh*)fi->fh;
-      cfuse->client->ll_file_layout(fh->inode, &layout);
+      cfuse->client->ll_file_layout(fh, &layout);
       l.stripe_unit = layout.fl_stripe_unit;
       l.stripe_count = layout.fl_stripe_count;
       l.object_size = layout.fl_object_size;
@@ -592,6 +594,15 @@ static void fuse_ll_releasedir(fuse_req_t req, fuse_ino_t ino,
   dir_result_t *dirp = reinterpret_cast<dir_result_t*>(fi->fh);
   cfuse->client->ll_releasedir(dirp);
   fuse_reply_err(req, 0);
+}
+
+static void fuse_ll_fsyncdir(fuse_req_t req, fuse_ino_t ino, int datasync,
+			     struct fuse_file_info *fi)
+{
+  CephFuse::Handle *cfuse = (CephFuse::Handle *)fuse_req_userdata(req);
+  dir_result_t *dirp = reinterpret_cast<dir_result_t*>(fi->fh);
+  int r = cfuse->client->ll_fsyncdir(dirp);
+  fuse_reply_err(req, -r);
 }
 
 static void fuse_ll_access(fuse_req_t req, fuse_ino_t ino, int mask)
@@ -755,6 +766,21 @@ static void dentry_invalidate_cb(void *handle, vinodeno_t dirino,
 #endif
 }
 
+static int remount_cb(void *handle)
+{
+  // used for trimming kernel dcache. when remounting a file system, linux kernel
+  // trims all unused dentries in the file system
+  char cmd[1024];
+  CephFuse::Handle *cfuse = (CephFuse::Handle *)handle;
+  snprintf(cmd, sizeof(cmd), "mount -i -o remount %s", cfuse->mountpoint);
+  int r = system(cmd);
+  if (r != 0 && r != -1) {
+    r = WEXITSTATUS(r);
+  }
+
+  return r;
+}
+
 static void do_init(void *data, fuse_conn_info *bar)
 {
   CephFuse::Handle *cfuse = (CephFuse::Handle *)data;
@@ -800,7 +826,7 @@ const static struct fuse_lowlevel_ops fuse_ll_oper = {
  opendir: fuse_ll_opendir,
  readdir: fuse_ll_readdir,
  releasedir: fuse_ll_releasedir,
- fsyncdir: 0,
+ fsyncdir: fuse_ll_fsyncdir,
  statfs: fuse_ll_statfs,
  setxattr: fuse_ll_setxattr,
  getxattr: fuse_ll_getxattr,
@@ -852,8 +878,6 @@ CephFuse::Handle::~Handle()
 
 void CephFuse::Handle::finalize()
 {
-  client->ll_register_ino_invalidate_cb(NULL, NULL);
-
   if (se)
     fuse_remove_signal_handlers(se);
   if (ch)
@@ -938,25 +962,26 @@ int CephFuse::Handle::start()
 
   fuse_session_add_chan(se, ch);
 
-  client->ll_register_switch_interrupt_cb(switch_interrupt_cb);
 
-  /*
-   * this is broken:
-   *
-   * - the cb needs the request handle to be useful; we should get the
-   *   gids in the method here in fuse_ll.c and pass the gid list in,
-   *   not use a callback.
-   * - the callback mallocs the list but it is not free()'d
-   *
-   * so disable it for now...
-
-  client->ll_register_getgroups_cb(getgroups_cb, this);
-
-   */
-  client->ll_register_dentry_invalidate_cb(dentry_invalidate_cb, this);
-
-  if (client->cct->_conf->fuse_use_invalidate_cb)
-    client->ll_register_ino_invalidate_cb(ino_invalidate_cb, this);
+  struct client_callback_args args = {
+    handle: this,
+    ino_cb: client->cct->_conf->fuse_use_invalidate_cb ? ino_invalidate_cb : NULL,
+    dentry_cb: dentry_invalidate_cb,
+    switch_intr_cb: switch_interrupt_cb,
+    remount_cb: remount_cb,
+    /*
+     * this is broken:
+     *
+     * - the cb needs the request handle to be useful; we should get the
+     *   gids in the method here in fuse_ll.c and pass the gid list in,
+     *   not use a callback.
+     * - the callback mallocs the list but it is not free()'d
+     *
+     * so disable it for now...
+     getgroups_cb: getgroups_cb,
+     */
+  };
+  client->ll_register_callbacks(&args);
 
   return 0;
 }

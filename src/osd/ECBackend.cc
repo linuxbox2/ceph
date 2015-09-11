@@ -13,7 +13,7 @@
  */
 
 #include <boost/variant.hpp>
-#include <boost/optional.hpp>
+#include <boost/optional/optional_io.hpp>
 #include <iostream>
 #include <sstream>
 
@@ -21,6 +21,9 @@
 #include "ECBackend.h"
 #include "messages/MOSDPGPush.h"
 #include "messages/MOSDPGPushReply.h"
+#include "ReplicatedPG.h"
+
+class ReplicatedPG;
 
 #define dout_subsys ceph_subsys_osd
 #define DOUT_PREFIX_ARGS this
@@ -167,12 +170,11 @@ void ECBackend::RecoveryOp::dump(Formatter *f) const
 ECBackend::ECBackend(
   PGBackend::Listener *pg,
   coll_t coll,
-  coll_t temp_coll,
   ObjectStore *store,
   CephContext *cct,
   ErasureCodeInterfaceRef ec_impl,
   uint64_t stripe_width)
-  : PGBackend(pg, store, coll, temp_coll),
+  : PGBackend(pg, store, coll),
     cct(cct),
     ec_impl(ec_impl),
     sinfo(ec_impl->get_data_chunk_count(), stripe_width) {
@@ -213,8 +215,8 @@ struct RecoveryMessages {
     const hobject_t &hoid, uint64_t off, uint64_t len,
     const set<pg_shard_t> &need,
     bool attrs) {
-    list<pair<uint64_t, uint64_t> > to_read;
-    to_read.push_back(make_pair(off, len));
+    list<boost::tuple<uint64_t, uint64_t, uint32_t> > to_read;
+    to_read.push_back(boost::make_tuple(off, len, 0));
     assert(!reads.count(hoid));
     reads.insert(
       make_pair(
@@ -232,7 +234,7 @@ struct RecoveryMessages {
   map<pg_shard_t, vector<PushOp> > pushes;
   map<pg_shard_t, vector<PushReplyOp> > push_replies;
   ObjectStore::Transaction *t;
-  RecoveryMessages() : t(new ObjectStore::Transaction) {}
+  RecoveryMessages() : t(NULL) {}
   ~RecoveryMessages() { assert(!t); }
 };
 
@@ -240,20 +242,28 @@ void ECBackend::handle_recovery_push(
   PushOp &op,
   RecoveryMessages *m)
 {
+  assert(m->t);
+
   bool oneshot = op.before_progress.first && op.after_progress.data_complete;
-  coll_t tcoll = oneshot ? coll : get_temp_coll(m->t);
+  ghobject_t tobj;
+  if (oneshot) {
+    tobj = ghobject_t(op.soid, ghobject_t::NO_GEN,
+		      get_parent()->whoami_shard().shard);
+  } else {
+    tobj = ghobject_t(get_parent()->get_temp_recovery_object(op.version,
+							     op.soid.snap),
+		      ghobject_t::NO_GEN,
+		      get_parent()->whoami_shard().shard);
+    if (op.before_progress.first) {
+      dout(10) << __func__ << ": Adding oid "
+	       << tobj.hobj << " in the temp collection" << dendl;
+      add_temp_obj(tobj.hobj);
+    }
+  }
+
   if (op.before_progress.first) {
-    get_parent()->on_local_recover_start(
-      op.soid,
-      m->t);
-    m->t->remove(
-      get_temp_coll(m->t),
-      ghobject_t(
-	op.soid, ghobject_t::NO_GEN, get_parent()->whoami_shard().shard));
-    m->t->touch(
-      tcoll,
-      ghobject_t(
-	op.soid, ghobject_t::NO_GEN, get_parent()->whoami_shard().shard));
+    m->t->remove(coll, tobj);
+    m->t->touch(coll, tobj);
   }
 
   if (!op.data_included.empty()) {
@@ -262,9 +272,8 @@ void ECBackend::handle_recovery_push(
     assert(op.data.length() == (end - start));
 
     m->t->write(
-      tcoll,
-      ghobject_t(
-	op.soid, ghobject_t::NO_GEN, get_parent()->whoami_shard().shard),
+      coll,
+      tobj,
       start,
       op.data.length(),
       op.data);
@@ -273,22 +282,22 @@ void ECBackend::handle_recovery_push(
   }
 
   if (op.before_progress.first) {
-    if (!oneshot)
-      add_temp_obj(op.soid);
     assert(op.attrset.count(string("_")));
     m->t->setattrs(
-      tcoll,
-      ghobject_t(
-	op.soid, ghobject_t::NO_GEN, get_parent()->whoami_shard().shard),
+      coll,
+      tobj,
       op.attrset);
   }
 
   if (op.after_progress.data_complete && !oneshot) {
-    clear_temp_obj(op.soid);
-    m->t->collection_move(
-      coll,
-      tcoll,
-      ghobject_t(
+    dout(10) << __func__ << ": Removing oid "
+	     << tobj.hobj << " from the temp collection" << dendl;
+    clear_temp_obj(tobj.hobj);
+    m->t->remove(coll, ghobject_t(
+	op.soid, ghobject_t::NO_GEN, get_parent()->whoami_shard().shard));
+    m->t->collection_move_rename(
+      coll, tobj,
+      coll, ghobject_t(
 	op.soid, ghobject_t::NO_GEN, get_parent()->whoami_shard().shard));
   }
   if (op.after_progress.data_complete) {
@@ -439,16 +448,22 @@ void ECBackend::dispatch_recovery_messages(RecoveryMessages &m, int priority)
     msg->compute_cost(cct);
     replies.insert(make_pair(i->first.osd, msg));
   }
-  m.t->register_on_complete(
-    get_parent()->bless_context(
-      new SendPushReplies(
-	get_parent(),
-	get_parent()->get_epoch(),
-	replies)));
-  m.t->register_on_applied(
-    new ObjectStore::C_DeleteTransaction(m.t));
-  get_parent()->queue_transaction(m.t);
-  m.t = NULL;
+
+  if (!replies.empty()) {
+    m.t->register_on_complete(
+	get_parent()->bless_context(
+	  new SendPushReplies(
+	    get_parent(),
+	    get_parent()->get_epoch(),
+	    replies)));
+    m.t->register_on_applied(
+	new ObjectStore::C_DeleteTransaction(m.t));
+    get_parent()->queue_transaction(m.t);
+    m.t = NULL;
+  } else {
+    assert(!m.t);
+  }
+
   if (m.reads.empty())
     return;
   start_read_op(
@@ -579,11 +594,11 @@ void ECBackend::continue_recovery_op(
       }
       return;
     }
-    case RecoveryOp::COMPLETE: {
-      assert(0); // should never be called once complete
-    };
-    default:
+    // should never be called once complete
+    case RecoveryOp::COMPLETE:
+    default: {
       assert(0);
+    };
     }
   }
 }
@@ -684,6 +699,8 @@ bool ECBackend::handle_message(
   case MSG_OSD_PG_PUSH: {
     MOSDPGPush *op = static_cast<MOSDPGPush *>(_op->get_req());
     RecoveryMessages rm;
+    rm.t = new ObjectStore::Transaction;
+    assert(rm.t);
     for (vector<PushOp>::iterator i = op->pushes.begin();
 	 i != op->pushes.end();
 	 ++i) {
@@ -806,8 +823,8 @@ void ECBackend::handle_sub_write(
   if (!get_parent()->pgb_is_primary())
     get_parent()->update_stats(op.stats);
   ObjectStore::Transaction *localt = new ObjectStore::Transaction;
+  localt->set_use_tbl(op.t.get_use_tbl());
   if (!op.temp_added.empty()) {
-    get_temp_coll(localt);
     add_temp_objs(op.temp_added);
   }
   if (op.t.empty()) {
@@ -817,7 +834,7 @@ void ECBackend::handle_sub_write(
       dout(10) << __func__ << ": removing object " << *i
 	       << " since we won't get the transaction" << dendl;
       localt->remove(
-	temp_coll,
+	coll,
 	ghobject_t(
 	  *i,
 	  ghobject_t::NO_GEN,
@@ -832,7 +849,11 @@ void ECBackend::handle_sub_write(
     op.trim_rollback_to,
     !(op.t.empty()),
     localt);
-  localt->append(op.t);
+
+  if (!(dynamic_cast<ReplicatedPG *>(get_parent())->is_undersized()) &&
+      (unsigned)get_parent()->whoami_shard().shard >= ec_impl->get_data_chunk_count())
+    op.t.set_fadvise_flag(CEPH_OSD_OP_FLAG_FADVISE_DONTNEED);
+
   if (on_local_applied_sync) {
     dout(10) << "Queueing onreadable_sync: " << on_local_applied_sync << dendl;
     localt->register_on_applied_sync(on_local_applied_sync);
@@ -848,7 +869,13 @@ void ECBackend::handle_sub_write(
       new SubWriteApplied(this, msg, op.tid, op.at_version)));
   localt->register_on_applied(
     new ObjectStore::C_DeleteTransaction(localt));
-  get_parent()->queue_transaction(localt, msg);
+  list<ObjectStore::Transaction*> tls;
+  tls.push_back(localt);
+  tls.push_back(new ObjectStore::Transaction);
+  tls.back()->swap(op.t);
+  tls.back()->register_on_complete(
+    new ObjectStore::C_DeleteTransaction(tls.back()));
+  get_parent()->queue_transactions(tls, msg);
 }
 
 void ECBackend::handle_sub_read(
@@ -856,21 +883,21 @@ void ECBackend::handle_sub_read(
   ECSubRead &op,
   ECSubReadReply *reply)
 {
-  for(map<hobject_t, list<pair<uint64_t, uint64_t> > >::iterator i =
+  for(map<hobject_t, list<boost::tuple<uint64_t, uint64_t, uint32_t> > >::iterator i =
         op.to_read.begin();
       i != op.to_read.end();
       ++i) {
-    for (list<pair<uint64_t, uint64_t> >::iterator j = i->second.begin();
+    for (list<boost::tuple<uint64_t, uint64_t, uint32_t> >::iterator j = i->second.begin();
 	 j != i->second.end();
 	 ++j) {
       bufferlist bl;
       int r = store->read(
-	i->first.is_temp() ? temp_coll : coll,
+	coll,
 	ghobject_t(
 	  i->first, ghobject_t::NO_GEN, get_parent()->whoami_shard().shard),
-	j->first,
-	j->second,
-	bl,
+	j->get<0>(),
+	j->get<1>(),
+	bl, j->get<2>(),
 	false);
       if (r < 0) {
 	assert(0);
@@ -880,7 +907,7 @@ void ECBackend::handle_sub_read(
       } else {
 	reply->buffers_read[i->first].push_back(
 	  make_pair(
-	    j->first,
+	    j->get<0>(),
 	    bl)
 	  );
       }
@@ -894,7 +921,7 @@ void ECBackend::handle_sub_read(
     if (reply->errors.count(*i))
       continue;
     int r = store->getattrs(
-      i->is_temp() ? temp_coll : coll,
+      coll,
       ghobject_t(
 	*i, ghobject_t::NO_GEN, get_parent()->whoami_shard().shard),
       reply->attrs_read[*i]);
@@ -949,7 +976,7 @@ void ECBackend::handle_sub_read_reply(
       // We canceled this read! @see filter_read_op
       continue;
     }
-    list<pair<uint64_t, uint64_t> >::const_iterator req_iter =
+    list<boost::tuple<uint64_t, uint64_t, uint32_t> >::const_iterator req_iter =
       rop.to_read.find(i->first)->second.to_read.begin();
     list<
       boost::tuple<
@@ -962,7 +989,7 @@ void ECBackend::handle_sub_read_reply(
       assert(riter != rop.complete[i->first].returned.end());
       pair<uint64_t, uint64_t> adjusted =
 	sinfo.aligned_offset_len_to_chunk(
-	  *req_iter);
+	  make_pair(req_iter->get<0>(), req_iter->get<1>()));
       assert(adjusted.first == j->first);
       riter->get<2>()[from].claim(j->second);
     }
@@ -1147,10 +1174,10 @@ void ECBackend::on_change()
   }
   in_progress_client_reads.clear();
   shard_to_read_map.clear();
-  clear_state();
+  clear_recovery_state();
 }
 
-void ECBackend::clear_state()
+void ECBackend::clear_recovery_state()
 {
   recovery_ops.clear();
 }
@@ -1213,7 +1240,7 @@ void ECBackend::submit_transaction(
   PGTransaction *_t,
   const eversion_t &trim_to,
   const eversion_t &trim_rollback_to,
-  vector<pg_log_entry_t> &log_entries,
+  const vector<pg_log_entry_t> &log_entries,
   boost::optional<pg_hit_set_history_t> &hset_history,
   Context *on_local_applied_sync,
   Context *on_all_applied,
@@ -1229,7 +1256,7 @@ void ECBackend::submit_transaction(
   op->version = at_version;
   op->trim_to = trim_to;
   op->trim_rollback_to = trim_rollback_to;
-  op->log_entries.swap(log_entries);
+  op->log_entries = log_entries;
   std::swap(op->updated_hit_set_history, hset_history);
   op->on_local_applied_sync = on_local_applied_sync;
   op->on_all_applied = on_all_applied;
@@ -1396,22 +1423,23 @@ void ECBackend::start_read_op(
       op.obj_to_source[i->first].insert(*j);
       op.source_to_obj[*j].insert(i->first);
     }
-    for (list<pair<uint64_t, uint64_t> >::const_iterator j =
+    for (list<boost::tuple<uint64_t, uint64_t, uint32_t> >::const_iterator j =
 	   i->second.to_read.begin();
 	 j != i->second.to_read.end();
 	 ++j) {
       reslist.push_back(
 	boost::make_tuple(
-	  j->first,
-	  j->second,
+	  j->get<0>(),
+	  j->get<1>(),
 	  map<pg_shard_t, bufferlist>()));
       pair<uint64_t, uint64_t> chunk_off_len =
-	sinfo.aligned_offset_len_to_chunk(
-	  *j);
+	sinfo.aligned_offset_len_to_chunk(make_pair(j->get<0>(), j->get<1>()));
       for (set<pg_shard_t>::const_iterator k = i->second.need.begin();
 	   k != i->second.need.end();
 	   ++k) {
-	messages[*k].to_read[i->first].push_back(chunk_off_len);
+	messages[*k].to_read[i->first].push_back(boost::make_tuple(chunk_off_len.first,
+								    chunk_off_len.second,
+								    j->get<2>()));
       }
       assert(!need_attrs);
     }
@@ -1449,7 +1477,7 @@ ECUtil::HashInfoRef ECBackend::get_hash_info(
     dout(10) << __func__ << ": not in cache " << hoid << dendl;
     struct stat st;
     int r = store->stat(
-      hoid.is_temp() ? temp_coll : coll,
+      coll,
       ghobject_t(hoid, ghobject_t::NO_GEN, get_parent()->whoami_shard().shard),
       &st);
     ECUtil::HashInfo hinfo(ec_impl->get_chunk_count());
@@ -1457,7 +1485,7 @@ ECUtil::HashInfoRef ECBackend::get_hash_info(
       dout(10) << __func__ << ": found on disk, size " << st.st_size << dendl;
       bufferlist bl;
       r = store->getattr(
-	hoid.is_temp() ? temp_coll : coll,
+	coll,
 	ghobject_t(hoid, ghobject_t::NO_GEN, get_parent()->whoami_shard().shard),
 	ECUtil::get_hinfo_key(),
 	bl);
@@ -1507,7 +1535,11 @@ void ECBackend::start_write(Op *op) {
        i != get_parent()->get_actingbackfill_shards().end();
        ++i) {
     trans[i->shard];
+    trans[i->shard].set_use_tbl(parent->transaction_use_tbl());
   }
+  ObjectStore::Transaction empty;
+  empty.set_use_tbl(parent->transaction_use_tbl());
+
   op->t->generate_transactions(
     op->unstable_hash_infos,
     ec_impl,
@@ -1540,7 +1572,7 @@ void ECBackend::start_write(Op *op) {
       op->reqid,
       op->hoid,
       stats,
-      should_send ? iter->second : ObjectStore::Transaction(),
+      should_send ? iter->second : empty,
       op->version,
       op->trim_to,
       op->trim_rollback_to,
@@ -1570,6 +1602,7 @@ int ECBackend::objects_read_sync(
   const hobject_t &hoid,
   uint64_t off,
   uint64_t len,
+  uint32_t op_flags,
   bufferlist *bl)
 {
   return -EOPNOTSUPP;
@@ -1579,12 +1612,12 @@ struct CallClientContexts :
   public GenContext<pair<RecoveryMessages*, ECBackend::read_result_t& > &> {
   ECBackend *ec;
   ECBackend::ClientAsyncReadStatus *status;
-  list<pair<pair<uint64_t, uint64_t>,
+  list<pair<boost::tuple<uint64_t, uint64_t, uint32_t>,
 	    pair<bufferlist*, Context*> > > to_read;
   CallClientContexts(
     ECBackend *ec,
     ECBackend::ClientAsyncReadStatus *status,
-    const list<pair<pair<uint64_t, uint64_t>,
+    const list<pair<boost::tuple<uint64_t, uint64_t, uint32_t>,
 		    pair<bufferlist*, Context*> > > &to_read)
     : ec(ec), status(status), to_read(to_read) {}
   void finish(pair<RecoveryMessages *, ECBackend::read_result_t &> &in) {
@@ -1592,12 +1625,12 @@ struct CallClientContexts :
     assert(res.returned.size() == to_read.size());
     assert(res.r == 0);
     assert(res.errors.empty());
-    for (list<pair<pair<uint64_t, uint64_t>,
+    for (list<pair<boost::tuple<uint64_t, uint64_t, uint32_t>,
 		   pair<bufferlist*, Context*> > >::iterator i = to_read.begin();
 	 i != to_read.end();
 	 to_read.erase(i++)) {
       pair<uint64_t, uint64_t> adjusted =
-	ec->sinfo.offset_len_to_stripe_bounds(i->first);
+	ec->sinfo.offset_len_to_stripe_bounds(make_pair(i->first.get<0>(), i->first.get<1>()));
       assert(res.returned.front().get<0>() == adjusted.first &&
 	     res.returned.front().get<1>() == adjusted.second);
       map<int, bufferlist> to_decode;
@@ -1617,8 +1650,8 @@ struct CallClientContexts :
       assert(i->second.first);
       i->second.first->substr_of(
 	bl,
-	i->first.first - adjusted.first,
-	MIN(i->first.second, bl.length() - (i->first.first - adjusted.first)));
+	i->first.get<0>() - adjusted.first,
+	MIN(i->first.get<1>(), bl.length() - (i->first.get<0>() - adjusted.first)));
       if (i->second.second) {
 	i->second.second->complete(i->second.first->length());
       }
@@ -1636,7 +1669,7 @@ struct CallClientContexts :
     }
   }
   ~CallClientContexts() {
-    for (list<pair<pair<uint64_t, uint64_t>,
+    for (list<pair<boost::tuple<uint64_t, uint64_t, uint32_t>,
 		   pair<bufferlist*, Context*> > >::iterator i = to_read.begin();
 	 i != to_read.end();
 	 to_read.erase(i++)) {
@@ -1647,21 +1680,23 @@ struct CallClientContexts :
 
 void ECBackend::objects_read_async(
   const hobject_t &hoid,
-  const list<pair<pair<uint64_t, uint64_t>,
+  const list<pair<boost::tuple<uint64_t, uint64_t, uint32_t>,
 		  pair<bufferlist*, Context*> > > &to_read,
   Context *on_complete)
 {
   in_progress_client_reads.push_back(ClientAsyncReadStatus(on_complete));
   CallClientContexts *c = new CallClientContexts(
     this, &(in_progress_client_reads.back()), to_read);
-  list<pair<uint64_t, uint64_t> > offsets;
-  for (list<pair<pair<uint64_t, uint64_t>,
+
+  list<boost::tuple<uint64_t, uint64_t, uint32_t> > offsets;
+  pair<uint64_t, uint64_t> tmp;
+  for (list<pair<boost::tuple<uint64_t, uint64_t, uint32_t>,
 		 pair<bufferlist*, Context*> > >::const_iterator i =
 	 to_read.begin();
        i != to_read.end();
        ++i) {
-    offsets.push_back(
-      sinfo.offset_len_to_stripe_bounds(i->first));
+    tmp = sinfo.offset_len_to_stripe_bounds(make_pair(i->first.get<0>(), i->first.get<1>()));
+    offsets.push_back(boost::make_tuple(tmp.first, tmp.second, i->first.get<2>()));
   }
 
   const vector<int> &chunk_mapping = ec_impl->get_chunk_mapping();
@@ -1734,9 +1769,10 @@ void ECBackend::rollback_append(
 
 void ECBackend::be_deep_scrub(
   const hobject_t &poid,
+  uint32_t seed,
   ScrubMap::object &o,
   ThreadPool::TPHandle &handle) {
-  bufferhash h(-1);
+  bufferhash h(-1); // we always used -1
   int r;
   uint64_t stride = cct->_conf->osd_deep_scrub_stride;
   if (stride % sinfo.get_chunk_size())
@@ -1796,6 +1832,6 @@ void ECBackend::be_deep_scrub(
     o.digest_present = true;
   }
 
-  o.omap_digest = 0;
+  o.omap_digest = seed;
   o.omap_digest_present = true;
 }

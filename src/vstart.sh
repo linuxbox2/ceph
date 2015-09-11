@@ -1,9 +1,24 @@
 #!/bin/sh
 
-export PYTHONPATH=./pybind
-export LD_LIBRARY_PATH=.libs
-export DYLD_LIBRARY_PATH=$LD_LIBRARY_PATH
+if [ -z "$CEPH_BUILD_ROOT" ]; then
+        [ -z "$CEPH_BIN" ] && CEPH_BIN=.
+        [ -z "$CEPH_LIB" ] && CEPH_LIB=.libs
+        [ -z $EC_PATH ] && EC_PATH=$CEPH_LIB
+        [ -z $OBJCLASS_PATH ] && OBJCLASS_PATH=$CEPH_LIB
+else
+        [ -z $CEPH_BIN ] && CEPH_BIN=$CEPH_BUILD_ROOT/bin
+        [ -z $CEPH_LIB ] && CEPH_LIB=$CEPH_BUILD_ROOT/lib
+        [ -z $EC_PATH ] && EC_PATH=$CEPH_LIB/erasure-code
+        [ -z $OBJCLASS_PATH ] && OBJCLASS_PATH=$CEPH_LIB/rados-classes
+fi
 
+if [ -z "${CEPH_VSTART_WRAPPER}" ]; then
+    PATH=$(pwd):$PATH
+fi
+
+export PYTHONPATH=./pybind
+export LD_LIBRARY_PATH=$CEPH_LIB
+export DYLD_LIBRARY_PATH=$LD_LIBRARY_PATH
 
 # abort on failure
 set -e
@@ -260,15 +275,18 @@ fi
 # lockdep everywhere?
 # export CEPH_ARGS="--lockdep 1"
 
-[ -z "$CEPH_BIN" ] && CEPH_BIN=.
-[ -z "$CEPH_PORT" ] && CEPH_PORT=6789
+if [ -z "$CEPH_PORT" ]; then
+    CEPH_PORT=6789
+    [ -e ".ceph_port" ] && CEPH_PORT=`cat .ceph_port`
+fi
 
+[ -z "$INIT_CEPH" ] && INIT_CEPH=$CEPH_BIN/init-ceph
 
 # sudo if btrfs
 test -d $CEPH_DEV_DIR/osd0/. && test -e $CEPH_DEV_DIR/sudo && SUDO="sudo"
 
 if [ "$start_all" -eq 1 ]; then
-    $SUDO $CEPH_BIN/init-ceph stop
+    $SUDO $INIT_CEPH stop
 fi
 $SUDO rm -f core*
 
@@ -294,6 +312,7 @@ else
     echo ip $IP
 fi
 echo "ip $IP"
+echo "port $PORT"
 
 
 
@@ -342,9 +361,10 @@ if [ "$start_mon" -eq 1 ]; then
         mon osd full ratio = .99
         mon data avail warn = 10
         mon data avail crit = 1
-        osd pool default erasure code directory = .libs
+        osd pool default erasure code directory = $EC_PATH
         osd pool default erasure code profile = plugin=jerasure technique=reed_sol_van k=2 m=1 ruleset-failure-domain=osd
         rgw frontends = fastcgi, civetweb port=$CEPH_RGW_PORT
+        rgw dns name = localhost
         filestore fd cache size = 32
         run dir = $CEPH_OUT_DIR
 EOF
@@ -385,7 +405,7 @@ $DAEMONOPTS
         osd journal = $journal_path
         osd journal size = 100
         osd class tmp = out
-        osd class dir = .libs
+        osd class dir = $OBJCLASS_PATH
         osd scrub load threshold = 5.0
         osd debug op order = true
         filestore wbthrottle xfs ios start flusher = 10
@@ -401,6 +421,7 @@ $extra_conf
         mon pg warn min per osd = 3
         mon osd allow primary affinity = true
         mon reweight min pgs per osd = 4
+        mon osd prime pg temp = true
 $DAEMONOPTS
 $CMONDEBUG
 $extra_conf
@@ -621,7 +642,10 @@ do_rgw()
     if [ "$debug" -ne 0 ]; then
         RGWDEBUG="--debug-rgw=20"
     fi
-    $CEPH_BIN/radosgw --log-file=${CEPH_OUT_DIR}/rgw.log ${RGWDEBUG} --debug-ms=1
+
+    RGWSUDO=
+    [ $CEPH_RGW_PORT -lt 1024 ] && RGWSUDO=sudo
+    $RGWSUDO $CEPH_BIN/radosgw --log-file=${CEPH_OUT_DIR}/rgw.log ${RGWDEBUG} --debug-ms=1
 
     # Create S3 user
     local akey='0555b35654ad1656d804'
@@ -647,7 +671,18 @@ do_rgw()
 
     # Create Swift user
     echo "setting up user tester"
-    $CEPH_BIN/radosgw-admin user create --subuser=tester:testing --display-name=Tester-Subuser --key-type=swift --secret=asdf > /dev/null
+    $CEPH_BIN/radosgw-admin user create --subuser=test:tester --display-name=Tester-Subuser --key-type=swift --secret=testing > /dev/null
+
+    echo ""
+    echo "S3 User Info:"
+    echo "  access key:  $akey"
+    echo "  secret key:  $skey"
+    echo ""
+    echo "Swift User Info:"
+    echo "  account   : test"
+    echo "  user      : tester"
+    echo "  password  : testing"
+    echo ""
 }
 if [ "$start_rgw" -eq 1 ]; then
     do_rgw
@@ -657,7 +692,7 @@ echo "started.  stop.sh to stop.  see out/* (e.g. 'tail -f out/????') for debug 
 
 echo ""
 echo "export PYTHONPATH=./pybind"
-echo "export LD_LIBRARY_PATH=.libs"
+echo "export LD_LIBRARY_PATH=$CEPH_LIB"
 
 if [ "$CEPH_DIR" != "$PWD" ]; then
     echo "export CEPH_CONF=$conf_fn"

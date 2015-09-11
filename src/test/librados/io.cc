@@ -231,6 +231,13 @@ TEST_F(LibRadosIo, RoundTrip) {
   memset(buf2, 0, sizeof(buf2));
   ASSERT_EQ((int)sizeof(buf2), rados_read(ioctx, "foo", buf2, sizeof(buf2), 0));
   ASSERT_EQ(0, memcmp(buf, buf2, sizeof(buf)));
+
+  uint64_t off = 19;
+  memset(buf, 0xcc, sizeof(buf));
+  ASSERT_EQ(0, rados_write(ioctx, "bar", buf, sizeof(buf), off));
+  memset(buf2, 0, sizeof(buf2));
+  ASSERT_EQ((int)sizeof(buf2), rados_read(ioctx, "bar", buf2, sizeof(buf2), off));
+  ASSERT_EQ(0, memcmp(buf, buf2, sizeof(buf)));
 }
 
 TEST_F(LibRadosIoPP, RoundTripPP) {
@@ -243,6 +250,22 @@ TEST_F(LibRadosIoPP, RoundTripPP) {
   bufferlist cl;
   ASSERT_EQ((int)sizeof(buf), ioctx.read("foo", cl, sizeof(buf), 0));
   ASSERT_EQ(0, memcmp(buf, cl.c_str(), sizeof(buf)));
+}
+
+TEST_F(LibRadosIoPP, RoundTripPP2)
+{
+  bufferlist bl;
+  bl.append("ceph");
+  ObjectWriteOperation write;
+  write.write(0, bl);
+  write.set_op_flags2(LIBRADOS_OP_FLAG_FADVISE_DONTNEED);
+  ASSERT_EQ(0, ioctx.operate("foo", &write));
+
+  ObjectReadOperation read;
+  read.read(0, bl.length(), NULL, NULL);
+  read.set_op_flags2(LIBRADOS_OP_FLAG_FADVISE_NOCACHE|LIBRADOS_OP_FLAG_FADVISE_RANDOM);
+  ASSERT_EQ(0, ioctx.operate("foo", &read, &bl));
+  ASSERT_EQ(0, memcmp(bl.c_str(), "ceph", 4));
 }
 
 TEST_F(LibRadosIo, OverlappingWriteRoundTrip) {
@@ -303,6 +326,22 @@ TEST_F(LibRadosIoPP, WriteFullRoundTripPP) {
   bufferlist bl3;
   ASSERT_EQ((int)sizeof(buf2), ioctx.read("foo", bl3, sizeof(buf), 0));
   ASSERT_EQ(0, memcmp(bl3.c_str(), buf2, sizeof(buf2)));
+}
+
+TEST_F(LibRadosIoPP, WriteFullRoundTripPP2)
+{
+  bufferlist bl;
+  bl.append("ceph");
+  ObjectWriteOperation write;
+  write.write_full(bl);
+  write.set_op_flags2(LIBRADOS_OP_FLAG_FADVISE_NOCACHE);
+  ASSERT_EQ(0, ioctx.operate("foo", &write));
+
+  ObjectReadOperation read;
+  read.read(0, bl.length(), NULL, NULL);
+  read.set_op_flags2(LIBRADOS_OP_FLAG_FADVISE_DONTNEED|LIBRADOS_OP_FLAG_FADVISE_RANDOM);
+  ASSERT_EQ(0, ioctx.operate("foo", &read, &bl));
+  ASSERT_EQ(0, memcmp(bl.c_str(), "ceph", 4));
 }
 
 TEST_F(LibRadosIo, AppendRoundTrip) {
@@ -424,6 +463,17 @@ TEST_F(LibRadosIo, RmXattr) {
       rados_setxattr(ioctx, "foo", attr1, attr1_buf, sizeof(attr1_buf)));
   ASSERT_EQ(0, rados_rmxattr(ioctx, "foo", attr1));
   ASSERT_EQ(-ENODATA, rados_getxattr(ioctx, "foo", attr1, buf, sizeof(buf)));
+
+  // Test rmxattr on a removed object
+  char buf2[128];
+  char attr2[] = "attr2";
+  char attr2_buf[] = "foo bar baz";
+  memset(buf2, 0xbb, sizeof(buf2));
+  ASSERT_EQ(0, rados_write(ioctx, "foo_rmxattr", buf2, sizeof(buf2), 0));
+  ASSERT_EQ(0,
+      rados_setxattr(ioctx, "foo_rmxattr", attr2, attr2_buf, sizeof(attr2_buf)));
+  ASSERT_EQ(0, rados_remove(ioctx, "foo_rmxattr"));
+  ASSERT_EQ(-ENOENT, rados_rmxattr(ioctx, "foo_rmxattr", attr2));
 }
 
 TEST_F(LibRadosIoPP, RmXattrPP) {
@@ -440,6 +490,20 @@ TEST_F(LibRadosIoPP, RmXattrPP) {
   ASSERT_EQ(0, ioctx.rmxattr("foo", attr1));
   bufferlist bl3;
   ASSERT_EQ(-ENODATA, ioctx.getxattr("foo", attr1, bl3));
+
+  // Test rmxattr on a removed object
+  char buf2[128];
+  char attr2[] = "attr2";
+  char attr2_buf[] = "foo bar baz";
+  memset(buf2, 0xbb, sizeof(buf2));
+  bufferlist bl21;
+  bl21.append(buf, sizeof(buf));
+  ASSERT_EQ(0, ioctx.write("foo_rmxattr", bl21, sizeof(buf2), 0));
+  bufferlist bl22;
+  bl22.append(attr2_buf, sizeof(attr2_buf));
+  ASSERT_EQ(0, ioctx.setxattr("foo_rmxattr", attr2, bl22));
+  ASSERT_EQ(0, ioctx.remove("foo_rmxattr"));
+  ASSERT_EQ(-ENOENT, ioctx.rmxattr("foo_rmxattr", attr2));
 }
 
 TEST_F(LibRadosIo, XattrIter) {
@@ -665,6 +729,9 @@ TEST_F(LibRadosIoEC, RoundTrip) {
   memset(buf2, 0, sizeof(buf2));
   ASSERT_EQ((int)sizeof(buf2), rados_read(ioctx, "foo", buf2, sizeof(buf2), 0));
   ASSERT_EQ(0, memcmp(buf, buf2, sizeof(buf)));
+
+  uint64_t off = 19;
+  ASSERT_EQ(-EOPNOTSUPP, rados_write(ioctx, "bar", buf, sizeof(buf), off));
 }
 
 TEST_F(LibRadosIoECPP, RoundTripPP) {
@@ -677,6 +744,22 @@ TEST_F(LibRadosIoECPP, RoundTripPP) {
   bufferlist cl;
   ASSERT_EQ((int)sizeof(buf), ioctx.read("foo", cl, sizeof(buf) * 3, 0));
   ASSERT_EQ(0, memcmp(buf, cl.c_str(), sizeof(buf)));
+}
+
+TEST_F(LibRadosIoECPP, RoundTripPP2)
+{
+  bufferlist bl;
+  bl.append("ceph");
+  ObjectWriteOperation write;
+  write.write(0, bl);
+  write.set_op_flags2(LIBRADOS_OP_FLAG_FADVISE_DONTNEED);
+  ASSERT_EQ(0, ioctx.operate("foo", &write));
+
+  ObjectReadOperation read;
+  read.read(0, bl.length(), NULL, NULL);
+  read.set_op_flags2(LIBRADOS_OP_FLAG_FADVISE_DONTNEED|LIBRADOS_OP_FLAG_FADVISE_RANDOM);
+  ASSERT_EQ(0, ioctx.operate("foo", &read, &bl));
+  ASSERT_EQ(0, memcmp(bl.c_str(), "ceph", 4));
 }
 
 TEST_F(LibRadosIoEC, OverlappingWriteRoundTrip) {
@@ -748,6 +831,22 @@ TEST_F(LibRadosIoECPP, WriteFullRoundTripPP) {
   bufferlist bl3;
   ASSERT_EQ((int)sizeof(buf2), ioctx.read("foo", bl3, sizeof(buf), 0));
   ASSERT_EQ(0, memcmp(bl3.c_str(), buf2, sizeof(buf2)));
+}
+
+TEST_F(LibRadosIoECPP, WriteFullRoundTripPP2)
+{
+  bufferlist bl;
+  bl.append("ceph");
+  ObjectWriteOperation write;
+  write.write_full(bl);
+  write.set_op_flags2(LIBRADOS_OP_FLAG_FADVISE_DONTNEED);
+  ASSERT_EQ(0, ioctx.operate("foo", &write));
+
+  ObjectReadOperation read;
+  read.read(0, bl.length(), NULL, NULL);
+  read.set_op_flags2(LIBRADOS_OP_FLAG_FADVISE_DONTNEED|LIBRADOS_OP_FLAG_FADVISE_RANDOM);
+  ASSERT_EQ(0, ioctx.operate("foo", &read, &bl));
+  ASSERT_EQ(0, memcmp(bl.c_str(), "ceph", 4));
 }
 
 TEST_F(LibRadosIoEC, AppendRoundTrip) {
@@ -886,6 +985,17 @@ TEST_F(LibRadosIoEC, RmXattr) {
       rados_setxattr(ioctx, "foo", attr1, attr1_buf, sizeof(attr1_buf)));
   ASSERT_EQ(0, rados_rmxattr(ioctx, "foo", attr1));
   ASSERT_EQ(-ENODATA, rados_getxattr(ioctx, "foo", attr1, buf, sizeof(buf)));
+
+  // Test rmxattr on a removed object
+  char buf2[128];
+  char attr2[] = "attr2";
+  char attr2_buf[] = "foo bar baz";
+  memset(buf2, 0xbb, sizeof(buf2));
+  ASSERT_EQ(0, rados_write(ioctx, "foo_rmxattr", buf2, sizeof(buf2), 0));
+  ASSERT_EQ(0,
+      rados_setxattr(ioctx, "foo_rmxattr", attr2, attr2_buf, sizeof(attr2_buf)));
+  ASSERT_EQ(0, rados_remove(ioctx, "foo_rmxattr"));
+  ASSERT_EQ(-ENOENT, rados_rmxattr(ioctx, "foo_rmxattr", attr2));
 }
 
 TEST_F(LibRadosIoECPP, RmXattrPP) {
@@ -902,6 +1012,20 @@ TEST_F(LibRadosIoECPP, RmXattrPP) {
   ASSERT_EQ(0, ioctx.rmxattr("foo", attr1));
   bufferlist bl3;
   ASSERT_EQ(-ENODATA, ioctx.getxattr("foo", attr1, bl3));
+
+  // Test rmxattr on a removed object
+  char buf2[128];
+  char attr2[] = "attr2";
+  char attr2_buf[] = "foo bar baz";
+  memset(buf2, 0xbb, sizeof(buf2));
+  bufferlist bl21;
+  bl21.append(buf, sizeof(buf));
+  ASSERT_EQ(0, ioctx.write("foo_rmxattr", bl21, sizeof(buf2), 0));
+  bufferlist bl22;
+  bl22.append(attr2_buf, sizeof(attr2_buf));
+  ASSERT_EQ(0, ioctx.setxattr("foo_rmxattr", attr2, bl22));
+  ASSERT_EQ(0, ioctx.remove("foo_rmxattr"));
+  ASSERT_EQ(-ENOENT, ioctx.rmxattr("foo_rmxattr", attr2));
 }
 
 TEST_F(LibRadosIoEC, XattrIter) {

@@ -28,6 +28,7 @@ public:
   void send_response_end();
 
   bool should_get_stats() { return need_stats; }
+  bool supports_account_metadata() { return true; }
 };
 
 class RGWListBucket_ObjStore_SWIFT : public RGWListBucket_ObjStore {
@@ -40,14 +41,17 @@ public:
 
   int get_params();
   void send_response();
+  bool need_container_stats() { return true; }
 };
 
 class RGWStatAccount_ObjStore_SWIFT : public RGWStatAccount_ObjStore {
+  map<string, bufferlist> attrs;
 public:
   RGWStatAccount_ObjStore_SWIFT() {
   }
   ~RGWStatAccount_ObjStore_SWIFT() {}
 
+  void execute();
   void send_response();
 };
 
@@ -85,19 +89,28 @@ public:
   void send_response();
 };
 
-class RGWPutMetadata_ObjStore_SWIFT : public RGWPutMetadata_ObjStore {
+class RGWPutMetadataAccount_ObjStore_SWIFT : public RGWPutMetadataAccount_ObjStore {
 public:
-  RGWPutMetadata_ObjStore_SWIFT() {}
-  ~RGWPutMetadata_ObjStore_SWIFT() {}
+  RGWPutMetadataAccount_ObjStore_SWIFT() {}
+  ~RGWPutMetadataAccount_ObjStore_SWIFT() {}
 
   int get_params();
   void send_response();
 };
 
-class RGWSetTempUrl_ObjStore_SWIFT : public RGWSetTempUrl_ObjStore {
+class RGWPutMetadataBucket_ObjStore_SWIFT : public RGWPutMetadataBucket_ObjStore {
 public:
-  RGWSetTempUrl_ObjStore_SWIFT() {}
-  ~RGWSetTempUrl_ObjStore_SWIFT() {}
+  RGWPutMetadataBucket_ObjStore_SWIFT() {}
+  ~RGWPutMetadataBucket_ObjStore_SWIFT() {}
+
+  int get_params();
+  void send_response();
+};
+
+class RGWPutMetadataObject_ObjStore_SWIFT : public RGWPutMetadataObject_ObjStore {
+public:
+  RGWPutMetadataObject_ObjStore_SWIFT() {}
+  ~RGWPutMetadataObject_ObjStore_SWIFT() {}
 
   int get_params();
   void send_response();
@@ -113,6 +126,8 @@ public:
 
 class RGWCopyObj_ObjStore_SWIFT : public RGWCopyObj_ObjStore {
   bool sent_header;
+protected:
+  void dump_copy_info();
 public:
   RGWCopyObj_ObjStore_SWIFT() : sent_header(false) {}
   ~RGWCopyObj_ObjStore_SWIFT() {}
@@ -220,9 +235,6 @@ public:
   RGWRESTMgr_SWIFT() {}
   virtual ~RGWRESTMgr_SWIFT() {}
 
-  virtual RGWRESTMgr *get_resource_mgr(struct req_state *s, const string& uri) {
-    return this;
-  }
   virtual RGWHandler *get_handler(struct req_state *s);
 };
 

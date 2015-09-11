@@ -39,6 +39,25 @@ TEST(LibRadosMiscVersion, VersionPP) {
   Rados::version(&major, &minor, &extra);
 }
 
+TEST(LibRadosMiscConnectFailure, ConnectFailure) {
+  rados_t cluster;
+
+  char *id = getenv("CEPH_CLIENT_ID");
+  if (id)
+    std::cerr << "Client id is: " << id << std::endl;
+
+  ASSERT_EQ(0, rados_create(&cluster, NULL));
+  ASSERT_EQ(0, rados_conf_read_file(cluster, NULL));
+  ASSERT_EQ(0, rados_conf_parse_env(cluster, NULL));
+
+  ASSERT_EQ(0, rados_conf_set(cluster, "client_mount_timeout", "0.000001"));
+
+  ASSERT_NE(0, rados_connect(cluster));
+  ASSERT_NE(0, rados_connect(cluster));
+
+  rados_shutdown(cluster);
+}
+
 TEST_F(LibRadosMisc, ClusterFSID) {
   char fsid[37];
   ASSERT_EQ(-ERANGE, rados_cluster_fsid(cluster, fsid, sizeof(fsid) - 1));
@@ -321,7 +340,8 @@ TEST_F(LibRadosMisc, Exec) {
   bufferlist::iterator iter = bl.begin();
   uint64_t all_features;
   ::decode(all_features, iter);
-  ASSERT_EQ(all_features, (uint64_t)RBD_FEATURES_ALL);
+  // make sure *some* features are specified; don't care which ones
+  ASSERT_NE(all_features, (unsigned)0);
 }
 
 TEST_F(LibRadosMiscPP, ExecPP) {
@@ -333,7 +353,8 @@ TEST_F(LibRadosMiscPP, ExecPP) {
   bufferlist::iterator iter = out.begin();
   uint64_t all_features;
   ::decode(all_features, iter);
-  ASSERT_EQ(all_features, (uint64_t)RBD_FEATURES_ALL);
+  // make sure *some* features are specified; don't care which ones
+  ASSERT_NE(all_features, (unsigned)0);
 }
 
 TEST_F(LibRadosMiscPP, Operate1PP) {
@@ -508,6 +529,34 @@ TEST_F(LibRadosMiscPP, AssertExistsPP) {
   ASSERT_EQ(-EEXIST, ioctx.create("asdffoo", true));
 }
 
+TEST_F(LibRadosMiscPP, AssertVersionPP) {
+  char buf[64];
+  memset(buf, 0xcc, sizeof(buf));
+  bufferlist bl;
+  bl.append(buf, sizeof(buf));
+
+  // Create test object...
+  ASSERT_EQ(0, ioctx.create("asdfbar", true));
+  // ...then write it again to guarantee that the
+  // (unsigned) version must be at least 1 (not 0)
+  // since we want to decrement it by 1 later.
+  ASSERT_EQ(0, ioctx.write_full("asdfbar", bl));
+
+  uint64_t v = ioctx.get_last_version();
+  ObjectWriteOperation op1;
+  op1.assert_version(v+1);
+  op1.write(0, bl);
+  ASSERT_EQ(-EOVERFLOW, ioctx.operate("asdfbar", &op1));
+  ObjectWriteOperation op2;
+  op2.assert_version(v-1);
+  op2.write(0, bl);
+  ASSERT_EQ(-ERANGE, ioctx.operate("asdfbar", &op2));
+  ObjectWriteOperation op3;
+  op3.assert_version(v);
+  op3.write(0, bl);
+  ASSERT_EQ(0, ioctx.operate("asdfbar", &op3));
+}
+
 TEST_F(LibRadosMiscPP, BigAttrPP) {
   char buf[64];
   memset(buf, 0xcc, sizeof(buf));
@@ -561,18 +610,18 @@ TEST_F(LibRadosMiscPP, CopyPP) {
   {
     // pass future version
     ObjectWriteOperation op;
-    op.copy_from("foo", ioctx, uv + 1);
+    op.copy_from("foo", ioctx, uv + 1, LIBRADOS_OP_FLAG_FADVISE_DONTNEED);
     ASSERT_EQ(-EOVERFLOW, ioctx.operate("foo.copy", &op));
   }
   {
     // pass old version
     ObjectWriteOperation op;
-    op.copy_from("foo", ioctx, uv - 1);
+    op.copy_from("foo", ioctx, uv - 1, LIBRADOS_OP_FLAG_FADVISE_DONTNEED);
     ASSERT_EQ(-ERANGE, ioctx.operate("foo.copy", &op));
   }
   {
     ObjectWriteOperation op;
-    op.copy_from("foo", ioctx, uv);
+    op.copy_from("foo", ioctx, uv, LIBRADOS_OP_FLAG_FADVISE_DONTNEED);
     ASSERT_EQ(0, ioctx.operate("foo.copy", &op));
 
     bufferlist bl2, x2;
@@ -585,7 +634,7 @@ TEST_F(LibRadosMiscPP, CopyPP) {
   // small object without a version
   {
     ObjectWriteOperation op;
-    op.copy_from("foo", ioctx, 0);
+    op.copy_from("foo", ioctx, 0, LIBRADOS_OP_FLAG_FADVISE_DONTNEED);
     ASSERT_EQ(0, ioctx.operate("foo.copy2", &op));
 
     bufferlist bl2, x2;
@@ -606,7 +655,7 @@ TEST_F(LibRadosMiscPP, CopyPP) {
 
   {
     ObjectWriteOperation op;
-    op.copy_from("big", ioctx, ioctx.get_last_version());
+    op.copy_from("big", ioctx, ioctx.get_last_version(), LIBRADOS_OP_FLAG_FADVISE_DONTNEED);
     ASSERT_EQ(0, ioctx.operate("big.copy", &op));
 
     bufferlist bl2, x2;
@@ -618,7 +667,7 @@ TEST_F(LibRadosMiscPP, CopyPP) {
 
   {
     ObjectWriteOperation op;
-    op.copy_from("big", ioctx, 0);
+    op.copy_from("big", ioctx, 0, LIBRADOS_OP_FLAG_FADVISE_SEQUENTIAL);
     ASSERT_EQ(0, ioctx.operate("big.copy2", &op));
 
     bufferlist bl2, x2;
@@ -628,6 +677,152 @@ TEST_F(LibRadosMiscPP, CopyPP) {
     ASSERT_TRUE(x.contents_equal(x2));
   }
 }
+
+class LibRadosTwoPoolsECPP : public RadosTestECPP
+{
+public:
+  LibRadosTwoPoolsECPP() {};
+  virtual ~LibRadosTwoPoolsECPP() {};
+protected:
+  static void SetUpTestCase() {
+    pool_name = get_temp_pool_name();
+    ASSERT_EQ("", create_one_ec_pool_pp(pool_name, s_cluster));
+    src_pool_name = get_temp_pool_name();
+    ASSERT_EQ(0, s_cluster.pool_create(src_pool_name.c_str()));
+  }
+  static void TearDownTestCase() {
+    ASSERT_EQ(0, s_cluster.pool_delete(src_pool_name.c_str()));
+    ASSERT_EQ(0, destroy_one_ec_pool_pp(pool_name, s_cluster));
+  }
+  static std::string src_pool_name;
+
+  virtual void SetUp() {
+    RadosTestECPP::SetUp();
+    ASSERT_EQ(0, cluster.ioctx_create(src_pool_name.c_str(), src_ioctx));
+    src_ioctx.set_namespace(nspace);
+  }
+  virtual void TearDown() {
+    // wait for maps to settle before next test
+    cluster.wait_for_latest_osdmap();
+
+    RadosTestECPP::TearDown();
+
+    cleanup_default_namespace(src_ioctx);
+    cleanup_namespace(src_ioctx, nspace);
+
+    src_ioctx.close();
+  }
+
+  librados::IoCtx src_ioctx;
+};
+std::string LibRadosTwoPoolsECPP::src_pool_name;
+
+//copy_from between ecpool and no-ecpool.
+TEST_F(LibRadosTwoPoolsECPP, CopyFrom) {
+  //create object w/ omapheader
+  bufferlist b;
+  b.append("copyfrom");
+  ASSERT_EQ(0, src_ioctx.omap_set_header("foo", b));
+
+  version_t uv = src_ioctx.get_last_version();
+  ObjectWriteOperation op;
+  op.copy_from("foo", src_ioctx, uv, 0);
+  ASSERT_EQ(-EOPNOTSUPP, ioctx.operate("foo.copy", &op));
+}
+
+TEST_F(LibRadosMiscPP, CopyScrubPP) {
+  bufferlist inbl, bl, x;
+  for (int i=0; i<100; ++i)
+    x.append("barrrrrrrrrrrrrrrrrrrrrrrrrr");
+  bl.append(buffer::create(g_conf->osd_copyfrom_max_chunk * 3));
+  bl.zero();
+  bl.append("tail");
+  bufferlist cbl;
+
+  map<string, bufferlist> to_set;
+  for (int i=0; i<1000; ++i)
+    to_set[string("foo") + stringify(i)] = x;
+
+  // small
+  cbl = x;
+  ASSERT_EQ(0, ioctx.write_full("small", cbl));
+  ASSERT_EQ(0, ioctx.setxattr("small", "myattr", x));
+
+  // big
+  cbl = bl;
+  ASSERT_EQ(0, ioctx.write_full("big", cbl));
+
+  // without header
+  cbl = bl;
+  ASSERT_EQ(0, ioctx.write_full("big2", cbl));
+  ASSERT_EQ(0, ioctx.setxattr("big2", "myattr", x));
+  ASSERT_EQ(0, ioctx.setxattr("big2", "myattr2", x));
+  ASSERT_EQ(0, ioctx.omap_set("big2", to_set));
+
+  // with header
+  cbl = bl;
+  ASSERT_EQ(0, ioctx.write_full("big3", cbl));
+  ASSERT_EQ(0, ioctx.omap_set_header("big3", x));
+  ASSERT_EQ(0, ioctx.omap_set("big3", to_set));
+
+  // deep scrub to ensure digests are in place
+  {
+    for (int i=0; i<10; ++i) {
+      ostringstream ss;
+      ss << "{\"prefix\": \"pg deep-scrub\", \"pgid\": \""
+	 << ioctx.get_id() << "." << i
+	 << "\"}";
+      cluster.mon_command(ss.str(), inbl, NULL, NULL);
+    }
+
+    // give it a few seconds to go.  this is sloppy but is usually enough time
+    cout << "waiting for initial deep scrubs..." << std::endl;
+    sleep(30);
+    cout << "done waiting, doing copies" << std::endl;
+  }
+
+  {
+    ObjectWriteOperation op;
+    op.copy_from("small", ioctx, 0, 0);
+    ASSERT_EQ(0, ioctx.operate("small.copy", &op));
+  }
+
+  {
+    ObjectWriteOperation op;
+    op.copy_from("big", ioctx, 0, 0);
+    ASSERT_EQ(0, ioctx.operate("big.copy", &op));
+  }
+
+  {
+    ObjectWriteOperation op;
+    op.copy_from("big2", ioctx, 0, 0);
+    ASSERT_EQ(0, ioctx.operate("big2.copy", &op));
+  }
+
+  {
+    ObjectWriteOperation op;
+    op.copy_from("big3", ioctx, 0, 0);
+    ASSERT_EQ(0, ioctx.operate("big3.copy", &op));
+  }
+
+  // deep scrub to ensure digests are correct
+  {
+    for (int i=0; i<10; ++i) {
+      ostringstream ss;
+      ss << "{\"prefix\": \"pg deep-scrub\", \"pgid\": \""
+	 << ioctx.get_id() << "." << i
+	 << "\"}";
+      cluster.mon_command(ss.str(), inbl, NULL, NULL);
+    }
+
+    // give it a few seconds to go.  this is sloppy but is usually enough time
+    cout << "waiting for final deep scrubs..." << std::endl;
+    sleep(30);
+    cout << "done waiting" << std::endl;
+  }
+}
+
+
 
 int main(int argc, char **argv)
 {

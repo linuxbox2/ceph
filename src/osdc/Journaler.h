@@ -164,11 +164,11 @@ public:
 	f->open_object_section("layout");
 	{
 	  f->dump_unsigned("stripe_unit", layout.fl_stripe_unit);
-	  f->dump_unsigned("stripe_count", layout.fl_stripe_unit);
-	  f->dump_unsigned("object_size", layout.fl_stripe_unit);
-	  f->dump_unsigned("cas_hash", layout.fl_stripe_unit);
-	  f->dump_unsigned("object_stripe_unit", layout.fl_stripe_unit);
-	  f->dump_unsigned("pg_pool", layout.fl_stripe_unit);
+	  f->dump_unsigned("stripe_count", layout.fl_stripe_count);
+	  f->dump_unsigned("object_size", layout.fl_object_size);
+	  f->dump_unsigned("cas_hash", layout.fl_cas_hash);
+	  f->dump_unsigned("object_stripe_unit", layout.fl_object_stripe_unit);
+	  f->dump_unsigned("pg_pool", layout.fl_pg_pool);
 	}
 	f->close_section(); // layout
       }
@@ -336,6 +336,8 @@ private:
   uint64_t trimming_pos;      // what we've requested to trim through
   uint64_t trimmed_pos;   // what has been trimmed
 
+  bool readable;
+
   void _finish_trim(int r, uint64_t to);
   class C_Trim;
   friend class C_Trim;
@@ -385,7 +387,8 @@ public:
     read_pos(0), requested_pos(0), received_pos(0),
     fetch_len(0), temp_fetch_len(0),
     on_readable(0), on_write_error(NULL), called_write_error(false),
-    expire_pos(0), trimming_pos(0), trimmed_pos(0)
+    expire_pos(0), trimming_pos(0), trimmed_pos(0), readable(false),
+    stopping(false)
   {
     memset(&layout, 0, sizeof(layout));
   }
@@ -465,6 +468,15 @@ public:
   }
 
   void set_write_error_handler(Context *c);
+
+  /**
+   * Cause any ongoing waits to error out with -EAGAIN, set error
+   * to -EAGAIN.
+   */
+  void shutdown();
+protected:
+  bool stopping;
+public:
 
   // Synchronous getters
   // ===================

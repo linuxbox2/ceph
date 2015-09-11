@@ -17,19 +17,20 @@
 #include "common/perf_counters.h"
 #include "common/ceph_context.h"
 #include "common/config.h"
+#include "include/stringify.h"
 #include "include/utime.h"
 #include "common/Clock.h"
 
-Mutex::Mutex(const char *n, bool r, bool ld,
+Mutex::Mutex(const std::string &n, bool r, bool ld,
 	     bool bt,
 	     CephContext *cct) :
-  name(n), id(-1), recursive(r), lockdep(ld), backtrace(bt),
-  nlock(0), locked_by(0), cct(cct), logger(0)
+  name(n), id(-1), recursive(r), lockdep(ld), backtrace(bt), nlock(0),
+  locked_by(0), cct(cct), logger(0)
 {
   if (cct) {
     PerfCountersBuilder b(cct, string("mutex-") + name,
 			  l_mutex_first, l_mutex_last);
-    b.add_time_avg(l_mutex_wait, "wait");
+    b.add_time_avg(l_mutex_wait, "wait", "Average time of mutex in locked state");
     logger = b.create_perf_counters();
     cct->get_perfcounters_collection()->add(logger);
     logger->set(l_mutex_wait, 0);
@@ -42,7 +43,7 @@ Mutex::Mutex(const char *n, bool r, bool ld,
     pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE);
     pthread_mutex_init(&_m,&attr);
     pthread_mutexattr_destroy(&attr);
-    if (g_lockdep)
+    if (lockdep && g_lockdep)
       _register();
   }
   else if (lockdep) {
@@ -55,6 +56,7 @@ Mutex::Mutex(const char *n, bool r, bool ld,
     pthread_mutexattr_init(&attr);
     pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_ERRORCHECK);
     pthread_mutex_init(&_m, &attr);
+    pthread_mutexattr_destroy(&attr);
     if (g_lockdep)
       _register();
   }
@@ -73,6 +75,9 @@ Mutex::~Mutex() {
   if (cct && logger) {
     cct->get_perfcounters_collection()->remove(logger);
     delete logger;
+  }
+  if (lockdep && g_lockdep) {
+    lockdep_unregister(id);
   }
 }
 

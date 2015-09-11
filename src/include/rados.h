@@ -142,6 +142,7 @@ extern const char *ceph_osd_state_name(int s);
 #define CEPH_OSDMAP_NOSCRUB  (1<<11) /* block periodic scrub */
 #define CEPH_OSDMAP_NODEEP_SCRUB (1<<12) /* block periodic deep-scrub */
 #define CEPH_OSDMAP_NOTIERAGENT (1<<13) /* disable tiering agent */
+#define CEPH_OSDMAP_NOREBALANCE (1<<14) /* block osd backfill unless pg is degraded */
 
 /*
  * The error code to return when an OSD can't handle a write
@@ -412,8 +413,13 @@ enum {
 };
 
 enum {
-	CEPH_OSD_OP_FLAG_EXCL = 1,      /* EXCL object create */
-	CEPH_OSD_OP_FLAG_FAILOK = 2,    /* continue despite failure */
+	CEPH_OSD_OP_FLAG_EXCL = 0x1,      /* EXCL object create */
+	CEPH_OSD_OP_FLAG_FAILOK = 0x2,    /* continue despite failure */
+	CEPH_OSD_OP_FLAG_FADVISE_RANDOM     = 0x4, /* the op is random */
+	CEPH_OSD_OP_FLAG_FADVISE_SEQUENTIAL = 0x8, /* the op is sequential */
+	CEPH_OSD_OP_FLAG_FADVISE_WILLNEED   = 0x10,/* data will be accessed in the near future */
+	CEPH_OSD_OP_FLAG_FADVISE_DONTNEED   = 0x20,/* data will not be accessed in the near future */
+	CEPH_OSD_OP_FLAG_FADVISE_NOCACHE   = 0x40, /* data will be accessed only once by this client */
 };
 
 #define EOLDSNAPC    85  /* ORDERSNAP flag set; writer has old snapc*/
@@ -443,8 +449,24 @@ enum {
 };
 
 enum {
+	CEPH_OSD_COPY_GET_FLAG_NOTSUPP_OMAP = 1, /* mean dest pool don't support omap*/
+};
+
+enum {
 	CEPH_OSD_TMAP2OMAP_NULLOK = 1,
 };
+
+enum {
+	CEPH_OSD_WATCH_OP_UNWATCH = 0,
+	CEPH_OSD_WATCH_OP_LEGACY_WATCH = 1,
+	/* note: use only ODD ids to prevent pre-giant code from
+	   interpreting the op as UNWATCH */
+	CEPH_OSD_WATCH_OP_WATCH = 3,
+	CEPH_OSD_WATCH_OP_RECONNECT = 5,
+	CEPH_OSD_WATCH_OP_PING = 7,
+};
+
+const char *ceph_osd_watch_op_name(int o);
 
 /*
  * an individual object operation.  each may be accompanied by some data
@@ -452,7 +474,7 @@ enum {
  */
 struct ceph_osd_op {
 	__le16 op;           /* CEPH_OSD_OP_* */
-	__le32 flags;        /* CEPH_OSD_FLAG_* */
+	__le32 flags;        /* CEPH_OSD_OP_FLAG_* */
 	union {
 		struct {
 			__le64 offset, length;
@@ -480,9 +502,13 @@ struct ceph_osd_op {
 	        } __attribute__ ((packed)) snap;
 		struct {
 			__le64 cookie;
-			__le64 ver;
-			__u8 flag;	/* 0 = unwatch, 1 = watch */
+			__le64 ver;     /* no longer used */
+			__u8 op;	/* CEPH_OSD_WATCH_OP_* */
+			__u32 gen;      /* registration generation */
 		} __attribute__ ((packed)) watch;
+		struct {
+			__le64 cookie;
+		} __attribute__ ((packed)) notify;
 		struct {
 			__le64 unused;
 			__le64 ver;
@@ -493,11 +519,17 @@ struct ceph_osd_op {
 		} __attribute__ ((packed)) clonerange;
 		struct {
 			__le64 max;     /* max data in reply */
+			__le32 flags;
 		} __attribute__ ((packed)) copy_get;
 		struct {
 			__le64 snapid;
 			__le64 src_version;
 			__u8 flags;
+			/*
+			 * __le32 flags: CEPH_OSD_OP_FLAG_FADVISE_: mean the fadvise flags for dest object
+			 * src_fadvise_flags mean the fadvise flags for src object
+			 */
+			__le32 src_fadvise_flags;
 		} __attribute__ ((packed)) copy_from;
 		struct {
 			struct ceph_timespec stamp;

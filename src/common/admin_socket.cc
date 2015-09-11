@@ -149,6 +149,33 @@ std::string AdminSocket::create_shutdown_pipe(int *pipe_rd, int *pipe_wr)
   return "";
 }
 
+std::string AdminSocket::destroy_shutdown_pipe()
+{
+  // Send a byte to the shutdown pipe that the thread is listening to
+  char buf[1] = { 0x0 };
+  int ret = safe_write(m_shutdown_wr_fd, buf, sizeof(buf));
+
+  // Close write end
+  VOID_TEMP_FAILURE_RETRY(close(m_shutdown_wr_fd));
+  m_shutdown_wr_fd = -1;
+
+  if (ret != 0) {
+    ostringstream oss;
+    oss << "AdminSocket::destroy_shutdown_pipe error: failed to write"
+      "to thread shutdown pipe: error " << ret;
+    return oss.str();
+  }
+
+  join();
+
+  // Close read end. Doing this before join() blocks the listenter and prevents
+  // joining.
+  VOID_TEMP_FAILURE_RETRY(close(m_shutdown_rd_fd));
+  m_shutdown_rd_fd = -1;
+
+  return "";
+}
+
 std::string AdminSocket::bind_and_listen(const std::string &sock_path, int *fd)
 {
   ldout(m_cct, 5) << "bind_and_listen " << sock_path << dendl;
@@ -325,7 +352,7 @@ bool AdminSocket::do_accept()
   stringstream errss;
   cmdvec.push_back(cmd);
   if (!cmdmap_from_json(cmdvec, &cmdmap, errss)) {
-    ldout(m_cct, 0) << "AdminSocket: " << errss << dendl;
+    ldout(m_cct, 0) << "AdminSocket: " << errss.rdbuf() << dendl;
     return false;
   }
   cmd_getval(m_cct, cmdmap, "format", format);
@@ -448,9 +475,7 @@ class HelpHook : public AdminSocketHook {
 public:
   HelpHook(AdminSocket *as) : m_as(as) {}
   bool call(string command, cmdmap_t &cmdmap, string format, bufferlist& out) {
-    Formatter *f = new_formatter(format);
-    if (!f)
-      f = new_formatter("json-pretty");
+    Formatter *f = Formatter::create(format, "json-pretty", "json-pretty");
     f->open_object_section("help");
     for (map<string,string>::iterator p = m_as->m_help.begin();
 	 p != m_as->m_help.end();
@@ -538,30 +563,31 @@ bool AdminSocket::init(const std::string &path)
 
 void AdminSocket::shutdown()
 {
+  std::string err;
+
+  // Under normal operation this is unlikely to occur.  However for some unit
+  // tests, some object members are not initialized and so cannot be deleted
+  // without fault.
   if (m_shutdown_wr_fd < 0)
     return;
 
   ldout(m_cct, 5) << "shutdown" << dendl;
 
-  // Send a byte to the shutdown pipe that the thread is listening to
-  char buf[1] = { 0x0 };
-  int ret = safe_write(m_shutdown_wr_fd, buf, sizeof(buf));
-  VOID_TEMP_FAILURE_RETRY(close(m_shutdown_wr_fd));
-  m_shutdown_wr_fd = -1;
-
-  if (ret == 0) {
-    join();
-  } else {
-    lderr(m_cct) << "AdminSocket::shutdown: failed to write "
-      "to thread shutdown pipe: error " << ret << dendl;
+  err = destroy_shutdown_pipe();
+  if (!err.empty()) {
+    lderr(m_cct) << "AdminSocket::shutdown: error: " << err << dendl;
   }
+
+  VOID_TEMP_FAILURE_RETRY(close(m_sock_fd));
 
   unregister_command("version");
   unregister_command("git_version");
   unregister_command("0");
   delete m_version_hook;
+
   unregister_command("help");
   delete m_help_hook;
+
   unregister_command("get_command_descriptions");
   delete m_getdescs_hook;
 

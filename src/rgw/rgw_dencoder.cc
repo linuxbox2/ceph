@@ -200,7 +200,7 @@ void rgw_log_entry::generate_test_instances(list<rgw_log_entry*>& o)
   e->bucket = "bucket";
   e->remote_addr = "1.2.3.4";
   e->user = "user";
-  e->obj = "obj";
+  e->obj = rgw_obj_key("obj");
   e->uri = "http://uri/bucket/obj";
   e->http_status = "200";
   e->error_code = "error_code";
@@ -212,16 +212,6 @@ void rgw_log_entry::generate_test_instances(list<rgw_log_entry*>& o)
   e->bucket_id = "10";
   o.push_back(e);
   o.push_back(new rgw_log_entry);
-}
-
-void rgw_intent_log_entry::generate_test_instances(list<rgw_intent_log_entry*>& o)
-{
-  rgw_intent_log_entry *e = new rgw_intent_log_entry;
-  rgw_bucket b("bucket", "pool", ".index_pool", "marker", "10", "region");
-  e->obj = rgw_obj(b, "object");
-  e->intent = DEL_OBJ;
-  o.push_back(e);
-  o.push_back(new rgw_intent_log_entry);
 }
 
 void ACLPermission::generate_test_instances(list<ACLPermission*>& o)
@@ -427,6 +417,34 @@ void RGWBucketInfo::generate_test_instances(list<RGWBucketInfo*>& o)
   i->flags = BUCKET_SUSPENDED;
   o.push_back(i);
   o.push_back(new RGWBucketInfo);
+}
+
+void RGWRegion::generate_test_instances(list<RGWRegion*>& o)
+{
+  RGWRegion *r = new RGWRegion;
+  o.push_back(r);
+  o.push_back(new RGWRegion);
+}
+
+void RGWZone::generate_test_instances(list<RGWZone*> &o)
+{
+  RGWZone *z = new RGWZone;
+  o.push_back(z);
+  o.push_back(new RGWZone);
+}
+
+void RGWZoneParams::generate_test_instances(list<RGWZoneParams*> &o)
+{
+  o.push_back(new RGWZoneParams);
+  o.push_back(new RGWZoneParams); 
+}
+
+void RGWOLHInfo::generate_test_instances(list<RGWOLHInfo*> &o)
+{
+  RGWOLHInfo *olh = new RGWOLHInfo;
+  olh->removed = false;
+  o.push_back(olh);
+  o.push_back(new RGWOLHInfo);
 }
 
 void RGWBucketEnt::generate_test_instances(list<RGWBucketEnt*>& o)

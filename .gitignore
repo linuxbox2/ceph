@@ -52,6 +52,9 @@ missing
 py-compile
 release
 stamp-h1
+systemd/ceph-osd@.service
+systemd/ceph-rgw.tmpfiles.d
+systemd/Makefile
 vgcore.*
 
 # specific local dir files
@@ -64,7 +67,7 @@ vgcore.*
 /ceph-[0-9]*/
 
 # M4 Macro directory
-m4/
+/m4/
 
 # where is this from?
 web/*.html

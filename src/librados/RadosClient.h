@@ -30,14 +30,13 @@ class CephContext;
 struct Connection;
 struct md_config_t;
 class Message;
-class MWatchNotify;
 class MLog;
 class Messenger;
 
 class librados::RadosClient : public Dispatcher
 {
 public:
-  CephContext *cct;
+  using Dispatcher::cct;
   md_config_t *conf;
 private:
   enum {
@@ -82,11 +81,14 @@ public:
   int connect();
   void shutdown();
 
+  int watch_flush();
+
   uint64_t get_instance_id();
 
   int wait_for_latest_osdmap();
 
   int create_ioctx(const char *name, IoCtxImpl **io);
+  int create_ioctx(int64_t, IoCtxImpl **io);
 
   int get_fsid(std::string *s);
   int64_t lookup_pool(const char *name);
@@ -95,27 +97,25 @@ public:
   int pool_get_auid(uint64_t pool_id, unsigned long long *auid);
   int pool_get_name(uint64_t pool_id, std::string *auid);
 
-  int pool_list(std::list<string>& ls);
+  int pool_list(std::list<std::pair<int64_t, string> >& ls);
   int get_pool_stats(std::list<string>& ls, map<string,::pool_stat_t>& result);
   int get_fs_stats(ceph_statfs& result);
 
-  int pool_create(string& name, unsigned long long auid=0, __u8 crush_rule=0);
+  /*
+  -1 was set as the default value and monitor will pickup the right crush rule with below order:
+    a) osd pool default crush replicated ruleset
+    b) the first ruleset in crush ruleset
+    c) error out if no value find
+  */
+  int pool_create(string& name, unsigned long long auid=0, int16_t crush_rule=-1);
   int pool_create_async(string& name, PoolAsyncCompletionImpl *c, unsigned long long auid=0,
-			__u8 crush_rule=0);
+			int16_t crush_rule=-1);
   int pool_get_base_tier(int64_t pool_id, int64_t* base_tier);
   int pool_delete(const char *name);
 
   int pool_delete_async(const char *name, PoolAsyncCompletionImpl *c);
 
-  // watch/notify
-  uint64_t max_watch_notify_cookie;
-  map<uint64_t, librados::WatchNotifyInfo *> watch_notify_info;
-
-  void register_watch_notify_callback(librados::WatchNotifyInfo *wc,
-				      uint64_t *cookie);
-  void unregister_watch_notify_callback(uint64_t cookie);
-  void handle_watch_notify(MWatchNotify *m);
-  void do_watch_notify(MWatchNotify *m);
+  int blacklist_add(const string& client_address, uint32_t expire_seconds);
 
   int mon_command(const vector<string>& cmd, const bufferlist &inbl,
 	          bufferlist *outbl, string *outs);

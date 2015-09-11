@@ -87,25 +87,22 @@ class Transaction {
     uint64_t start_time = Cycles::rdtsc();
     ObjectStore::Transaction::iterator i = t.begin();
     while (i.have_op()) {
-      int op = i.decode_op();
+    ObjectStore::Transaction::Op *op = i.decode_op();
 
-      switch (op) {
+      switch (op->op) {
       case ObjectStore::Transaction::OP_WRITE:
         {
-          coll_t cid = i.decode_cid();
-          ghobject_t oid = i.decode_oid();
-          i.decode_length();
-          i.decode_length();
-          i.get_replica();
+          coll_t cid = i.get_cid(op->cid);
+          ghobject_t oid = i.get_oid(op->oid);
           bufferlist bl;
           i.decode_bl(bl);
         }
         break;
       case ObjectStore::Transaction::OP_SETATTR:
         {
-          coll_t cid = i.decode_cid();
-          ghobject_t oid = i.decode_oid();
-          string name = i.decode_attrname();
+          coll_t cid = i.get_cid(op->cid);
+          ghobject_t oid = i.get_oid(op->oid);
+          string name = i.decode_string();
           bufferlist bl;
           i.decode_bl(bl);
           map<string, bufferptr> to_set;
@@ -114,16 +111,16 @@ class Transaction {
         break;
       case ObjectStore::Transaction::OP_OMAP_SETKEYS:
         {
-          coll_t cid(i.decode_cid());
-          ghobject_t oid = i.decode_oid();
-          map<string, bufferlist> aset;
+          coll_t cid = i.get_cid(op->cid);
+          ghobject_t oid = i.get_oid(op->oid);
+          map<string, bufferptr> aset;
           i.decode_attrset(aset);
         }
         break;
       case ObjectStore::Transaction::OP_OMAP_RMKEYS:
         {
-          coll_t cid(i.decode_cid());
-          ghobject_t oid = i.decode_oid();
+          coll_t cid = i.get_cid(op->cid);
+          ghobject_t oid = i.get_oid(op->oid);
           set<string> keys;
           i.decode_keyset(keys);
         }
@@ -195,9 +192,10 @@ class PerfCase {
   }
 
   uint64_t rados_write_4k(int times) {
-    uint64_t start_time = 0, ticks = 0;
+    uint64_t ticks = 0;
     uint64_t len = Kib *4;
     for (int i = 0; i < times; i++) {
+      uint64_t start_time = 0;
       {
         Transaction t;
         ghobject_t oid = create_object();
@@ -235,8 +233,8 @@ const string PerfCase::info_info_attr("11.40_info");
 const string PerfCase::attr("_");
 const string PerfCase::snapset_attr("snapset");
 const string PerfCase::pglog_attr("pglog_attr");
-const coll_t PerfCase::meta_cid("meta");
-const coll_t PerfCase::cid("meta");
+const coll_t PerfCase::meta_cid;
+const coll_t PerfCase::cid;
 const ghobject_t PerfCase::pglog_oid(hobject_t(sobject_t(object_t("cid_pglog"), 0)));
 const ghobject_t PerfCase::info_oid(hobject_t(sobject_t(object_t("infos"), 0)));
 Transaction::Tick Transaction::write_ticks, Transaction::setattr_ticks, Transaction::omap_setkeys_ticks, Transaction::omap_rmkeys_ticks;

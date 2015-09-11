@@ -306,6 +306,7 @@ void RGWOp_Subuser_Create::execute()
   RESTArgs::get_bool(s, "generate-secret", false, &gen_secret);
 
   perm_mask = rgw_str_to_perm(perm_str.c_str());
+  op_state.set_perm(perm_mask);
 
   // FIXME: no double checking
   if (!uid.empty())
@@ -316,9 +317,6 @@ void RGWOp_Subuser_Create::execute()
 
   if (!secret_key.empty())
     op_state.set_secret_key(secret_key);
-
-  if (perm_mask != 0)
-    op_state.set_perm(perm_mask);
 
   op_state.set_generate_subuser(gen_subuser);
 
@@ -373,6 +371,7 @@ void RGWOp_Subuser_Modify::execute()
   RESTArgs::get_bool(s, "generate-secret", false, &gen_secret);
 
   perm_mask = rgw_str_to_perm(perm_str.c_str());
+  op_state.set_perm(perm_mask);
 
   // FIXME: no double checking
   if (!uid.empty())
@@ -386,9 +385,6 @@ void RGWOp_Subuser_Modify::execute()
 
   if (gen_secret)
     op_state.set_gen_secret();
-
-  if (perm_mask != 0)
-    op_state.set_perm(perm_mask);
 
   if (!key_type_str.empty()) {
     if (key_type_str.compare("swift") == 0)
@@ -627,10 +623,9 @@ struct UserQuotas {
 
   UserQuotas() {}
 
-  UserQuotas(RGWUserInfo& info) {
-    bucket_quota = info.bucket_quota;
-    user_quota = info.user_quota;
-  }
+  UserQuotas(RGWUserInfo& info) : bucket_quota(info.bucket_quota), 
+				  user_quota(info.user_quota) {}
+
   void dump(Formatter *f) const {
     encode_json("bucket_quota", bucket_quota, f);
     encode_json("user_quota", user_quota, f);
@@ -693,6 +688,7 @@ void RGWOp_Quota_Info::execute()
   if (http_ret < 0)
     return;
 
+  flusher.start(0);
   if (show_all) {
     UserQuotas quotas(info);
     encode_json("quota", quotas, s->formatter);

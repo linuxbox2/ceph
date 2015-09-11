@@ -316,7 +316,7 @@ int libradosstriper::RadosStriperImpl::write_full(const std::string& soid,
 						  const bufferlist& bl) 
 {
   int rc = trunc(soid, 0);
-  if (rc) return rc;
+  if (rc && rc != -ENOENT) return rc; // ENOENT is obviously ok
   return write(soid, bl, bl.length(), 0);
 }
 
@@ -573,7 +573,7 @@ int libradosstriper::RadosStriperImpl::remove(const std::string& soid)
       std::string err;
       // this intermediate string allows to add a null terminator before calling strtol
       std::string strsize(bl2.c_str(), bl2.length());
-      uint64_t size = strict_strtol(strsize.c_str(), 10, &err);
+      uint64_t size = strict_strtoll(strsize.c_str(), 10, &err);
       if (!err.empty()) {
         lderr(cct()) << XATTR_SIZE << " : " << err << dendl;
         

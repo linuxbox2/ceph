@@ -34,9 +34,12 @@ const static struct rgw_http_errors RGW_HTTP_ERRORS[] = {
     { ERR_TOO_LARGE, 400, "EntityTooLarge" },
     { ERR_TOO_SMALL, 400, "EntityTooSmall" },
     { ERR_TOO_MANY_BUCKETS, 400, "TooManyBuckets" },
+    { ERR_MALFORMED_XML, 400, "MalformedXML" },
     { ERR_LENGTH_REQUIRED, 411, "MissingContentLength" },
     { EACCES, 403, "AccessDenied" },
     { EPERM, 403, "AccessDenied" },
+    { ERR_SIGNATURE_NO_MATCH, 403, "SignatureDoesNotMatch" },
+    { ERR_INVALID_ACCESS_KEY, 403, "InvalidAccessKeyId" },
     { ERR_USER_SUSPENDED, 403, "UserSuspended" },
     { ERR_REQUEST_TIME_SKEWED, 403, "RequestTimeTooSkewed" },
     { ERR_QUOTA_EXCEEDED, 403, "QuotaExceeded" },
@@ -53,6 +56,7 @@ const static struct rgw_http_errors RGW_HTTP_ERRORS[] = {
     { ERR_UNPROCESSABLE_ENTITY, 422, "UnprocessableEntity" },
     { ERR_LOCKED, 423, "Locked" },
     { ERR_INTERNAL_ERROR, 500, "InternalError" },
+    { ERR_NOT_IMPLEMENTED, 501, "NotImplemented" },
 };
 
 const static struct rgw_http_errors RGW_HTTP_SWIFT_ERRORS[] = {
@@ -106,6 +110,7 @@ const static struct rgw_http_status_code http_codes[] = {
   { 417, "Expectation Failed" },
   { 422, "Unprocessable Entity" },
   { 500, "Internal Server Error" },
+  { 501, "Not Implemented" },
   { 0, NULL },
 };
 

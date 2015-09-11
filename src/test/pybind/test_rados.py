@@ -1,6 +1,6 @@
-from nose.tools import eq_ as eq, assert_raises
-from rados import (Rados, Error, Object, ObjectExists, ObjectNotFound,
-                   ObjectBusy,
+from nose.tools import eq_ as eq, ok_ as ok, assert_raises
+from rados import (Rados, Error, RadosStateError, Object, ObjectExists,
+                   ObjectNotFound, ObjectBusy, requires, opt,
                    ANONYMOUS_AUID, ADMIN_AUID, LIBRADOS_ALL_NSPACES)
 import time
 import threading
@@ -37,6 +37,86 @@ def test_ioctx_context_manager():
     with Rados(conffile='', rados_id='admin') as conn:
         with conn.open_ioctx('rbd') as ioctx:
             pass
+
+class TestRequires(object):
+    @requires(('foo', str), ('bar', int), ('baz', int))
+    def _method_plain(self, foo, bar, baz):
+        ok(isinstance(foo, str))
+        ok(isinstance(bar, int))
+        ok(isinstance(baz, int))
+        return (foo, bar, baz)
+
+    def test_method_plain(self):
+        assert_raises(TypeError, self._method_plain, 42, 42, 42)
+        assert_raises(TypeError, self._method_plain, '42', '42', '42')
+        assert_raises(TypeError, self._method_plain, foo='42', bar='42', baz='42')
+        eq(self._method_plain('42', 42, 42), ('42', 42, 42))
+        eq(self._method_plain(foo='42', bar=42, baz=42), ('42', 42, 42))
+
+    @requires(('opt_foo', opt(str)), ('opt_bar', opt(int)), ('baz', int))
+    def _method_with_opt_arg(self, foo, bar, baz):
+        ok(isinstance(foo, str) or foo is None)
+        ok(isinstance(bar, int) or bar is None)
+        ok(isinstance(baz, int))
+        return (foo, bar, baz)
+
+    def test_method_with_opt_args(self):
+        assert_raises(TypeError, self._method_with_opt_arg, 42, 42, 42)
+        assert_raises(TypeError, self._method_with_opt_arg, '42', '42', 42)
+        assert_raises(TypeError, self._method_with_opt_arg, None, None, None)
+        eq(self._method_with_opt_arg(None, 42, 42), (None, 42, 42))
+        eq(self._method_with_opt_arg('42', None, 42), ('42', None, 42))
+        eq(self._method_with_opt_arg(None, None, 42), (None, None, 42))
+
+
+class TestRadosStateError(object):
+    def _requires_configuring(self, rados):
+        assert_raises(RadosStateError, rados.connect)
+
+    def _requires_configuring_or_connected(self, rados):
+        assert_raises(RadosStateError, rados.conf_read_file)
+        assert_raises(RadosStateError, rados.conf_parse_argv, None)
+        assert_raises(RadosStateError, rados.conf_parse_env)
+        assert_raises(RadosStateError, rados.conf_get, 'opt')
+        assert_raises(RadosStateError, rados.conf_set, 'opt', 'val')
+        assert_raises(RadosStateError, rados.ping_monitor, 0)
+
+    def _requires_connected(self, rados):
+        assert_raises(RadosStateError, rados.pool_exists, 'foo')
+        assert_raises(RadosStateError, rados.pool_lookup, 'foo')
+        assert_raises(RadosStateError, rados.pool_reverse_lookup, 0)
+        assert_raises(RadosStateError, rados.create_pool, 'foo')
+        assert_raises(RadosStateError, rados.get_pool_base_tier, 0)
+        assert_raises(RadosStateError, rados.delete_pool, 'foo')
+        assert_raises(RadosStateError, rados.list_pools)
+        assert_raises(RadosStateError, rados.get_fsid)
+        assert_raises(RadosStateError, rados.open_ioctx, 'foo')
+        assert_raises(RadosStateError, rados.mon_command, '', '')
+        assert_raises(RadosStateError, rados.osd_command, 0, '', '')
+        assert_raises(RadosStateError, rados.pg_command, '', '', '')
+        assert_raises(RadosStateError, rados.wait_for_latest_osdmap)
+        assert_raises(RadosStateError, rados.blacklist_add, '127.0.0.1/123', 0)
+
+    def test_configuring(self):
+        rados = Rados(conffile='')
+        eq('configuring', rados.state)
+        self._requires_connected(rados)
+
+    def test_connected(self):
+        rados = Rados(conffile='')
+        with rados:
+            eq('connected', rados.state)
+            self._requires_configuring(rados)
+
+    def test_shutdown(self):
+        rados = Rados(conffile='')
+        with rados:
+            pass
+        eq('shutdown', rados.state)
+        self._requires_configuring(rados)
+        self._requires_configuring_or_connected(rados)
+        self._requires_connected(rados)
+
 
 class TestRados(object):
 
@@ -123,6 +203,9 @@ class TestRados(object):
     def test_get_fsid(self):
         fsid = self.rados.get_fsid()
         eq(len(fsid), 36)
+
+    def test_blacklist_add(self):
+        self.rados.blacklist_add("1.2.3.4/123", 1)
 
 class TestIoctx(object):
 

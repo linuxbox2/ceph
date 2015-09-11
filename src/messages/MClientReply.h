@@ -120,6 +120,7 @@ struct InodeStat {
 
   ceph_dir_layout dir_layout;
 
+  quota_info_t quota;
   //map<string, bufferptr> xattrs;
 
  public:
@@ -158,13 +159,8 @@ struct InodeStat {
     rstat.rfiles = e.rfiles;
     rstat.rsubdirs = e.rsubdirs;
 
-    int n = e.fragtree.nsplits;
-    while (n) {
-      ceph_frag_tree_split s;
-      ::decode(s, p);
-      dirfragtree._splits[(__u32)s.frag] = s.by;
-      n--;
-    }
+    dirfragtree.decode_nohead(e.fragtree.nsplits, p);
+
     ::decode(symlink, p);
     
     if (features & CEPH_FEATURE_DIRLAYOUTHASH)
@@ -181,6 +177,11 @@ struct InodeStat {
     } else {
       inline_version = CEPH_INLINE_NONE;
     }
+
+    if (features & CEPH_FEATURE_MDS_QUOTA)
+      ::decode(quota, p);
+    else
+      memset(&quota, 0, sizeof(quota));
   }
   
   // see CInode::encode_inodestat for encoder.

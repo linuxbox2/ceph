@@ -26,11 +26,13 @@ if [ `dirname $0` = "." ] && [ $PWD != "/etc/init.d" ]; then
     LIBDIR=.
     ETCDIR=.
     SYSTEMD_RUN=""
+    ASSUME_DEV=1
 else
     BINDIR=@bindir@
     SBINDIR=@prefix@/sbin
     LIBDIR=@libdir@/ceph
     ETCDIR=@sysconfdir@/ceph
+    ASSUME_DEV=0
 fi
 
 usage_exit() {
@@ -88,8 +90,7 @@ stop_daemon() {
     action=$5
     [ -z "$action" ] && action="Stopping"
     echo -n "$action Ceph $name on $host..."
-    do_cmd "while [ 1 ]; do
-	[ -e $pidfile ] || break
+    do_cmd "if [ -e $pidfile ] ; then 
 	pid=\`cat $pidfile\`
 	while [ -e /proc/\$pid ] && grep -q $daemon /proc/\$pid/cmdline ; do
 	    cmd=\"kill $signal \$pid\"
@@ -98,8 +99,7 @@ stop_daemon() {
 	    sleep 1
 	    continue
 	done
-	break
-    done"
+    fi"
     echo done
 }
 
@@ -221,6 +221,9 @@ for name in $what; do
 
     binary="$BINDIR/ceph-$type"
     cmd="$binary -i $id"
+    if [ $ASSUME_DEV -eq 1 ]; then
+      cmd="PATH=$PWD:$PATH $cmd"
+    fi
 
     get_conf run_dir "/var/run/ceph" "run dir"
 
@@ -341,6 +344,7 @@ for name in $what; do
 		[ -n "$fs_opt" ] && fs_opt="-o $fs_opt"
 		[ -n "$pre_mount" ] && do_cmd "$pre_mount"
 
+		do_root_cmd_okfail "mkdir -p $fs_path"
 		if [ "$fs_type" = "btrfs" ]; then
 		    echo Mounting Btrfs on $host:$fs_path
 		    do_root_cmd_okfail "modprobe btrfs ; btrfs device scan || btrfsctl -a ; egrep -q '^[^ ]+ $fs_path ' /proc/mounts || mount -t btrfs $fs_opt $first_dev $fs_path"
@@ -361,7 +365,7 @@ for name in $what; do
 		    get_conf osd_location_hook "$BINDIR/ceph-crush-location" "osd crush location hook"
 		    osd_location=`$osd_location_hook --cluster $cluster --id $id --type osd`
 		    get_conf osd_weight "" "osd crush initial weight"
-		    defaultweight="$(df -P -k $osd_data/. | tail -1 | awk '{ print sprintf("%.2f",$2/1073741824) }')"
+		    defaultweight="$(df -P -k $osd_data/. | tail -1 | awk '{ print sprintf("%.4f",$2/1073741824) }')"
 		    get_conf osd_keyring "$osd_data/keyring" "keyring"
 		    do_cmd_okfail "timeout 30 $BINDIR/ceph -c $conf --name=osd.$id --keyring=$osd_keyring osd crush create-or-move -- $id ${osd_weight:-${defaultweight:-1}} $osd_location"
 		    if [ "$ERR" != "0" ]; then

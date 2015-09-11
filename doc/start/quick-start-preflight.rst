@@ -63,7 +63,7 @@ following steps:
    Paste the following example code. Replace ``{ceph-release}`` with
    the recent major release of Ceph (e.g., ``firefly``). Replace ``{distro}``
    with your Linux distribution (e.g., ``el6`` for CentOS 6, 
-   ``el7`` for CentOS 7, ``rhel6.5`` for
+   ``el7`` for CentOS 7, ``rhel6`` for
    Red Hat 6.5, ``rhel7`` for Red Hat 7, and ``fc19`` or ``fc20`` for Fedora 19
    or Fedora 20. Finally, save the contents to the 
    ``/etc/yum.repos.d/ceph.repo`` file. ::
@@ -166,10 +166,9 @@ Enable Password-less SSH
 ------------------------
 
 Since ``ceph-deploy`` will not prompt for a password, you must generate
-SSH keys on the admin node and distribute the public key to each Ceph node.
-
-.. note:: ``ceph-deploy`` v1.1.3 and later releases will attempt to generate
-   the SSH keys for initial monitors. 
+SSH keys on the admin node and distribute the public key to each Ceph
+node. ``ceph-deploy`` will attempt to generate the SSH keys for initial
+monitors.
 
 #. Generate the SSH keys, but do not use ``sudo`` or the
    ``root`` user. Leave the passphrase empty::
@@ -240,7 +239,7 @@ Open Required Ports
 -------------------
 
 Ceph Monitors communicate using port ``6789`` by default. Ceph OSDs communicate
-in a port range of ``6800:7810`` by default. See the `Network Configuration
+in a port range of ``6800:7300`` by default. See the `Network Configuration
 Reference`_ for details. Ceph OSDs can use multiple network connections to
 communicate with clients, monitors, other OSDs for replication, and other OSDs
 for heartbeats.
@@ -250,12 +249,12 @@ strict. You may need to adjust your firewall settings allow inbound requests so
 that clients in your network can communicate with daemons on your Ceph nodes.
 
 For ``firewalld`` on RHEL 7, add port ``6789`` for Ceph Monitor nodes and ports
-``6800:7100`` for Ceph OSDs to the public zone and ensure that you make the
+``6800:7300`` for Ceph OSDs to the public zone and ensure that you make the
 setting permanent so that it is enabled on reboot. For example::
 
 	sudo firewall-cmd --zone=public --add-port=6789/tcp --permanent
 
-For ``iptables``, add port ``6789`` for Ceph Monitors and ports ``6800:7100`` 
+For ``iptables``, add port ``6789`` for Ceph Monitors and ports ``6800:7300``
 for Ceph OSDs. For example::
 
 	sudo iptables -A INPUT -i {iface} -p tcp -s {ip-address}/{netmask} --dport 6789 -j ACCEPT
@@ -293,6 +292,22 @@ following::
 
 To configure SELinux persistently (recommended if SELinux is an issue), modify
 the configuration file at  ``/etc/selinux/config``.
+
+
+Priorities/Preferences
+----------------------
+
+Ensure that your package manager has priority/preferences packages installed and
+enabled. On CentOS, you may need to install EPEL. On RHEL, you may need to
+enable optional repositories. ::
+
+	sudo yum install yum-plugin-priorities
+
+For example, on RHEL 7 server, execute the following to install
+``yum-plugin-priorities`` and enable the  ``rhel-7-server-optional-rpms``
+repository::
+
+	sudo yum install yum-plugin-priorities --enablerepo=rhel-7-server-optional-rpms
 
 
 Summary

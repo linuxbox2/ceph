@@ -390,17 +390,13 @@ class TestMDS(TestArgparse):
         self.check_1_string_arg('mds', 'fail')
 
     def test_rm(self):
+        # Valid: single GID argument present
+        self.assert_valid_command(['mds', 'rm', '1'])
+
+        # Missing GID arg: invalid
         assert_equal({}, validate_command(sigdict, ['mds', 'rm']))
-        assert_equal({}, validate_command(sigdict, ['mds', 'rm', '1']))
-        for name in ('osd', 'mon', 'client', 'mds'):
-            self.assert_valid_command(['mds', 'rm', '1', name + '.42'])
-            assert_equal({}, validate_command(sigdict, ['mds', 'rm',
-                                                        '-1', name + '.42']))
-            assert_equal({}, validate_command(sigdict, ['mds', 'rm',
-                                                        '-1', name]))
-            assert_equal({}, validate_command(sigdict, ['mds', 'rm',
-                                                        '1', name + '.42',
-                                                        'toomany']))
+        # Extra arg: invalid
+        assert_equal({}, validate_command(sigdict, ['mds', 'rm', '1', 'mds.42']))
 
     def test_rmfailed(self):
         self.check_1_natural_arg('mds', 'rmfailed')
@@ -548,10 +544,11 @@ class TestOSD(TestArgparse):
 
     def test_map(self):
         self.assert_valid_command(['osd', 'map', 'poolname', 'objectname'])
+        self.assert_valid_command(['osd', 'map', 'poolname', 'objectname', 'nspace'])
         assert_equal({}, validate_command(sigdict, ['osd', 'map']))
         assert_equal({}, validate_command(sigdict, ['osd', 'map', 'poolname']))
         assert_equal({}, validate_command(sigdict, ['osd', 'map',
-                                                    'poolname', 'objectname',
+                                                    'poolname', 'objectname', 'nspace',
                                                     'toomany']))
 
     def test_metadata(self):
@@ -1110,7 +1107,7 @@ class TestOSD(TestArgparse):
                                                         'toomany']))
 
     def test_tier_cache_mode(self):
-        for mode in ('none', 'writeback', 'forward', 'readonly', 'readforward'):
+        for mode in ('none', 'writeback', 'forward', 'readonly', 'readforward', 'readproxy'):
             self.assert_valid_command(['osd', 'tier', 'cache-mode',
                                        'poolname', mode])
         assert_equal({}, validate_command(sigdict, ['osd', 'tier',

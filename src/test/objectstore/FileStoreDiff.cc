@@ -132,13 +132,13 @@ bool FileStoreDiff::diff_objects(FileStore *a_store, FileStore *b_store, coll_t 
 
   int err;
   std::vector<ghobject_t> b_objects, a_objects;
-  err = b_store->collection_list(coll, b_objects);
+  err = b_store->collection_list(coll, ghobject_t(), ghobject_t::get_max(), INT_MAX, &b_objects, NULL);
   if (err < 0) {
     dout(0) << "diff_objects list on verify coll " << coll.to_str()
 	    << " returns " << err << dendl;
     return true;
   }
-  err = a_store->collection_list(coll, a_objects);
+  err = a_store->collection_list(coll, ghobject_t(), ghobject_t::get_max(), INT_MAX, &a_objects, NULL);
   if (err < 0) {
     dout(0) << "diff_objects list on store coll " << coll.to_str()
               << " returns " << err << dendl;
@@ -258,13 +258,13 @@ bool FileStoreDiff::diff_coll_attrs(FileStore *a_store, FileStore *b_store, coll
   int err;
   std::map<std::string, bufferptr> b_coll_attrs, a_coll_attrs;
   err = b_store->collection_getattrs(coll, b_coll_attrs);
-  if (err < 0) {
+  if (err < 0 && err != -EOPNOTSUPP) {
     dout(0) << "diff_attrs getattrs on verify coll " << coll.to_str()
         << "returns " << err << dendl;
     ret = true;
   }
   err = a_store->collection_getattrs(coll, a_coll_attrs);
-  if (err < 0) {
+  if (err < 0 && err != -EOPNOTSUPP) {
     dout(0) << "diff_attrs getattrs on A coll " << coll.to_str()
               << "returns " << err << dendl;
     ret = true;

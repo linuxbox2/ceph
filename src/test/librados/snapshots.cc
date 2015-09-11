@@ -145,6 +145,26 @@ TEST_F(LibRadosSnapshotsPP, SnapGetNamePP) {
   EXPECT_EQ(0, ioctx.snap_remove("snapfoo"));
 }
 
+TEST_F(LibRadosSnapshotsPP, SnapCreateRemovePP) {
+  // reproduces http://tracker.ceph.com/issues/10262
+  bufferlist bl;
+  bl.append("foo");
+  ASSERT_EQ(0, ioctx.write("foo", bl, bl.length(), 0));
+  ASSERT_EQ(0, ioctx.snap_create("snapfoo"));
+  ASSERT_EQ(0, ioctx.remove("foo"));
+  ASSERT_EQ(0, ioctx.snap_create("snapbar"));
+
+  librados::ObjectWriteOperation *op = new librados::ObjectWriteOperation();
+  op->create(false);
+  op->remove();
+  ASSERT_EQ(0, ioctx.operate("foo", op));
+
+  EXPECT_EQ(0, ioctx.snap_remove("snapfoo"));
+  EXPECT_EQ(0, ioctx.snap_remove("snapbar"));
+
+  delete op;
+}
+
 TEST_F(LibRadosSnapshotsSelfManaged, Snap) {
   std::vector<uint64_t> my_snaps;
   my_snaps.push_back(-2);
@@ -463,6 +483,40 @@ TEST_F(LibRadosSnapshotsSelfManagedPP, SnapOverlapPP) {
   ASSERT_EQ(0, ioctx.selfmanaged_snap_remove(my_snaps.back()));
   my_snaps.pop_back();
   readioctx.close();
+}
+
+TEST_F(LibRadosSnapshotsSelfManagedPP, Bug11677) {
+  std::vector<uint64_t> my_snaps;
+  my_snaps.push_back(-2);
+  ASSERT_EQ(0, ioctx.selfmanaged_snap_create(&my_snaps.back()));
+  ::std::reverse(my_snaps.begin(), my_snaps.end());
+  ASSERT_EQ(0, ioctx.selfmanaged_snap_set_write_ctx(my_snaps[0], my_snaps));
+  ::std::reverse(my_snaps.begin(), my_snaps.end());
+
+  int bsize = 1<<20;
+  char *buf = (char *)new char[bsize];
+  memset(buf, 0xcc, bsize);
+  bufferlist bl1;
+  bl1.append(buf, bsize);
+  ASSERT_EQ(0, ioctx.write("foo", bl1, bsize, 0));
+
+  my_snaps.push_back(-2);
+  ASSERT_EQ(0, ioctx.selfmanaged_snap_create(&my_snaps.back()));
+  ::std::reverse(my_snaps.begin(), my_snaps.end());
+  ASSERT_EQ(0, ioctx.selfmanaged_snap_set_write_ctx(my_snaps[0], my_snaps));
+  ::std::reverse(my_snaps.begin(), my_snaps.end());
+
+  librados::ObjectWriteOperation *op = new librados::ObjectWriteOperation();
+  op->assert_exists();
+  op->remove();
+  ASSERT_EQ(0, ioctx.operate("foo", op));
+
+  ASSERT_EQ(0, ioctx.selfmanaged_snap_remove(my_snaps.back()));
+  my_snaps.pop_back();
+  ASSERT_EQ(0, ioctx.selfmanaged_snap_remove(my_snaps.back()));
+  my_snaps.pop_back();
+  ioctx.snap_set_read(LIBRADOS_SNAP_HEAD);
+  delete[] buf;
 }
 
 // EC testing
@@ -794,5 +848,39 @@ TEST_F(LibRadosSnapshotsSelfManagedECPP, RollbackPP) {
 
   delete[] buf;
   delete[] buf2;
+}
+
+TEST_F(LibRadosSnapshotsSelfManagedECPP, Bug11677) {
+  std::vector<uint64_t> my_snaps;
+  my_snaps.push_back(-2);
+  ASSERT_EQ(0, ioctx.selfmanaged_snap_create(&my_snaps.back()));
+  ::std::reverse(my_snaps.begin(), my_snaps.end());
+  ASSERT_EQ(0, ioctx.selfmanaged_snap_set_write_ctx(my_snaps[0], my_snaps));
+  ::std::reverse(my_snaps.begin(), my_snaps.end());
+
+  int bsize = alignment;
+  char *buf = (char *)new char[bsize];
+  memset(buf, 0xcc, bsize);
+  bufferlist bl1;
+  bl1.append(buf, bsize);
+  ASSERT_EQ(0, ioctx.write("foo", bl1, bsize, 0));
+
+  my_snaps.push_back(-2);
+  ASSERT_EQ(0, ioctx.selfmanaged_snap_create(&my_snaps.back()));
+  ::std::reverse(my_snaps.begin(), my_snaps.end());
+  ASSERT_EQ(0, ioctx.selfmanaged_snap_set_write_ctx(my_snaps[0], my_snaps));
+  ::std::reverse(my_snaps.begin(), my_snaps.end());
+
+  librados::ObjectWriteOperation *op = new librados::ObjectWriteOperation();
+  op->assert_exists();
+  op->remove();
+  ASSERT_EQ(0, ioctx.operate("foo", op));
+
+  ASSERT_EQ(0, ioctx.selfmanaged_snap_remove(my_snaps.back()));
+  my_snaps.pop_back();
+  ASSERT_EQ(0, ioctx.selfmanaged_snap_remove(my_snaps.back()));
+  my_snaps.pop_back();
+  ioctx.snap_set_read(LIBRADOS_SNAP_HEAD);
+  delete[] buf;
 }
 

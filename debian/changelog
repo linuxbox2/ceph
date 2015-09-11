@@ -1,3 +1,51 @@
+ceph (9.0.2-1) stable; urgency=low
+
+  * New upstream release
+
+ -- Alfredo Deza <adeza@redhat.com>  Tue, 14 Jul 2015 13:10:31 -0700
+
+ceph (9.0.1-1) stable; urgency=low
+
+  * New upstream release
+
+ -- Alfredo Deza <adeza@redhat.com>  Fri, 05 Jun 2015 10:59:02 -0700
+
+ceph (9.0.0-1) stable; urgency=low
+
+  * New upstream release
+
+ -- Alfredo Deza <adeza@redhat.com>  Mon, 04 May 2015 12:32:58 -0700
+
+ceph (0.94-1) stable; urgency=low
+
+  * New upstream release
+
+ -- Alfredo Deza <adeza@redhat.com>  Tue, 07 Apr 2015 10:05:40 -0700
+
+ceph (0.93-1) stable; urgency=low
+
+  * New upstream release
+
+ -- Alfredo Deza <adeza@redhat.com>  Fri, 27 Feb 2015 09:52:53 -0800
+
+ceph (0.92-1) stable; urgency=low
+
+  * New upstream release
+
+ -- Alfredo Deza <adeza@redhat.com>  Mon, 02 Feb 2015 10:35:27 -0800
+
+ceph (0.91-1) stable; urgency=low
+
+  * New upstream release
+
+ -- Alfredo Deza <adeza@redhat.com>  Tue, 13 Jan 2015 12:10:22 -0800
+
+ceph (0.90-1) stable; urgency=low
+
+  * New upstream release
+
+ -- Alfredo Deza <adeza@redhat.com>  Fri, 19 Dec 2014 06:56:22 -0800
+
 ceph (0.89-1) stable; urgency=low
 
   * New upstream release

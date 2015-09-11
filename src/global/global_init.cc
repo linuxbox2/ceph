@@ -31,6 +31,10 @@
 
 #include <errno.h>
 #include <deque>
+#ifdef WITH_LTTNG
+#include <lttng/ust.h>
+#endif
+
 
 #define dout_subsys ceph_subsys_
 
@@ -116,8 +120,6 @@ void global_init(std::vector < const char * > *alt_def_args,
 {
   global_pre_init(alt_def_args, args, module_type, code_env, flags);
 
-  g_lockdep = g_ceph_context->_conf->lockdep;
-
   // signal stuff
   int siglist[] = { SIGPIPE, 0 };
   block_signals(siglist, NULL);
@@ -138,9 +140,6 @@ void global_init(std::vector < const char * > *alt_def_args,
     }
   }
 
-  if (g_lockdep) {
-    lockdep_register_ceph_context(g_ceph_context);
-  }
   register_assert_context(g_ceph_context);
 
   // call all observers now.  this has the side-effect of configuring
@@ -188,6 +187,11 @@ void global_init_daemonize(CephContext *cct, int flags)
   if (global_init_prefork(cct, flags) < 0)
     return;
 
+#ifdef WITH_LTTNG
+  sigset_t sigset;
+  ust_before_fork(&sigset);
+#endif
+
   int ret = daemon(1, 1);
   if (ret) {
     ret = errno;
@@ -196,6 +200,9 @@ void global_init_daemonize(CephContext *cct, int flags)
     exit(1);
   }
 
+#ifdef WITH_LTTNG
+  ust_after_fork_child(&sigset);
+#endif
   global_init_postfork_start(cct);
   global_init_postfork_finish(cct, flags);
 }

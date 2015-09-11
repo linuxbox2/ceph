@@ -79,10 +79,10 @@ string lowercase_underscore_http_attr(const string& orig)
   for (size_t i = 0; i < orig.size(); ++i, ++s) {
     switch (*s) {
       case '-':
-	buf[i] = '_';
-	break;
+        buf[i] = '_';
+        break;
       default:
-	buf[i] = tolower(*s);
+        buf[i] = tolower(*s);
     }
   }
   return string(buf);
@@ -101,10 +101,32 @@ string uppercase_underscore_http_attr(const string& orig)
   for (size_t i = 0; i < orig.size(); ++i, ++s) {
     switch (*s) {
       case '-':
-	buf[i] = '_';
-	break;
+        buf[i] = '_';
+        break;
       default:
-	buf[i] = toupper(*s);
+        buf[i] = toupper(*s);
+    }
+  }
+  return string(buf);
+}
+
+/*
+ * make attrs look-like-this
+ * converts underscores to dashes
+ */
+string lowercase_dash_http_attr(const string& orig)
+{
+  const char *s = orig.c_str();
+  char buf[orig.size() + 1];
+  buf[orig.size()] = '\0';
+
+  for (size_t i = 0; i < orig.size(); ++i, ++s) {
+    switch (*s) {
+      case '_':
+        buf[i] = '-';
+        break;
+      default:
+        buf[i] = tolower(*s);
     }
   }
   return string(buf);
@@ -125,21 +147,24 @@ string camelcase_dash_http_attr(const string& orig)
   for (size_t i = 0; i < orig.size(); ++i, ++s) {
     switch (*s) {
       case '_':
-	buf[i] = '-';
-	last_sep = true;
-	break;
+        buf[i] = '-';
+        last_sep = true;
+        break;
       default:
-	if (last_sep)
-	  buf[i] = toupper(*s);
-	else
-	  buf[i] = tolower(*s);
-	last_sep = false;
+        if (last_sep)
+          buf[i] = toupper(*s);
+        else
+          buf[i] = tolower(*s);
+        last_sep = false;
     }
   }
   return string(buf);
 }
 
-void rgw_rest_init(CephContext *cct)
+/* avoid duplicate hostnames in hostnames list */
+static set<string> hostnames_set;
+
+void rgw_rest_init(CephContext *cct, RGWRegion& region)
 {
   for (struct rgw_http_attr *attr = rgw_to_http_attr_list; attr->rgw_attr; attr++) {
     rgw_to_http_attrs[attr->rgw_attr] = attr->http_attr;
@@ -168,6 +193,59 @@ void rgw_rest_init(CephContext *cct)
   for (const struct rgw_http_status_code *h = http_codes; h->code; h++) {
     http_status_names[h->code] = h->name;
   }
+
+  if (!cct->_conf->rgw_dns_name.empty()) {
+    hostnames_set.insert(cct->_conf->rgw_dns_name);
+  }
+  hostnames_set.insert(region.hostnames.begin(),  region.hostnames.end());
+  /* TODO: We should have a sanity check that no hostname matches the end of
+   * any other hostname, otherwise we will get ambigious results from
+   * rgw_find_host_in_domains.
+   * Eg: 
+   * Hostnames: [A, B.A]
+   * Inputs: [Z.A, X.B.A]
+   * Z.A clearly splits to subdomain=Z, domain=Z
+   * X.B.A ambigously splits to both {X, B.A} and {X.B, A}
+   */
+}
+
+static bool str_ends_with(const string& s, const string& suffix, size_t *pos)
+{
+  size_t len = suffix.size();
+  if (len > (size_t)s.size()) {
+    return false;
+  }
+
+  ssize_t p = s.size() - len;
+  if (pos) {
+    *pos = p;
+  }
+
+  return s.compare(p, len, suffix) == 0;
+}
+
+static bool rgw_find_host_in_domains(const string& host, string *domain, string *subdomain)
+{
+  set<string>::iterator iter;
+  for (iter = hostnames_set.begin(); iter != hostnames_set.end(); ++iter) {
+    size_t pos;
+    if (!str_ends_with(host, *iter, &pos))
+      continue;
+
+    *domain = host.substr(pos);
+    if (pos == 0) {
+      subdomain->clear();
+    } else {
+      if (host[pos - 1] != '.') {
+        continue;
+      }
+
+      *domain = host.substr(pos);
+      *subdomain = host.substr(0, pos - 1);
+    }
+    return true;
+  }
+  return false;
 }
 
 static void dump_status(struct req_state *s, const char *status, const char *status_name)
@@ -241,13 +319,21 @@ void dump_errno(struct req_state *s, int err)
   dump_status(s, buf, http_status_names[s->err.http_ret]);
 }
 
+void dump_string_header(struct req_state *s, const char *name, const char *val)
+{
+  int r = s->cio->print("%s: %s\r\n", name, val);
+  if (r < 0) {
+    ldout(s->cct, 0) << "ERROR: s->cio->print() returned err=" << r << dendl;
+  }
+}
+
 void dump_content_length(struct req_state *s, uint64_t len)
 {
   int r = s->cio->send_content_length(len);
   if (r < 0) {
     ldout(s->cct, 0) << "ERROR: s->cio->print() returned err=" << r << dendl;
   }
-  r = s->cio->print("Accept-Ranges: %s\n", "bytes");
+  r = s->cio->print("Accept-Ranges: %s\r\n", "bytes");
   if (r < 0) {
     ldout(s->cct, 0) << "ERROR: s->cio->print() returned err=" << r << dendl;
   }
@@ -257,9 +343,9 @@ void dump_etag(struct req_state *s, const char *etag)
 {
   int r;
   if (s->prot_flags & RGW_REST_SWIFT)
-    r = s->cio->print("etag: %s\n", etag);
+    r = s->cio->print("etag: %s\r\n", etag);
   else
-    r = s->cio->print("ETag: \"%s\"\n", etag);
+    r = s->cio->print("ETag: \"%s\"\r\n", etag);
   if (r < 0) {
     ldout(s->cct, 0) << "ERROR: s->cio->print() returned err=" << r << dendl;
   }
@@ -268,22 +354,19 @@ void dump_etag(struct req_state *s, const char *etag)
 void dump_pair(struct req_state *s, const char *key, const char *value)
 {
   if ( (strlen(key) > 0) && (strlen(value) > 0))
-    s->cio->print("%s: %s\n", key, value);
+    s->cio->print("%s: %s\r\n", key, value);
 }
 
 void dump_bucket_from_state(struct req_state *s)
 {
   int expose_bucket = g_conf->rgw_expose_bucket;
   if (expose_bucket) {
-    if (!s->bucket_name_str.empty())
-      s->cio->print("Bucket: \"%s\"\n", s->bucket_name_str.c_str());
+    if (!s->bucket_name_str.empty()) {
+      string b;
+      url_encode(s->bucket_name_str, b);
+      s->cio->print("Bucket: %s\r\n", b.c_str());
+    }
   }
-}
-
-void dump_object_from_state(struct req_state *s)
-{
-  if (!s->object_str.empty())
-    s->cio->print("Key: \"%s\"\n", s->object_str.c_str());
 }
 
 void dump_uri_from_state(struct req_state *s)
@@ -297,14 +380,14 @@ void dump_uri_from_state(struct req_state *s)
     if (!s->bucket_name_str.empty()) {
       location += s->bucket_name_str;
       location += "/";
-      if (!s->object_str.empty()) {
-        location += s->object_str;
-        s->cio->print("Location: %s\n", location.c_str());
+      if (!s->object.empty()) {
+        location += s->object.name;
+        s->cio->print("Location: %s\r\n", location.c_str());
       }
     }
   }
   else {
-    s->cio->print("Location: \"%s\"\n", s->info.request_uri.c_str());
+    s->cio->print("Location: \"%s\"\r\n", s->info.request_uri.c_str());
   }
 }
 
@@ -313,10 +396,10 @@ void dump_redirect(struct req_state *s, const string& redirect)
   if (redirect.empty())
     return;
 
-  s->cio->print("Location: %s\n", redirect.c_str());
+  s->cio->print("Location: %s\r\n", redirect.c_str());
 }
 
-static void dump_time_header(struct req_state *s, const char *name, time_t t)
+void dump_time_header(struct req_state *s, const char *name, time_t t)
 {
 
   char timestr[TIME_BUF_SIZE];
@@ -328,7 +411,7 @@ static void dump_time_header(struct req_state *s, const char *name, time_t t)
   if (strftime(timestr, sizeof(timestr), "%a, %d %b %Y %H:%M:%S %Z", tmp) == 0)
     return;
 
-  int r = s->cio->print("%s: %s\n", name, timestr);
+  int r = s->cio->print("%s: %s\r\n", name, timestr);
   if (r < 0) {
     ldout(s->cct, 0) << "ERROR: s->cio->print() returned err=" << r << dendl;
   }
@@ -344,7 +427,7 @@ void dump_epoch_header(struct req_state *s, const char *name, time_t t)
   char buf[32];
   snprintf(buf, sizeof(buf), "%lld", (long long)t);
 
-  int r = s->cio->print("%s: %s\n", name, buf);
+  int r = s->cio->print("%s: %s\r\n", name, buf);
   if (r < 0) {
     ldout(s->cct, 0) << "ERROR: s->cio->print() returned err=" << r << dendl;
   }
@@ -377,16 +460,16 @@ void dump_owner(struct req_state *s, string& id, string& name, const char *secti
 void dump_access_control(struct req_state *s, const char *origin, const char *meth,
                          const char *hdr, const char *exp_hdr, uint32_t max_age) {
   if (origin && (origin[0] != '\0')) {
-    s->cio->print("Access-Control-Allow-Origin: %s\n", origin);
+    s->cio->print("Access-Control-Allow-Origin: %s\r\n", origin);
     if (meth && (meth[0] != '\0'))
-      s->cio->print("Access-Control-Allow-Methods: %s\n", meth);
+      s->cio->print("Access-Control-Allow-Methods: %s\r\n", meth);
     if (hdr && (hdr[0] != '\0'))
-      s->cio->print("Access-Control-Allow-Headers: %s\n", hdr);
+      s->cio->print("Access-Control-Allow-Headers: %s\r\n", hdr);
     if (exp_hdr && (exp_hdr[0] != '\0')) {
-      s->cio->print("Access-Control-Expose-Headers: %s\n", exp_hdr);
+      s->cio->print("Access-Control-Expose-Headers: %s\r\n", exp_hdr);
     }
     if (max_age != CORS_MAX_AGE_INVALID) {
-      s->cio->print("Access-Control-Max-Age: %d\n", max_age);
+      s->cio->print("Access-Control-Max-Age: %d\r\n", max_age);
     }
   }
 }
@@ -414,15 +497,34 @@ void dump_start(struct req_state *s)
   }
 }
 
-void end_header(struct req_state *s, RGWOp *op, const char *content_type)
+void dump_trans_id(req_state *s)
+{
+  if (s->prot_flags & RGW_REST_SWIFT) {
+    s->cio->print("X-Trans-Id: ts-%s\r\n", s->trans_id.c_str());
+  }
+  else {
+    s->cio->print("x-amz-request-id: %s\r\n", s->trans_id.c_str());
+  }
+}
+
+void end_header(struct req_state *s, RGWOp *op, const char *content_type, const int64_t proposed_content_length,
+		bool force_content_type)
 {
   string ctype;
+
+  dump_trans_id(s);
 
   if (op) {
     dump_access_control(s, op);
   }
 
-  if (!content_type || s->err.is_err()) {
+  if (s->prot_flags & RGW_REST_SWIFT) {
+    force_content_type = true;
+  }
+
+  /* do not send content type if content length is zero
+     and the content type was not set by the user */
+  if (force_content_type || (!content_type &&  s->formatter->get_len()  != 0) || s->err.is_err()){
     switch (s->format) {
     case RGW_FORMAT_XML:
       ctype = "application/xml";
@@ -447,10 +549,18 @@ void end_header(struct req_state *s, RGWOp *op, const char *content_type)
       s->formatter->dump_string("Message", s->err.message);
     s->formatter->close_section();
     dump_content_length(s, s->formatter->get_len());
+  } else {
+    if (proposed_content_length != NO_CONTENT_LENGTH) {
+      dump_content_length(s, proposed_content_length);
+    }
   }
-  int r = s->cio->print("Content-type: %s\r\n", content_type);
-  if (r < 0) {
-    ldout(s->cct, 0) << "ERROR: s->cio->print() returned err=" << r << dendl;
+
+  int r;
+  if (content_type) {
+      r = s->cio->print("Content-type: %s\r\n", content_type);
+      if (r < 0) {
+	ldout(s->cct, 0) << "ERROR: s->cio->print() returned err=" << r << dendl;
+      }
   }
   r = s->cio->complete_header();
   if (r < 0) {
@@ -501,7 +611,7 @@ void dump_range(struct req_state *s, uint64_t ofs, uint64_t end, uint64_t total)
 
   /* dumping range into temp buffer first, as libfcgi will fail to digest %lld */
   snprintf(range_buf, sizeof(range_buf), "%lld-%lld/%lld", (long long)ofs, (long long)end, (long long)total);
-  int r = s->cio->print("Content-Range: bytes %s\n", range_buf);
+  int r = s->cio->print("Content-Range: bytes %s\r\n", range_buf);
   if (r < 0) {
     ldout(s->cct, 0) << "ERROR: s->cio->print() returned err=" << r << dendl;
   }
@@ -709,7 +819,7 @@ int RGWPutObj_ObjStore::verify_params()
 {
   if (s->length) {
     off_t len = atoll(s->length);
-    if (len > (off_t)RGW_MAX_PUT_SIZE) {
+    if (len > (off_t)(s->cct->_conf->rgw_max_put_size)) {
       return -ERR_TOO_LARGE;
     }
   }
@@ -748,7 +858,7 @@ int RGWPutObj_ObjStore::get_data(bufferlist& bl)
     bl.append(bp, 0, len);
   }
 
-  if ((uint64_t)ofs + len > RGW_MAX_PUT_SIZE) {
+  if ((uint64_t)ofs + len > s->cct->_conf->rgw_max_put_size) {
     return -ERR_TOO_LARGE;
   }
 
@@ -767,7 +877,7 @@ int RGWPostObj_ObjStore::verify_params()
     return -ERR_LENGTH_REQUIRED;
   }
   off_t len = atoll(s->length);
-  if (len > (off_t)RGW_MAX_PUT_SIZE) {
+  if (len > (off_t)(s->cct->_conf->rgw_max_put_size)) {
     return -ERR_TOO_LARGE;
   }
 
@@ -1008,6 +1118,21 @@ int RGWHandler_ObjStore::allocate_formatter(struct req_state *s, int default_typ
       s->format = RGW_FORMAT_XML;
     } else if (format_str.compare("json") == 0) {
       s->format = RGW_FORMAT_JSON;
+    } else {
+      const char *accept = s->info.env->get("HTTP_ACCEPT");
+      if (accept) {
+        char format_buf[64];
+        unsigned int i = 0;
+        for (; i < sizeof(format_buf) - 1 && accept[i] && accept[i] != ';'; ++i) {
+          format_buf[i] = accept[i];
+        }
+        format_buf[i] = 0;
+        if ((strcmp(format_buf, "text/xml") == 0) || (strcmp(format_buf, "application/xml") == 0)) {
+          s->format = RGW_FORMAT_XML;
+        } else if (strcmp(format_buf, "application/json") == 0) {
+          s->format = RGW_FORMAT_JSON;
+        }
+      }
     }
   }
 
@@ -1114,7 +1239,7 @@ int RGWHandler_ObjStore::read_permissions(RGWOp *op_obj)
       break;
     }
     /* is it a 'create bucket' request? */
-    if ((s->op == OP_PUT) && s->object_str.size() == 0)
+    if (op_obj->get_type() == RGW_OP_CREATE_BUCKET)
       return 0;
     only_bucket = true;
     break;
@@ -1204,49 +1329,129 @@ RGWRESTMgr::~RGWRESTMgr()
   delete default_mgr;
 }
 
+static int64_t parse_content_length(const char *content_length)
+{
+  int64_t len = -1;
+
+  if (*content_length == '\0') {
+    len = 0;
+  } else {
+    string err;
+    len = strict_strtoll(content_length, 10, &err);
+    if (!err.empty()) {
+      len = -1;
+    }
+  }
+
+  return len;
+}
 int RGWREST::preprocess(struct req_state *s, RGWClientIO *cio)
 {
   req_info& info = s->info;
 
   s->cio = cio;
-  if (g_conf->rgw_dns_name.length() && info.host) {
-    string h(s->info.host);
+  if (info.host.size()) {
+    ldout(s->cct, 10) << "host=" << info.host << dendl;
+    string domain;
+    string subdomain;
+    bool in_hosted_domain = rgw_find_host_in_domains(info.host, &domain,
+						     &subdomain);
+    ldout(s->cct, 20) << "subdomain=" << subdomain << " domain=" << domain
+		      << " in_hosted_domain=" << in_hosted_domain << dendl;
 
-    ldout(s->cct, 10) << "host=" << s->info.host << " rgw_dns_name=" << g_conf->rgw_dns_name << dendl;
-    int pos = h.find(g_conf->rgw_dns_name);
-
-    if (g_conf->rgw_resolve_cname && pos < 0) {
+    if (g_conf->rgw_resolve_cname && !in_hosted_domain) {
       string cname;
       bool found;
-      int r = rgw_resolver->resolve_cname(h, cname, &found);
+      int r = rgw_resolver->resolve_cname(info.host, cname, &found);
       if (r < 0) {
-	dout(0) << "WARNING: rgw_resolver->resolve_cname() returned r=" << r << dendl;
+	ldout(s->cct, 0) << "WARNING: rgw_resolver->resolve_cname() returned r=" << r << dendl;
       }
       if (found) {
-        dout(0) << "resolved host cname " << h << " -> " << cname << dendl;
-	h = cname;
-        pos = h.find(g_conf->rgw_dns_name);
+        ldout(s->cct, 5) << "resolved host cname " << info.host << " -> "
+			 << cname << dendl;
+        in_hosted_domain = rgw_find_host_in_domains(cname, &domain, &subdomain);
+        ldout(s->cct, 20) << "subdomain=" << subdomain << " domain=" << domain
+			  << " in_hosted_domain=" << in_hosted_domain << dendl;
       }
     }
 
-    if (pos > 0 && h[pos - 1] == '.') {
+    if (in_hosted_domain && !subdomain.empty()) {
       string encoded_bucket = "/";
-      encoded_bucket.append(h.substr(0, pos-1));
+      encoded_bucket.append(subdomain);
       if (s->info.request_uri[0] != '/')
-	encoded_bucket.append("/'");
+        encoded_bucket.append("/'");
       encoded_bucket.append(s->info.request_uri);
       s->info.request_uri = encoded_bucket;
     }
+
+    if (!domain.empty()) {
+      s->info.domain = domain;
+    }
+  }
+
+  if (s->info.domain.empty()) {
+    s->info.domain = s->cct->_conf->rgw_dns_name;
   }
 
   url_decode(s->info.request_uri, s->decoded_uri);
-  s->length = info.env->get("CONTENT_LENGTH");
+
+  /* FastCGI specification, section 6.3
+   * http://www.fastcgi.com/devkit/doc/fcgi-spec.html#S6.3
+   * ===
+   * The Authorizer application receives HTTP request information from the Web
+   * server on the FCGI_PARAMS stream, in the same format as a Responder. The
+   * Web server does not send CONTENT_LENGTH, PATH_INFO, PATH_TRANSLATED, and
+   * SCRIPT_NAME headers.
+   * ===
+   * Ergo if we are in Authorizer role, we MUST look at HTTP_CONTENT_LENGTH
+   * instead of CONTENT_LENGTH for the Content-Length.
+   *
+   * There is one slight wrinkle in this, and that's older versions of 
+   * nginx/lighttpd/apache setting BOTH headers. As a result, we have to check
+   * both headers and can't always simply pick A or B.
+   */
+  const char* content_length = info.env->get("CONTENT_LENGTH");
+  const char* http_content_length = info.env->get("HTTP_CONTENT_LENGTH");
+  if (!http_content_length != !content_length) {
+    /* Easy case: one or the other is missing */
+    s->length = (content_length ? content_length : http_content_length);
+  } else if (s->cct->_conf->rgw_content_length_compat && content_length && http_content_length) {
+    /* Hard case: Both are set, we have to disambiguate */
+    int64_t content_length_i, http_content_length_i;
+
+    content_length_i = parse_content_length(content_length);
+    http_content_length_i = parse_content_length(http_content_length);
+
+    // Now check them:
+    if (http_content_length_i < 0) {
+      // HTTP_CONTENT_LENGTH is invalid, ignore it
+    } else if (content_length_i < 0) {
+      // CONTENT_LENGTH is invalid, and HTTP_CONTENT_LENGTH is valid
+      // Swap entries
+      content_length = http_content_length;
+    } else {
+      // both CONTENT_LENGTH and HTTP_CONTENT_LENGTH are valid
+      // Let's pick the larger size
+      if (content_length_i < http_content_length_i) {
+	// prefer the larger value
+	content_length = http_content_length;
+      }
+    }
+    s->length = content_length;
+    // End of: else if (s->cct->_conf->rgw_content_length_compat && content_length &&
+    // http_content_length)
+  } else {
+    /* no content length was defined */
+    s->length = NULL;
+  }
+
+
   if (s->length) {
     if (*s->length == '\0') {
       s->content_length = 0;
     } else {
       string err;
-      s->content_length = strict_strtol(s->length, 10, &err);
+      s->content_length = strict_strtoll(s->length, 10, &err);
       if (!err.empty()) {
         ldout(s->cct, 10) << "bad content length, aborting" << dendl;
         return -EINVAL;

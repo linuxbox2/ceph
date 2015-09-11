@@ -1,6 +1,7 @@
 #!/bin/bash
 #
 # Copyright (C) 2013 Cloudwatt <libre.licensing@cloudwatt.com>
+# Copyright (C) 2015 Red Hat <contact@redhat.com>
 #
 # Author: Loic Dachary <loic@dachary.org>
 #
@@ -15,9 +16,10 @@
 # GNU Library Public License for more details.
 #
 
-source test/mon/mon-test-helpers.sh
+source ../qa/workunits/ceph-helpers.sh
 
-export CEPH_DIR="$PWD/test-$CEPH_PORT"
+export CEPH_VSTART_WRAPPER=1
+export CEPH_DIR="$PWD/testdir/test-$CEPH_PORT"
 export CEPH_DEV_DIR="$CEPH_DIR/dev"
 export CEPH_OUT_DIR="$CEPH_DIR/out"
 
@@ -27,10 +29,10 @@ function vstart_setup()
     mkdir -p $CEPH_DEV_DIR
     trap "teardown $CEPH_DIR" EXIT
     export LC_ALL=C # some tests are vulnerable to i18n
+    export PATH="$(pwd):${PATH}"
     ./vstart.sh \
         -o 'paxos propose interval = 0.01' \
         -n -l $CEPH_START || return 1
-    export PATH=.:$PATH
     export CEPH_CONF=$CEPH_DIR/ceph.conf
 
     crit=$(expr 100 - $(ceph-conf --show-config-value mon_data_avail_crit))

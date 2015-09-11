@@ -35,6 +35,10 @@ public:
     }
 };
 
+#pragma GCC diagnostic ignored "-Wpragmas"
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+
 struct WatcherUnwatcher : public Thread {
   string pool;
   WatcherUnwatcher(string& _pool) : pool(_pool) {}
@@ -48,9 +52,10 @@ struct WatcherUnwatcher : public Thread {
 
       uint64_t handle;
       WatchNotifyTestCtx watch_ctx;
-      ioctx.watch("foo", 0, &handle, &watch_ctx);
+      int r = ioctx.watch("foo", 0, &handle, &watch_ctx);
       bufferlist bl;
-      ioctx.unwatch("foo", handle);
+      if (r == 0)
+	ioctx.unwatch("foo", handle);
       ioctx.close();
     }
     return NULL;
@@ -116,3 +121,6 @@ TEST_P(WatchStress, Stress1) {
   ASSERT_EQ(0, destroy_one_pool_pp(pool_name, ncluster));
   sem_destroy(&sem);
 }
+
+#pragma GCC diagnostic pop
+#pragma GCC diagnostic warning "-Wpragmas"

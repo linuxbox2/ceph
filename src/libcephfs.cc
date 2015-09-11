@@ -77,7 +77,7 @@ public:
       goto fail;
 
     //network connection
-    messenger = Messenger::create(cct, entity_name_t::CLIENT(), "client", msgr_nonce);
+    messenger = Messenger::create(cct, cct->_conf->ms_type, entity_name_t::CLIENT(), "client", msgr_nonce);
 
     //at last the client
     ret = -CEPHFS_ERROR_NEW_CLIENT; //defined in libcephfs.h;
@@ -632,6 +632,14 @@ extern "C" int ceph_lgetxattr(struct ceph_mount_info *cmount, const char *path, 
   return cmount->get_client()->lgetxattr(path, name, value, size);
 }
 
+extern "C" int ceph_fgetxattr(struct ceph_mount_info *cmount, int fd, const char *name, void *value, size_t size)
+{
+  if (!cmount->is_mounted())
+    return -ENOTCONN;
+  return cmount->get_client()->fgetxattr(fd, name, value, size);
+}
+
+
 extern "C" int ceph_listxattr(struct ceph_mount_info *cmount, const char *path, char *list, size_t size)
 {
   if (!cmount->is_mounted())
@@ -644,6 +652,13 @@ extern "C" int ceph_llistxattr(struct ceph_mount_info *cmount, const char *path,
   if (!cmount->is_mounted())
     return -ENOTCONN;
   return cmount->get_client()->llistxattr(path, list, size);
+}
+
+extern "C" int ceph_flistxattr(struct ceph_mount_info *cmount, int fd, char *list, size_t size)
+{
+  if (!cmount->is_mounted())
+    return -ENOTCONN;
+  return cmount->get_client()->flistxattr(fd, list, size);
 }
 
 extern "C" int ceph_removexattr(struct ceph_mount_info *cmount, const char *path, const char *name)
@@ -660,6 +675,13 @@ extern "C" int ceph_lremovexattr(struct ceph_mount_info *cmount, const char *pat
   return cmount->get_client()->lremovexattr(path, name);
 }
 
+extern "C" int ceph_fremovexattr(struct ceph_mount_info *cmount, int fd, const char *name)
+{
+  if (!cmount->is_mounted())
+    return -ENOTCONN;
+  return cmount->get_client()->fremovexattr(fd, name);
+}
+
 extern "C" int ceph_setxattr(struct ceph_mount_info *cmount, const char *path, const char *name, const void *value, size_t size, int flags)
 {
   if (!cmount->is_mounted())
@@ -672,6 +694,13 @@ extern "C" int ceph_lsetxattr(struct ceph_mount_info *cmount, const char *path, 
   if (!cmount->is_mounted())
     return -ENOTCONN;
   return cmount->get_client()->lsetxattr(path, name, value, size, flags);
+}
+
+extern "C" int ceph_fsetxattr(struct ceph_mount_info *cmount, int fd, const char *name, const void *value, size_t size, int flags)
+{
+  if (!cmount->is_mounted())
+    return -ENOTCONN;
+  return cmount->get_client()->fsetxattr(fd, name, value, size, flags);
 }
 /* end xattr support */
 
@@ -716,6 +745,14 @@ extern "C" int ceph_utime(struct ceph_mount_info *cmount, const char *path,
   if (!cmount->is_mounted())
     return -ENOTCONN;
   return cmount->get_client()->utime(path, buf);
+}
+
+extern "C" int ceph_flock(struct ceph_mount_info *cmount, int fd, int operation,
+			  uint64_t owner)
+{
+  if (!cmount->is_mounted())
+    return -ENOTCONN;
+  return cmount->get_client()->flock(fd, operation, owner);
 }
 
 extern "C" int ceph_truncate(struct ceph_mount_info *cmount, const char *path,
@@ -775,12 +812,28 @@ extern "C" int ceph_read(struct ceph_mount_info *cmount, int fd, char *buf,
   return cmount->get_client()->read(fd, buf, size, offset);
 }
 
+extern "C" int ceph_preadv(struct ceph_mount_info *cmount, int fd,
+              const struct iovec *iov, int iovcnt, int64_t offset)
+{
+  if (!cmount->is_mounted())
+      return -ENOTCONN;
+  return cmount->get_client()->preadv(fd, iov, iovcnt, offset);
+}
+
 extern "C" int ceph_write(struct ceph_mount_info *cmount, int fd, const char *buf,
 			  int64_t size, int64_t offset)
 {
   if (!cmount->is_mounted())
     return -ENOTCONN;
   return cmount->get_client()->write(fd, buf, size, offset);
+}
+
+extern "C" int ceph_pwritev(struct ceph_mount_info *cmount, int fd,
+              const struct iovec *iov, int iovcnt, int64_t offset)
+{
+  if (!cmount->is_mounted())
+    return -ENOTCONN;
+  return cmount->get_client()->pwritev(fd, iov, iovcnt, offset);
 }
 
 extern "C" int ceph_ftruncate(struct ceph_mount_info *cmount, int fd, int64_t size)

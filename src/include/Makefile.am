@@ -1,11 +1,6 @@
-libcephfs_includedir = $(includedir)/cephfs
-libcephfs_include_DATA = $(srcdir)/include/cephfs/libcephfs.h
+if ENABLE_CLIENT
 
-librbd_includedir = $(includedir)/rbd
-librbd_include_DATA = \
-	$(srcdir)/include/rbd/features.h \
-	$(srcdir)/include/rbd/librbd.h \
-	$(srcdir)/include/rbd/librbd.hpp
+if WITH_RADOS
 
 rados_includedir = $(includedir)/rados
 rados_include_DATA = \
@@ -18,10 +13,33 @@ rados_include_DATA = \
 	$(srcdir)/include/crc32c.h \
 	$(srcdir)/include/memory.h
 
+
+if WITH_RBD
+librbd_includedir = $(includedir)/rbd
+librbd_include_DATA = \
+	$(srcdir)/include/rbd/features.h \
+	$(srcdir)/include/rbd/librbd.h \
+	$(srcdir)/include/rbd/librbd.hpp
+endif # WITH_RBD
+
+
+if WITH_RADOSSTRIPER
 radosstriper_includedir = $(includedir)/radosstriper
 radosstriper_include_DATA = \
 	$(srcdir)/include/radosstriper/libradosstriper.h \
 	$(srcdir)/include/radosstriper/libradosstriper.hpp
+endif # WITH_RADOSSTRIPER
+
+
+if WITH_CEPHFS
+libcephfs_includedir = $(includedir)/cephfs
+libcephfs_include_DATA = $(srcdir)/include/cephfs/libcephfs.h
+endif # WITH_CEPHFS
+
+
+endif # WITH_RADOS
+
+endif # ENABLE_CLIENT
 
 noinst_HEADERS += \
 	include/Context.h \
@@ -67,12 +85,13 @@ noinst_HEADERS += \
 	include/str_list.h \
 	include/str_map.h \
 	include/stringify.h \
-	include/triple.h \
 	include/types.h \
 	include/utime.h \
 	include/elist.h \
 	include/uuid.h \
 	include/xlist.h \
+	include/compact_map.h \
+	include/compact_set.h \
 	include/rados/librados.h \
 	include/rados/rados_types.h \
 	include/rados/rados_types.hpp \
@@ -86,11 +105,11 @@ noinst_HEADERS += \
 	include/rbd/features.h \
 	include/rbd/librbd.h \
 	include/rbd/librbd.hpp\
+	include/rbd/object_map_types.h \
 	include/util.h\
 	include/stat.h \
 	include/on_exit.h \
 	include/memory.h \
 	include/rados/memory.h \
-	include/hash_namespace.h \
 	include/unordered_set.h \
 	include/unordered_map.h

@@ -175,6 +175,7 @@ TEST(LibRadosAio, TooBig) {
                                          my_completion, buf, UINT_MAX));
   ASSERT_EQ(-E2BIG, rados_aio_append(test_data.m_ioctx, "foo",
                                      my_completion, buf, UINT_MAX));
+  rados_aio_release(my_completion);
 }
 
 TEST(LibRadosAio, TooBigPP) {
@@ -187,6 +188,7 @@ TEST(LibRadosAio, TooBigPP) {
   ASSERT_EQ(-E2BIG, test_data.m_ioctx.aio_write("foo", aio_completion, bl, UINT_MAX, 0));
   ASSERT_EQ(-E2BIG, test_data.m_ioctx.aio_append("foo", aio_completion, bl, UINT_MAX));
   // ioctx.aio_write_full no way to overflow bl.length()
+  delete aio_completion;
 }
 
 TEST(LibRadosAio, SimpleWrite) {
@@ -207,17 +209,19 @@ TEST(LibRadosAio, SimpleWrite) {
   ASSERT_EQ(0, rados_aio_get_return_value(my_completion));
 
   rados_ioctx_set_namespace(test_data.m_ioctx, "nspace");
+  rados_completion_t my_completion2;
   ASSERT_EQ(0, rados_aio_create_completion((void*)&test_data,
-	      set_completion_complete, set_completion_safe, &my_completion));
+	      set_completion_complete, set_completion_safe, &my_completion2));
   ASSERT_EQ(0, rados_aio_write(test_data.m_ioctx, "foo",
-			       my_completion, buf, sizeof(buf), 0));
+			       my_completion2, buf, sizeof(buf), 0));
   {
     TestAlarm alarm;
     sem_wait(&test_data.m_sem);
     sem_wait(&test_data.m_sem);
   }
-  ASSERT_EQ(0, rados_aio_get_return_value(my_completion));
+  ASSERT_EQ(0, rados_aio_get_return_value(my_completion2));
   rados_aio_release(my_completion);
+  rados_aio_release(my_completion2);
 }
 
 TEST(LibRadosAio, SimpleWritePP) {
@@ -434,6 +438,48 @@ TEST(LibRadosAio, RoundTripPP2) {
   delete my_completion;
   delete my_completion2;
 }
+
+//using ObjectWriteOperation/ObjectReadOperation with iohint
+TEST(LibRadosAio, RoundTripPP3)
+{
+  Rados cluster;
+  std::string pool_name = get_temp_pool_name();
+  ASSERT_EQ("", create_one_pool_pp(pool_name, cluster));
+  IoCtx ioctx;
+  cluster.ioctx_create(pool_name.c_str(), ioctx);
+
+  boost::scoped_ptr<AioCompletion> my_completion1(cluster.aio_create_completion(0, 0, 0));
+  ObjectWriteOperation op;
+  char buf[128];
+  memset(buf, 0xcc, sizeof(buf));
+  bufferlist bl;
+  bl.append(buf);
+
+  op.write(0, bl);
+  op.set_op_flags2(LIBRADOS_OP_FLAG_FADVISE_DONTNEED);
+  ioctx.aio_operate("test_obj", my_completion1.get(), &op);
+  {
+    TestAlarm alarm;
+    ASSERT_EQ(0, my_completion1->wait_for_complete());
+  }
+  EXPECT_EQ(0, my_completion1->get_return_value());
+
+  boost::scoped_ptr<AioCompletion> my_completion2(cluster.aio_create_completion(0, 0, 0));
+  bl.clear();
+  ObjectReadOperation op1;
+  op1.read(0, sizeof(buf), &bl, NULL);
+  op1.set_op_flags2(LIBRADOS_OP_FLAG_FADVISE_DONTNEED|LIBRADOS_OP_FLAG_FADVISE_RANDOM);
+  ioctx.aio_operate("test_obj", my_completion2.get(), &op1, 0);
+  {
+    TestAlarm alarm;
+    ASSERT_EQ(0, my_completion2->wait_for_complete());
+  }
+  EXPECT_EQ(0, my_completion2->get_return_value());
+  ASSERT_EQ(0, memcmp(buf, bl.c_str(), sizeof(buf)));
+  ioctx.remove("test_obj");
+  destroy_one_pool_pp(pool_name, cluster);
+}
+
 
 TEST(LibRadosAio, RoundTripAppend) {
   AioTestData test_data;
@@ -968,6 +1014,47 @@ TEST(LibRadosAio, RoundTripWriteFullPP) {
   delete my_completion3;
 }
 
+//using ObjectWriteOperation/ObjectReadOperation with iohint
+TEST(LibRadosAio, RoundTripWriteFullPP2)
+{
+  Rados cluster;
+  std::string pool_name = get_temp_pool_name();
+  ASSERT_EQ("", create_one_pool_pp(pool_name, cluster));
+  IoCtx ioctx;
+  cluster.ioctx_create(pool_name.c_str(), ioctx);
+
+  boost::scoped_ptr<AioCompletion> my_completion1(cluster.aio_create_completion(0, 0, 0));
+  ObjectWriteOperation op;
+  char buf[128];
+  memset(buf, 0xcc, sizeof(buf));
+  bufferlist bl;
+  bl.append(buf);
+
+  op.write_full(bl);
+  op.set_op_flags2(LIBRADOS_OP_FLAG_FADVISE_DONTNEED);
+  ioctx.aio_operate("test_obj", my_completion1.get(), &op);
+  {
+    TestAlarm alarm;
+    ASSERT_EQ(0, my_completion1->wait_for_complete());
+  }
+  EXPECT_EQ(0, my_completion1->get_return_value());
+
+  boost::scoped_ptr<AioCompletion> my_completion2(cluster.aio_create_completion(0, 0, 0));
+  bl.clear();
+  ObjectReadOperation op1;
+  op1.read(0, sizeof(buf), &bl, NULL);
+  op1.set_op_flags2(LIBRADOS_OP_FLAG_FADVISE_DONTNEED|LIBRADOS_OP_FLAG_FADVISE_RANDOM);
+  ioctx.aio_operate("test_obj", my_completion2.get(), &op1, 0);
+  {
+    TestAlarm alarm;
+    ASSERT_EQ(0, my_completion2->wait_for_complete());
+  }
+  EXPECT_EQ(0, my_completion2->get_return_value());
+  ASSERT_EQ(0, memcmp(buf, bl.c_str(), sizeof(buf)));
+
+  ioctx.remove("test_obj");
+  destroy_one_pool_pp(pool_name, cluster);
+}
 
 TEST(LibRadosAio, SimpleStat) {
   AioTestData test_data;
@@ -1406,6 +1493,53 @@ TEST(LibRadosAio, OmapPP) {
     ASSERT_EQ(set_got.size(), (unsigned)0);
   }
 
+  // omap_clear clears header *and* keys
+  {
+    boost::scoped_ptr<AioCompletion> my_completion(cluster.aio_create_completion(0, 0, 0));
+    ObjectWriteOperation op;
+    bufferlist bl;
+    bl.append("some data");
+    map<string,bufferlist> to_set;
+    to_set["foo"] = bl;
+    to_set["foo2"] = bl;
+    to_set["qfoo3"] = bl;
+    op.omap_set(to_set);
+    op.omap_set_header(bl);
+    ioctx.aio_operate("foo3", my_completion.get(), &op);
+    {
+      TestAlarm alarm;
+      ASSERT_EQ(0, my_completion->wait_for_complete());
+    }
+    EXPECT_EQ(0, my_completion->get_return_value());
+  }
+  {
+    boost::scoped_ptr<AioCompletion> my_completion(cluster.aio_create_completion(0, 0, 0));
+    ObjectWriteOperation op;
+    op.omap_clear();
+    ioctx.aio_operate("foo3", my_completion.get(), &op);
+    {
+      TestAlarm alarm;
+      ASSERT_EQ(0, my_completion->wait_for_complete());
+    }
+    EXPECT_EQ(0, my_completion->get_return_value());
+  }
+  {
+    boost::scoped_ptr<AioCompletion> my_completion(cluster.aio_create_completion(0, 0, 0));
+    ObjectReadOperation op;
+    set<string> set_got;
+    bufferlist hdr;
+    op.omap_get_keys("", -1, &set_got, 0);
+    op.omap_get_header(&hdr, NULL);
+    ioctx.aio_operate("foo3", my_completion.get(), &op, 0);
+    {
+      TestAlarm alarm;
+      ASSERT_EQ(0, my_completion->wait_for_complete());
+    }
+    EXPECT_EQ(0, my_completion->get_return_value());
+    ASSERT_EQ(set_got.size(), (unsigned)0);
+    ASSERT_EQ(hdr.length(), 0u);
+  }
+
   ioctx.remove("test_obj");
   destroy_one_pool_pp(pool_name, cluster);
 }
@@ -1674,17 +1808,19 @@ TEST(LibRadosAioEC, SimpleWrite) {
   ASSERT_EQ(0, rados_aio_get_return_value(my_completion));
 
   rados_ioctx_set_namespace(test_data.m_ioctx, "nspace");
+  rados_completion_t my_completion2;
   ASSERT_EQ(0, rados_aio_create_completion((void*)&test_data,
-	      set_completion_completeEC, set_completion_safeEC, &my_completion));
+	      set_completion_completeEC, set_completion_safeEC, &my_completion2));
   ASSERT_EQ(0, rados_aio_write(test_data.m_ioctx, "foo",
-			       my_completion, buf, sizeof(buf), 0));
+			       my_completion2, buf, sizeof(buf), 0));
   {
     TestAlarm alarm;
     sem_wait(&test_data.m_sem);
     sem_wait(&test_data.m_sem);
   }
-  ASSERT_EQ(0, rados_aio_get_return_value(my_completion));
+  ASSERT_EQ(0, rados_aio_get_return_value(my_completion2));
   rados_aio_release(my_completion);
+  rados_aio_release(my_completion2);
 }
 
 TEST(LibRadosAioEC, SimpleWritePP) {
@@ -1901,6 +2037,49 @@ TEST(LibRadosAioEC, RoundTripPP2) {
   delete my_completion;
   delete my_completion2;
 }
+
+//using ObjectWriteOperation/ObjectReadOperation with iohint
+TEST(LibRadosAioEC, RoundTripPP3)
+{
+  Rados cluster;
+  std::string pool_name = get_temp_pool_name();
+  ASSERT_EQ("", create_one_pool_pp(pool_name, cluster));
+  IoCtx ioctx;
+  cluster.ioctx_create(pool_name.c_str(), ioctx);
+
+  boost::scoped_ptr<AioCompletion> my_completion1(cluster.aio_create_completion(0, 0, 0));
+  ObjectWriteOperation op;
+  char buf[128];
+  memset(buf, 0xcc, sizeof(buf));
+  bufferlist bl;
+  bl.append(buf);
+
+  op.write(0, bl);
+  op.set_op_flags2(LIBRADOS_OP_FLAG_FADVISE_DONTNEED);
+  ioctx.aio_operate("test_obj", my_completion1.get(), &op);
+  {
+    TestAlarm alarm;
+    ASSERT_EQ(0, my_completion1->wait_for_complete());
+  }
+  EXPECT_EQ(0, my_completion1->get_return_value());
+
+  boost::scoped_ptr<AioCompletion> my_completion2(cluster.aio_create_completion(0, 0, 0));
+  bl.clear();
+  ObjectReadOperation op1;
+  op1.read(0, sizeof(buf), &bl, NULL);
+  op1.set_op_flags2(LIBRADOS_OP_FLAG_FADVISE_DONTNEED|LIBRADOS_OP_FLAG_FADVISE_RANDOM);
+  ioctx.aio_operate("test_obj", my_completion2.get(), &op1, 0);
+  {
+    TestAlarm alarm;
+    ASSERT_EQ(0, my_completion2->wait_for_complete());
+  }
+  EXPECT_EQ(0, my_completion2->get_return_value());
+  ASSERT_EQ(0, memcmp(buf, bl.c_str(), sizeof(buf)));
+
+  ioctx.remove("test_obj");
+  destroy_one_pool_pp(pool_name, cluster);
+}
+
 
 TEST(LibRadosAioEC, RoundTripAppend) {
   AioTestDataEC test_data;
@@ -2479,6 +2658,47 @@ TEST(LibRadosAioEC, RoundTripWriteFullPP) {
   delete my_completion3;
 }
 
+//using ObjectWriteOperation/ObjectReadOperation with iohint
+TEST(LibRadosAioEC, RoundTripWriteFullPP2)
+{
+  Rados cluster;
+  std::string pool_name = get_temp_pool_name();
+  ASSERT_EQ("", create_one_pool_pp(pool_name, cluster));
+  IoCtx ioctx;
+  cluster.ioctx_create(pool_name.c_str(), ioctx);
+
+  boost::scoped_ptr<AioCompletion> my_completion1(cluster.aio_create_completion(0, 0, 0));
+  ObjectWriteOperation op;
+  char buf[128];
+  memset(buf, 0xcc, sizeof(buf));
+  bufferlist bl;
+  bl.append(buf);
+
+  op.write_full(bl);
+  op.set_op_flags2(LIBRADOS_OP_FLAG_FADVISE_NOCACHE);
+  ioctx.aio_operate("test_obj", my_completion1.get(), &op);
+  {
+    TestAlarm alarm;
+    ASSERT_EQ(0, my_completion1->wait_for_complete());
+  }
+  EXPECT_EQ(0, my_completion1->get_return_value());
+
+  boost::scoped_ptr<AioCompletion> my_completion2(cluster.aio_create_completion(0, 0, 0));
+  bl.clear();
+  ObjectReadOperation op1;
+  op1.read(0, sizeof(buf), &bl, NULL);
+  op1.set_op_flags2(LIBRADOS_OP_FLAG_FADVISE_NOCACHE|LIBRADOS_OP_FLAG_FADVISE_RANDOM);
+  ioctx.aio_operate("test_obj", my_completion2.get(), &op1, 0);
+  {
+    TestAlarm alarm;
+    ASSERT_EQ(0, my_completion2->wait_for_complete());
+  }
+  EXPECT_EQ(0, my_completion2->get_return_value());
+  ASSERT_EQ(0, memcmp(buf, bl.c_str(), sizeof(buf)));
+
+  ioctx.remove("test_obj");
+  destroy_one_pool_pp(pool_name, cluster);
+}
 
 TEST(LibRadosAioEC, SimpleStat) {
   AioTestDataEC test_data;

@@ -9,7 +9,7 @@
 #include <set>
 #include <string>
 
-#include <iostream> //for testing, remove
+#include <iosfwd>
 
 #include "include/types.h"
 
@@ -87,6 +87,8 @@ public:
       crush_destroy(crush);
   }
 
+  crush_map *get_crush_map() { return crush; }
+
   /* building */
   void create() {
     if (crush)
@@ -105,6 +107,7 @@ public:
     crush->choose_total_tries = 19;
     crush->chooseleaf_descend_once = 0;
     crush->chooseleaf_vary_r = 0;
+    crush->allowed_bucket_algs = CRUSH_LEGACY_ALLOWED_BUCKET_ALGS;
   }
   void set_tunables_bobtail() {
     crush->choose_local_tries = 0;
@@ -112,6 +115,7 @@ public:
     crush->choose_total_tries = 50;
     crush->chooseleaf_descend_once = 1;
     crush->chooseleaf_vary_r = 0;
+    crush->allowed_bucket_algs = CRUSH_LEGACY_ALLOWED_BUCKET_ALGS;
   }
   void set_tunables_firefly() {
     crush->choose_local_tries = 0;
@@ -119,16 +123,32 @@ public:
     crush->choose_total_tries = 50;
     crush->chooseleaf_descend_once = 1;
     crush->chooseleaf_vary_r = 1;
+    crush->allowed_bucket_algs = CRUSH_LEGACY_ALLOWED_BUCKET_ALGS;
+  }
+  void set_tunables_hammer() {
+    crush->choose_local_tries = 0;
+    crush->choose_local_fallback_tries = 0;
+    crush->choose_total_tries = 50;
+    crush->chooseleaf_descend_once = 1;
+    crush->chooseleaf_vary_r = 1;
+    crush->allowed_bucket_algs =
+      (1 << CRUSH_BUCKET_UNIFORM) |
+      (1 << CRUSH_BUCKET_LIST) |
+      (1 << CRUSH_BUCKET_STRAW) |
+      (1 << CRUSH_BUCKET_STRAW2);
   }
 
   void set_tunables_legacy() {
     set_tunables_argonaut();
+    crush->straw_calc_version = 0;
   }
   void set_tunables_optimal() {
-    set_tunables_firefly();
+    set_tunables_hammer();
+    crush->straw_calc_version = 1;
   }
   void set_tunables_default() {
     set_tunables_bobtail();
+    crush->straw_calc_version = 1;
   }
 
   int get_choose_local_tries() const {
@@ -166,13 +186,29 @@ public:
     crush->chooseleaf_vary_r = n;
   }
 
+  int get_straw_calc_version() const {
+    return crush->straw_calc_version;
+  }
+  void set_straw_calc_version(int n) {
+    crush->straw_calc_version = n;
+  }
+
+  unsigned get_allowed_bucket_algs() const {
+    return crush->allowed_bucket_algs;
+  }
+  void set_allowed_bucket_algs(unsigned n) {
+    crush->allowed_bucket_algs = n;
+  }
+
   bool has_argonaut_tunables() const {
     return
       crush->choose_local_tries == 2 &&
       crush->choose_local_fallback_tries == 5 &&
       crush->choose_total_tries == 19 &&
       crush->chooseleaf_descend_once == 0 &&
-      crush->chooseleaf_vary_r == 0;
+      crush->chooseleaf_vary_r == 0 &&
+      crush->straw_calc_version == 0 &&
+      crush->allowed_bucket_algs == CRUSH_LEGACY_ALLOWED_BUCKET_ALGS;
   }
   bool has_bobtail_tunables() const {
     return
@@ -180,7 +216,9 @@ public:
       crush->choose_local_fallback_tries == 0 &&
       crush->choose_total_tries == 50 &&
       crush->chooseleaf_descend_once == 1 &&
-      crush->chooseleaf_vary_r == 0;
+      crush->chooseleaf_vary_r == 0 &&
+      crush->straw_calc_version == 0 &&
+      crush->allowed_bucket_algs == CRUSH_LEGACY_ALLOWED_BUCKET_ALGS;
   }
   bool has_firefly_tunables() const {
     return
@@ -188,8 +226,23 @@ public:
       crush->choose_local_fallback_tries == 0 &&
       crush->choose_total_tries == 50 &&
       crush->chooseleaf_descend_once == 1 &&
-      crush->chooseleaf_vary_r == 1;
+      crush->chooseleaf_vary_r == 1 &&
+      crush->straw_calc_version == 0 &&
+      crush->allowed_bucket_algs == CRUSH_LEGACY_ALLOWED_BUCKET_ALGS;
   }
+  bool has_hammer_tunables() const {
+    return
+      crush->choose_local_tries == 0 &&
+      crush->choose_local_fallback_tries == 0 &&
+      crush->choose_total_tries == 50 &&
+      crush->chooseleaf_descend_once == 1 &&
+      crush->chooseleaf_vary_r == 1 &&
+      crush->straw_calc_version == 1 &&
+      crush->allowed_bucket_algs == ((1 << CRUSH_BUCKET_UNIFORM) |
+				      (1 << CRUSH_BUCKET_LIST) |
+				      (1 << CRUSH_BUCKET_STRAW) |
+				      (1 << CRUSH_BUCKET_STRAW2));
+}
 
   bool has_optimal_tunables() const {
     return has_firefly_tunables();
@@ -212,11 +265,29 @@ public:
     return
       crush->chooseleaf_vary_r != 0;
   }
+
   bool has_v2_rules() const;
   bool has_v3_rules() const;
+  bool has_v4_buckets() const;
 
   bool is_v2_rule(unsigned ruleid) const;
   bool is_v3_rule(unsigned ruleid) const;
+
+  // default bucket types
+  unsigned get_default_bucket_alg() const {
+    // in order of preference
+    if (crush->allowed_bucket_algs & (1 << CRUSH_BUCKET_STRAW2))
+      return CRUSH_BUCKET_STRAW2;
+    if (crush->allowed_bucket_algs & (1 << CRUSH_BUCKET_STRAW))
+      return CRUSH_BUCKET_STRAW;
+    if (crush->allowed_bucket_algs & (1 << CRUSH_BUCKET_TREE))
+      return CRUSH_BUCKET_TREE;
+    if (crush->allowed_bucket_algs & (1 << CRUSH_BUCKET_LIST))
+      return CRUSH_BUCKET_LIST;
+    if (crush->allowed_bucket_algs & (1 << CRUSH_BUCKET_UNIFORM))
+      return CRUSH_BUCKET_UNIFORM;
+    return 0;
+  }
 
   // bucket types
   int get_num_type_names() const {
@@ -516,6 +587,7 @@ public:
 private:
   bool _maybe_remove_last_instance(CephContext *cct, int id, bool unlink_only);
   int _remove_item_under(CephContext *cct, int id, int ancestor, bool unlink_only);
+  bool _bucket_is_in_use(CephContext *cct, int id);
 public:
   int remove_item_under(CephContext *cct, int id, int ancestor, bool unlink_only);
 
@@ -550,7 +622,6 @@ public:
    *
    * Will return the weight for the first instance it finds.
    *
-   * @param cct cct
    * @param id item id to check
    * @return weight of item
    */
@@ -678,6 +749,11 @@ public:
     ruleno = crush_add_rule(crush, n, ruleno);
     return ruleno;
   }
+  int set_rule_mask_max_size(unsigned ruleno, int max_size) {
+    crush_rule *r = get_rule(ruleno);
+    if (IS_ERR(r)) return -1;
+    return r->mask.max_size = max_size;
+  }
   int set_rule_step(unsigned ruleno, unsigned step, int op, int arg1, int arg2) {
     if (!crush) return -ENOENT;
     crush_rule *n = get_rule(ruleno);
@@ -721,6 +797,12 @@ public:
 
   int add_simple_ruleset(string name, string root_name, string failure_domain_type,
 			 string mode, int rule_type, ostream *err = 0);
+  /**
+   * @param rno ruleset id to use, -1 to pick the lowest available
+   */
+  int add_simple_ruleset_at(string name, string root_name,
+                            string failure_domain_type, string mode,
+                            int rule_type, int rno, ostream *err = 0);
 
   int remove_rule(int ruleno);
 
@@ -781,11 +863,11 @@ private:
 
     if (!IS_ERR(parent_bucket)) {
       // zero out the bucket weight
-      crush_bucket_adjust_item_weight(parent_bucket, item, 0);
+      crush_bucket_adjust_item_weight(crush, parent_bucket, item, 0);
       adjust_item_weight(cct, parent_bucket->id, parent_bucket->weight);
 
       // remove the bucket from the parent
-      crush_bucket_remove_item(parent_bucket, item);
+      crush_bucket_remove_item(crush, parent_bucket, item);
     } else if (PTR_ERR(parent_bucket) != -ENOENT) {
       return PTR_ERR(parent_bucket);
     }
@@ -859,13 +941,21 @@ public:
     if (IS_ERR(b)) return PTR_ERR(b);
     return crush_get_bucket_item_weight(b, pos);
   }
+  float get_bucket_item_weightf(int id, int pos) const {
+    const crush_bucket *b = get_bucket(id);
+    if (IS_ERR(b)) return 0;
+    return (float)crush_get_bucket_item_weight(b, pos) / (float)0x10000;
+  }
 
   /* modifiers */
   int add_bucket(int bucketno, int alg, int hash, int type, int size,
 		 int *items, int *weights, int *idout) {
-    if (type == 0)
-      return -EINVAL;
-    crush_bucket *b = crush_make_bucket(alg, hash, type, size, items, weights);
+    if (alg == 0) {
+      alg = get_default_bucket_alg();
+      if (alg == 0)
+	return -EINVAL;
+    }
+    crush_bucket *b = crush_make_bucket(crush, alg, hash, type, size, items, weights);
     assert(b);
     return crush_add_bucket(crush, bucketno, b, idout);
   }
@@ -969,9 +1059,12 @@ public:
   void dump_rule(int ruleset, Formatter *f) const;
   void dump_tunables(Formatter *f) const;
   void list_rules(Formatter *f) const;
-  void dump_tree(const vector<__u32>& w, ostream *out, Formatter *f) const;
+  void dump_tree(ostream *out, Formatter *f) const;
+  void dump_tree(Formatter *f) const;
   static void generate_test_instances(list<CrushWrapper*>& o);
 
+  int _get_osd_pool_default_crush_replicated_ruleset(CephContext *cct,
+                                                     bool quiet);
   int get_osd_pool_default_crush_replicated_ruleset(CephContext *cct);
 
   static bool is_valid_crush_name(const string& s);

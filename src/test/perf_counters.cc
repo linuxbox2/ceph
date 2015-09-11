@@ -61,7 +61,7 @@ TEST(PerfCounters, SimpleTest) {
   AdminSocketClient client(get_rand_socket_path());
   std::string message;
   ASSERT_EQ("", client.do_request("{ \"prefix\": \"perf dump\" }", &message));
-  ASSERT_EQ("{}", message);
+  ASSERT_EQ("{}\n", message);
 }
 
 enum {
@@ -181,9 +181,8 @@ TEST(PerfCounters, MultiplePerfCounters) {
   ASSERT_EQ(sd("{\"test_perfcounter_1\":{\"element1\":13,\"element2\":0.000000000,"
 	    "\"element3\":{\"avgcount\":0,\"sum\":0.000000000}}}"), msg);
   ASSERT_EQ("", client.do_request("{ \"prefix\": \"perf schema\", \"format\": \"json\" }", &msg));
-  ASSERT_EQ(sd("{\"test_perfcounter_1\":{\"element1\":{\"type\":2},"
-	       "\"element2\":{\"type\":1},\"element3\":{\"type\":5}}}"), msg);
-
+  ASSERT_EQ(sd("{\"test_perfcounter_1\":{\"element1\":{\"type\":2,\"description\":\"\",\"nick\":\"\"},"
+	    "\"element2\":{\"type\":1,\"description\":\"\",\"nick\":\"\"},\"element3\":{\"type\":5,\"description\":\"\",\"nick\":\"\"}}}"), msg);
   coll->clear();
   ASSERT_EQ("", client.do_request("{ \"prefix\": \"perf dump\", \"format\": \"json\" }", &msg));
   ASSERT_EQ("{}", msg);

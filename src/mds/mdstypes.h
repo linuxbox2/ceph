@@ -18,12 +18,13 @@
 #include "include/frag.h"
 #include "include/xlist.h"
 #include "include/interval_set.h"
+#include "include/compact_map.h"
+#include "include/compact_set.h"
 
 #include "inode_backtrace.h"
 
 #include <boost/pool/pool.hpp>
 #include "include/assert.h"
-#include "include/hash_namespace.h"
 #include <boost/serialization/strong_typedef.hpp>
 
 
@@ -62,6 +63,7 @@
 
 #define MDS_INO_IS_STRAY(i)  ((i) >= MDS_INO_STRAY_OFFSET  && (i) < (MDS_INO_STRAY_OFFSET+(MAX_MDS*NUM_STRAY)))
 #define MDS_INO_IS_MDSDIR(i) ((i) >= MDS_INO_MDSDIR_OFFSET && (i) < (MDS_INO_MDSDIR_OFFSET+MAX_MDS))
+#define MDS_INO_MDSDIR_OWNER(i) (signed ((unsigned (i)) - MDS_INO_MDSDIR_OFFSET))
 #define MDS_INO_IS_BASE(i)   (MDS_INO_ROOT == (i) || MDS_INO_IS_MDSDIR(i))
 #define MDS_INO_STRAY_OWNER(i) (signed (((unsigned (i)) - MDS_INO_STRAY_OFFSET) / NUM_STRAY))
 #define MDS_INO_STRAY_INDEX(i) (((unsigned (i)) - MDS_INO_STRAY_OFFSET) % NUM_STRAY)
@@ -71,7 +73,7 @@
 #define MDS_TRAVERSE_DISCOVERXLOCK 3    // succeeds on (foreign?) null, xlocked dentries.
 
 
-BOOST_STRONG_TYPEDEF(int32_t, mds_rank_t)
+typedef int32_t mds_rank_t;
 BOOST_STRONG_TYPEDEF(uint64_t, mds_gid_t)
 extern const mds_gid_t MDS_GID_NONE;
 extern const mds_rank_t MDS_RANK_NONE;
@@ -260,7 +262,45 @@ inline bool operator<(const vinodeno_t &l, const vinodeno_t &r) {
     (l.ino == r.ino && l.snapid < r.snapid);
 }
 
-CEPH_HASH_NAMESPACE_START
+struct quota_info_t
+{
+  int64_t max_bytes;
+  int64_t max_files;
+ 
+  quota_info_t() : max_bytes(0), max_files(0) {}
+
+  void encode(bufferlist& bl) const {
+    ENCODE_START(1, 1, bl);
+    ::encode(max_bytes, bl);
+    ::encode(max_files, bl);
+    ENCODE_FINISH(bl);
+  }
+  void decode(bufferlist::iterator& p) {
+    DECODE_START_LEGACY_COMPAT_LEN(1, 1, 1, p);
+    ::decode(max_bytes, p);
+    ::decode(max_files, p);
+    DECODE_FINISH(p);
+  }
+
+  void dump(Formatter *f) const;
+  static void generate_test_instances(list<quota_info_t *>& ls);
+
+  bool is_valid() const {
+    return max_bytes >=0 && max_files >=0;
+  }
+  bool is_enable() const {
+    return max_bytes || max_files;
+  }
+};
+WRITE_CLASS_ENCODER(quota_info_t)
+
+inline bool operator==(const quota_info_t &l, const quota_info_t &r) {
+  return memcmp(&l, &r, sizeof(l)) == 0;
+}
+
+ostream& operator<<(ostream &out, const quota_info_t &n);
+
+namespace std {
   template<> struct hash<vinodeno_t> {
     size_t operator()(const vinodeno_t &vino) const { 
       hash<inodeno_t> H;
@@ -268,7 +308,7 @@ CEPH_HASH_NAMESPACE_START
       return H(vino.ino) ^ I(vino.snapid);
     }
   };
-CEPH_HASH_NAMESPACE_END
+} // namespace std
 
 
 
@@ -318,6 +358,58 @@ inline bool operator==(const client_writeable_range_t& l,
     l.follows == r.follows;
 }
 
+struct inline_data_t {
+private:
+  bufferlist *blp;
+public:
+  version_t version;
+
+  void free_data() {
+    delete blp;
+    blp = NULL;
+  }
+  bufferlist& get_data() {
+    if (!blp)
+      blp = new bufferlist;
+    return *blp;
+  }
+  size_t length() const { return blp ? blp->length() : 0; }
+
+  inline_data_t() : blp(0), version(1) {}
+  inline_data_t(const inline_data_t& o) : blp(0), version(o.version) {
+    if (o.blp)
+      get_data() = *o.blp;
+  }
+  ~inline_data_t() {
+    free_data();
+  }
+  inline_data_t& operator=(const inline_data_t& o) {
+    version = o.version;
+    if (o.blp)
+      get_data() = *o.blp;
+    else
+      free_data();
+    return *this;
+  }
+  bool operator==(const inline_data_t& o) const {
+   return length() == o.length() &&
+	  (length() == 0 ||
+	   (*const_cast<bufferlist*>(blp) == *const_cast<bufferlist*>(o.blp)));
+  }
+  bool operator!=(const inline_data_t& o) const {
+    return !(*this == o);
+  }
+  void encode(bufferlist &bl) const;
+  void decode(bufferlist::iterator& bl);
+};
+WRITE_CLASS_ENCODER(inline_data_t)
+
+enum {
+  DAMAGE_STATS,     // statistics (dirstat, size, etc)
+  DAMAGE_RSTATS,    // recursive statistics (rstat, accounted_rstat)
+  DAMAGE_FRAGTREE   // fragtree -- repair by searching
+};
+typedef uint32_t damage_flags_t;
 
 /*
  * inode_t
@@ -346,7 +438,7 @@ struct inode_t {
   // file (data access)
   ceph_dir_layout  dir_layout;    // [dir only]
   ceph_file_layout layout;
-  vector <int64_t> old_pools;
+  compact_set <int64_t> old_pools;
   uint64_t   size;        // on directory, # dentries
   uint64_t   max_size_ever; // max size the file has ever been
   uint32_t   truncate_seq;
@@ -355,8 +447,7 @@ struct inode_t {
   utime_t    mtime;   // file data modify time.
   utime_t    atime;   // file data access time.
   uint32_t   time_warp_seq;  // count of (potential) mtime/atime timewarps (i.e., utimes())
-  bufferlist inline_data;
-  version_t  inline_version;
+  inline_data_t inline_data;
 
   std::map<client_t,client_writeable_range_t> client_ranges;  // client(s) can write to these ranges
 
@@ -364,6 +455,8 @@ struct inode_t {
   frag_info_t dirstat;         // protected by my filelock
   nest_info_t rstat;           // protected by my nestlock
   nest_info_t accounted_rstat; // protected by parent's nestlock
+
+  quota_info_t quota;
  
   // special stuff
   version_t version;           // auth only
@@ -372,16 +465,18 @@ struct inode_t {
 
   version_t backtrace_version;
 
+  snapid_t oldest_snap;
+
   inode_t() : ino(0), rdev(0),
 	      mode(0), uid(0), gid(0), nlink(0),
 	      size(0), max_size_ever(0),
 	      truncate_seq(0), truncate_size(0), truncate_from(0),
 	      truncate_pending(0),
 	      time_warp_seq(0),
-	      inline_version(1),
 	      version(0), file_data_version(0), xattr_version(0), backtrace_version(0) {
     clear_layout();
     memset(&dir_layout, 0, sizeof(dir_layout));
+    memset(&quota, 0, sizeof(quota));
   }
 
   // file type
@@ -451,7 +546,7 @@ struct inode_t {
     }
   }
 
-  bool is_backtrace_updated() {
+  bool is_backtrace_updated() const {
     return backtrace_version == version;
   }
   void update_backtrace(version_t pv=0) {
@@ -460,7 +555,7 @@ struct inode_t {
 
   void add_old_pool(int64_t l) {
     backtrace_version = version;
-    old_pools.push_back(l);
+    old_pools.insert(l);
   }
 
   void encode(bufferlist &bl) const;
@@ -510,6 +605,7 @@ struct fnode_t {
   snapid_t snap_purged_thru;   // the max_last_destroy snapid we've been purged thru
   frag_info_t fragstat, accounted_fragstat;
   nest_info_t rstat, accounted_rstat;
+  damage_flags_t damage_flags;
 
   void encode(bufferlist &bl) const;
   void decode(bufferlist::iterator& bl);
@@ -714,14 +810,14 @@ inline bool operator<=(const metareqid_t& l, const metareqid_t& r) {
 inline bool operator>(const metareqid_t& l, const metareqid_t& r) { return !(l <= r); }
 inline bool operator>=(const metareqid_t& l, const metareqid_t& r) { return !(l < r); }
 
-CEPH_HASH_NAMESPACE_START
+namespace std {
   template<> struct hash<metareqid_t> {
     size_t operator()(const metareqid_t &r) const { 
       hash<uint64_t> H;
       return H(r.name.num()) ^ H(r.name.type()) ^ H(r.tid);
     }
   };
-CEPH_HASH_NAMESPACE_END
+} // namespace std
 
 
 // cap info for client reconnect
@@ -839,7 +935,7 @@ inline bool operator==(dirfrag_t l, dirfrag_t r) {
   return l.ino == r.ino && l.frag == r.frag;
 }
 
-CEPH_HASH_NAMESPACE_START
+namespace std {
   template<> struct hash<dirfrag_t> {
     size_t operator()(const dirfrag_t &df) const { 
       static rjhash<uint64_t> H;
@@ -847,7 +943,7 @@ CEPH_HASH_NAMESPACE_START
       return H(df.ino) ^ I(df.frag);
     }
   };
-CEPH_HASH_NAMESPACE_END
+} // namespace std
 
 
 
@@ -1157,7 +1253,7 @@ class MDSCacheObject {
   const static int PIN_TEMPEXPORTING = 1008;  // temp pin between encode_ and finish_export
   static const int PIN_CLIENTLEASE = 1009;
 
-  const char *generic_pin_name(int p) {
+  const char *generic_pin_name(int p) const {
     switch (p) {
     case PIN_REPLICATED: return "replicated";
     case PIN_DIRTY: return "dirty";
@@ -1192,7 +1288,9 @@ class MDSCacheObject {
   MDSCacheObject() :
     state(0), 
     ref(0),
-    replica_nonce(0) {}
+    auth_pins(0), nested_auth_pins(0),
+    replica_nonce(0)
+  {}
   virtual ~MDSCacheObject() {}
 
   // printing
@@ -1220,8 +1318,8 @@ class MDSCacheObject {
 
   // --------------------------------------------
   // authority
-  virtual mds_authority_t authority() = 0;
-  bool is_ambiguous_auth() {
+  virtual mds_authority_t authority() const = 0;
+  bool is_ambiguous_auth() const {
     return authority().second != CDIR_AUTH_UNKNOWN;
   }
 
@@ -1234,26 +1332,19 @@ protected:
 #endif
 
  public:
-  int get_num_ref(int by = -1) {
+  int get_num_ref(int by = -1) const {
 #ifdef MDS_REF_SET
     if (by >= 0) {
-      if (ref_map.find(by) == ref_map.end())
+      if (ref_map.find(by) == ref_map.end()) {
 	return 0;
-      return ref_map[by];
+      } else {
+        return ref_map.find(by)->second;
+      }
     }
 #endif
     return ref;
   }
-#ifdef MDS_REF_SET
-  int get_pin_totals() {
-    int total = 0;
-    for(std::map<int,int>::iterator i = ref_map.begin(); i != ref_map.end(); ++i) {
-      total += i->second;
-    }
-    return total;
-  }
-#endif
-  virtual const char *pin_name(int by) = 0;
+  virtual const char *pin_name(int by) const = 0;
   //bool is_pinned_by(int by) { return ref_set.count(by); }
   //multiset<int>& get_ref_set() { return ref_set; }
 
@@ -1276,7 +1367,6 @@ protected:
       ref--;
 #ifdef MDS_REF_SET
       ref_map[by]--;
-      assert(ref == get_pin_totals());
 #endif
       if (ref == 0)
 	last_put();
@@ -1300,13 +1390,12 @@ protected:
     if (ref_map.find(by) == ref_map.end())
       ref_map[by] = 0;
     ref_map[by]++;
-    assert(ref == get_pin_totals());
 #endif
   }
 
-  void print_pin_set(std::ostream& out) {
+  void print_pin_set(std::ostream& out) const {
 #ifdef MDS_REF_SET
-    std::map<int, int>::iterator it = ref_map.begin();
+    std::map<int, int>::const_iterator it = ref_map.begin();
     while (it != ref_map.end()) {
       out << " " << pin_name(it->first) << "=" << it->second;
       ++it;
@@ -1316,15 +1405,29 @@ protected:
 #endif
   }
 
+  protected:
+  int auth_pins;
+  int nested_auth_pins;
+#ifdef MDS_AUTHPIN_SET
+  multiset<void*> auth_pin_set;
+#endif
+
+  public:
+  bool is_auth_pinned() const { return auth_pins || nested_auth_pins; }
+  int get_num_auth_pins() const { return auth_pins; }
+  int get_num_nested_auth_pins() const { return nested_auth_pins; }
+
+  void dump_states(Formatter *f) const;
+  void dump(Formatter *f) const;
 
   // --------------------------------------------
   // auth pins
-  virtual bool can_auth_pin() = 0;
+  virtual bool can_auth_pin() const = 0;
   virtual void auth_pin(void *who) = 0;
   virtual void auth_unpin(void *who) = 0;
-  virtual bool is_frozen() = 0;
-  virtual bool is_freezing() = 0;
-  virtual bool is_freezing_or_frozen() {
+  virtual bool is_frozen() const = 0;
+  virtual bool is_freezing() const = 0;
+  virtual bool is_freezing_or_frozen() const {
     return is_frozen() || is_freezing();
   }
 
@@ -1333,12 +1436,12 @@ protected:
   // replication (across mds cluster)
  protected:
   unsigned		replica_nonce; // [replica] defined on replica
-  std::map<mds_rank_t,unsigned>	replica_map;   // [auth] mds -> nonce
+  compact_map<mds_rank_t,unsigned>	replica_map;   // [auth] mds -> nonce
 
  public:
-  bool is_replicated() { return !replica_map.empty(); }
-  bool is_replica(mds_rank_t mds) { return replica_map.count(mds); }
-  int num_replicas() { return replica_map.size(); }
+  bool is_replicated() const { return !replica_map.empty(); }
+  bool is_replica(mds_rank_t mds) const { return replica_map.count(mds); }
+  int num_replicas() const { return replica_map.size(); }
   unsigned add_replica(mds_rank_t mds) {
     if (replica_map.count(mds)) 
       return ++replica_map[mds];  // inc nonce
@@ -1366,24 +1469,24 @@ protected:
       put(PIN_REPLICATED);
     replica_map.clear();
   }
-  std::map<mds_rank_t,unsigned>::iterator replicas_begin() { return replica_map.begin(); }
-  std::map<mds_rank_t,unsigned>::iterator replicas_end() { return replica_map.end(); }
-  const std::map<mds_rank_t,unsigned>& get_replicas() { return replica_map; }
-  void list_replicas(std::set<mds_rank_t>& ls) {
-    for (std::map<mds_rank_t,unsigned>::const_iterator p = replica_map.begin();
+  compact_map<mds_rank_t,unsigned>::iterator replicas_begin() { return replica_map.begin(); }
+  compact_map<mds_rank_t,unsigned>::iterator replicas_end() { return replica_map.end(); }
+  const compact_map<mds_rank_t,unsigned>& get_replicas() const { return replica_map; }
+  void list_replicas(std::set<mds_rank_t>& ls) const {
+    for (compact_map<mds_rank_t,unsigned>::const_iterator p = replica_map.begin();
 	 p != replica_map.end();
-	 ++p) 
+	 ++p)
       ls.insert(p->first);
   }
 
-  unsigned get_replica_nonce() { return replica_nonce; }
+  unsigned get_replica_nonce() const { return replica_nonce; }
   void set_replica_nonce(unsigned n) { replica_nonce = n; }
 
 
   // ---------------------------------------------
   // waiting
  protected:
-  multimap<uint64_t, MDSInternalContextBase*>  waiting;
+  compact_multimap<uint64_t, MDSInternalContextBase*>  waiting;
 
  public:
   bool is_waiter_for(uint64_t mask, uint64_t min=0) {
@@ -1392,7 +1495,7 @@ protected:
       while (min & (min-1))  // if more than one bit is set
 	min &= min-1;        //  clear LSB
     }
-    for (multimap<uint64_t,MDSInternalContextBase*>::iterator p = waiting.lower_bound(min);
+    for (compact_multimap<uint64_t,MDSInternalContextBase*>::iterator p = waiting.lower_bound(min);
 	 p != waiting.end();
 	 ++p) {
       if (p->first & mask) return true;
@@ -1412,7 +1515,7 @@ protected:
   }
   virtual void take_waiting(uint64_t mask, list<MDSInternalContextBase*>& ls) {
     if (waiting.empty()) return;
-    multimap<uint64_t,MDSInternalContextBase*>::iterator it = waiting.begin();
+    compact_multimap<uint64_t,MDSInternalContextBase*>::iterator it = waiting.begin();
     while (it != waiting.end()) {
       if (it->first & mask) {
 	ls.push_back(it->second);
@@ -1481,7 +1584,25 @@ inline std::ostream& operator<<(std::ostream& out, mdsco_db_line_prefix o) {
   return out;
 }
 
+class ceph_file_layout_wrapper : public ceph_file_layout
+{
+public:
+  void encode(bufferlist &bl) const
+  {
+    ::encode(static_cast<const ceph_file_layout&>(*this), bl);
+  }
 
+  void decode(bufferlist::iterator &p)
+  {
+    ::decode(static_cast<ceph_file_layout&>(*this), p);
+  }
+
+  static void generate_test_instances(std::list<ceph_file_layout_wrapper*>& ls)
+  {
+  }
+
+  void dump(Formatter *f) const;
+};
 
 
 

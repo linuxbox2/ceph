@@ -44,7 +44,7 @@ To activate Ceph's debugging output (*i.e.*, ``dout()``) at runtime,  use the
 	
 Replace ``{daemon-type}`` with one of ``osd``, ``mon`` or ``mds``. You may apply
 the runtime setting to all daemons of a particular type with ``*``, or specify
-a specific daemon's ID (i.e., its number or letter). For example, to increase
+a specific daemon's ID. For example, to increase
 debug logging for a ``ceph-osd`` daemon named ``osd.0``, execute the following:: 
 
 	ceph tell osd.0 injectargs --debug-osd 0/5
@@ -147,7 +147,11 @@ Each subsystem has a logging level for its output logs, and for its logs
 in-memory. You may set different values for each of these subsystems by setting
 a log file level and a memory level for debug logging. Ceph's logging levels
 operate on a scale of ``1`` to ``20``, where ``1`` is terse and ``20`` is
-verbose. 
+verbose. In general, the logs in-memory are not sent to the output log unless:
+
+- a fatal signal is raised or
+- an ``assert`` in source code is triggered or
+- upon requested. Please consult `document on admin socket <http://docs.ceph.com/docs/master/man/8/ceph/#daemon>`_ for more details.
 
 A debug logging setting can take a single value for the log level and the
 memory level, which sets them both as the same value. For example, if you

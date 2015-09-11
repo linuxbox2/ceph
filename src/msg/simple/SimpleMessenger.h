@@ -79,9 +79,10 @@ public:
    * @param name The name to assign ourselves
    * _nonce A unique ID to use for this SimpleMessenger. It should not
    * be a value that will be repeated if the daemon restarts.
+   * features The local features bits for the local_connection
    */
   SimpleMessenger(CephContext *cct, entity_name_t name,
-		  string mname, uint64_t _nonce);
+		  string mname, uint64_t _nonce, uint64_t features);
 
   /**
    * Destroy the SimpleMessenger. Pretty simple since all the work is done
@@ -182,10 +183,6 @@ public:
    */
   Pipe *add_accept_pipe(int sd);
 
-  Connection *create_anon_connection() {
-    return new PipeConnection(cct, NULL);
-  }
-
 private:
 
   /**
@@ -219,7 +216,7 @@ private:
    * @param type The peer type of the entity at the address.
    * @param con An existing Connection to associate with the new Pipe. If
    * NULL, it creates a new Connection.
-   * @param msg an initial message to queue on the new pipe
+   * @param first an initial message to queue on the new pipe
    *
    * @return a pointer to the newly-created Pipe. Caller does not own a
    * reference; take one if you need it.
@@ -335,6 +332,7 @@ public:
 
   /// con used for sending messages to ourselves
   ConnectionRef local_connection;
+  uint64_t local_features;
 
   /**
    * @defgroup SimpleMessenger internals
@@ -373,7 +371,7 @@ public:
   int get_proto_version(int peer_type, bool connect);
 
   /**
-   * Fill in the address and peer type for the local connection, which
+   * Fill in the features, address and peer type for the local connection, which
    * is used for delivering messages back to ourself.
    */
   void init_local_connection();
@@ -409,6 +407,11 @@ public:
    * ready to be torn down.
    */
   void queue_reap(Pipe *pipe);
+
+  /**
+   * Used to get whether this connection ready to send
+   */
+  bool is_connected(Connection *con);
   /**
    * @} // SimpleMessenger Internals
    */

@@ -20,7 +20,6 @@
 #include "include/types.h"
 #include "include/blobhash.h"
 #include "include/encoding.h"
-#include "include/hash_namespace.h"
 
 namespace ceph {
   class Formatter;
@@ -39,7 +38,7 @@ public:
   static const int TYPE_OSD = CEPH_ENTITY_TYPE_OSD;
   static const int TYPE_CLIENT = CEPH_ENTITY_TYPE_CLIENT;
 
-  static const int NEW = -1;
+  static const int64_t NEW = -1;
 
   // cons
   entity_name_t() : _type(0), _num(0) { }
@@ -48,10 +47,10 @@ public:
     _type(n.type), _num(n.num) { }
 
   // static cons
-  static entity_name_t MON(int i=NEW) { return entity_name_t(TYPE_MON, i); }
-  static entity_name_t MDS(int i=NEW) { return entity_name_t(TYPE_MDS, i); }
-  static entity_name_t OSD(int i=NEW) { return entity_name_t(TYPE_OSD, i); }
-  static entity_name_t CLIENT(int i=NEW) { return entity_name_t(TYPE_CLIENT, i); }
+  static entity_name_t MON(int64_t i=NEW) { return entity_name_t(TYPE_MON, i); }
+  static entity_name_t MDS(int64_t i=NEW) { return entity_name_t(TYPE_MDS, i); }
+  static entity_name_t OSD(int64_t i=NEW) { return entity_name_t(TYPE_OSD, i); }
+  static entity_name_t CLIENT(int64_t i=NEW) { return entity_name_t(TYPE_CLIENT, i); }
   
   int64_t num() const { return _num; }
   int type() const { return _type; }
@@ -133,7 +132,7 @@ inline std::ostream& operator<<(std::ostream& out, const ceph_entity_name& addr)
   return out << *(const entity_name_t*)&addr;
 }
 
-CEPH_HASH_NAMESPACE_START
+namespace std {
   template<> struct hash< entity_name_t >
   {
     size_t operator()( const entity_name_t &m ) const
@@ -141,7 +140,7 @@ CEPH_HASH_NAMESPACE_START
       return rjhash32(m.type() ^ m.num());
     }
   };
-CEPH_HASH_NAMESPACE_END
+} // namespace std
 
 
 
@@ -353,7 +352,7 @@ inline bool operator<=(const entity_addr_t& a, const entity_addr_t& b) { return 
 inline bool operator>(const entity_addr_t& a, const entity_addr_t& b) { return memcmp(&a, &b, sizeof(a)) > 0; }
 inline bool operator>=(const entity_addr_t& a, const entity_addr_t& b) { return memcmp(&a, &b, sizeof(a)) >= 0; }
 
-CEPH_HASH_NAMESPACE_START
+namespace std {
   template<> struct hash< entity_addr_t >
   {
     size_t operator()( const entity_addr_t& x ) const
@@ -362,7 +361,7 @@ CEPH_HASH_NAMESPACE_START
       return H((const char*)&x, sizeof(x));
     }
   };
-CEPH_HASH_NAMESPACE_END
+} // namespace std
 
 
 /*
@@ -407,7 +406,7 @@ inline bool operator<=(const entity_inst_t& a, const entity_inst_t& b) {
 inline bool operator>(const entity_inst_t& a, const entity_inst_t& b) { return b < a; }
 inline bool operator>=(const entity_inst_t& a, const entity_inst_t& b) { return b <= a; }
 
-CEPH_HASH_NAMESPACE_START
+namespace std {
   template<> struct hash< entity_inst_t >
   {
     size_t operator()( const entity_inst_t& x ) const
@@ -417,7 +416,7 @@ CEPH_HASH_NAMESPACE_START
       return H(x.name) ^ I(x.addr);
     }
   };
-CEPH_HASH_NAMESPACE_END
+} // namespace std
 
 
 inline ostream& operator<<(ostream& out, const entity_inst_t &i)

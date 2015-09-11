@@ -18,7 +18,7 @@
 #include "OSD.h"
 #include "PGBackend.h"
 #include "osd_types.h"
-#include <boost/optional.hpp>
+#include <boost/optional/optional_io.hpp>
 #include "erasure-code/ErasureCodeInterface.h"
 #include "ECTransaction.h"
 #include "ECMsgTypes.h"
@@ -83,7 +83,7 @@ public:
   void check_recovery_sources(const OSDMapRef osdmap);
 
   void on_change();
-  void clear_state();
+  void clear_recovery_state();
 
   void on_flushed();
 
@@ -98,7 +98,7 @@ public:
     PGTransaction *t,
     const eversion_t &trim_to,
     const eversion_t &trim_rollback_to,
-    vector<pg_log_entry_t> &log_entries,
+    const vector<pg_log_entry_t> &log_entries,
     boost::optional<pg_hit_set_history_t> &hset_history,
     Context *on_local_applied_sync,
     Context *on_all_applied,
@@ -112,6 +112,7 @@ public:
     const hobject_t &hoid,
     uint64_t off,
     uint64_t len,
+    uint32_t op_flags,
     bufferlist *bl);
 
   /**
@@ -142,7 +143,7 @@ public:
   list<ClientAsyncReadStatus> in_progress_client_reads;
   void objects_read_async(
     const hobject_t &hoid,
-    const list<pair<pair<uint64_t, uint64_t>,
+    const list<pair<boost::tuple<uint64_t, uint64_t, uint32_t>,
 		    pair<bufferlist*, Context*> > > &to_read,
     Context *on_complete);
 
@@ -264,13 +265,13 @@ public:
     read_result_t() : r(0) {}
   };
   struct read_request_t {
-    const list<pair<uint64_t, uint64_t> > to_read;
+    const list<boost::tuple<uint64_t, uint64_t, uint32_t> > to_read;
     const set<pg_shard_t> need;
     const bool want_attrs;
     GenContext<pair<RecoveryMessages *, read_result_t& > &> *cb;
     read_request_t(
       const hobject_t &hoid,
-      const list<pair<uint64_t, uint64_t> > &to_read,
+      const list<boost::tuple<uint64_t, uint64_t, uint32_t> > &to_read,
       const set<pg_shard_t> &need,
       bool want_attrs,
       GenContext<pair<RecoveryMessages *, read_result_t& > &> *cb)
@@ -384,7 +385,7 @@ public:
    *
    * Determines the whether _have is suffient to recover an object
    */
-  class ECRecPred : public IsRecoverablePredicate {
+  class ECRecPred : public IsPGRecoverablePredicate {
     set<int> want;
     ErasureCodeInterfaceRef ec_impl;
   public:
@@ -404,7 +405,7 @@ public:
       return ec_impl->minimum_to_decode(want, have, &min) == 0;
     }
   };
-  IsRecoverablePredicate *get_is_recoverable_predicate() {
+  IsPGRecoverablePredicate *get_is_recoverable_predicate() {
     return new ECRecPred(ec_impl);
   }
 
@@ -413,7 +414,7 @@ public:
    *
    * Determines the whether _have is suffient to read an object
    */
-  class ECReadPred : public IsReadablePredicate {
+  class ECReadPred : public IsPGReadablePredicate {
     pg_shard_t whoami;
     ECRecPred rec_pred;
   public:
@@ -424,7 +425,7 @@ public:
       return _have.count(whoami) && rec_pred(_have);
     }
   };
-  IsReadablePredicate *get_is_readable_predicate() {
+  IsPGReadablePredicate *get_is_readable_predicate() {
     return new ECReadPred(get_parent()->whoami_shard(), ec_impl);
   }
 
@@ -441,7 +442,6 @@ public:
   ECBackend(
     PGBackend::Listener *pg,
     coll_t coll,
-    coll_t temp_coll,
     ObjectStore *store,
     CephContext *cct,
     ErasureCodeInterfaceRef ec_impl,
@@ -468,6 +468,7 @@ public:
 
   void be_deep_scrub(
     const hobject_t &obj,
+    uint32_t seed,
     ScrubMap::object &o,
     ThreadPool::TPHandle &handle);
   uint64_t be_get_ondisk_size(uint64_t logical_size) {

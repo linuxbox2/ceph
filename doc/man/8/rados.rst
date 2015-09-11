@@ -1,3 +1,5 @@
+:orphan:
+
 =======================================
  rados -- rados object storage utility
 =======================================
@@ -51,6 +53,15 @@ Options
 
    Connect to specified monitor (instead of looking through ceph.conf).
 
+.. option:: -b block_size
+
+  Set the block size for put/get ops and for write benchmarking.
+
+.. option:: --striper
+
+   Uses the striping API of rados rather than the default one.
+   Available for stat, get, put, truncate, rm, ls and all xattr related operation
+
 
 Global commands
 ===============
@@ -102,7 +113,8 @@ Pool specific commands
   sequential or random. Before running one of the reading benchmarks,
   run a write benchmark with the *--no-cleanup* option. The default
   object size is 4 MB, and the default number of simulated threads
-  (parallel writes) is 16. 
+  (parallel writes) is 16.
+  Note: -b *objsize* option is valid only in *write* mode.
 
 :command:`cleanup`
 
@@ -159,7 +171,7 @@ To read a previously snapshotted version of an object::
 Availability
 ============
 
-**rados** is part of the Ceph distributed storage system. Please refer to
+**rados** is part of Ceph, a massively scalable, open-source, distributed storage system. Please refer to
 the Ceph documentation at http://ceph.com/docs for more information.
 
 

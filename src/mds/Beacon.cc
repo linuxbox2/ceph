@@ -16,11 +16,12 @@
 #include "common/dout.h"
 #include "common/HeartbeatMap.h"
 #include "include/stringify.h"
+#include "include/util.h"
 
 #include "messages/MMDSBeacon.h"
 #include "mon/MonClient.h"
 #include "mds/MDLog.h"
-#include "mds/MDS.h"
+#include "mds/MDSRank.h"
 #include "mds/MDSMap.h"
 #include "mds/Locker.h"
 
@@ -32,10 +33,10 @@
 
 
 Beacon::Beacon(CephContext *cct_, MonClient *monc_, std::string name_) :
-  Dispatcher(cct_), lock("Beacon"), monc(monc_), timer(g_ceph_context, lock), name(name_)
+  Dispatcher(cct_), lock("Beacon"), monc(monc_), timer(g_ceph_context, lock),
+  name(name_), awaiting_seq(-1)
 {
   want_state = MDSMap::STATE_NULL;
-  last_send = 0;
   last_seq = 0;
   sender = NULL;
   was_laggy = false;
@@ -56,7 +57,6 @@ void Beacon::init(MDSMap const *mdsmap, MDSMap::DaemonState want_state_,
   Mutex::Locker l(lock);
   assert(mdsmap != NULL);
 
-  // Initialize copies of MDS state
   want_state = want_state_;
   _notify_mdsmap(mdsmap);
   standby_for_rank = standby_rank_;
@@ -106,25 +106,37 @@ void Beacon::handle_mds_beacon(MMDSBeacon *m)
 
   // update lab
   if (seq_stamp.count(seq)) {
-    assert(seq_stamp[seq] > last_acked_stamp);
-    last_acked_stamp = seq_stamp[seq];
     utime_t now = ceph_clock_now(g_ceph_context);
-    utime_t rtt = now - last_acked_stamp;
+    if (seq_stamp[seq] > last_acked_stamp) {
+      last_acked_stamp = seq_stamp[seq];
+      utime_t rtt = now - last_acked_stamp;
 
-    dout(10) << "handle_mds_beacon " << ceph_mds_state_name(m->get_state())
-	     << " seq " << m->get_seq() 
-	     << " rtt " << rtt << dendl;
+      dout(10) << "handle_mds_beacon " << ceph_mds_state_name(m->get_state())
+	       << " seq " << m->get_seq() << " rtt " << rtt << dendl;
 
-    if (was_laggy && rtt < g_conf->mds_beacon_grace) {
-      dout(0) << "handle_mds_beacon no longer laggy" << dendl;
-      was_laggy = false;
-      laggy_until = now;
+      if (was_laggy && rtt < g_conf->mds_beacon_grace) {
+	dout(0) << "handle_mds_beacon no longer laggy" << dendl;
+	was_laggy = false;
+	laggy_until = now;
+      }
+    } else {
+      // Mark myself laggy if system clock goes backwards. Hopping
+      // later beacons will clear it.
+      dout(1) << "handle_mds_beacon system clock goes backwards, "
+	      << "mark myself laggy" << dendl;
+      last_acked_stamp = now - utime_t(g_conf->mds_beacon_grace + 1, 0);
+      was_laggy = true;
     }
 
     // clean up seq_stamp map
     while (!seq_stamp.empty() &&
 	   seq_stamp.begin()->first <= seq)
       seq_stamp.erase(seq_stamp.begin());
+
+    // Wake a waiter up if present
+    if (awaiting_seq == seq) {
+      waiting_cond.Signal();
+    }
   } else {
     dout(10) << "handle_mds_beacon " << ceph_mds_state_name(m->get_state())
 	     << " seq " << m->get_seq() << " dne" << dendl;
@@ -136,6 +148,25 @@ void Beacon::send()
 {
   Mutex::Locker l(lock);
   _send();
+}
+
+
+void Beacon::send_and_wait(const double duration)
+{
+  Mutex::Locker l(lock);
+  _send();
+  awaiting_seq = last_seq;
+  dout(20) << __func__ << ": awaiting " << awaiting_seq
+           << " for up to " << duration << "s" << dendl;
+
+  utime_t timeout;
+  timeout.set_from_double(ceph_clock_now(cct) + duration);
+  while ((!seq_stamp.empty() && seq_stamp.begin()->first <= awaiting_seq)
+         && ceph_clock_now(cct) < timeout) {
+    waiting_cond.WaitUntil(lock, timeout);
+  }
+
+  awaiting_seq = -1;
 }
 
 
@@ -163,6 +194,8 @@ void Beacon::_send()
 	   << dendl;
 
   seq_stamp[last_seq] = ceph_clock_now(g_ceph_context);
+
+  assert(want_state != MDSMap::STATE_NULL);
   
   MMDSBeacon *beacon = new MMDSBeacon(
       monc->get_fsid(), mds_gid_t(monc->get_global_id()),
@@ -175,7 +208,12 @@ void Beacon::_send()
   beacon->set_standby_for_name(standby_for_name);
   beacon->set_health(health);
   beacon->set_compat(compat);
-
+  // piggyback the sys info on beacon msg
+  if (want_state == MDSMap::STATE_BOOT) {
+    map<string, string> sys_info;
+    collect_sys_info(&sys_info, cct);
+    beacon->set_sys_info(sys_info);
+  }
   monc->send_mon_message(beacon);
 }
 
@@ -193,10 +231,13 @@ void Beacon::notify_mdsmap(MDSMap const *mdsmap)
 void Beacon::_notify_mdsmap(MDSMap const *mdsmap)
 {
   assert(mdsmap != NULL);
+  assert(mdsmap->get_epoch() >= epoch);
 
-  epoch = mdsmap->get_epoch();
-  compat = get_mdsmap_compat_set_default();
-  compat.merge(mdsmap->compat);
+  if (mdsmap->get_epoch() != epoch) {
+    epoch = mdsmap->get_epoch();
+    compat = get_mdsmap_compat_set_default();
+    compat.merge(mdsmap->compat);
+  }
 }
 
 
@@ -233,11 +274,23 @@ utime_t Beacon::get_laggy_until() const
   return laggy_until;
 }
 
-void Beacon::notify_want_state(MDSMap::DaemonState const newstate)
+void Beacon::set_want_state(MDSMap const *mdsmap, MDSMap::DaemonState const newstate)
 {
   Mutex::Locker l(lock);
 
-  want_state = newstate;
+  // Update mdsmap epoch atomically with updating want_state, so that when
+  // we send a beacon with the new want state it has the latest epoch, and
+  // once we have updated to the latest epoch, we are not sending out
+  // a stale want_state (i.e. one from before making it through MDSMap
+  // handling)
+  _notify_mdsmap(mdsmap);
+
+  if (want_state != newstate) {
+    dout(10) << __func__ << ": "
+      << ceph_mds_state_name(want_state) << " -> "
+      << ceph_mds_state_name(newstate) << dendl;
+    want_state = newstate;
+  }
 }
 
 
@@ -246,9 +299,13 @@ void Beacon::notify_want_state(MDSMap::DaemonState const newstate)
  * some health metrics that we will send in the next
  * beacon.
  */
-void Beacon::notify_health(MDS const *mds)
+void Beacon::notify_health(MDSRank const *mds)
 {
   Mutex::Locker l(lock);
+  if (!mds) {
+    // No MDS rank held
+    return;
+  }
 
   // I'm going to touch this MDS, so it must be locked
   assert(mds->mds_lock.is_locked_by_me());
@@ -312,6 +369,8 @@ void Beacon::notify_health(MDS const *mds)
 
   // Detect clients failing to generate cap releases from CEPH_SESSION_RECALL_STATE
   // messages. May be due to buggy client or resource-hogging application.
+  //
+  // Detect clients failing to advance their old_client_tid
   {
     set<Session*> sessions;
     mds->sessionmap.get_client_session_set(sessions);
@@ -319,6 +378,7 @@ void Beacon::notify_health(MDS const *mds)
     cutoff -= g_conf->mds_recall_state_timeout;
 
     std::list<MDSHealthMetric> late_recall_metrics;
+    std::list<MDSHealthMetric> large_completed_requests_metrics;
     for (set<Session*>::iterator i = sessions.begin(); i != sessions.end(); ++i) {
       Session *session = *i;
       if (!session->recalled_at.is_zero()) {
@@ -328,13 +388,21 @@ void Beacon::notify_health(MDS const *mds)
         if (session->recalled_at < cutoff) {
           dout(20) << "  exceeded timeout " << session->recalled_at << " vs. " << cutoff << dendl;
           std::ostringstream oss;
-        oss << "Client " << session->get_human_name() << " failing to respond to cache pressure";
+	  oss << "Client " << session->get_human_name() << " failing to respond to cache pressure";
           MDSHealthMetric m(MDS_HEALTH_CLIENT_RECALL, HEALTH_WARN, oss.str());
           m.metadata["client_id"] = session->info.inst.name.num();
           late_recall_metrics.push_back(m);
         } else {
           dout(20) << "  within timeout " << session->recalled_at << " vs. " << cutoff << dendl;
         }
+      }
+      if (session->get_num_trim_requests_warnings() > 0 &&
+	  session->get_num_completed_requests() >= g_conf->mds_max_completed_requests) {
+	std::ostringstream oss;
+	oss << "Client " << session->get_human_name() << " failing to advance its oldest_client_tid";
+	MDSHealthMetric m(MDS_HEALTH_CLIENT_OLDEST_TID, HEALTH_WARN, oss.str());
+	m.metadata["client_id"] = session->info.inst.name.num();
+	large_completed_requests_metrics.push_back(m);
       }
     }
 
@@ -349,6 +417,24 @@ void Beacon::notify_health(MDS const *mds)
       health.metrics.push_back(m);
       late_recall_metrics.clear();
     }
+
+    if (large_completed_requests_metrics.size() <= (size_t)g_conf->mds_health_summarize_threshold) {
+      health.metrics.splice(health.metrics.end(), large_completed_requests_metrics);
+    } else {
+      std::ostringstream oss;
+      oss << "Many clients (" << large_completed_requests_metrics.size()
+	<< ") failing to advance their oldest_client_tid";
+      MDSHealthMetric m(MDS_HEALTH_CLIENT_OLDEST_TID_MANY, HEALTH_WARN, oss.str());
+      m.metadata["client_count"] = large_completed_requests_metrics.size();
+      health.metrics.push_back(m);
+      large_completed_requests_metrics.clear();
+    }
   }
+}
+
+MDSMap::DaemonState Beacon::get_want_state() const
+{
+  Mutex::Locker l(lock);
+  return want_state;
 }
 

@@ -1,5 +1,5 @@
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-;  Copyright(c) 2011-2014 Intel Corporation All rights reserved.
+;  Copyright(c) 2011-2015 Intel Corporation All rights reserved.
 ;
 ;  Redistribution and use in source and binary forms, with or without
 ;  modification, are permitted provided that the following conditions
@@ -30,8 +30,6 @@
 ;;;
 ;;; gf_6vect_dot_prod_avx(len, vec, *g_tbls, **buffs, **dests);
 ;;;
-;;; Author: Gregory Tucker
-
 
 %ifidn __OUTPUT_FORMAT__, elf64
  %define arg0  rdi

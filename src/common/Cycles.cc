@@ -52,12 +52,16 @@ void Cycles::init()
   if (cycles_per_sec != 0)
     return;
 
+  // Skip initialization if rtdsc is not implemented
+  if (rdtsc() == 0)
+    return;
+
   // Compute the frequency of the fine-grained CPU timer: to do this,
   // take parallel time readings using both rdtsc and gettimeofday.
   // After 10ms have elapsed, take the ratio between these readings.
 
   struct timeval start_time, stop_time;
-  uint64_t start_cycles, stop_cycles, micros;
+  uint64_t micros;
   double old_cycles;
 
   // There is one tricky aspect, which is that we could get interrupted
@@ -70,12 +74,12 @@ void Cycles::init()
     if (gettimeofday(&start_time, NULL) != 0) {
       assert(0 == "couldn't read clock");
     }
-    start_cycles = rdtsc();
+    uint64_t start_cycles = rdtsc();
     while (1) {
       if (gettimeofday(&stop_time, NULL) != 0) {
         assert(0 == "couldn't read clock");
       }
-      stop_cycles = rdtsc();
+      uint64_t stop_cycles = rdtsc();
       micros = (stop_time.tv_usec - start_time.tv_usec) +
           (stop_time.tv_sec - start_time.tv_sec)*1000000;
       if (micros > 10000) {

@@ -1,9 +1,14 @@
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
+// vim: ts=8 sw=2 smarttab
 
+#include "include/stringify.h"
 #include "CrushTester.h"
+#include "CrushTreeDumper.h"
 
 #include <algorithm>
 #include <stdlib.h>
-
+#include <boost/lexical_cast.hpp>
+#include <common/SubProcess.h>
 
 void CrushTester::set_device_weight(int dev, float f)
 {
@@ -350,6 +355,88 @@ void CrushTester::write_integer_indexed_scalar_data_string(vector<string> &dst, 
   dst.push_back( data_buffer.str() );
 }
 
+int CrushTester::test_with_crushtool(const char *crushtool_cmd, int max_id, int timeout)
+{
+  SubProcessTimed crushtool(crushtool_cmd, true, false, true, timeout);
+  string opt_max_id = boost::lexical_cast<string>(max_id);
+  crushtool.add_cmd_args("-i", "-", "--test", "--check", opt_max_id.c_str(), NULL);
+  int ret = crushtool.spawn();
+  if (ret != 0) {
+    err << "failed run crushtool: " << crushtool.err();
+    return ret;
+  }
+
+  bufferlist bl;
+  ::encode(crush, bl);
+  bl.write_fd(crushtool.stdin());
+  crushtool.close_stdin();
+  bl.clear();
+  ret = bl.read_fd(crushtool.stderr(), 100 * 1024);
+  if (ret < 0) {
+    err << "failed read from crushtool: " << cpp_strerror(-ret);
+    return ret;
+  }
+  bl.write_stream(err);
+  if (crushtool.join() != 0) {
+    err << crushtool.err();
+    return -EINVAL;
+  }
+
+  return 0;
+}
+
+namespace {
+  class BadCrushMap : public std::runtime_error {
+  public:
+    int item;
+    BadCrushMap(const char* msg, int id)
+      : std::runtime_error(msg), item(id) {}
+  };
+  // throws if any node in the crush fail to print
+  class CrushWalker : public CrushTreeDumper::Dumper<void> {
+    typedef void DumbFormatter;
+    typedef CrushTreeDumper::Dumper<DumbFormatter> Parent;
+    int max_id;
+  public:
+    CrushWalker(const CrushWrapper *crush, unsigned max_id)
+      : Parent(crush), max_id(max_id) {}
+    void dump_item(const CrushTreeDumper::Item &qi, DumbFormatter *) {
+      int type = -1;
+      if (qi.is_bucket()) {
+	if (!crush->get_item_name(qi.id)) {
+	  throw BadCrushMap("unknown item name", qi.id);
+	}
+	type = crush->get_bucket_type(qi.id);
+      } else {
+	if (max_id > 0 && qi.id >= max_id) {
+	  throw BadCrushMap("item id too large", qi.id);
+	}
+	type = 0;
+      }
+      if (!crush->get_type_name(type)) {
+	throw BadCrushMap("unknown type name", qi.id);
+      }
+    }
+  };
+}
+
+bool CrushTester::check_name_maps(unsigned max_id) const
+{
+  CrushWalker crush_walker(&crush, max_id);
+  try {
+    // walk through the crush, to see if its self-contained
+    crush_walker.dump(NULL);
+    // and see if the maps is also able to handle straying OSDs, whose id >= 0.
+    // "ceph osd tree" will try to print them, even they are not listed in the
+    // crush map.
+    crush_walker.dump_item(CrushTreeDumper::Item(0, 0, 0), NULL);
+  } catch (const BadCrushMap& e) {
+    err << e.what() << ": item#" << e.item << std::endl;
+    return false;
+  }
+  return true;
+}
+
 int CrushTester::test()
 {
   if (min_rule < 0 || max_rule < 0) {
@@ -487,18 +574,18 @@ int CrushTester::test()
           vector<int> out;
 
           if (use_crush) {
-            if (output_statistics)
-              err << "CRUSH"; // prepend CRUSH to placement output
+            if (output_mappings)
+	      err << "CRUSH"; // prepend CRUSH to placement output
             crush.do_rule(r, x, out, nr, weight);
           } else {
-            if (output_statistics)
-              err << "RNG"; // prepend RNG to placement output to denote simulation
+            if (output_mappings)
+	      err << "RNG"; // prepend RNG to placement output to denote simulation
             // test our new monte carlo placement generator
             random_placement(r, out, nr, weight);
           }
 
-          if (output_statistics)
-            err << " rule " << r << " x " << x << " " << out << std::endl;
+	  if (output_mappings)
+	    err << " rule " << r << " x " << x << " " << out << std::endl;
 
           if (output_data_file)
             write_integer_indexed_vector_data_string(tester_data.placement_information, x, out);
@@ -539,14 +626,14 @@ int CrushTester::test()
 
       if (output_statistics)
         for (unsigned i = 0; i < per.size(); i++) {
-          if (output_utilization && num_batches > 1){
+          if (output_utilization) {
             if (num_objects_expected[i] > 0 && per[i] > 0) {
               err << "  device " << i << ":\t"
                   << "\t" << " stored " << ": " << per[i]
                   << "\t" << " expected " << ": " << num_objects_expected[i]
                   << std::endl;
             }
-          } else if (output_utilization_all && num_batches > 1) {
+          } else if (output_utilization_all) {
             err << "  device " << i << ":\t"
                 << "\t" << " stored " << ": " << per[i]
                 << "\t" << " expected " << ": " << num_objects_expected[i]

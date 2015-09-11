@@ -304,6 +304,24 @@ class MonitorDBStore
       : store(s), t(t), oncommit(f)
     {}
     void finish(int r) {
+      /* The store serializes writes.  Each transaction is handled
+       * sequentially by the io_work Finisher.  If a transaction takes longer
+       * to apply its state to permanent storage, then no other transaction
+       * will be handled meanwhile.
+       *
+       * We will now randomly inject random delays.  We can safely sleep prior
+       * to applying the transaction as it won't break the model.
+       */
+      double delay_prob = g_conf->mon_inject_transaction_delay_probability;
+      if (delay_prob && (rand() % 10000 < delay_prob * 10000.0)) {
+        utime_t delay;
+        double delay_max = g_conf->mon_inject_transaction_delay_max;
+        delay.set_from_double(delay_max * (double)(rand() % 10000) / 10000.0);
+        lsubdout(g_ceph_context, mon, 1)
+          << "apply_transaction will be delayed for " << delay
+          << " seconds" << dendl;
+        delay.sleep();
+      }
       int ret = store->apply_transaction(t);
       oncommit->complete(ret);
     }
@@ -430,11 +448,13 @@ class MonitorDBStore
 
     virtual pair<string,string> get_next_key() {
       assert(iter->valid());
-      pair<string,string> r = iter->raw_key();
-      do {
-	iter->next();
-      } while (iter->valid() && sync_prefixes.count(iter->raw_key().first) == 0);
-      return r;
+
+      for (; iter->valid(); iter->next()) {
+        pair<string,string> r = iter->raw_key();
+        if (sync_prefixes.count(r.first) > 0)
+          return r;
+      }
+      return pair<string,string>();
     }
 
     virtual bool _is_valid() {
@@ -550,7 +570,10 @@ class MonitorDBStore
   }
 
   int open(ostream &out) {
-    db->init();
+    if (g_conf->mon_keyvaluedb == "rocksdb")
+      db->init(g_conf->mon_rocksdb_options);
+    else
+      db->init();
     int r = db->open(out);
     if (r < 0)
       return r;
@@ -560,7 +583,10 @@ class MonitorDBStore
   }
 
   int create_and_open(ostream &out) {
-    db->init();
+    if (g_conf->mon_keyvaluedb == "rocksdb")
+      db->init(g_conf->mon_rocksdb_options);
+    else
+      db->init();
     int r = db->create_and_open(out);
     if (r < 0)
       return r;

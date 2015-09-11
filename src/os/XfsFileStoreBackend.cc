@@ -19,10 +19,12 @@
 #include <sys/ioctl.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <sys/utsname.h>
 
 #include <xfs/xfs.h>
 
 #include "common/errno.h"
+#include "common/linux_version.h"
 #include "include/assert.h"
 #include "include/compat.h"
 
@@ -109,14 +111,26 @@ int XfsFileStoreBackend::detect_features()
       ret = 0;
       dout(0) << "detect_feature: failed to set test file extsize, assuming extsize is NOT supported" << dendl;
       goto out_close;
+    }
+
+    // make sure we have 3.5 or newer, which includes this fix
+    //   aff3a9edb7080f69f07fe76a8bd089b3dfa4cb5d
+    // for this set_extsize bug
+    //   http://oss.sgi.com/bugzilla/show_bug.cgi?id=874
+    int ver = get_linux_version();
+    if (ver == 0) {
+      dout(0) << __func__ << ": couldn't verify extsize not buggy, disabling extsize" << dendl;
+      m_has_extsize = false;
+    } else if (ver < KERNEL_VERSION(3, 5, 0)) {
+      dout(0) << __func__ << ": disabling extsize, your kernel < 3.5 and has buggy extsize ioctl" << dendl;
+      m_has_extsize = false;
     } else {
-      dout(0) << "detect_feature: extsize is supported" << dendl;
+      dout(0) << __func__ << ": extsize is supported and your kernel >= 3.5" << dendl;
       m_has_extsize = true;
     }
   } else {
     dout(0) << "detect_feature: extsize is disabled by conf" << dendl;
   }
-
 
 out_close:
   TEMP_FAILURE_RETRY(::close(fd));

@@ -32,7 +32,8 @@ using namespace std;
 #include <errno.h>
 #include <sstream>
 
-class MDS;
+#define SOCKET_PRIORITY_MIN_DELAY 6
+
 class Timer;
 
 
@@ -47,6 +48,8 @@ protected:
   int default_send_priority;
   /// set to true once the Messenger has started, and set to false on shutdown
   bool started;
+  uint32_t magic;
+  int socket_priority;
 
 public:
   /**
@@ -54,6 +57,7 @@ public:
    *  from this value.
    */
   CephContext *cct;
+  int crcflags;
 
   /**
    * A Policy describes the rules of a Connection. Is there a limit on how
@@ -126,7 +130,10 @@ public:
   Messenger(CephContext *cct_, entity_name_t w)
     : my_inst(),
       default_send_priority(CEPH_MSG_PRIO_DEFAULT), started(false),
-      cct(cct_)
+      magic(0),
+      socket_priority(-1),
+      cct(cct_),
+      crcflags(get_default_crc_flags(cct->_conf))
   {
     my_inst.name = w;
   }
@@ -139,19 +146,18 @@ public:
    * available or specified via the configuration in cct.
    *
    * @param cct context
+   * @param type name of messenger type
    * @param name entity name to register
    * @param lname logical name of the messenger in this process (e.g., "client")
    * @param nonce nonce value to uniquely identify this instance on the current host
+   * @param features bits for the local connection
    */
   static Messenger *create(CephContext *cct,
+                           const string &type,
                            entity_name_t name,
 			   string lname,
-                           uint64_t nonce);
-
-  /**
-   * create a anonymous Connection instance
-   */
-  virtual Connection *create_anon_connection() = 0;
+                           uint64_t nonce,
+			   uint64_t features = 0);
 
   /**
    * @defgroup Accessors
@@ -168,6 +174,10 @@ public:
    * set messenger's instance
    */
   void set_myinst(entity_inst_t i) { my_inst = i; }
+
+  uint32_t get_magic() { return magic; }
+  void set_magic(int _magic) { magic = _magic; }
+
   /**
    * Retrieve the Messenger's address.
    *
@@ -179,7 +189,7 @@ protected:
   /**
    * set messenger's address
    */
-  void set_myaddr(const entity_addr_t& a) { my_inst.addr = a; }
+  virtual void set_myaddr(const entity_addr_t& a) { my_inst.addr = a; }
 public:
   /**
    * Retrieve the Messenger's name.
@@ -219,6 +229,11 @@ public:
    * (0 if the queue is empty)
    */
   virtual double get_dispatch_queue_max_age(utime_t now) = 0;
+  /**
+   * Get the default crc flags for this messenger.
+   * but not yet dispatched.
+   */
+  static int get_default_crc_flags(md_config_t *);
 
   /**
    * @} // Accessors
@@ -273,16 +288,16 @@ public:
    */
   virtual Policy get_default_policy() = 0;
   /**
-   * Set a Throttler which is applied to all Messages from the given
-   * type of peer.
+   * Set Throttlers applied to all Messages from the given type of peer
    *
    * This is an init-time function and cannot be called after calling
    * start() or bind().
    *
-   * @param type The peer type this Throttler will apply to.
-   * @param t The Throttler to apply. The Messenger does not take
-   * ownership of this pointer, but you must not destroy it before
-   * you destroy the Messenger.
+   * @param type The peer type the Throttlers will apply to.
+   * @param bytes The Throttle for the number of bytes carried by the message
+   * @param msgs The Throttle for the number of messages for this @p type
+   * @note The Messenger does not take ownership of the Throttle pointers, but
+   * you must not destroy them before you destroy the Messenger.
    */
   virtual void set_policy_throttlers(int type, Throttle *bytes, Throttle *msgs=NULL) = 0;
   /**
@@ -296,6 +311,27 @@ public:
   void set_default_send_priority(int p) {
     assert(!started);
     default_send_priority = p;
+  }
+  /**
+   * Set the priority(SO_PRIORITY) for all packets to be sent on this socket.
+   *
+   * Linux uses this value to order the networking queues: packets with a higher
+   * priority may be processed first depending on the selected device queueing
+   * discipline.
+   *
+   * @param prio The priority. Setting a priority outside the range 0 to 6
+   * requires the CAP_NET_ADMIN capability.
+   */
+  void set_socket_priority(int prio) {
+    socket_priority = prio;
+  }
+  /**
+   * Get the socket priority
+   *
+   * @return the socket priority
+   */
+  int get_socket_priority() {
+    return socket_priority;
   }
   /**
    * Add a new Dispatcher to the front of the list. If you add

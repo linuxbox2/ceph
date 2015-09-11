@@ -575,57 +575,61 @@ version_t PGMonitor::get_trim_to()
   return 0;
 }
 
-bool PGMonitor::preprocess_query(PaxosServiceMessage *m)
+bool PGMonitor::preprocess_query(MonOpRequestRef op)
 {
+  op->mark_pgmon_event(__func__);
+  PaxosServiceMessage *m = static_cast<PaxosServiceMessage*>(op->get_req());
   dout(10) << "preprocess_query " << *m << " from " << m->get_orig_source_inst() << dendl;
   switch (m->get_type()) {
   case CEPH_MSG_STATFS:
-    handle_statfs(static_cast<MStatfs*>(m));
+    handle_statfs(op);
     return true;
   case MSG_GETPOOLSTATS:
-    return preprocess_getpoolstats(static_cast<MGetPoolStats*>(m));
+    return preprocess_getpoolstats(op);
     
   case MSG_PGSTATS:
-    return preprocess_pg_stats(static_cast<MPGStats*>(m));
+    return preprocess_pg_stats(op);
 
   case MSG_MON_COMMAND:
-    return preprocess_command(static_cast<MMonCommand*>(m));
+    return preprocess_command(op);
 
 
   default:
     assert(0);
-    m->put();
     return true;
   }
 }
 
-bool PGMonitor::prepare_update(PaxosServiceMessage *m)
+bool PGMonitor::prepare_update(MonOpRequestRef op)
 {
+  op->mark_pgmon_event(__func__);
+  PaxosServiceMessage *m = static_cast<PaxosServiceMessage*>(op->get_req());
   dout(10) << "prepare_update " << *m << " from " << m->get_orig_source_inst() << dendl;
   switch (m->get_type()) {
   case MSG_PGSTATS:
-    return prepare_pg_stats((MPGStats*)m);
+    return prepare_pg_stats(op);
 
   case MSG_MON_COMMAND:
-    return prepare_command(static_cast<MMonCommand*>(m));
+    return prepare_command(op);
 
   default:
     assert(0);
-    m->put();
     return false;
   }
 }
 
-void PGMonitor::handle_statfs(MStatfs *statfs)
+void PGMonitor::handle_statfs(MonOpRequestRef op)
 {
+  op->mark_pgmon_event(__func__);
+  MStatfs *statfs = static_cast<MStatfs*>(op->get_req());
   // check caps
   MonSession *session = statfs->get_session();
   if (!session)
-    goto out;
+    return;
   if (!session->is_capable("pg", MON_CAP_R)) {
     dout(0) << "MStatfs received from entity with insufficient privileges "
 	    << session->caps << dendl;
-    goto out;
+    return;
   }
   MStatfsReply *reply;
 
@@ -633,7 +637,7 @@ void PGMonitor::handle_statfs(MStatfs *statfs)
 
   if (statfs->fsid != mon->monmap->fsid) {
     dout(0) << "handle_statfs on fsid " << statfs->fsid << " != " << mon->monmap->fsid << dendl;
-    goto out;
+    return;
   }
 
   // fill out stfs
@@ -646,13 +650,13 @@ void PGMonitor::handle_statfs(MStatfs *statfs)
   reply->h.st.num_objects = pg_map.pg_sum.stats.sum.num_objects;
 
   // reply
-  mon->send_reply(statfs, reply);
- out:
-  statfs->put();
+  mon->send_reply(op, reply);
 }
 
-bool PGMonitor::preprocess_getpoolstats(MGetPoolStats *m)
+bool PGMonitor::preprocess_getpoolstats(MonOpRequestRef op)
 {
+  op->mark_pgmon_event(__func__);
+  MGetPoolStats *m = static_cast<MGetPoolStats*>(op->get_req());
   MGetPoolStatsReply *reply;
 
   MonSession *session = m->get_session();
@@ -682,27 +686,26 @@ bool PGMonitor::preprocess_getpoolstats(MGetPoolStats *m)
     reply->pool_stats[*p] = pg_map.pg_pool_sum[poolid];
   }
 
-  mon->send_reply(m, reply);
+  mon->send_reply(op, reply);
 
  out:
-  m->put();
   return true;
 }
 
 
-bool PGMonitor::preprocess_pg_stats(MPGStats *stats)
+bool PGMonitor::preprocess_pg_stats(MonOpRequestRef op)
 {
+  op->mark_pgmon_event(__func__);
+  MPGStats *stats = static_cast<MPGStats*>(op->get_req());
   // check caps
   MonSession *session = stats->get_session();
   if (!session) {
     dout(10) << "PGMonitor::preprocess_pg_stats: no monitor session!" << dendl;
-    stats->put();
     return true;
   }
   if (!session->is_capable("pg", MON_CAP_R)) {
     derr << "PGMonitor::preprocess_pg_stats: MPGStats received from entity "
          << "with insufficient privileges " << session->caps << dendl;
-    stats->put();
     return true;
   }
 
@@ -711,7 +714,7 @@ bool PGMonitor::preprocess_pg_stats(MPGStats *stats)
   if (stats->had_map_for > 30.0 && 
       mon->osdmon()->is_readable() &&
       stats->epoch < mon->osdmon()->osdmap.get_epoch())
-    mon->osdmon()->send_latest_now_nodelete(stats, stats->epoch+1);
+    mon->osdmon()->send_latest_now_nodelete(op, stats->epoch+1);
 
   // Always forward the PGStats to the leader, even if they are the same as
   // the old PGStats. The leader will mark as down osds that haven't sent
@@ -742,14 +745,15 @@ bool PGMonitor::pg_stats_have_changed(int from, const MPGStats *stats) const
   return false;
 }
 
-bool PGMonitor::prepare_pg_stats(MPGStats *stats) 
+bool PGMonitor::prepare_pg_stats(MonOpRequestRef op)
 {
+  op->mark_pgmon_event(__func__);
+  MPGStats *stats = static_cast<MPGStats*>(op->get_req());
   dout(10) << "prepare_pg_stats " << *stats << " from " << stats->get_orig_source() << dendl;
   int from = stats->get_orig_source().num();
 
   if (stats->fsid != mon->monmap->fsid) {
     dout(0) << "prepare_pg_stats on fsid " << stats->fsid << " != " << mon->monmap->fsid << dendl;
-    stats->put();
     return false;
   }
 
@@ -759,7 +763,6 @@ bool PGMonitor::prepare_pg_stats(MPGStats *stats)
       !mon->osdmon()->osdmap.is_up(from) ||
       stats->get_orig_source_inst() != mon->osdmon()->osdmap.get_inst(from)) {
     dout(1) << " ignoring stats from non-active osd." << dendl;
-    stats->put();
     return false;
   }
       
@@ -772,8 +775,7 @@ bool PGMonitor::prepare_pg_stats(MPGStats *stats)
 	 ++p) {
       ack->pg_stat[p->first] = make_pair(p->second.reported_seq, p->second.reported_epoch);
     }
-    mon->send_reply(stats, ack);
-    stats->put();
+    mon->send_reply(op, ack);
     return false;
   }
 
@@ -791,6 +793,7 @@ bool PGMonitor::prepare_pg_stats(MPGStats *stats)
 
   // pg stats
   MPGStatsAck *ack = new MPGStatsAck;
+  MonOpRequestRef ack_op = mon->op_tracker.create_request<MonOpRequest>(ack);
   ack->set_tid(stats->get_tid());
   for (map<pg_t,pg_stat_t>::iterator p = stats->pg_stat.begin();
        p != stats->pg_stat.end();
@@ -835,15 +838,18 @@ bool PGMonitor::prepare_pg_stats(MPGStats *stats)
     */
   }
   
-  wait_for_finished_proposal(new C_Stats(this, stats, ack));
+  wait_for_finished_proposal(op, new C_Stats(this, op, ack_op));
   return true;
 }
 
-void PGMonitor::_updated_stats(MPGStats *req, MPGStatsAck *ack)
+void PGMonitor::_updated_stats(MonOpRequestRef op, MonOpRequestRef ack_op)
 {
-  dout(7) << "_updated_stats for " << req->get_orig_source_inst() << dendl;
-  mon->send_reply(req, ack);
-  req->put();
+  op->mark_pgmon_event(__func__);
+  ack_op->mark_pgmon_event(__func__);
+  MPGStats *ack = static_cast<MPGStats*>(ack_op->get_req());
+  dout(7) << "_updated_stats for "
+          << op->get_req()->get_orig_source_inst() << dendl;
+  mon->send_reply(op, ack);
 }
 
 
@@ -873,13 +879,13 @@ void PGMonitor::check_osd_map(epoch_t epoch)
 
   if (!mon->osdmon()->is_readable()) {
     dout(10) << "check_osd_map -- osdmap not readable, waiting" << dendl;
-    mon->osdmon()->wait_for_readable(new RetryCheckOSDMap(this, epoch));
+    mon->osdmon()->wait_for_readable_ctx(new RetryCheckOSDMap(this, epoch));
     return;
   }
 
   if (!is_writeable()) {
     dout(10) << "check_osd_map -- pgmap not writeable, waiting" << dendl;
-    wait_for_writeable(new RetryCheckOSDMap(this, epoch));
+    wait_for_writeable_ctx(new RetryCheckOSDMap(this, epoch));
     return;
   }
 
@@ -1023,8 +1029,8 @@ bool PGMonitor::register_new_pgs()
        ++p) {
     int64_t poolid = p->first;
     pg_pool_t &pool = p->second;
-    int ruleno = pool.get_crush_ruleset();
-    if (!osdmap->crush->rule_exists(ruleno)) 
+    int ruleno = osdmap->crush->find_rule(pool.get_crush_ruleset(), pool.get_type(), pool.get_size());
+    if (ruleno < 0 || !osdmap->crush->rule_exists(ruleno))
       continue;
 
     if (pool.get_last_change() <= pg_map.last_pg_scan ||
@@ -1193,7 +1199,7 @@ void PGMonitor::send_pg_creates(int osd, Connection *con)
     m->mkpg[*q] = pg_create_t(pg_map.pg_stat[*q].created,
 			      pg_map.pg_stat[*q].parent,
 			      pg_map.pg_stat[*q].parent_split_bits);
-    // Need the create time from the monitor using his clock to set last_scrub_stamp
+    // Need the create time from the monitor using its clock to set last_scrub_stamp
     // upon pg creation.
     m->ctimes[*q] = pg_map.pg_stat[*q].last_scrub_stamp;
   }
@@ -1269,7 +1275,10 @@ void PGMonitor::dump_object_stat_sum(TextTable &tbl, Formatter *f,
   } else {
     tbl << stringify(si_t(sum.num_bytes));
     int64_t kb_used = SHIFT_ROUND_UP(sum.num_bytes, 10);
-    tbl << percentify(((float)kb_used / pg_map.osd_sum.kb)*100);
+    float used = 0.0;
+    if (pg_map.osd_sum.kb > 0)
+      used = (float)kb_used / pg_map.osd_sum.kb;
+    tbl << percentify(used*100);
     tbl << si_t(avail);
     tbl << sum.num_objects;
     if (verbose) {
@@ -1292,6 +1301,11 @@ int64_t PGMonitor::get_rule_avail(OSDMap& osdmap, int ruleno)
   for (map<int,float>::iterator p = wm.begin(); p != wm.end(); ++p) {
     ceph::unordered_map<int32_t,osd_stat_t>::const_iterator osd_info = pg_map.osd_stat.find(p->first);
     if (osd_info != pg_map.osd_stat.end()) {
+      if (osd_info->second.kb == 0) {
+        // osd must be out, hence its stats have been zeroed
+        // (unless we somehow managed to have a disk with size 0...)
+        continue;
+      }
       int64_t proj = (float)((osd_info->second).kb_avail * 1024ull) /
         (double)p->second;
       if (min < 0 || proj < min)
@@ -1339,9 +1353,11 @@ void PGMonitor::dump_pool_stats(stringstream &ss, Formatter *f, bool verbose)
     int ruleno = osdmap.crush->find_rule(pool->get_crush_ruleset(),
 					 pool->get_type(),
 					 pool->get_size());
-    uint64_t avail;
+    int64_t avail;
     if (avail_by_rule.count(ruleno) == 0) {
       avail = get_rule_avail(osdmap, ruleno);
+      if (avail < 0)
+        avail = 0;
       avail_by_rule[ruleno] = avail;
     } else {
       avail = avail_by_rule[ruleno];
@@ -1419,7 +1435,11 @@ void PGMonitor::dump_fs_stats(stringstream &ss, Formatter *f, bool verbose)
     tbl << stringify(si_t(pg_map.osd_sum.kb*1024))
         << stringify(si_t(pg_map.osd_sum.kb_avail*1024))
         << stringify(si_t(pg_map.osd_sum.kb_used*1024));
-    tbl << percentify(((float)pg_map.osd_sum.kb_used / pg_map.osd_sum.kb)*100);
+    float used = 0.0;
+    if (pg_map.osd_sum.kb > 0) {
+      used = ((float)pg_map.osd_sum.kb_used / pg_map.osd_sum.kb);
+    }
+    tbl << percentify(used*100);
     if (verbose) {
       tbl << stringify(si_t(pg_map.pg_sum.stats.sum.num_objects));
     }
@@ -1442,17 +1462,20 @@ void PGMonitor::dump_info(Formatter *f)
   f->dump_unsigned("pgmap_last_committed", get_last_committed());
 }
 
-bool PGMonitor::preprocess_command(MMonCommand *m)
+bool PGMonitor::preprocess_command(MonOpRequestRef op)
 {
+  op->mark_pgmon_event(__func__);
+  MMonCommand *m = static_cast<MMonCommand*>(op->get_req());
   int r = -1;
   bufferlist rdata;
   stringstream ss, ds;
+  bool primary = false;
 
   map<string, cmd_vartype> cmdmap;
   if (!cmdmap_from_json(m->cmd, &cmdmap, ss)) {
     // ss has reason for failure
     string rs = ss.str();
-    mon->reply_command(m, -EINVAL, rs, rdata, get_last_committed());
+    mon->reply_command(op, -EINVAL, rs, rdata, get_last_committed());
     return true;
   }
 
@@ -1461,7 +1484,7 @@ bool PGMonitor::preprocess_command(MMonCommand *m)
 
   MonSession *session = m->get_session();
   if (!session) {
-    mon->reply_command(m, -EACCES, "access denied", rdata, get_last_committed());
+    mon->reply_command(op, -EACCES, "access denied", rdata, get_last_committed());
     return true;
   }
 
@@ -1478,11 +1501,31 @@ bool PGMonitor::preprocess_command(MMonCommand *m)
     cmd_putval(g_ceph_context, cmdmap, "format", string("json"));
     cmd_putval(g_ceph_context, cmdmap, "dumpcontents", v);
     prefix = "pg dump";
+  } else if (prefix == "pg ls-by-primary") {
+    primary = true;
+    prefix = "pg ls";
+  } else if (prefix == "pg ls-by-osd") {
+    prefix = "pg ls";
+  } else if (prefix == "pg ls-by-pool") {
+    prefix = "pg ls";
+    string poolstr;
+    cmd_getval(g_ceph_context, cmdmap, "poolstr", poolstr);
+    int64_t pool = -2;
+    pool = mon->osdmon()->osdmap.lookup_pg_pool_name(poolstr.c_str());
+    if (pool < 0) {
+      r = -ENOENT;
+      ss << "pool " << poolstr << " does not exist";
+      string rs = ss.str();
+      mon->reply_command(op, r, rs, get_last_committed());
+      return true;
+    }
+    cmd_putval(g_ceph_context, cmdmap, "pool", pool);
   }
+   
 
   string format;
   cmd_getval(g_ceph_context, cmdmap, "format", format, string("plain"));
-  boost::scoped_ptr<Formatter> f(new_formatter(format));
+  boost::scoped_ptr<Formatter> f(Formatter::create(format));
 
   if (prefix == "pg stat") {
     if (f) {
@@ -1551,10 +1594,65 @@ bool PGMonitor::preprocess_command(MMonCommand *m)
       }
       f->flush(ds);
     } else {
-      // plain format ignores dumpcontents
-      pg_map.dump(ds);
+      if (what.count("all")) {
+	pg_map.dump(ds);
+      } else if (what.count("summary") || what.count("sum")) {
+	pg_map.dump_basic(ds);
+	pg_map.dump_pg_sum_stats(ds, true);
+	pg_map.dump_osd_sum_stats(ds);
+      } else {
+	if (what.count("pgs_brief")) {
+	  pg_map.dump_pg_stats(ds, true);
+	}
+	bool header = true;
+	if (what.count("pgs")) {
+	  pg_map.dump_pg_stats(ds, false);
+	  header = false;
+	}
+	if (what.count("pools")) {
+	  pg_map.dump_pool_stats(ds, header);
+	  header = false;
+	}
+	if (what.count("osds")) {
+	  pg_map.dump_osd_stats(ds);
+	}
+      }
     }
     ss << "dumped " << what << " in format " << format;
+    r = 0;
+  } else if (prefix == "pg ls") {
+    int64_t osd = -1;
+    int64_t pool = -1;
+    vector<string>states;
+    set<pg_t> pgs;
+    set<string> what;
+    cmd_getval(g_ceph_context, cmdmap, "pool", pool);
+    cmd_getval(g_ceph_context, cmdmap, "osd", osd);
+    cmd_getval(g_ceph_context, cmdmap, "states", states);
+    if (pool >= 0 && !mon->osdmon()->osdmap.have_pg_pool(pool)) {
+      r = -ENOENT;
+      ss << "pool " << pool << " does not exist";
+      goto reply;
+    } 
+    if (osd >= 0 && !mon->osdmon()->osdmap.is_up(osd)) {
+      ss << "osd " << osd << " is not up";
+      r = -EAGAIN;
+      goto reply;
+    }
+    if (states.empty())
+      states.push_back("all");
+    while (!states.empty()) {
+      string state = states.back();
+      what.insert(state);
+      pg_map.get_filtered_pg_stats(state,pool,osd,primary,pgs);
+      states.pop_back();
+    }
+    if (f && !pgs.empty()){
+      pg_map.dump_filtered_pg_stats(f.get(),pgs);
+      f->flush(ds);
+    } else if (!pgs.empty()){
+      pg_map.dump_filtered_pg_stats(ds,pgs);
+    }
     r = 0;
   } else if (prefix == "pg dump_stuck") {
     vector<string> stuckop_vec;
@@ -1688,12 +1786,14 @@ bool PGMonitor::preprocess_command(MMonCommand *m)
   string rs;
   getline(ss, rs);
   rdata.append(ds);
-  mon->reply_command(m, r, rs, rdata, get_last_committed());
+  mon->reply_command(op, r, rs, rdata, get_last_committed());
   return true;
 }
 
-bool PGMonitor::prepare_command(MMonCommand *m)
+bool PGMonitor::prepare_command(MonOpRequestRef op)
 {
+  op->mark_pgmon_event(__func__);
+  MMonCommand *m = static_cast<MMonCommand*>(op->get_req());
   stringstream ss;
   pg_t pgid;
   epoch_t epoch = mon->osdmon()->osdmap.get_epoch();
@@ -1704,7 +1804,7 @@ bool PGMonitor::prepare_command(MMonCommand *m)
   if (!cmdmap_from_json(m->cmd, &cmdmap, ss)) {
     // ss has reason for failure
     string rs = ss.str();
-    mon->reply_command(m, -EINVAL, rs, get_last_committed());
+    mon->reply_command(op, -EINVAL, rs, get_last_committed());
     return true;
   }
 
@@ -1713,7 +1813,7 @@ bool PGMonitor::prepare_command(MMonCommand *m)
 
   MonSession *session = m->get_session();
   if (!session) {
-    mon->reply_command(m, -EACCES, "access denied", get_last_committed());
+    mon->reply_command(op, -EACCES, "access denied", get_last_committed());
     return true;
   }
 
@@ -1767,17 +1867,18 @@ bool PGMonitor::prepare_command(MMonCommand *m)
   getline(ss, rs);
   if (r < 0 && rs.length() == 0)
     rs = cpp_strerror(r);
-  mon->reply_command(m, r, rs, get_last_committed());
+  mon->reply_command(op, r, rs, get_last_committed());
   return false;
 
  update:
   getline(ss, rs);
-  wait_for_finished_proposal(new Monitor::C_Command(mon, m, r, rs,
-						    get_last_committed() + 1));
+  wait_for_finished_proposal(op, new Monitor::C_Command(
+        mon, op, r, rs, get_last_committed() + 1));
   return true;
 }
 
-static void note_stuck_detail(enum PGMap::StuckPG what,
+// Only called with a single bit set in "what"
+static void note_stuck_detail(int what,
 			      ceph::unordered_map<pg_t,pg_stat_t>& stuck_pgs,
 			      list<pair<health_status_t,string> > *detail)
 {
@@ -1970,7 +2071,7 @@ void PGMonitor::get_health(list<pair<health_status_t,string> >& summary,
   // slow requests
   if (g_conf->mon_osd_max_op_age > 0 &&
       pg_map.osd_sum.op_queue_age_hist.upper_bound() > g_conf->mon_osd_max_op_age) {
-    unsigned sum = _warn_slow_request_histogram(pg_map.osd_sum.op_queue_age_hist, "", summary, detail);
+    unsigned sum = _warn_slow_request_histogram(pg_map.osd_sum.op_queue_age_hist, "", summary, NULL);
     if (sum > 0) {
       ostringstream ss;
       ss << sum << " requests are blocked > " << g_conf->mon_osd_max_op_age << " sec";
@@ -2022,7 +2123,7 @@ void PGMonitor::get_health(list<pair<health_status_t,string> >& summary,
       ((1000000 - p->second.cache_target_full_ratio_micro) *
        g_conf->mon_cache_target_full_warn_ratio);
     if (p->second.target_max_objects && (uint64_t)st.stats.sum.num_objects >
-	p->second.target_max_objects * ratio / 1000000) {
+	p->second.target_max_objects * (ratio / 1000000.0)) {
       nearfull = true;
       if (detail) {
 	ostringstream ss;
@@ -2034,11 +2135,11 @@ void PGMonitor::get_health(list<pair<health_status_t,string> >& summary,
       }
     }
     if (p->second.target_max_bytes && (uint64_t)st.stats.sum.num_bytes >
-	p->second.target_max_bytes * ratio / 1000000) {
+	p->second.target_max_bytes * (ratio / 1000000.0)) {
       nearfull = true;
       if (detail) {
 	ostringstream ss;
-	ss << "cache pool '" << mon->osdmon()->osdmap.get_pool_name(p->first)
+	ss << "cache pool '" << name
 	   << "' with " << si_t(st.stats.sum.num_bytes)
 	   << "B at/near target max "
 	   << si_t(p->second.target_max_bytes) << "B";
@@ -2067,7 +2168,7 @@ void PGMonitor::get_health(list<pair<health_status_t,string> >& summary,
   int sum_pg_up = MAX(pg_map.pg_sum.up, static_cast<int32_t>(pg_map.pg_stat.size()));
   if (num_in && g_conf->mon_pg_warn_min_per_osd > 0) {
     int per = sum_pg_up / num_in;
-    if (per < g_conf->mon_pg_warn_min_per_osd) {
+    if (per < g_conf->mon_pg_warn_min_per_osd && per) {
       ostringstream ss;
       ss << "too few PGs per OSD (" << per << " < min " << g_conf->mon_pg_warn_min_per_osd << ")";
       summary.push_back(make_pair(HEALTH_WARN, ss.str()));
@@ -2092,9 +2193,10 @@ void PGMonitor::get_health(list<pair<health_status_t,string> >& summary,
       const pg_pool_t *pi = mon->osdmon()->osdmap.get_pg_pool(p->first);
       if (!pi)
 	continue;   // in case osdmap changes haven't propagated to PGMap yet
+      const string& name = mon->osdmon()->osdmap.get_pool_name(p->first);
       if (pi->get_pg_num() > pi->get_pgp_num()) {
 	ostringstream ss;
-	ss << "pool " << mon->osdmon()->osdmap.get_pool_name(p->first) << " pg_num "
+	ss << "pool " << name << " pg_num "
 	   << pi->get_pg_num() << " > pgp_num " << pi->get_pgp_num();
 	summary.push_back(make_pair(HEALTH_WARN, ss.str()));
 	if (detail)
@@ -2109,11 +2211,11 @@ void PGMonitor::get_health(list<pair<health_status_t,string> >& summary,
 	if (g_conf->mon_pg_warn_max_object_skew > 0 &&
 	    ratio > g_conf->mon_pg_warn_max_object_skew) {
 	  ostringstream ss;
-	  ss << "pool " << mon->osdmon()->osdmap.get_pool_name(p->first) << " has too few pgs";
+	  ss << "pool " << name << " has too few pgs";
 	  summary.push_back(make_pair(HEALTH_WARN, ss.str()));
 	  if (detail) {
 	    ostringstream ss;
-	    ss << "pool " << mon->osdmon()->osdmap.get_pool_name(p->first) << " objects per pg ("
+	    ss << "pool " << name << " objects per pg ("
 	       << objects_per_pg << ") is more than " << ratio << " times cluster average ("
 	       << average_objects_per_pg << ")";
 	    detail->push_back(make_pair(HEALTH_WARN, ss.str()));
@@ -2150,31 +2252,32 @@ int PGMonitor::dump_stuck_pg_stats(stringstream &ds,
 				   int threshold,
 				   vector<string>& args) const
 {
-  PGMap::StuckPG stuck_type;
-  string type = args[0];
+  int stuck_types = 0;
 
-  if (type == "inactive")
-    stuck_type = PGMap::STUCK_INACTIVE;
-  else if (type == "unclean")
-    stuck_type = PGMap::STUCK_UNCLEAN;
-  else if (type == "undersized")
-    stuck_type = PGMap::STUCK_UNDERSIZED;
-  else if (type == "degraded")
-    stuck_type = PGMap::STUCK_DEGRADED;
-  else if (type == "stale")
-    stuck_type = PGMap::STUCK_STALE;
-  else {
-    ds << "Unknown type: " << type << std::endl;
-    return 0;
+  for (vector<string>::iterator i = args.begin() ; i != args.end(); ++i) {
+    if (*i == "inactive")
+      stuck_types |= PGMap::STUCK_INACTIVE;
+    else if (*i == "unclean")
+      stuck_types |= PGMap::STUCK_UNCLEAN;
+    else if (*i == "undersized")
+      stuck_types |= PGMap::STUCK_UNDERSIZED;
+    else if (*i == "degraded")
+      stuck_types |= PGMap::STUCK_DEGRADED;
+    else if (*i == "stale")
+      stuck_types |= PGMap::STUCK_STALE;
+    else {
+      ds << "Unknown type: " << *i << std::endl;
+      return 0;
+    }
   }
 
   utime_t now(ceph_clock_now(g_ceph_context));
   utime_t cutoff = now - utime_t(threshold, 0);
 
   if (!f) {
-    pg_map.dump_stuck_plain(ds, stuck_type, cutoff);
+    pg_map.dump_stuck_plain(ds, stuck_types, cutoff);
   } else {
-    pg_map.dump_stuck(f, stuck_type, cutoff);
+    pg_map.dump_stuck(f, stuck_types, cutoff);
     f->flush(ds);
   }
 

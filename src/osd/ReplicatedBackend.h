@@ -33,7 +33,6 @@ public:
   ReplicatedBackend(
     PGBackend::Listener *pg,
     coll_t coll,
-    coll_t temp_coll,
     ObjectStore *store,
     CephContext *cct);
 
@@ -70,20 +69,20 @@ public:
     );
 
   void on_change();
-  void clear_state();
+  void clear_recovery_state();
   void on_flushed();
 
-  class RPCRecPred : public IsRecoverablePredicate {
+  class RPCRecPred : public IsPGRecoverablePredicate {
   public:
     bool operator()(const set<pg_shard_t> &have) const {
       return !have.empty();
     }
   };
-  IsRecoverablePredicate *get_is_recoverable_predicate() {
+  IsPGRecoverablePredicate *get_is_recoverable_predicate() {
     return new RPCRecPred;
   }
 
-  class RPCReadPred : public IsReadablePredicate {
+  class RPCReadPred : public IsPGReadablePredicate {
     pg_shard_t whoami;
   public:
     RPCReadPred(pg_shard_t whoami) : whoami(whoami) {}
@@ -91,7 +90,7 @@ public:
       return have.count(whoami);
     }
   };
-  IsReadablePredicate *get_is_readable_predicate() {
+  IsPGReadablePredicate *get_is_readable_predicate() {
     return new RPCReadPred(get_parent()->whoami_shard());
   }
 
@@ -153,11 +152,12 @@ public:
     const hobject_t &hoid,
     uint64_t off,
     uint64_t len,
+    uint32_t op_flags,
     bufferlist *bl);
 
   void objects_read_async(
     const hobject_t &hoid,
-    const list<pair<pair<uint64_t, uint64_t>,
+    const list<pair<boost::tuple<uint64_t, uint64_t, uint32_t>,
 	       pair<bufferlist*, Context*> > > &to_read,
     Context *on_complete);
 
@@ -343,7 +343,7 @@ public:
     PGTransaction *t,
     const eversion_t &trim_to,
     const eversion_t &trim_rollback_to,
-    vector<pg_log_entry_t> &log_entries,
+    const vector<pg_log_entry_t> &log_entries,
     boost::optional<pg_hit_set_history_t> &hset_history,
     Context *on_local_applied_sync,
     Context *on_all_applied,
@@ -354,6 +354,22 @@ public:
     );
 
 private:
+  template<typename T, int MSGTYPE>
+  Message * generate_subop(
+    const hobject_t &soid,
+    const eversion_t &at_version,
+    ceph_tid_t tid,
+    osd_reqid_t reqid,
+    eversion_t pg_trim_to,
+    eversion_t pg_trim_rollback_to,
+    hobject_t new_temp_oid,
+    hobject_t discard_temp_oid,
+    const vector<pg_log_entry_t> &log_entries,
+    boost::optional<pg_hit_set_history_t> &hset_history,
+    InProgressOp *op,
+    ObjectStore::Transaction *op_t,
+    pg_shard_t peer,
+    const pg_info_t &pinfo);
   void issue_op(
     const hobject_t &soid,
     const eversion_t &at_version,
@@ -363,14 +379,17 @@ private:
     eversion_t pg_trim_rollback_to,
     hobject_t new_temp_oid,
     hobject_t discard_temp_oid,
-    vector<pg_log_entry_t> &log_entries,
+    const vector<pg_log_entry_t> &log_entries,
     boost::optional<pg_hit_set_history_t> &hset_history,
     InProgressOp *op,
     ObjectStore::Transaction *op_t);
   void op_applied(InProgressOp *op);
   void op_commit(InProgressOp *op);
+  template<typename T, int MSGTYPE>
   void sub_op_modify_reply(OpRequestRef op);
   void sub_op_modify(OpRequestRef op);
+  template<typename T, int MSGTYPE>
+  void sub_op_modify_impl(OpRequestRef op);
 
   struct RepModify {
     OpRequestRef op;
@@ -412,6 +431,7 @@ private:
 
   void be_deep_scrub(
     const hobject_t &obj,
+    uint32_t seed,
     ScrubMap::object &o,
     ThreadPool::TPHandle &handle);
   uint64_t be_get_ondisk_size(uint64_t logical_size) { return logical_size; }

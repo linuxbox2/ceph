@@ -21,6 +21,11 @@
 #include <sys/stat.h>
 #include <dirent.h>
 #include <sys/xattr.h>
+#include <sys/uio.h>
+
+#ifdef __linux__
+#include <limits.h>
+#endif
 
 TEST(LibCephFS, OpenEmptyComponent) {
 
@@ -132,6 +137,8 @@ TEST(LibCephFS, ReleaseMounted) {
   ASSERT_EQ(0, ceph_conf_read_file(cmount, NULL));
   ASSERT_EQ(0, ceph_mount(cmount, "/"));
   ASSERT_EQ(-EISCONN, ceph_release(cmount));
+  ASSERT_EQ(0, ceph_unmount(cmount));
+  ASSERT_EQ(0, ceph_release(cmount));
 }
 
 TEST(LibCephFS, UnmountRelease) {
@@ -171,13 +178,22 @@ TEST(LibCephFS, OpenLayout) {
   /* valid layout */
   char test_layout_file[256];
   sprintf(test_layout_file, "test_layout_%d_b", getpid());
-  int fd = ceph_open_layout(cmount, test_layout_file, O_CREAT, 0666, (1<<20), 7, (1<<20), NULL);
+  int fd = ceph_open_layout(cmount, test_layout_file, O_CREAT|O_WRONLY, 0666, (1<<20), 7, (1<<20), NULL);
   ASSERT_GT(fd, 0);
   char poolname[80];
   ASSERT_LT(0, ceph_get_file_pool_name(cmount, fd, poolname, sizeof(poolname)));
   ASSERT_EQ(4, ceph_get_file_pool_name(cmount, fd, poolname, 0));
   ASSERT_EQ(0, strcmp("data", poolname));
+
+  /* on already-written file (ENOTEMPTY) */
+  ceph_write(cmount, fd, "hello world", 11, 0);
   ceph_close(cmount, fd);
+
+  char xattrk[128];
+  char xattrv[128];
+  sprintf(xattrk, "ceph.file.layout.stripe_unit");
+  sprintf(xattrv, "65536");
+  ASSERT_EQ(-ENOTEMPTY, ceph_setxattr(cmount, test_layout_file, xattrk, (void *)xattrv, 5, 0));
 
   /* invalid layout */
   sprintf(test_layout_file, "test_layout_%d_c", getpid());
@@ -650,8 +666,53 @@ TEST(LibCephFS, Fchown) {
 
   fd = ceph_open(cmount, test_file, O_RDWR, 0);
   ASSERT_EQ(fd, -EACCES);
+
   ceph_shutdown(cmount);
 }
+
+#if defined(__linux__) && defined(O_PATH)
+TEST(LibCephFS, FlagO_PATH) {
+  struct ceph_mount_info *cmount;
+
+  ASSERT_EQ(0, ceph_create(&cmount, NULL));
+  ASSERT_EQ(0, ceph_conf_parse_env(cmount, NULL));
+  ASSERT_EQ(0, ceph_conf_read_file(cmount, NULL));
+  ASSERT_EQ(0, ceph_mount(cmount, NULL));
+
+  char test_file[PATH_MAX];
+  sprintf(test_file, "test_oflag_%d", getpid());
+
+  int fd = ceph_open(cmount, test_file, O_CREAT|O_RDWR|O_PATH, 0666);
+  ASSERT_EQ(-ENOENT, fd);
+
+  fd = ceph_open(cmount, test_file, O_CREAT|O_RDWR, 0666);
+  ASSERT_GT(fd, 0);
+  ASSERT_EQ(0, ceph_close(cmount, fd));
+
+  // ok, the file has been created. perform real checks now
+  fd = ceph_open(cmount, test_file, O_CREAT|O_RDWR|O_PATH, 0666);
+  ASSERT_GT(fd, 0);
+
+  char buf[128];
+  ASSERT_EQ(-EBADF, ceph_read(cmount, fd, buf, sizeof(buf), 0));
+  ASSERT_EQ(-EBADF, ceph_write(cmount, fd, buf, sizeof(buf), 0));
+
+  // set perms to readable and writeable only by owner
+  ASSERT_EQ(-EBADF, ceph_fchmod(cmount, fd, 0600));
+
+  // change ownership to nobody -- we assume nobody exists and id is always 65534
+  ASSERT_EQ(-EBADF, ceph_fchown(cmount, fd, 65534, 65534));
+
+  // try to sync
+  ASSERT_EQ(-EBADF, ceph_fsync(cmount, fd, false));
+
+  struct stat sb;
+  ASSERT_EQ(0, ceph_fstat(cmount, fd, &sb));
+
+  ASSERT_EQ(0, ceph_close(cmount, fd));
+  ceph_shutdown(cmount);
+}
+#endif /* __linux */
 
 TEST(LibCephFS, Symlinks) {
   struct ceph_mount_info *cmount;
@@ -672,6 +733,10 @@ TEST(LibCephFS, Symlinks) {
   sprintf(test_symlink, "test_symlinks_sym_%d", getpid());
 
   ASSERT_EQ(ceph_symlink(cmount, test_file, test_symlink), 0);
+
+  // test the O_NOFOLLOW case
+  fd = ceph_open(cmount, test_symlink, O_NOFOLLOW, 0);
+  ASSERT_EQ(fd, -ELOOP);
 
   // stat the original file
   struct stat stbuf_orig;
@@ -822,6 +887,24 @@ TEST(LibCephFS, HardlinkNoOriginal) {
   ceph_shutdown(cmount);
 }
 
+TEST(LibCephFS, BadArgument) {
+  struct ceph_mount_info *cmount;
+  ASSERT_EQ(ceph_create(&cmount, NULL), 0);
+  ASSERT_EQ(0, ceph_conf_parse_env(cmount, NULL));
+  ASSERT_EQ(ceph_conf_read_file(cmount, NULL), 0);
+  ASSERT_EQ(ceph_mount(cmount, NULL), 0);
+
+  int fd = ceph_open(cmount, "test_file", O_CREAT|O_RDWR, 0666);
+  ASSERT_GT(fd, 0);
+  char buf[100];
+  ASSERT_EQ(ceph_write(cmount, fd, buf, sizeof(buf), 0), (int)sizeof(buf));
+  ASSERT_EQ(ceph_read(cmount, fd, buf, 0, 5), 0);
+  ceph_close(cmount, fd);
+  ASSERT_EQ(ceph_unlink(cmount, "test_file"), 0);
+
+  ceph_shutdown(cmount);
+}
+
 TEST(LibCephFS, BadFileDesc) {
   struct ceph_mount_info *cmount;
   ASSERT_EQ(ceph_create(&cmount, NULL), 0);
@@ -877,6 +960,44 @@ TEST(LibCephFS, ReadEmptyFile) {
 
   char buf[4096];
   ASSERT_EQ(ceph_read(cmount, fd, buf, 4096, 0), 0);
+
+  ceph_close(cmount, fd);
+  ceph_shutdown(cmount);
+}
+
+TEST(LibCephFS, PreadvPwritev) {
+  struct ceph_mount_info *cmount;
+  ASSERT_EQ(ceph_create(&cmount, NULL), 0);
+  ASSERT_EQ(0, ceph_conf_parse_env(cmount, NULL));
+  ASSERT_EQ(ceph_conf_read_file(cmount, NULL), 0);
+  ASSERT_EQ(ceph_mount(cmount, NULL), 0);
+
+  int mypid = getpid();
+  char testf[256];
+
+  sprintf(testf, "test_preadvpwritevfile%d", mypid);
+  int fd = ceph_open(cmount, testf, O_CREAT|O_RDWR, 0666);
+  ASSERT_GT(fd, 0);
+
+  char out0[] = "hello ";
+  char out1[] = "world\n";
+  struct iovec iov_out[2] = {
+	{out0, sizeof(out0)},
+	{out1, sizeof(out1)},
+  };
+  char in0[sizeof(out0)];
+  char in1[sizeof(out1)];
+  struct iovec iov_in[2] = {
+	{in0, sizeof(in0)},
+	{in1, sizeof(in1)},
+  };
+  ssize_t nwritten = iov_out[0].iov_len + iov_out[1].iov_len; 
+  ssize_t nread = iov_in[0].iov_len + iov_in[1].iov_len; 
+
+  ASSERT_EQ(ceph_pwritev(cmount, fd, iov_out, 2, 0), nwritten);
+  ASSERT_EQ(ceph_preadv(cmount, fd, iov_in, 2, 0), nread);
+  ASSERT_EQ(0, strncmp((const char*)iov_in[0].iov_base, (const char*)iov_out[0].iov_base, iov_out[0].iov_len));
+  ASSERT_EQ(0, strncmp((const char*)iov_in[1].iov_base, (const char*)iov_out[1].iov_base, iov_out[1].iov_len));
 
   ceph_close(cmount, fd);
   ceph_shutdown(cmount);
@@ -1138,6 +1259,7 @@ TEST(LibCephFS, GetOsdCrushLocation) {
     }
   }
 
+  ceph_close(cmount, fd);
   ceph_shutdown(cmount);
 }
 

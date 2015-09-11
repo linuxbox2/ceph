@@ -18,6 +18,7 @@
 #include "osd_types.h"
 #include "include/buffer.h"
 #include "os/ObjectStore.h"
+#include "boost/tuple/tuple.hpp"
 
 struct ECSubWrite {
   pg_shard_t from;
@@ -33,7 +34,7 @@ struct ECSubWrite {
   set<hobject_t> temp_added;
   set<hobject_t> temp_removed;
   boost::optional<pg_hit_set_history_t> updated_hit_set_history;
-  ECSubWrite() {}
+  ECSubWrite() : tid(0) {}
   ECSubWrite(
     pg_shard_t from,
     ceph_tid_t tid,
@@ -56,10 +57,29 @@ struct ECSubWrite {
       temp_added(temp_added),
       temp_removed(temp_removed),
       updated_hit_set_history(updated_hit_set_history) {}
+  void claim(ECSubWrite &other) {
+    from = other.from;
+    tid = other.tid;
+    reqid = other.reqid;
+    soid = other.soid;
+    stats = other.stats;
+    t.swap(other.t);
+    at_version = other.at_version;
+    trim_to = other.trim_to;
+    trim_rollback_to = other.trim_rollback_to;
+    log_entries.swap(other.log_entries);
+    temp_added.swap(other.temp_added);
+    temp_removed.swap(other.temp_removed);
+    updated_hit_set_history = other.updated_hit_set_history;
+  }
   void encode(bufferlist &bl) const;
   void decode(bufferlist::iterator &bl);
   void dump(Formatter *f) const;
   static void generate_test_instances(list<ECSubWrite*>& o);
+private:
+  // no outside copying -- slow
+  ECSubWrite(ECSubWrite& other);
+  const ECSubWrite& operator=(const ECSubWrite& other);
 };
 WRITE_CLASS_ENCODER(ECSubWrite)
 
@@ -69,7 +89,7 @@ struct ECSubWriteReply {
   eversion_t last_complete;
   bool committed;
   bool applied;
-  ECSubWriteReply() : committed(false), applied(false) {}
+  ECSubWriteReply() : tid(0), committed(false), applied(false) {}
   void encode(bufferlist &bl) const;
   void decode(bufferlist::iterator &bl);
   void dump(Formatter *f) const;
@@ -80,14 +100,14 @@ WRITE_CLASS_ENCODER(ECSubWriteReply)
 struct ECSubRead {
   pg_shard_t from;
   ceph_tid_t tid;
-  map<hobject_t, list<pair<uint64_t, uint64_t> > > to_read;
+  map<hobject_t, list<boost::tuple<uint64_t, uint64_t, uint32_t> > > to_read;
   set<hobject_t> attrs_to_read;
-  void encode(bufferlist &bl) const;
+  void encode(bufferlist &bl, uint64_t features) const;
   void decode(bufferlist::iterator &bl);
   void dump(Formatter *f) const;
   static void generate_test_instances(list<ECSubRead*>& o);
 };
-WRITE_CLASS_ENCODER(ECSubRead)
+WRITE_CLASS_ENCODER_FEATURES(ECSubRead)
 
 struct ECSubReadReply {
   pg_shard_t from;
