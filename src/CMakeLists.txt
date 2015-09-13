@@ -69,7 +69,7 @@ else()
 endif()
 
 
-set(EXTRALIBS uuid rt dl ${Boost_LIBS})
+set(EXTRALIBS uuid ${BLKID_LIBRARIES} rt dl ${Boost_LIBS})
 
 if(${WITH_PROFILER})
   list(APPEND EXTRALIBS profiler)
