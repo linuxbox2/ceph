@@ -47,6 +47,9 @@ using namespace std;
 
 #include "messages/MPing.h"
 
+#include "messages/MConnect.h"
+#include "messages/MNop.h"
+
 #include "messages/MCommand.h"
 #include "messages/MCommandReply.h"
 #include "messages/MBackfillReserve.h"

@@ -178,7 +178,11 @@
 // Xio Testing
 #define MSG_DATA_PING		  0x602
 
-// Xio intends to define messages 0x603..0x606
+// Session startup
+#define MSG_CONNECT               0x603
+#define MSG_CONNECT_REPLY         0x604
+#define MSG_CONNECT_AUTH          0x605
+#define MSG_CONNECT_AUTH_REPLY    0x606
 
 // Special
 #define MSG_NOP                   0x607
