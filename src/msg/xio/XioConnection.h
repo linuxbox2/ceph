@@ -26,6 +26,7 @@ extern "C" {
 #include "XioSubmit.h"
 #include "msg/Connection.h"
 #include "msg/Messenger.h"
+#include "messages/MConnect.h"
 #include "auth/AuthSessionHandler.h"
 
 #define XIO_ALL_FEATURES (CEPH_FEATURES_ALL & \
@@ -170,13 +171,11 @@ private:
     // state machine
     int init_state();
     int next_state(Message* m);
-#if 0 // future (session startup)
     int msg_connect(MConnect *m);
     int msg_connect_reply(MConnectReply *m);
     int msg_connect_reply(MConnectAuthReply *m);
     int msg_connect_auth(MConnectAuth *m);
     int msg_connect_auth_reply(MConnectAuthReply *m);
-#endif
     int state_up_ready(uint32_t flags);
     int state_flow_controlled(uint32_t flags);
     int state_discon();

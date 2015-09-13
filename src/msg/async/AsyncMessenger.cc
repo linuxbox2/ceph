@@ -387,7 +387,7 @@ AsyncMessenger::AsyncMessenger(CephContext *cct, entity_name_t name,
     lock("AsyncMessenger::lock"),
     nonce(_nonce), need_addr(true), listen_sd(-1), did_bind(false),
     global_seq(0), deleted_lock("AsyncMessenger::deleted_lock"),
-    cluster_protocol(0), stopped(true)
+    stopped(true)
 {
   ceph_spin_init(&global_seq_lock);
   cct->lookup_or_create_singleton_object<WorkerPool>(pool, WorkerPool::name);
@@ -694,33 +694,6 @@ void AsyncMessenger::mark_down(const entity_addr_t& addr)
     ldout(cct, 1) << __func__ << " " << addr << " -- connection dne" << dendl;
   }
   lock.Unlock();
-}
-
-int AsyncMessenger::get_proto_version(int peer_type, bool connect)
-{
-  int my_type = my_inst.name.type();
-
-  // set reply protocol version
-  if (peer_type == my_type) {
-    // internal
-    return cluster_protocol;
-  } else {
-    // public
-    if (connect) {
-      switch (peer_type) {
-        case CEPH_ENTITY_TYPE_OSD: return CEPH_OSDC_PROTOCOL;
-        case CEPH_ENTITY_TYPE_MDS: return CEPH_MDSC_PROTOCOL;
-        case CEPH_ENTITY_TYPE_MON: return CEPH_MONC_PROTOCOL;
-      }
-    } else {
-      switch (my_type) {
-        case CEPH_ENTITY_TYPE_OSD: return CEPH_OSDC_PROTOCOL;
-        case CEPH_ENTITY_TYPE_MDS: return CEPH_MDSC_PROTOCOL;
-        case CEPH_ENTITY_TYPE_MON: return CEPH_MONC_PROTOCOL;
-      }
-    }
-  }
-  return 0;
 }
 
 void AsyncMessenger::learned_addr(const entity_addr_t &peer_addr_for_me)

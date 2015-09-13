@@ -110,7 +110,7 @@ public:
    */
   void set_cluster_protocol(int p) {
     assert(!started && !did_bind);
-    cluster_protocol = p;
+    SimplePolicyMessenger::set_cluster_protocol(p);
   }
 
   int bind(const entity_addr_t& bind_addr);

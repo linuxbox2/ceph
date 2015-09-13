@@ -28,12 +28,16 @@ private:
   /// map specifying different Policies for specific peer types
   map<int, Policy> policy_map; // entity_name_t::type -> Policy
 
+  /// shared cluster protocol behavior
+  int cluster_protocol;
+
 public:
 
   SimplePolicyMessenger(CephContext *cct, entity_name_t name,
 			string mname, uint64_t _nonce)
     : Messenger(cct, name),
-      policy_lock("SimplePolicyMessenger::policy_lock")
+      policy_lock("SimplePolicyMessenger::policy_lock"),
+      cluster_protocol(0)
     {
     }
 
@@ -107,6 +111,48 @@ public:
       default_policy.throttler_bytes = byte_throttle;
       default_policy.throttler_messages = msg_throttle;
     }
+  }
+
+  /**
+   * Get the protocol version we support for the given peer type: either
+   * a peer protocol (if it matches our own), the protocol version for the
+   * peer (if we're connecting), or our protocol version (if we're accepting).
+   */
+  int get_proto_version(int peer_type, bool connect) {
+    int my_type = my_inst.name.type();
+
+    // set reply protocol version
+    if (peer_type == my_type) {
+      // internal
+      return cluster_protocol;
+    } else {
+      // public
+      if (connect) {
+	switch (peer_type) {
+	case CEPH_ENTITY_TYPE_OSD: return CEPH_OSDC_PROTOCOL;
+	case CEPH_ENTITY_TYPE_MDS: return CEPH_MDSC_PROTOCOL;
+	case CEPH_ENTITY_TYPE_MON: return CEPH_MONC_PROTOCOL;
+	}
+      } else {
+	switch (my_type) {
+	case CEPH_ENTITY_TYPE_OSD: return CEPH_OSDC_PROTOCOL;
+	case CEPH_ENTITY_TYPE_MDS: return CEPH_MDSC_PROTOCOL;
+	case CEPH_ENTITY_TYPE_MON: return CEPH_MONC_PROTOCOL;
+	}
+      }
+    }
+    return 0;
+  }
+
+  /**
+   * Set the cluster protocol in use by this daemon.
+   * This is an init-time function and cannot be called after calling
+   * start() or bind().
+   *
+   * @param p The cluster protocol to use. Defined externally.
+   */
+  void set_cluster_protocol(int p) {
+    cluster_protocol = p;
   }
 
 }; /* SimplePolicyMessenger */

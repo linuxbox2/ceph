@@ -202,7 +202,7 @@ public:
    */
   void set_cluster_protocol(int p) {
     assert(!started && !did_bind);
-    cluster_protocol = p;
+    SimplePolicyMessenger::set_cluster_protocol(p);
   }
 
   int bind(const entity_addr_t& bind_addr);
@@ -368,9 +368,6 @@ private:
   Mutex deleted_lock;
   set<AsyncConnectionRef> deleted_conns;
 
-  /// internal cluster protocol version, if any, for talking to entities of the same type.
-  int cluster_protocol;
-
   Cond  stop_cond;
   bool stopped;
 
@@ -471,12 +468,6 @@ public:
     ceph_spin_unlock(&global_seq_lock);
     return ret;
   }
-  /**
-   * Get the protocol version we support for the given peer type: either
-   * a peer protocol (if it matches our own), the protocol version for the
-   * peer (if we're connecting), or our protocol version (if we're accepting).
-   */
-  int get_proto_version(int peer_type, bool connect);
 
   /**
    * Fill in the address and peer type for the local connection, which

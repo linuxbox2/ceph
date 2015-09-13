@@ -34,7 +34,9 @@ private:
   static std::atomic<uint32_t> nInstances;
   std::atomic<uint32_t> nsessions;
   std::atomic<uint32_t> shutdown_called;
+  std::atomic<uint32_t> global_seq; /* XXX should this be 64-bit? */
   Spinlock conns_sp;
+  Spinlock global_seq_reset_sp;
   XioConnection::ConnList conns_list;
   XioConnection::EntitySet conns_entity_map;
   XioPortals portals;
@@ -77,6 +79,18 @@ public:
   void set_special_handling(int n) { special_handling = n; }
   int pool_hint(uint32_t size);
   void try_insert(XioConnection *xcon);
+
+  uint32_t get_global_seq(uint32_t old=0) {
+    uint32_t gseq = ++global_seq;
+    if (old > gseq) {
+      Spinlock::Locker lck(global_seq_reset_sp);
+      if (old > global_seq) {
+	global_seq = old;
+	gseq = ++global_seq;
+      }
+    }
+    return gseq;
+  }
 
   /* xio hooks */
   int new_session(struct xio_session *session,
