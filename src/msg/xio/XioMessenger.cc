@@ -24,6 +24,7 @@
 #include "common/address_helper.h"
 #include "common/code_environment.h"
 #include "common/Mutex.h" /* sorry */
+#include "XioHelo.h"
 #include "messages/MNop.h"
 
 #define dout_subsys ceph_subsys_xio
@@ -103,16 +104,18 @@ void log_dout(const char *file, unsigned line,
 }
 
 static int on_session_event(struct xio_session *session,
-			    struct xio_session_event_data *event_data,
+			    struct xio_session_event_data *ev_data,
 			    void *cb_user_context)
 {
   XioMessenger *msgr = static_cast<XioMessenger*>(cb_user_context);
   CephContext *cct = msgr->cct;
 
-  ldout(cct,4) << "session event: " << xio_session_event_str(event_data->event)
-    << ". reason: " << xio_strerror(event_data->reason) << dendl;
+  ldout(cct,4) << "session event: "
+	       << xio_session_event_str(ev_data->event)
+	       << " reason: " << xio_strerror(ev_data->reason)
+	       << dendl;
 
-  return msgr->session_event(session, event_data, cb_user_context);
+  return msgr->session_event(session, ev_data, cb_user_context);
 }
 
 static int on_new_session(struct xio_session *session,
@@ -422,13 +425,109 @@ int XioMessenger::new_session(struct xio_session *session,
 {
   if (shutdown_called) {
     return xio_reject(
-      session, XIO_E_SESSION_REFUSED, NULL /* udata */, 0 /* udata len */);
+      session, XIO_E_SESSION_REFUSED,
+      NULL /* udata */, 0 /* udata len */);
   }
-  int code = portals.accept(session, req, cb_user_context);
+
+  XioConnection *xcon = nullptr;
+  entity_inst_t s_inst;
+  XioHelo xhelo;
+  int code = 0;
+
+  /* new xio_sessions now have startup info */
+  decode_xiohelo(xhelo, (char*) req->private_data,
+		 req->private_data_len);
+
+  conns_sp.lock();
+
+  if (xhelo.flags & XIO_HELO_FLAG_BOUND_ADDR ) {
+    /* check for reconnection */
+    XioConnection::EntitySet::iterator conn_iter =
+      conns_entity_map.find(xhelo.src, XioConnection::EntityComp());
+    if (unlikely(conn_iter != conns_entity_map.end())) {
+      xcon = (*conn_iter).get(); // could skip ref (conns_sp)
+      pthread_spin_lock(&xcon->sp);
+      switch (xcon->cstate.startup_state) {
+      case XioConnection::IDLE:
+	/* normal reconnect */
+	xcon->xio_conn_type = XioConnection::PASSIVE;
+	xcon->cstate.init_passive(XioConnection::CState::OP_FLAG_LOCKED);
+	break;
+      case XioConnection::CONNECTING:
+	/* outbound connection in progress (statup race) */
+	code = xio_reject(session, (enum xio_status) EISCONN, NULL,
+			  0);
+	pthread_spin_unlock(&xcon->sp);
+	xcon->put();
+	conns_sp.unlock();
+	return code;
+	break;
+      case XioConnection::ACCEPTING: /* bad user state */
+      case XioConnection::READY: /* Accelio state violation */
+	code = xio_reject(session, (enum xio_status) EISCONN, NULL, 0);
+	pthread_spin_unlock(&xcon->sp);
+	xcon->put();
+	conns_sp.unlock();
+	return code;
+	/* RESET? */
+	break;
+      };
+      pthread_spin_unlock(&xcon->sp);
+      xcon->put();
+    }
+  } else {
+    /* fall back on the remote's src address (ephemeral port for
+     * RDMA) */
+    (void) entity_addr_from_sockaddr(
+      &s_inst.addr, (struct sockaddr *) &req->src_addr);
+  }
+
+  if (likely(! xcon)) {
+    /* stash new XioConnection with state {PASSIVE, INIT, IDLE} */
+    xcon = new XioConnection(this, XioConnection::PASSIVE, s_inst);
+    xcon->session = session;
+    struct xio_session_attr attr;
+    attr.user_context = xcon;
+    xio_modify_session(session, &attr, XIO_SESSION_ATTR_USER_CTX);
+    xcon->get(); // sentinel
+    conns_list.push_back(*xcon); // MRU
+    conns_entity_map.insert(*xcon);
+    xcon->cstate.flags |= XioConnection::CState::FLAG_MAPPED;
+  }
+
+  conns_sp.unlock();
+
+  code = portals.accept(session, req, cb_user_context);
   if (! code)
     ++nsessions;
+
   return code;
 } /* new_session */
+
+void XioMessenger::unmap_connection(XioConnection *xcon) {
+
+  Spinlock::Locker lckr(conns_sp);
+  XioConnection::EntitySet::iterator conn_iter =
+    conns_entity_map.find(xcon->peer, XioConnection::EntityComp());
+  if (conn_iter != conns_entity_map.end()) {
+    XioConnection *xcon2 = &(*conn_iter);
+    if (xcon == xcon2) {
+      conns_entity_map.erase(conn_iter);
+    }
+  }
+
+  /* now find xcon on conns_list, erase, and release sentinel ref */
+  if (xcon->conns_hook.is_linked()) {
+    /* now find xcon on conns_list and erase */
+    XioConnection::ConnList::iterator citer =
+      XioConnection::ConnList::s_iterator_to(*xcon);
+    conns_list.erase(citer);
+  }
+  xcon->cstate.flags &= ~XioConnection::CState::FLAG_MAPPED;
+
+  /* release map ref */
+  xcon->put();
+} /* unmap_connection */
 
 int XioMessenger::session_event(struct xio_session *session,
 				struct xio_session_event_data *event_data,
@@ -457,7 +556,8 @@ int XioMessenger::session_event(struct xio_session *session,
 				    (struct sockaddr *) &xcona.peer_addr);
     //set_myaddr(peer_addr_for_me);
     learned_addr(peer_addr_for_me);
-    ldout(cct,2) << "client: connected from " << peer_addr_for_me << " to "
+    ldout(cct,2) << "client: connected from "
+		 << peer_addr_for_me << " to "
 		 << paddr << dendl;
 
     /* notify hook */
@@ -494,8 +594,11 @@ int XioMessenger::session_event(struct xio_session *session,
     assert(xcon->portal);
 
     xcona.user_context = xcon;
-    (void) xio_modify_connection(conn, &xcona, XIO_CONNECTION_ATTR_USER_CTX);
+    (void) xio_modify_connection(conn, &xcona,
+				 XIO_CONNECTION_ATTR_USER_CTX);
 
+    /* passive startup negotiation */
+    xcon->cstate.init_passive(XioConnection::CState::OP_FLAG_NONE);
     xcon->connected.store(true);
 
     /* sentinel ref */
@@ -505,9 +608,6 @@ int XioMessenger::session_event(struct xio_session *session,
     /* XXX we can't put xcon in conns_entity_map becase we don't yet know
      * it's peer address */
     conns_sp.unlock();
-
-    /* XXXX pre-merge of session startup negotiation ONLY! */
-    xcon->cstate.state_up_ready(XioConnection::CState::OP_FLAG_NONE);
 
     ldout(cct,2) << "new connection session " << session
 		 << " xcon " << xcon << dendl;
@@ -523,22 +623,7 @@ int XioMessenger::session_event(struct xio_session *session,
       << " user_context " << event_data->conn_user_context << dendl;
     xcon = static_cast<XioConnection*>(event_data->conn_user_context);
     if (likely(!!xcon)) {
-      Spinlock::Locker lckr(conns_sp);
-      XioConnection::EntitySet::iterator conn_iter =
-	conns_entity_map.find(xcon->peer, XioConnection::EntityComp());
-      if (conn_iter != conns_entity_map.end()) {
-	XioConnection *xcon2 = &(*conn_iter);
-	if (xcon == xcon2) {
-	  conns_entity_map.erase(conn_iter);
-	}
-      }
-      /* check if citer on conn_list */
-      if (xcon->conns_hook.is_linked()) {
-        /* now find xcon on conns_list and erase */
-        XioConnection::ConnList::iterator citer =
-            XioConnection::ConnList::s_iterator_to(*xcon);
-        conns_list.erase(citer);
-      }
+      unmap_connection(xcon);
       xcon->on_disconnect_event();
     }
     break;
@@ -970,8 +1055,10 @@ int XioMessenger::shutdown()
 
 ConnectionRef XioMessenger::get_connection(const entity_inst_t& dest)
 {
+  ldout(cct,10) << __func__ << " xcon: " << this << " dest: " << dest << dendl;
+
   if (shutdown_called)
-    return NULL;
+    return nullptr;
 
   const entity_inst_t& self_inst = get_myinst();
   if ((&dest == &self_inst) ||
@@ -979,73 +1066,102 @@ ConnectionRef XioMessenger::get_connection(const entity_inst_t& dest)
     return get_loopback_connection();
   }
 
+  XioConnection *xcon = nullptr;
+
+retry:
   conns_sp.lock();
   XioConnection::EntitySet::iterator conn_iter =
     conns_entity_map.find(dest, XioConnection::EntityComp());
   if (conn_iter != conns_entity_map.end()) {
-    ConnectionRef cref = &(*conn_iter);
-    conns_sp.unlock();
-    return cref;
-  }
-  else {
-    conns_sp.unlock();
-    string xio_uri = xio_uri_from_entity(cct->_conf->xio_transport_type,
-					 dest.addr, true /* want_port */);
+    ConnectionRef cref  = &(*conn_iter); /* ref+1 */
 
-    ldout(cct,4) << "XioMessenger " << this << " get_connection: xio_uri "
-      << xio_uri << dendl;
-
-    /* XXX client session creation parameters */
-    struct xio_session_params params = {
-      .type		= XIO_SESSION_CLIENT,
-      .initial_sn	= 0,
-      .ses_ops		= &xio_msgr_ops,
-      .user_context	= this,
-      .private_data	= NULL,
-      .private_data_len = 0,
-      .uri		= (char *)xio_uri.c_str()
-    };
-
-    XioConnection *xcon = new XioConnection(this, XioConnection::ACTIVE,
-					    dest);
-
-    xcon->session = xio_session_create(&params);
-    if (! xcon->session) {
-      delete xcon;
-      return NULL;
-    }
-    ++nsessions;
-
-    /* this should cause callbacks with user context of conn, but
-     * we can always set it explicitly */
-    struct xio_connection_params xcp = {
-      .session           = xcon->session,
-      .ctx               = this->portals.get_portal0()->ctx,
-      .conn_idx          = 0, /* XXX auto_count */
-      .enable_tos        = 0,
-      .tos               = 0,
-      .pad               = 0,
-      .out_addr          = NULL,
-      .conn_user_context = xcon
-    };
-    xcon->conn = xio_connect(&xcp);
-    xcon->connected.store(true);
-
+    uint32_t session_state = xcon->cstate.session_state;
+    switch (session_state) {
+    case XioConnection::UP:
+      /* return fully-up XioConnections */
+      ldout(cct,10) << __func__ << " found active xcon " << this
+		    << dendl;
+      conns_sp.unlock();
+      return cref;
+      break;
+    case XioConnection::DISCONNECTED:
+      ldout(cct,10) << __func__ << " re-connecting xcon " << this
+		    << dendl;
+      /* XXX interlock matches that in new_session(), may be
+       * possible to avoid */
+      pthread_spin_lock(&xcon->sp);
+      conns_sp.unlock();
+      xcon = static_cast<XioConnection*>(cref.get());
+      /* LOCKED */
+      break;
+    default:
+      /* XXX for any other state, retry/block */
+      ldout(cct,10) << __func__ << " blocking for xcon " << this
+		    << " state: " << session_state << dendl;
+      pthread_spin_unlock(&xcon->sp);
+      conns_sp.unlock();
+      pthread_yield();
+      goto retry;
+      break;
+    } /* switch */
+  } else {
+    /* no mapped connection for dest, make one */
+    xcon = new XioConnection(this, XioConnection::ACTIVE, dest);
     /* sentinel ref */
     xcon->get(); /* xcon->nref == 1 */
-    conns_sp.lock();
-    conns_list.push_back(*xcon);
+    pthread_spin_lock(&xcon->sp);
+    conns_list.push_back(*xcon); /* MRU */
     conns_entity_map.insert(*xcon);
+    xcon->cstate.flags |= XioConnection::CState::FLAG_MAPPED;
     conns_sp.unlock();
+  } /* ! mapped */
 
-    /* XXXX pre-merge of session startup negotiation ONLY! */
-    xcon->cstate.state_up_ready(XioConnection::CState::OP_FLAG_NONE);
+  string xio_uri =
+    xio_uri_from_entity(cct->_conf->xio_transport_type, dest.addr,
+			true /* want_port */);
+  buffer::list xhelo_bl;
+  XioHelo xhelo(did_bind ? XIO_HELO_FLAG_BOUND_ADDR
+		: XIO_HELO_FLAG_NONE,
+		self_inst, dest);
+  ::encode(xhelo, xhelo_bl);
 
-    ldout(cct,2) << "new connection xcon: " << xcon <<
-      " up_ready on session " << xcon->session << dendl;
+  /* XXX client session creation parameters */
+  struct xio_session_params params = {
+    .type = XIO_SESSION_CLIENT,
+    .initial_sn = 0,
+    .ses_ops = &xio_msgr_ops,
+    .user_context = xcon,
+    .private_data = xhelo_bl.c_str(),
+    .private_data_len = xhelo_bl.length(),
+    .uri = (char *)xio_uri.c_str()
+  };
 
-    return xcon->get(); /* nref +1 */
-  }
+  xcon->session = xio_session_create(&params);
+  ++nsessions;
+
+  /* this should cause callbacks with user context of conn,
+   * but we can always set it explicitly */
+  struct xio_connection_params xcp = {
+    .session = xcon->session,
+    .ctx = this->portals.get_portal0()->ctx,
+    .conn_idx = 0, /* auto_count */
+    .enable_tos = 0,
+    .tos = 0,
+    .pad = 0,
+    .out_addr = NULL,
+    .conn_user_context = xcon
+  };
+
+  xcon->conn = xio_connect(&xcp);
+  xcon->connected = true;
+
+  /* kick off startup negotiation */
+  xcon->cstate.init_active(XioConnection::CState::OP_FLAG_LOCKED);
+
+  /* if !xcon->session, xcon state is {INIT, IDLE} */
+
+  pthread_spin_unlock(&xcon->sp);
+  return xcon; /* ref +1 */
 } /* get_connection */
 
 ConnectionRef XioMessenger::get_loopback_connection()

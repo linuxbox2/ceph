@@ -119,9 +119,9 @@ XioConnection::XioConnection(XioMessenger *m, XioConnection::type _type,
 
   /* set send & receive msgs queue depth */
   xio_set_opt(NULL, XIO_OPTLEVEL_ACCELIO, XIO_OPTNAME_SND_QUEUE_DEPTH_MSGS,
-             &xopt, sizeof(xopt));
+	      &xopt, sizeof(xopt));
   xio_set_opt(NULL, XIO_OPTLEVEL_ACCELIO, XIO_OPTNAME_RCV_QUEUE_DEPTH_MSGS,
-             &xopt, sizeof(xopt));
+	      &xopt, sizeof(xopt));
 
   if (policy.throttler_bytes) {
     max_bytes = policy.throttler_bytes->get_max();
@@ -134,55 +134,23 @@ XioConnection::XioConnection(XioMessenger *m, XioConnection::type _type,
 
   /* set send & receive total bytes throttle */
   xio_set_opt(NULL, XIO_OPTLEVEL_ACCELIO, XIO_OPTNAME_SND_QUEUE_DEPTH_BYTES,
-             &bytes_opt, sizeof(bytes_opt));
+	      &bytes_opt, sizeof(bytes_opt));
   xio_set_opt(NULL, XIO_OPTLEVEL_ACCELIO, XIO_OPTNAME_RCV_QUEUE_DEPTH_BYTES,
-             &bytes_opt, sizeof(bytes_opt));
+	      &bytes_opt, sizeof(bytes_opt));
 
-  ldout(m->cct,4) << "Peer type: " << peer.name.type_str() <<
-        " throttle_msgs: " << xopt << " throttle_bytes: " << bytes_opt << dendl;
+  ldout(m->cct,4) << "Peer type: " << peer.name.type_str()
+		  << " throttle_msgs: " << xopt
+		  << " throttle_bytes: " << bytes_opt
+		  << dendl;
 
-  /* XXXX fake features, aieee! */
-  set_features(XIO_ALL_FEATURES);
+  /* start with local_features */
+  set_features(m->local_features);
 }
 
 int XioConnection::send_message(Message *m)
 {
   XioMessenger *ms = static_cast<XioMessenger*>(get_messenger());
   return ms->_send_message(m, this);
-}
-
-int XioConnection::passive_setup()
-{
-  /* XXX passive setup is a placeholder for (potentially active-side
-     initiated) feature and auth* negotiation */
-  static bufferlist authorizer_reply; /* static because fake */
-  static CryptoKey session_key; /* ditto */
-  bool authorizer_valid;
-
-  XioMessenger *msgr = static_cast<XioMessenger*>(get_messenger());
-
-  // fake an auth buffer
-  EntityName name;
-  name.set_type(peer.name.type());
-
-  AuthNoneAuthorizer auth;
-  auth.build_authorizer(name, peer.name.num());
-
-  /* XXX fake authorizer! */
-  msgr->ms_deliver_verify_authorizer(
-    this, peer_type, CEPH_AUTH_NONE,
-    auth.bl,
-    authorizer_reply,
-    authorizer_valid,
-    session_key);
-
-  /* notify hook */
-  msgr->ms_deliver_handle_accept(this);
-  msgr->ms_deliver_handle_fast_accept(this);
-
-  /* try to insert in conns_entity_map */
-  msgr->try_insert(this);
-  return (0);
 }
 
 static inline XioDispatchHook* pool_alloc_xio_dispatch_hook(
@@ -207,23 +175,26 @@ int XioConnection::on_msg_req(struct xio_session *session,
 
   /* XXX Accelio guarantees message ordering at
    * xio_session */
-
   if (! in_seq.p()) {
     if (!treq->in.header.iov_len) {
-	ldout(msgr->cct,0) << __func__ << " empty header: packet out of sequence?" << dendl;
+	ldout(msgr->cct,0) << __func__
+			   << " empty header: packet out of sequence?"
+			   << dendl;
 	xio_release_msg(req);
 	return 0;
     }
+
     XioMsgCnt msg_cnt(
       buffer::create_static(treq->in.header.iov_len,
 			    (char*) treq->in.header.iov_base));
+
     ldout(msgr->cct,10) << __func__ << " receive req " << "treq " << treq
-      << " msg_cnt " << msg_cnt.msg_cnt
-      << " iov_base " << treq->in.header.iov_base
-      << " iov_len " << (int) treq->in.header.iov_len
-      << " nents " << treq->in.pdata_iov.nents
-      << " conn " << conn << " sess " << session
-      << " sn " << treq->sn << dendl;
+			<< " msg_cnt " << msg_cnt.msg_cnt
+			<< " iov_base " << treq->in.header.iov_base
+			<< " iov_len " << (int) treq->in.header.iov_len
+			<< " nents " << treq->in.pdata_iov.nents
+			<< " conn " << conn << " sess " << session
+			<< " sn " << treq->sn << dendl;
     assert(session == this->session);
     in_seq.set_count(msg_cnt.msg_cnt);
   } else {
@@ -248,8 +219,8 @@ int XioConnection::on_msg_req(struct xio_session *session,
 
   const utime_t recv_stamp = ceph_clock_now(msgr->cct);
 
-  ldout(msgr->cct,4) << __func__ << " " << "msg_seq.size()="  << msg_seq.size() <<
-    dendl;
+  ldout(msgr->cct,4) << __func__ << " " << "msg_seq.size()="
+		     << msg_seq.size() << dendl;
 
   struct xio_msg* msg_iter = msg_seq.begin();
   treq = msg_iter;
@@ -277,11 +248,9 @@ int XioConnection::on_msg_req(struct xio_session *session,
     iovs = vmsg_sglist(&treq->in);
     for (; blen && (ix < iov_len); ++ix) {
       msg_iov = &iovs[ix];
-
       /* XXX need to detect any buffer which needs to be
        * split due to coalescing of a segment (front, middle,
        * data) boundary */
-
       take_len = MIN(blen, msg_iov->iov_len);
       payload.append(
 	buffer::create_msg(
@@ -393,21 +362,9 @@ int XioConnection::on_msg_req(struct xio_session *session,
     /* MP-SAFE */
     state.set_in_seq(header.seq);
 
-    /* XXXX validate peer type */
-    if (peer_type != (int) hdr.peer_type) { /* XXX isn't peer_type -1? */
-      peer_type = hdr.peer_type;
-      peer_addr = hdr.addr;
-      peer.addr = peer_addr;
-      peer.name = hdr.hdr->src;
-      if (xio_conn_type == XioConnection::PASSIVE) {
-	/* XXX kick off feature/authn/authz negotiation
-	 * nb:  very possibly the active side should initiate this, but
-	 * for now, call a passive hook so OSD and friends can create
-	 * sessions without actually negotiating
-	 */
-	passive_setup();
-      }
-    }
+    /* handle connect negotiation */
+    if (unlikely(cstate.get_session_state() == XioConnection::START))
+      return cstate.next_state(m);
 
     if (magic & (MSG_MAGIC_TRACE_XCON)) {
       ldout(msgr->cct,4) << "decode m is " << m->get_type() << dendl;
@@ -422,7 +379,7 @@ int XioConnection::on_msg_req(struct xio_session *session,
   }
 
   return 0;
-}
+} /* XioConnection::on_msg_req */
 
 int XioConnection::on_ow_msg_send_complete(struct xio_session *session,
 					   struct xio_msg *req,
@@ -451,7 +408,7 @@ int XioConnection::on_ow_msg_send_complete(struct xio_session *session,
 	(1 /* XXX memory <= memory low-water mark */))  {
       cstate.state_up_ready(XioConnection::CState::OP_FLAG_NONE);
       ldout(msgr->cct,2) << "on_msg_delivered xcon: " << xmsg->xcon <<
-        " session: " << session << " up_ready from flow_controlled" << dendl;
+	" session: " << session << " up_ready from flow_controlled" << dendl;
     }
   }
 
@@ -636,14 +593,15 @@ int XioConnection::_mark_disposable(uint32_t flags)
   return 0;
 }
 
-int XioConnection::CState::init_state()
+int XioConnection::CState::init_active(uint32_t flags)
 {
   dout(11) << __func__ << " ENTER " << dendl;
 
   assert(xcon->xio_conn_type==XioConnection::ACTIVE);
   session_state.store(XioConnection::START);
   startup_state.store(XioConnection::CONNECTING);
-  XioMessenger* msgr = static_cast<XioMessenger*>(xcon->get_messenger());
+  XioMessenger* msgr
+    = static_cast<XioMessenger*>(xcon->get_messenger());
   MConnect* m = new MConnect();
   m->addr = msgr->get_myinst().addr;
   m->name = msgr->get_myinst().name;
@@ -656,6 +614,17 @@ int XioConnection::CState::init_state()
 
   // send it
   msgr->_send_message_impl(m, xcon);
+
+  return 0;
+}
+
+int XioConnection::CState::init_passive(uint32_t flags)
+{
+  dout(11) << __func__ << " ENTER " << dendl;
+
+  assert(xcon->xio_conn_type==XioConnection::PASSIVE);
+  session_state.store(START);
+  startup_state.store(ACCEPTING);
 
   return 0;
 }
@@ -687,6 +656,11 @@ int XioConnection::CState::next_state(Message* m)
 
 int XioConnection::CState::state_up_ready(uint32_t flags)
 {
+  ldout(xcon->get_messenger()->cct,10) << "xcon " << xcon
+				       << " up_ready on session "
+				       << xcon->session
+				       << dendl;
+
   if (! (flags & CState::OP_FLAG_LOCKED))
     pthread_spin_lock(&xcon->sp);
 
@@ -698,7 +672,7 @@ int XioConnection::CState::state_up_ready(uint32_t flags)
   if (! (flags & CState::OP_FLAG_LOCKED))
     pthread_spin_unlock(&xcon->sp);
 
-  return (0);
+  return 0;
 }
 
 int XioConnection::CState::state_discon()
@@ -941,19 +915,18 @@ int XioConnection::CState::msg_connect_auth(MConnectAuth *m)
   if (policy.lossy)
     m2->flags |= CEPH_MSG_CONNECT_LOSSY;
 
-  // XXXX locking?
   features = m2->features;
 
   session_security.reset(
     get_auth_session_handler(msgr->cct, m2->authorizer_protocol,
 			     session_key, features));
 
-  // notify ULP
-  msgr->ms_deliver_handle_accept(xcon);
-
+  /* XXX can flush msgs, should precede hook */
   state_up_ready(XioConnection::CState::OP_FLAG_NONE);
 
-  // XXX need queue for up-ready races (other side)?
+  /* notify hook */
+  msgr->ms_deliver_handle_accept(xcon);
+  msgr->ms_deliver_handle_fast_accept(xcon);
 
 send_m2:
   msgr->_send_message_impl(m2, xcon);
@@ -1022,17 +995,18 @@ int XioConnection::CState::msg_connect_auth_reply(MConnectAuthReply *m)
     connect_seq = 0;
     // notify ULP
     msgr->ms_deliver_handle_reset(xcon);
-    // restart negotiation
-    init_state();
+    /* restart negotiation */
+    init_active(XioConnection::CState::OP_FLAG_NONE);
     goto dispose_m;
   }
 
-  // can we remove global_seq?
+  /* XXX can we remove global_seq? */
   if (m->tag == CEPH_MSGR_TAG_RETRY_GLOBAL) {
     global_seq = msgr->get_global_seq(m->global_seq);
     dout(4) << "connect got RETRY_GLOBAL " << m->global_seq
 	    << " chose new " << global_seq << dendl;
-    init_state();
+    /* restart negotiation */
+    init_active(XioConnection::CState::OP_FLAG_NONE);
     goto dispose_m;
   }
 
@@ -1112,6 +1086,15 @@ int XioConnection::CState::state_fail(Message* m, uint32_t flags)
   m->put();
 
   return 0;
+}
+
+XioLoopbackConnection::XioLoopbackConnection(XioMessenger *m)
+  : Connection(m->cct, m), seq(0)
+{
+  const entity_inst_t& m_inst = m->get_myinst();
+  peer_addr = m_inst.addr;
+  peer_type = m_inst.name.type();
+  set_features(m->local_features);
 }
 
 int XioLoopbackConnection::send_message(Message *m)

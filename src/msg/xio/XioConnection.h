@@ -29,6 +29,8 @@ extern "C" {
 #include "messages/MConnect.h"
 #include "auth/AuthSessionHandler.h"
 
+
+/* XXX now used only in xio_client/server */
 #define XIO_ALL_FEATURES (CEPH_FEATURES_ALL & \
 			  ~CEPH_FEATURE_MSGR_KEEPALIVE2)
 
@@ -169,7 +171,8 @@ private:
     };
 
     // state machine
-    int init_state();
+    int init_active(uint32_t flags);
+    int init_passive(uint32_t flags);
     int next_state(Message* m);
     int msg_connect(MConnect *m);
     int msg_connect_reply(MConnectReply *m);
@@ -299,8 +302,6 @@ public:
   void set_special_handling(int n) { special_handling = n; }
   uint64_t get_scount() { return scount; }
 
-  int passive_setup(); /* XXX */
-
   int on_msg_req(struct xio_session *session, struct xio_msg *req,
 		 int more_in_batch, void *cb_user_context);
   int on_ow_msg_send_complete(struct xio_session *session, struct xio_msg *msg,
@@ -321,13 +322,7 @@ class XioLoopbackConnection : public Connection
 private:
   std::atomic<uint64_t> seq;
 public:
-  XioLoopbackConnection(Messenger *m) : Connection(m->cct, m), seq(0)
-    {
-      const entity_inst_t& m_inst = m->get_myinst();
-      peer_addr = m_inst.addr;
-      peer_type = m_inst.name.type();
-      set_features(XIO_ALL_FEATURES); /* XXXX set to ours */
-    }
+  XioLoopbackConnection(XioMessenger *m);
 
   XioLoopbackConnection* get() {
     return static_cast<XioLoopbackConnection*>(RefCountedObject::get());

@@ -78,7 +78,7 @@ public:
   uint32_t get_special_handling() { return special_handling; }
   void set_special_handling(int n) { special_handling = n; }
   int pool_hint(uint32_t size);
-  void try_insert(XioConnection *xcon);
+  void try_insert(XioConnection *xcon); /* XXX */
 
   uint32_t get_global_seq(uint32_t old=0) {
     uint32_t gseq = ++global_seq;
@@ -161,6 +161,8 @@ public:
    */
   void learned_addr(const entity_addr_t& peer_addr_for_me);
 
+private:
+  void unmap_connection(XioConnection *xcon);
 
 protected:
   virtual void ready()
