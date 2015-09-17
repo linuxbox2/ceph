@@ -229,6 +229,8 @@ private:
   int on_disconnect_event() {
     connected.store(false);
     pthread_spin_lock(&sp);
+    /* XXX check policy--this potentially interacts w/session restart
+     * guarantees (if the policy is lossless?) */
     discard_input_queue(CState::OP_FLAG_LOCKED);
     pthread_spin_unlock(&sp);
     return 0;
