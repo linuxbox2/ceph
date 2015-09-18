@@ -381,9 +381,9 @@ int XioConnection::on_msg_req(struct xio_session *session,
   return 0;
 } /* XioConnection::on_msg_req */
 
-int XioConnection::on_ow_msg_send_complete(struct xio_session *session,
-					   struct xio_msg *req,
-					   void *conn_user_context)
+int XioConnection::_retire_msg(struct xio_session *session,
+			       struct xio_msg *req,
+			       void *conn_user_context)
 {
   /* requester send complete (one-way) */
   uint64_t rc = ++scount;
@@ -395,10 +395,14 @@ int XioConnection::on_ow_msg_send_complete(struct xio_session *session,
     }
   } /* trace ctr */
 
-  ldout(msgr->cct,11) << "on_msg_delivered xcon: " << xmsg->xcon <<
-    " session: " << session << " msg: " << req << " sn: " << req->sn <<
-    " type: " << xmsg->m->get_type() << " tid: " << xmsg->m->get_tid() <<
-    " seq: " << xmsg->m->get_seq() << dendl;
+  ldout(msgr->cct,11) << __func__ << " xcon: " << xmsg->xcon
+		      << " session: " << session
+		      << " msg: " << req
+		      << " sn: " << req->sn
+		      << " type: " << xmsg->m->get_type()
+		      << " tid: " << xmsg->m->get_tid()
+		      << " seq: " << xmsg->m->get_seq()
+		      << dendl;
 
   --send_ctr; /* atomic, because portal thread */
 
@@ -407,15 +411,37 @@ int XioConnection::on_ow_msg_send_complete(struct xio_session *session,
     if ((send_ctr <= uint32_t(xio_qdepth_low_mark())) &&
 	(1 /* XXX memory <= memory low-water mark */))  {
       cstate.state_up_ready(XioConnection::CState::OP_FLAG_NONE);
-      ldout(msgr->cct,2) << "on_msg_delivered xcon: " << xmsg->xcon <<
-	" session: " << session << " up_ready from flow_controlled" << dendl;
+      ldout(msgr->cct,2) << __func__ << " xcon: " << xmsg->xcon
+			 << " session: " << session
+			 << " up_ready from flow_controlled"
+			 << dendl;
     }
   }
 
   xmsg->put();
 
   return 0;
-}  /* on_msg_delivered */
+} /* XioConnection::_retire_msg */
+
+int XioConnection::on_msg_delivered(struct xio_session *session,
+				    struct xio_msg *req,
+				    void *conn_user_context)
+{
+  /* if delivery policy is lossy, messages can be retired immediately--
+   * if lossless, when delivery is acknowledged */
+  assert(!cstate.policy.lossy);
+  return _retire_msg(session, req, conn_user_context);
+} /* XioConnection::on_msg_delivered */
+
+int XioConnection::on_msg_send_complete(struct xio_session *session,
+					struct xio_msg *req,
+					void *conn_user_context)
+{
+  if (!cstate.policy.lossy)
+    return 0;
+
+  return _retire_msg(session, req, conn_user_context);
+}  /* XioConnection::on_msg_send_complete */
 
 void XioConnection::msg_send_fail(XioMsg *xmsg, int code)
 {
@@ -508,7 +534,7 @@ int XioConnection::discard_input_queue(uint32_t flags)
   }
 
   return 0;
-}
+} /* XioConnection::discard_input_queue */
 
 int XioConnection::adjust_clru(uint32_t flags)
 {
@@ -532,17 +558,26 @@ int XioConnection::adjust_clru(uint32_t flags)
     pthread_spin_unlock(&sp);
 
   return 0;
-}
+} /* XioConnection::adjust_clru */
 
 int XioConnection::on_msg_error(struct xio_session *session,
 				enum xio_status error,
 				struct xio_msg  *msg,
 				void *conn_user_context)
 {
+  /* XXX if an outgoing msg has errored and we are not
+   * shutting down, requeue it for delivery at the next
+   * reconnection */
   XioMsg *xmsg = static_cast<XioMsg*>(msg->user_context);
-  if (xmsg)
-    xmsg->put();
-
+  if (xmsg) {
+    if (static_cast<XioMessenger*>(get_messenger())->shutdown_called)
+      xmsg->put();
+    else {
+      pthread_spin_lock(&sp);
+      outgoing.requeue.push_back(*xmsg);
+      pthread_spin_unlock(&sp);
+    }
+  }
   --send_ctr; /* atomic, because portal thread */
   return 0;
 } /* on_msg_error */
@@ -565,8 +600,8 @@ int XioConnection::_mark_down(uint32_t flags)
   // Accelio disconnect
   xio_disconnect(conn);
 
-  /* XXX this will almost certainly be called again from
-   * on_disconnect_event() */
+  /* XXX mark_down is precisely when reconnect state, and any
+   * queued outgoing messages, may be discarded */
   discard_input_queue(flags|CState::OP_FLAG_LOCKED);
 
   if (! (flags & CState::OP_FLAG_LOCKED))
@@ -607,7 +642,7 @@ int XioConnection::CState::init_active(uint32_t flags)
   m->name = msgr->get_myinst().name;
   m->flags = 0;
 
-  // XXXX needed?  correct?
+  // XXX check
   m->connect_seq = ++connect_seq;
   m->last_in_seq = in_seq;
   m->last_out_seq = out_seq;
@@ -664,10 +699,10 @@ int XioConnection::CState::state_up_ready(uint32_t flags)
   if (! (flags & CState::OP_FLAG_LOCKED))
     pthread_spin_lock(&xcon->sp);
 
-  xcon->flush_input_queue(flags|CState::OP_FLAG_LOCKED);
-
   session_state.store(UP);
   startup_state.store(READY);
+
+  xcon->flush_input_queue(flags|CState::OP_FLAG_LOCKED);
 
   if (! (flags & CState::OP_FLAG_LOCKED))
     pthread_spin_unlock(&xcon->sp);
@@ -725,7 +760,7 @@ int XioConnection::CState::msg_connect(MConnect *m)
   m2->name = msgr->get_myinst().name;
   m2->flags = 0;
 
-  // XXXX needed?  correct?
+  // XXX check
   m2->last_in_seq = in_seq;
   m2->last_out_seq = out_seq;
 
@@ -747,7 +782,7 @@ int XioConnection::CState::msg_connect_reply(MConnectReply *m)
 
   dout(11) << __func__ << " ENTER " << dendl;
 
- // XXX do we need any data from this phase?
+  // XXX do we need any data from this phase?
   XioMessenger* msgr = static_cast<XioMessenger*>(xcon->get_messenger());
   authorizer =
     msgr->ms_deliver_get_authorizer(xcon->peer_type, false /* force_new */);
@@ -1033,6 +1068,8 @@ int XioConnection::CState::msg_connect_auth_reply(MConnectAuthReply *m)
       return state_fail(m, OP_FLAG_NONE);
     }
   }
+
+  // TODO check sequence updates commented here
 
   // hooray!
   //peer_global_seq = m->global_seq;

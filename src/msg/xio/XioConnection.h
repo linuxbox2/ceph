@@ -228,11 +228,6 @@ private:
 
   int on_disconnect_event() {
     connected.store(false);
-    pthread_spin_lock(&sp);
-    /* XXX check policy--this potentially interacts w/session restart
-     * guarantees (if the policy is lossless?) */
-    discard_input_queue(CState::OP_FLAG_LOCKED);
-    pthread_spin_unlock(&sp);
     return 0;
   }
 
@@ -304,10 +299,14 @@ public:
   void set_special_handling(int n) { special_handling = n; }
   uint64_t get_scount() { return scount; }
 
+  int _retire_msg(struct xio_session *session, struct xio_msg *req,
+		  void *conn_user_context);
   int on_msg_req(struct xio_session *session, struct xio_msg *req,
 		 int more_in_batch, void *cb_user_context);
-  int on_ow_msg_send_complete(struct xio_session *session, struct xio_msg *msg,
-			      void *conn_user_context);
+  int on_msg_delivered(struct xio_session *session, struct xio_msg *msg,
+		       void *conn_user_context);
+  int on_msg_send_complete(struct xio_session *session, struct xio_msg *msg,
+			   void *conn_user_context);
   int on_msg_error(struct xio_session *session, enum xio_status error,
 		   struct xio_msg  *msg, void *conn_user_context);
   void msg_send_fail(XioMsg *xmsg, int code);

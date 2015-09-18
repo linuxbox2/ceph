@@ -153,9 +153,10 @@ static int on_msg(struct xio_session *session,
 			  cb_user_context);
 }
 
-static int on_ow_msg_send_complete(struct xio_session *session,
-				   struct xio_msg *msg,
-				   void *conn_user_context)
+static int on_msg_delivered(struct xio_session *session,
+			    struct xio_msg *msg,
+			    int last_in_rxq,
+			    void *conn_user_context)
 {
   XioConnection *xcon =
     static_cast<XioConnection*>(conn_user_context);
@@ -165,7 +166,22 @@ static int on_ow_msg_send_complete(struct xio_session *session,
 		<< " msg: " << msg << " conn_user_context "
 		<< conn_user_context << dendl;
 
-  return xcon->on_ow_msg_send_complete(session, msg, conn_user_context);
+  return xcon->on_msg_delivered(session, msg, conn_user_context);
+}
+
+static int on_ow_msg_send_complete(struct xio_session *session,
+				   struct xio_msg *msg,
+				   void *conn_user_context)
+{
+  XioConnection *xcon =
+    static_cast<XioConnection*>(conn_user_context);
+  CephContext *cct = xcon->get_messenger()->cct;
+
+  ldout(cct,25) << "msg send_complete session: " << session
+		<< " msg: " << msg << " conn_user_context "
+		<< conn_user_context << dendl;
+
+  return xcon->on_msg_send_complete(session, msg, conn_user_context);
 }
 
 static int on_msg_error(struct xio_session *session,
@@ -365,6 +381,7 @@ XioMessenger::XioMessenger(CephContext *cct, entity_name_t name,
       xio_msgr_ops.on_new_session = on_new_session;
       xio_msgr_ops.on_session_established = NULL;
       xio_msgr_ops.on_msg = on_msg;
+      xio_msgr_ops.on_msg_delivered = on_msg_delivered;
       xio_msgr_ops.on_ow_msg_send_complete = on_ow_msg_send_complete;
       xio_msgr_ops.on_msg_error = on_msg_error;
       xio_msgr_ops.on_cancel = on_cancel;

@@ -134,12 +134,14 @@ extern struct xio_mempool *xio_msgr_noreg_mpool;
 
 #define XIO_MSGR_IOVLEN 16
 
+struct XioMsg;
+
 struct xio_msg_ex
 {
   struct xio_msg msg;
   struct xio_iovec_ex iovs[XIO_MSGR_IOVLEN];
 
-  xio_msg_ex(void* user_context) {
+  xio_msg_ex(XioMsg* xmsg, const Messenger::Policy& policy) {
     // go in structure order
     msg.in.header.iov_len = 0;
     msg.in.header.iov_base = NULL;  /* XXX Accelio requires this currently */
@@ -162,9 +164,9 @@ struct xio_msg_ex
     // minimal initialize an "out" msg
     msg.request = NULL;
     msg.type = XIO_MSG_TYPE_ONE_WAY;
-    // for now, we DO NEED receipts for every msg
-    msg.flags = 0;
-    msg.user_context = user_context;
+    // request delivery receipt iff policy is lossless
+    msg.flags = (policy.lossy) ? 0 : XIO_MSG_FLAG_REQUEST_READ_RECEIPT;
+    msg.user_context = xmsg;
     msg.next = NULL;
     // minimal zero "in" side
   }
@@ -185,7 +187,8 @@ public:
 	 int _ex_cnt) :
     XioSubmit(XioSubmit::OUTGOING_MSG, _xcon),
     m(_m), hdr(m->get_header(), m->get_footer()),
-    req_0(this), req_arr(NULL), mp_this(_mp), nrefs(_ex_cnt+1)
+    req_0(this, _xcon->cstate.policy), req_arr(NULL),
+    mp_this(_mp), nrefs(_ex_cnt+1)
     {
       const entity_inst_t &inst = xcon->get_messenger()->get_myinst();
       hdr.hdr->src.type = inst.name.type();
@@ -193,7 +196,7 @@ public:
       hdr.msg_cnt = _ex_cnt+1;
 
       if (unlikely(_ex_cnt > 0)) {
-	alloc_trailers(_ex_cnt);
+	alloc_trailers(_xcon, _ex_cnt);
       }
 
       xpool_inc_msgcnt();
@@ -221,11 +224,11 @@ public:
     put(hdr.msg_cnt);
   }
 
-  void alloc_trailers(int cnt) {
+  void alloc_trailers(XioConnection* xcon, int cnt) {
     req_arr = static_cast<xio_msg_ex*>(malloc(cnt * sizeof(xio_msg_ex)));
     for (int ix = 0; ix < cnt; ++ix) {
       xio_msg_ex* xreq = &(req_arr[ix]);
-      new (xreq) xio_msg_ex(this);
+      new (xreq) xio_msg_ex(this, xcon->cstate.policy);
     }
   }
 
