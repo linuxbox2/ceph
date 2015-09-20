@@ -575,7 +575,7 @@ int XioConnection::on_teardown_event() {
     goto out;
   }
   /* do nothing */
-  out:
+out:
   return 0;
 } /* XioConnection::on_teardown_event() */
 
