@@ -146,7 +146,8 @@ private:
     uint32_t flags;
 
     CState(XioConnection* _xcon)
-      : xcon(_xcon),
+      : policy(_xcon->get_default_policy()),
+	xcon(_xcon),
 	protocol_version(0),
 	session_state(INIT),
 	startup_state(IDLE),
@@ -235,7 +236,7 @@ private:
     pthread_spin_lock(&sp);
     if (conn)
       xio_connection_destroy(conn);
-    conn = NULL;
+    conn = nullptr;
     pthread_spin_unlock(&sp);
     this->put();
     return 0;
@@ -256,6 +257,11 @@ public:
   ~XioConnection() {
     if (conn)
       xio_connection_destroy(conn);
+  }
+
+  const Messenger::Policy get_default_policy() {
+    return static_cast<SimplePolicyMessenger*>(
+      get_messenger())->get_default_policy();
   }
 
   bool is_connected() { return connected; }

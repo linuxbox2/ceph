@@ -640,8 +640,10 @@ int XioMessenger::session_event(struct xio_session *session,
       << " user_context " << event_data->conn_user_context << dendl;
     xcon = static_cast<XioConnection*>(event_data->conn_user_context);
     if (likely(!!xcon)) {
-      unmap_connection(xcon);
       xcon->on_disconnect_event();
+      if (xcon->cstate.policy.lossy) {
+	unmap_connection(xcon);
+      }
     }
     break;
   case XIO_SESSION_CONNECTION_TEARDOWN_EVENT:
