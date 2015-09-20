@@ -560,6 +560,25 @@ int XioConnection::adjust_clru(uint32_t flags)
   return 0;
 } /* XioConnection::adjust_clru */
 
+int XioConnection::on_teardown_event() {
+  pthread_spin_lock(&sp);
+  if (conn)
+    xio_connection_destroy(conn);
+  conn = nullptr;
+  pthread_spin_unlock(&sp);
+  /* if connection policy lossy or we were marked down, discard */
+  if (cstate.policy.lossy ||
+      (cstate.flags & CState::FLAG_MARK_DOWN)) {
+    static_cast<XioMessenger*>(
+      this->get_messenger())->unmap_connection(this); /* ref -1 */
+    /* XXX no call path ref, can't touch 'this' */
+    goto out;
+  }
+  /* do nothing */
+  out:
+  return 0;
+} /* XioConnection::on_teardown_event() */
+
 int XioConnection::on_msg_error(struct xio_session *session,
 				enum xio_status error,
 				struct xio_msg  *msg,
@@ -582,33 +601,29 @@ int XioConnection::on_msg_error(struct xio_session *session,
   return 0;
 } /* on_msg_error */
 
-void XioConnection::mark_down()
-{
-  _mark_down(XioConnection::CState::OP_FLAG_NONE);
-}
-
 int XioConnection::_mark_down(uint32_t flags)
 {
   if (! (flags & CState::OP_FLAG_LOCKED))
     pthread_spin_lock(&sp);
 
-  // per interface comment, we only stage a remote reset if the
-  // current policy required it
-  if (cstate.policy.resetcheck)
-    cstate.flags |= CState::FLAG_RESET;
-
-  // Accelio disconnect
-  xio_disconnect(conn);
+  cstate.flags |= CState::FLAG_MARK_DOWN;
 
   /* XXX mark_down is precisely when reconnect state, and any
    * queued outgoing messages, may be discarded */
   discard_input_queue(flags|CState::OP_FLAG_LOCKED);
 
+  // Accelio disconnect
+  if (connected)
+    xio_disconnect(conn);
+  else
+    static_cast<XioMessenger*>(
+      this->get_messenger())->unmap_connection(this); /* ref -1 */
+
   if (! (flags & CState::OP_FLAG_LOCKED))
     pthread_spin_unlock(&sp);
 
   return 0;
-}
+} /* XioConnection::_mark_down */
 
 void XioConnection::mark_disposable()
 {

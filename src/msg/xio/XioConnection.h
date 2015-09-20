@@ -121,6 +121,7 @@ private:
     static const int FLAG_BAD_AUTH = 0x0001;
     static const int FLAG_MAPPED = 0x0002;
     static const int FLAG_RESET = 0x0004;
+    static const int FLAG_MARK_DOWN = 0x0008;
 
     static const int OP_FLAG_NONE = 0x0000;
     static const int OP_FLAG_LOCKED = 0x0001;
@@ -229,18 +230,14 @@ private:
 
   int on_disconnect_event() {
     connected.store(false);
+    // per interface comment, we only stage a remote reset if the
+    // current policy required it
+    if (cstate.policy.resetcheck)
+      cstate.flags |= CState::FLAG_RESET;
     return 0;
   }
 
-  int on_teardown_event() {
-    pthread_spin_lock(&sp);
-    if (conn)
-      xio_connection_destroy(conn);
-    conn = nullptr;
-    pthread_spin_unlock(&sp);
-    this->put();
-    return 0;
-  }
+  int on_teardown_event();
 
   int xio_qdepth_high_mark() {
     return q_high_mark;
@@ -268,7 +265,11 @@ public:
 
   int send_message(Message *m);
   void send_keepalive() {}
-  virtual void mark_down();
+
+  virtual void mark_down() {
+    _mark_down(XioConnection::CState::OP_FLAG_NONE);
+  }
+
   int _mark_down(uint32_t flags);
   virtual void mark_disposable();
   int _mark_disposable(uint32_t flags);
