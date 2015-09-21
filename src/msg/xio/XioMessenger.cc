@@ -415,13 +415,7 @@ int XioMessenger::pool_hint(uint32_t dsize) {
 
 void XioMessenger::learned_addr(const entity_addr_t &peer_addr_for_me)
 {
-  // be careful here: multiple threads may block here, and readers of
-  // my_inst.addr do NOT hold any lock.
-
-  // this always goes from true -> false under the protection of the
-  // mutex.  if it is already false, we need not retake the mutex at
-  // all.
-  if (!need_addr)
+  if (! need_addr)
     return;
 
   std::lock_guard<std::mutex> lck(sh_mtx);
@@ -431,9 +425,7 @@ void XioMessenger::learned_addr(const entity_addr_t &peer_addr_for_me)
     my_inst.addr.addr = t.addr;
     ldout(cct,2) << "learned my addr " << my_inst.addr << dendl;
     need_addr = false;
-    // init_local_connection();
   }
-
 }
 
 int XioMessenger::new_session(struct xio_session *session,
