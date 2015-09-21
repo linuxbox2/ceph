@@ -1036,7 +1036,7 @@ int XioMessenger::_send_message_impl(Message* m, XioConnection* xcon)
 
   /* serialize to fix message ordering */
   Mutex::Locker lck(xcon->lock);
-  xmsg->m->set_seq(xcon->state.next_out_seq());
+  xmsg->m->set_seq(xcon->cstate.next_out_seq());
   xmsg->m->encode_header(xcon->get_features(), crcflags);
   const std::list<buffer::ptr>& header =
     xmsg->hdr.get_bl().buffers();

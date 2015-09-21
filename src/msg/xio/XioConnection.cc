@@ -360,7 +360,7 @@ int XioConnection::on_msg_req(struct xio_session *session,
     m->set_seq(header.seq);
 
     /* MP-SAFE */
-    state.set_in_seq(header.seq);
+    cstate.set_in_seq(header.seq);
 
     /* handle connect negotiation */
     if (unlikely(cstate.get_session_state() == XioConnection::START))
@@ -929,7 +929,7 @@ int XioConnection::CState::msg_connect_auth(MConnectAuth *m)
 
   if (!msgr->ms_deliver_verify_authorizer(
 	xcon->get(), peer_type, m->authorizer_protocol, auth_bl,
-	auth_reply_bl, auth_valid, session_key) || !auth_valid) {
+	auth_reply_bl, auth_valid, *session_key) || !auth_valid) {
     m2->tag = CEPH_MSGR_TAG_BADAUTHORIZER;
     session_security.reset();
     goto send_m2;
@@ -969,7 +969,7 @@ int XioConnection::CState::msg_connect_auth(MConnectAuth *m)
 
   session_security.reset(
     get_auth_session_handler(msgr->cct, m2->authorizer_protocol,
-			     session_key, features));
+			    *session_key, features));
 
   /* XXX can flush msgs, should precede hook */
   state_up_ready(XioConnection::CState::OP_FLAG_NONE);

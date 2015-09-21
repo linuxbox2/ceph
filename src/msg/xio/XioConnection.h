@@ -83,34 +83,6 @@ private:
   int q_high_mark;
   int q_low_mark;
 
-  struct lifecycle {
-    // different from Pipe states?
-    enum lf_state {
-      INIT,
-      LOCAL_DISCON,
-      REMOTE_DISCON,
-      RECONNECTING,
-      UP,
-      DEAD } state;
-
-    /* XXX */
-    uint32_t reconnects;
-    uint32_t connect_seq, peer_global_seq;
-    uint32_t in_seq, out_seq_acked; // atomic<uint64_t>, got receipt
-    std::atomic<uint64_t> out_seq;
-
-    lifecycle() : state(lifecycle::INIT), in_seq(0), out_seq(0) {}
-
-    void set_in_seq(uint32_t seq) {
-      in_seq = seq;
-    }
-
-    uint32_t next_out_seq() {
-      return ++out_seq;
-    }
-
-  } state;
-
   /* batching */
   XioInSeq in_seq;
 
@@ -127,13 +99,14 @@ private:
     static const int OP_FLAG_LOCKED = 0x0001;
     static const int OP_FLAG_LRU = 0x0002;
 
+    XioConnection *xcon;
+
     uint64_t features;
     Messenger::Policy policy;
 
-    CryptoKey session_key;
     ceph::shared_ptr<AuthSessionHandler> session_security;
-    AuthAuthorizer *authorizer;
-    XioConnection *xcon;
+    CryptoKey* session_key;
+    AuthAuthorizer* authorizer;
     uint32_t protocol_version;
 
     std::atomic<uint32_t> session_state;
@@ -147,8 +120,10 @@ private:
     uint32_t flags;
 
     CState(XioConnection* _xcon)
-      : policy(_xcon->get_default_policy()),
-	xcon(_xcon),
+      : xcon(_xcon),
+	policy(_xcon->get_default_policy()),
+	session_key(nullptr),
+	authorizer(nullptr),
 	protocol_version(0),
 	session_state(INIT),
 	startup_state(IDLE),
