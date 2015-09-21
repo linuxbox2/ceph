@@ -101,6 +101,15 @@ void log_dout(const char *file, unsigned line,
       << function << " - " << buffer << dendl;
   }
 }
+} /* namespace xio_log */
+
+const char *xio_banner = CEPH_BANNER;
+
+static bool has_xio_banner(struct xio_new_session_req *req)
+{
+  return (memcmp(req->private_data, xio_banner,
+			std::min(uint32_t(req->private_data_len),
+				(uint32_t(sizeof(CEPH_BANNER))))) == 0);
 }
 
 static int on_session_event(struct xio_session *session,
@@ -426,87 +435,19 @@ void XioMessenger::learned_addr(const entity_addr_t &peer_addr_for_me)
     ldout(cct,2) << "learned my addr " << my_inst.addr << dendl;
     need_addr = false;
   }
-}
+} /* learned_addr */
 
 int XioMessenger::new_session(struct xio_session *session,
 			      struct xio_new_session_req *req,
 			      void *cb_user_context)
 {
-  if (shutdown_called) {
+  if (shutdown_called ||
+      (! has_xio_banner(req))) {
     return xio_reject(
-      session, XIO_E_SESSION_REFUSED,
-      NULL /* udata */, 0 /* udata len */);
+      session, XIO_E_SESSION_REFUSED, NULL /* udata */, 0 /* udata len */);
   }
 
-  XioConnection *xcon = nullptr;
-  entity_inst_t s_inst;
-  XioHelo xhelo;
-  int code = 0;
-
-  /* new xio_sessions now have startup info */
-  decode_xiohelo(xhelo, (char*) req->private_data,
-		 req->private_data_len);
-
-  conns_sp.lock();
-
-  if (xhelo.flags & XIO_HELO_FLAG_BOUND_ADDR ) {
-    /* check for reconnection */
-    XioConnection::EntitySet::iterator conn_iter =
-      conns_entity_map.find(xhelo.src, XioConnection::EntityComp());
-    if (unlikely(conn_iter != conns_entity_map.end())) {
-      xcon = (*conn_iter).get(); // could skip ref (conns_sp)
-      pthread_spin_lock(&xcon->sp);
-      switch (xcon->cstate.startup_state) {
-      case XioConnection::IDLE:
-	/* normal reconnect */
-	xcon->xio_conn_type = XioConnection::PASSIVE;
-	xcon->cstate.init_passive(XioConnection::CState::OP_FLAG_LOCKED);
-	break;
-      case XioConnection::CONNECTING:
-	/* outbound connection in progress (statup race) */
-	code = xio_reject(session, (enum xio_status) EISCONN, NULL,
-			  0);
-	pthread_spin_unlock(&xcon->sp);
-	xcon->put();
-	conns_sp.unlock();
-	return code;
-	break;
-      case XioConnection::ACCEPTING: /* bad user state */
-      case XioConnection::READY: /* Accelio state violation */
-	code = xio_reject(session, (enum xio_status) EISCONN, NULL, 0);
-	pthread_spin_unlock(&xcon->sp);
-	xcon->put();
-	conns_sp.unlock();
-	return code;
-	/* RESET? */
-	break;
-      };
-      pthread_spin_unlock(&xcon->sp);
-      xcon->put();
-    }
-  } else {
-    /* fall back on the remote's src address (ephemeral port for
-     * RDMA) */
-    (void) entity_addr_from_sockaddr(
-      &s_inst.addr, (struct sockaddr *) &req->src_addr);
-  }
-
-  if (likely(! xcon)) {
-    /* stash new XioConnection with state {PASSIVE, INIT, IDLE} */
-    xcon = new XioConnection(this, XioConnection::PASSIVE, s_inst);
-    xcon->session = session;
-    struct xio_session_attr attr;
-    attr.user_context = xcon;
-    xio_modify_session(session, &attr, XIO_SESSION_ATTR_USER_CTX);
-    xcon->get(); // sentinel
-    conns_list.push_back(*xcon); // MRU
-    conns_entity_map.insert(*xcon);
-    xcon->cstate.flags |= XioConnection::CState::FLAG_MAPPED;
-  }
-
-  conns_sp.unlock();
-
-  code = portals.accept(session, req, cb_user_context);
+  int code = portals.accept(session, req, cb_user_context);
   if (! code)
     ++nsessions;
 
@@ -1142,8 +1083,8 @@ retry:
     .initial_sn = 0,
     .ses_ops = &xio_msgr_ops,
     .user_context = xcon,
-    .private_data = xhelo_bl.c_str(),
-    .private_data_len = xhelo_bl.length(),
+    .private_data = const_cast<char*>(xio_banner),
+    .private_data_len = sizeof(CEPH_BANNER),
     .uri = (char *)xio_uri.c_str()
   };
 
