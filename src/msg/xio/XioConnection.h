@@ -53,7 +53,6 @@ public:
     UP,
     FLOW_CONTROLLED,
     DISCONNECTED,
-    DELETED,
     BARRIER
   };
 

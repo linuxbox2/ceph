@@ -18,13 +18,14 @@
 #include <set>
 #include <stdlib.h>
 #include <memory>
+#include <thread>
+#include <chrono>
 
 #include "XioMsg.h"
 #include "XioMessenger.h"
 #include "common/address_helper.h"
 #include "common/code_environment.h"
 #include "common/Mutex.h" /* sorry */
-#include "XioHelo.h"
 #include "messages/MNop.h"
 
 #define dout_subsys ceph_subsys_xio
@@ -1030,6 +1031,8 @@ retry:
     uint32_t session_state = xcon->cstate.session_state;
     switch (session_state) {
     case XioConnection::UP:
+    case XioConnection::START:
+    case XioConnection::FLOW_CONTROLLED:
       /* return fully-up XioConnections */
       ldout(cct,10) << __func__ << " found active xcon " << this
 		    << dendl;
@@ -1046,13 +1049,14 @@ retry:
       xcon = static_cast<XioConnection*>(cref.get());
       /* LOCKED */
       break;
+    case XioConnection::BARRIER: /* heading to mark down */
     default:
       /* XXX for any other state, retry/block */
       ldout(cct,10) << __func__ << " blocking for xcon " << this
 		    << " state: " << session_state << dendl;
       pthread_spin_unlock(&xcon->sp);
       conns_sp.unlock();
-      pthread_yield();
+      std::this_thread::sleep_for(std::chrono::seconds(1));
       goto retry;
       break;
     } /* switch */
@@ -1071,11 +1075,6 @@ retry:
   string xio_uri =
     xio_uri_from_entity(cct->_conf->xio_transport_type, dest.addr,
 			true /* want_port */);
-  buffer::list xhelo_bl;
-  XioHelo xhelo(did_bind ? XIO_HELO_FLAG_BOUND_ADDR
-		: XIO_HELO_FLAG_NONE,
-		self_inst, dest);
-  ::encode(xhelo, xhelo_bl);
 
   /* XXX client session creation parameters */
   struct xio_session_params params = {
