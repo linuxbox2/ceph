@@ -201,6 +201,7 @@ namespace bi = boost::intrusive;
 #define MSG_MAGIC_TRACE_XIO    0x0020
 #define MSG_MAGIC_TRACE_XMSGR  0x0040
 #define MSG_MAGIC_TRACE_CTR    0x0080
+#define MSG_MAGIC_XIO_TCP      0x0100
 
 // XioMessenger diagnostic "ping pong" flag (resend msg when send completes)
 #define MSG_MAGIC_REDUPE       0x0100

@@ -767,12 +767,16 @@ int XioMessenger::bind(const entity_addr_t& addr)
     }
   }
 
+  /* XXX another copy needed? */
   entity_addr_t shift_addr = *a;
-
-  string base_uri = xio_uri_from_entity(cct->_conf->xio_transport_type,
-					shift_addr, false /* want_port */);
-  ldout(cct,4) << "XioMessenger " << this << " bind: xio_uri "
-    << base_uri << ':' << shift_addr.get_port() << dendl;
+  string trans_type =
+    (get_magic() & MSG_MAGIC_XIO_TCP) ? "tcp" : cct->_conf->xio_transport_type;
+      string base_uri = xio_uri_from_entity(trans_type, shift_addr,
+					    false /* want_port */);
+      ldout(cct,4) << "XioMessenger " << this
+      << " bind: xio_uri " << base_uri
+      << ':' << shift_addr.get_port()
+      << dendl;
 
   uint16_t port0;
   int r = portals.bind(&xio_msgr_ops, base_uri, shift_addr.get_port(), &port0);
@@ -1072,16 +1076,18 @@ retry:
     conns_sp.unlock();
   } /* ! mapped */
 
+  string trans_type =
+    (get_magic() & MSG_MAGIC_XIO_TCP) ? "tcp" : cct->_conf->xio_transport_type;
+
   string xio_uri =
-    xio_uri_from_entity(cct->_conf->xio_transport_type, dest.addr,
-			true /* want_port */);
+    xio_uri_from_entity(trans_type, dest.addr, true /* want_port */);
 
   /* XXX client session creation parameters */
   struct xio_session_params params = {
     .type = XIO_SESSION_CLIENT,
     .initial_sn = 0,
     .ses_ops = &xio_msgr_ops,
-    .user_context = xcon,
+    .user_context = this,
     .private_data = const_cast<char*>(xio_banner),
     .private_data_len = sizeof(CEPH_BANNER),
     .uri = (char *)xio_uri.c_str()

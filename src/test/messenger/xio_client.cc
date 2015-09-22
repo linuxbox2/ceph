@@ -46,6 +46,7 @@ void usage(ostream& out)
 "  --msgs X\n"
 "  --dsize X\n"
 "  --nfrags X\n"
+"  --tcp\n"
 "  --dfast\n"
     ;
 }
@@ -67,6 +68,7 @@ int main(int argc, const char **argv)
 	int n_dsize = 0;
 	int n_nfrags = 1;
 	bool dfast = false;
+	bool tcp = false;
 
 	struct timespec ts;
 	ts.tv_sec = 5;
@@ -94,8 +96,11 @@ int main(int argc, const char **argv)
 	  } else if (ceph_argparse_witharg(args, arg_iter, &val, "--nfrags",
 				    (char*) NULL)) {
 	    n_nfrags = atoi(val.c_str());
+	  }  else if (ceph_argparse_flag(args, arg_iter, "--tcp",
+						    (char*) NULL)) {
+	    tcp = true;
 	  } else if (ceph_argparse_flag(args, arg_iter, "--dfast",
-					   (char*) NULL)) {
+						  (char*) NULL)) {
 	    dfast = true;
 	  } else {
 	    ++arg_iter;
@@ -120,10 +125,15 @@ int main(int argc, const char **argv)
 				     0 /* nonce */, XIO_ALL_FEATURES,
 				     dstrategy);
 
-	// enable timing prints
-	static_cast<XioMessenger*>(messenger)->set_magic(
+	uint32_t magic =
 	  MSG_MAGIC_REDUPE /* resubmit messages on delivery (REQUIRED) */ |
-	  MSG_MAGIC_TRACE_CTR /* timing prints */);
+	  MSG_MAGIC_TRACE_CTR /* timing prints */;
+
+	/* XXX provide a way to force TCP operation */
+	if (tcp)
+	  magic |= MSG_MAGIC_XIO_TCP;
+
+	static_cast<XioMessenger*>(messenger)->set_magic(magic);
 
 	// ensure we have a pool of sizeof(payload data)
 	if (n_dsize)
