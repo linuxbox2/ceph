@@ -365,6 +365,26 @@ Message *decode_message(CephContext *cct, int crcflags,
   case CEPH_MSG_PING:
     m = new MPing();
     break;
+
+    // new session startup messages
+  case MSG_CONNECT:
+    m = new MConnect();
+    break;
+  case MSG_CONNECT_REPLY:
+    m = new MConnectReply();
+    break;
+  case MSG_CONNECT_AUTH:
+    m = new MConnectAuth();
+    break;
+  case MSG_CONNECT_AUTH_REPLY:
+    m = new MConnectAuthReply();
+    break;
+
+    // non-routable message, used for (e.g.) barriers
+  case MSG_NOP:
+    return 0;
+    break;
+
   case MSG_COMMAND:
     m = new MCommand;
     break;
