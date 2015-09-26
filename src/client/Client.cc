@@ -181,6 +181,7 @@ Client::Client(Messenger *m, MonClient *mc)
     callback_handle(NULL),
     switch_interrupt_cb(NULL),
     remount_cb(NULL),
+    vnode_invalidate_cb(nullptr),
     ino_invalidate_cb(NULL),
     dentry_invalidate_cb(NULL),
     getgroups_cb(NULL),
@@ -188,6 +189,7 @@ Client::Client(Messenger *m, MonClient *mc)
     require_remount(false),
     async_ino_invalidator(m->cct),
     async_dentry_invalidator(m->cct),
+    async_vnode_invalidator(m->cct),
     interrupt_finisher(m->cct),
     remount_finisher(m->cct),
     objecter_finisher(m->cct),
@@ -513,6 +515,12 @@ void Client::shutdown()
     ldout(cct, 10) << "shutdown stopping dentry invalidator finisher" << dendl;
     async_dentry_invalidator.wait_for_empty();
     async_dentry_invalidator.stop();
+  }
+
+  if (vnode_invalidate_cb) {
+    ldout(cct, 10) << "shutdown stopping vnode invalidator finisher" << dendl;
+    async_vnode_invalidator.wait_for_empty();
+    async_vnode_invalidator.stop();
   }
 
   if (switch_interrupt_cb) {
@@ -3363,6 +3371,32 @@ void Client::_invalidate_inode_cache(Inode *in, int64_t off, int64_t len)
   _schedule_invalidate_callback(in, off, len, true);
 }
 
+class C_Client_VnodeInvalidate : public Context  {
+private:
+  Client *client;
+  vinodeno_t ino;
+public:
+  C_Client_VnodeInvalidate(Client *c, vinodeno_t ino) :
+    client(c), ino(ino) {
+  }
+  void finish(int r) {
+    assert(!client->client_lock.is_locked_by_me()); // XXX could be lockless
+    client->_async_vnode_invalidate(ino);
+  }
+};
+
+void Client::_async_vnode_invalidate(vinodeno_t ino)
+{
+  ldout(cct, 10) << __func__  << " " << dendl;
+  vnode_invalidate_cb(callback_handle, ino);
+}
+
+void Client::_schedule_vnode_invalidate_callback(vinodeno_t ino) {
+
+  if (vnode_invalidate_cb)
+    async_vnode_invalidator.queue(new C_Client_VnodeInvalidate(this, ino));
+}
+
 void Client::_release(Inode *in)
 {
   ldout(cct, 20) << "_release " << *in << dendl;
@@ -4524,8 +4558,8 @@ void Client::handle_cap_grant(MetaSession *session, Inode *in, Cap *cap, MClient
     cap->issued = new_caps;
     cap->implemented |= new_caps;
 
-    // AFS-style callback break (something revoked)
-    // TODO: schedule me
+    // AFS,DCE-style callback break
+    _schedule_vnode_invalidate_callback(in->vino());
 
     if (((used & ~new_caps) & CEPH_CAP_FILE_BUFFER)
         && !_flush(in, new C_Client_FlushComplete(this, in))) {
@@ -8345,6 +8379,7 @@ void Client::ll_register_callbacks(struct client_callback_args *args)
   ldout(cct, 10) << "ll_register_callbacks cb " << args->handle
 		 << " invalidate_ino_cb " << args->ino_cb
 		 << " invalidate_dentry_cb " << args->dentry_cb
+		 << " vn_invalidate_cb " << args->vnode_cb
 		 << " getgroups_cb" << args->getgroups_cb
 		 << " switch_interrupt_cb " << args->switch_intr_cb
 		 << " remount_cb " << args->remount_cb
@@ -8357,6 +8392,10 @@ void Client::ll_register_callbacks(struct client_callback_args *args)
   if (args->dentry_cb) {
     dentry_invalidate_cb = args->dentry_cb;
     async_dentry_invalidator.start();
+  }
+  if (args->vnode_cb) {
+    vnode_invalidate_cb = args->vnode_cb;
+    async_vnode_invalidator.start();
   }
   if (args->switch_intr_cb) {
     switch_interrupt_cb = args->switch_intr_cb;

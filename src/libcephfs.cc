@@ -32,11 +32,7 @@
 #include "include/assert.h"
 
 
-static void ino_invalidate(void *handle, vinodeno_t ino, int64_t off,
-			  int64_t len);
-
-static void dentry_invalidate(void *handle, vinodeno_t dirino,
-			      vinodeno_t ino, string& name);
+static void vn_invalidate(void *handle, vinodeno_t ino);
 
 struct ceph_mount_info
 {
@@ -247,12 +243,7 @@ public:
     invalidate_arg = arg;
   }
 
-  void invalidate(vinodeno_t ino, int64_t off,
-			  int64_t len) {
-    invalidate_cb(this, ino, invalidate_arg);
-  }
-
-  void invalidate(vinodeno_t ino, const string& name) {
+  void invalidate(vinodeno_t ino) {
     invalidate_cb(this, ino, invalidate_arg);
   }
 
@@ -1700,27 +1691,16 @@ extern "C" int ceph_ll_register_invalidate(struct ceph_mount_info *cmount,
   struct client_callback_args args;
   memset(&args, 0, sizeof(struct client_callback_args));
   args.handle = cmount;
-  args.ino_cb = ino_invalidate;
-  args.dentry_cb = dentry_invalidate;
+  args.vnode_cb = vn_invalidate;
   cmount->get_client()->ll_register_callbacks(&args);
   cmount->set_invalidate_cb(cb, arg);
   return 0;
 }
 
-static void ino_invalidate(void *handle, vinodeno_t ino, int64_t off,
-			  int64_t len)
+static void vn_invalidate(void *handle, vinodeno_t ino)
 {
   struct ceph_mount_info *cmount =
     static_cast<ceph_mount_info*>(handle);
   assert(cmount);
-  cmount->invalidate(ino, off, len);
-}
-
-static void dentry_invalidate(void *handle, vinodeno_t parent_ino,
-			      vinodeno_t ino, string& name)
-{
-  struct ceph_mount_info *cmount =
-    static_cast<ceph_mount_info*>(handle);
-  assert(cmount);
-  cmount->invalidate(ino, name);
+  cmount->invalidate(ino);
 }

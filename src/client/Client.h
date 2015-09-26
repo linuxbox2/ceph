@@ -131,7 +131,7 @@ struct MetaSession;
 struct MetaRequest;
 class ceph_lock_state_t;
 
-
+typedef void (*client_vno_callback_t)(void *handle, vinodeno_t ino);
 typedef void (*client_ino_callback_t)(void *handle, vinodeno_t ino, int64_t off, int64_t len);
 
 typedef void (*client_dentry_callback_t)(void *handle, vinodeno_t dirino,
@@ -145,6 +145,7 @@ struct client_callback_args {
   void *handle;
   client_ino_callback_t ino_cb;
   client_dentry_callback_t dentry_cb;
+  client_vno_callback_t vnode_cb;
   client_switch_interrupt_callback_t switch_intr_cb;
   client_remount_callback_t remount_cb;
   client_getgroups_callback_t getgroups_cb;
@@ -239,14 +240,18 @@ class Client : public Dispatcher, public md_config_obs_t {
   void *callback_handle;
   client_switch_interrupt_callback_t switch_interrupt_cb;
   client_remount_callback_t remount_cb;
+  client_vno_callback_t vnode_invalidate_cb;
   client_ino_callback_t ino_invalidate_cb;
   client_dentry_callback_t dentry_invalidate_cb;
   client_getgroups_callback_t getgroups_cb;
   bool can_invalidate_dentries;
   bool require_remount;
 
+  // XXX unify?
   Finisher async_ino_invalidator;
   Finisher async_dentry_invalidator;
+  Finisher async_vnode_invalidator;
+
   Finisher interrupt_finisher;
   Finisher remount_finisher;
   Finisher objecter_finisher;
@@ -421,6 +426,8 @@ protected:
   friend class C_Client_FlushComplete; // calls put_inode()
   friend class C_Client_CacheInvalidate;  // calls ino_invalidate_cb
   friend class C_Client_DentryInvalidate;  // calls dentry_invalidate_cb
+  friend class C_Client_VnodeInvalidate;  // calls vnode_invalidate_cb
+
   friend class C_Block_Sync; // Calls block map and protected helpers
   friend class C_C_Tick; // Asserts on client_lock
   friend class C_Client_SyncCommit; // Asserts on client_lock
@@ -572,6 +579,9 @@ protected:
   void _schedule_invalidate_dentry_callback(Dentry *dn, bool del);
   void _async_dentry_invalidate(vinodeno_t dirino, vinodeno_t ino, string& name);
   void _try_to_trim_inode(Inode *in);
+
+  void _schedule_vnode_invalidate_callback(vinodeno_t ino);
+  void _async_vnode_invalidate(vinodeno_t ino);
 
   void _schedule_invalidate_callback(Inode *in, int64_t off, int64_t len, bool keep_caps);
   void _invalidate_inode_cache(Inode *in);

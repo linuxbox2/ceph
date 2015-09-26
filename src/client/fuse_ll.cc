@@ -974,11 +974,11 @@ int CephFuse::Handle::start()
 
   fuse_session_add_chan(se, ch);
 
-
   struct client_callback_args args = {
     handle: this,
     ino_cb: client->cct->_conf->fuse_use_invalidate_cb ? ino_invalidate_cb : NULL,
     dentry_cb: dentry_invalidate_cb,
+    vnode_cb: nullptr,
     switch_intr_cb: switch_interrupt_cb,
 #if defined(__linux__)
     remount_cb: remount_cb,
