@@ -122,7 +122,7 @@ struct CephContext;
 # define CEPHFS_ERROR_MESSENGER_START 1003
 
 /**
- * @defgroup libcephfs_h_init Setup and Teardown
+ * @defgroup libcephfs_h_init Setup atypedef int (*client_vnode_invalidate_t)(void *handle, vinodeno_t, void *arg);nd Teardown
  * These are the first and last functions that should be called
  * when using libcephfs.
  *
@@ -1481,6 +1481,12 @@ int ceph_ll_write_block(struct ceph_mount_info *cmount,
 int ceph_ll_commit_blocks(struct ceph_mount_info *cmount,
 			  struct Inode *in, uint64_t offset, uint64_t range);
 
+/* client callbacks */
+typedef int (*libcephfs_invalidate_t)(struct ceph_mount_info *cmount,
+				      vinodeno_t ino, void *arg);
+
+int ceph_ll_register_invalidate(struct ceph_mount_info *cmount,
+				libcephfs_invalidate_t cb, void *arg);
 
 #ifdef __cplusplus
 }

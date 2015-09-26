@@ -4524,6 +4524,9 @@ void Client::handle_cap_grant(MetaSession *session, Inode *in, Cap *cap, MClient
     cap->issued = new_caps;
     cap->implemented |= new_caps;
 
+    // AFS-style callback break (something revoked)
+    // TODO: schedule me
+
     if (((used & ~new_caps) & CEPH_CAP_FILE_BUFFER)
         && !_flush(in, new C_Client_FlushComplete(this, in))) {
       // waitin' for flush

@@ -31,6 +31,13 @@
 #include "msg/Messenger.h"
 #include "include/assert.h"
 
+
+static void ino_invalidate(void *handle, vinodeno_t ino, int64_t off,
+			  int64_t len);
+
+static void dentry_invalidate(void *handle, vinodeno_t dirino,
+			      vinodeno_t ino, string& name);
+
 struct ceph_mount_info
 {
 public:
@@ -40,7 +47,9 @@ public:
       client(NULL),
       monclient(NULL),
       messenger(NULL),
-      cct(cct_)
+      cct(cct_),
+      invalidate_cb(nullptr),
+      invalidate_arg(nullptr)
   {
   }
 
@@ -233,6 +242,20 @@ public:
     return cct;
   }
 
+  void set_invalidate_cb(libcephfs_invalidate_t cb, void *arg) {
+    invalidate_cb = cb;
+    invalidate_arg = arg;
+  }
+
+  void invalidate(vinodeno_t ino, int64_t off,
+			  int64_t len) {
+    invalidate_cb(this, ino, invalidate_arg);
+  }
+
+  void invalidate(vinodeno_t ino, const string& name) {
+    invalidate_cb(this, ino, invalidate_arg);
+  }
+
 private:
   bool mounted;
   bool inited;
@@ -240,8 +263,10 @@ private:
   MonClient *monclient;
   Messenger *messenger;
   CephContext *cct;
+  libcephfs_invalidate_t invalidate_cb;
+  void *invalidate_arg;
   std::string cwd;
-};
+}; /* ceph_mount_info */
 
 static void do_out_buffer(bufferlist& outbl, char **outbuf, size_t *outbuflen)
 {
@@ -1666,4 +1691,36 @@ extern "C" void ceph_buffer_free(char *buf)
   if (buf) {
     free(buf);
   }
+}
+
+extern "C" int ceph_ll_register_invalidate(struct ceph_mount_info *cmount,
+					  libcephfs_invalidate_t cb,
+					  void *arg)
+{
+  struct client_callback_args args;
+  memset(&args, 0, sizeof(struct client_callback_args));
+  args.handle = cmount;
+  args.ino_cb = ino_invalidate;
+  args.dentry_cb = dentry_invalidate;
+  cmount->get_client()->ll_register_callbacks(&args);
+  cmount->set_invalidate_cb(cb, arg);
+  return 0;
+}
+
+static void ino_invalidate(void *handle, vinodeno_t ino, int64_t off,
+			  int64_t len)
+{
+  struct ceph_mount_info *cmount =
+    static_cast<ceph_mount_info*>(handle);
+  assert(cmount);
+  cmount->invalidate(ino, off, len);
+}
+
+static void dentry_invalidate(void *handle, vinodeno_t parent_ino,
+			      vinodeno_t ino, string& name)
+{
+  struct ceph_mount_info *cmount =
+    static_cast<ceph_mount_info*>(handle);
+  assert(cmount);
+  cmount->invalidate(ino, name);
 }
