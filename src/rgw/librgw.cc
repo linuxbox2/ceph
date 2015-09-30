@@ -67,21 +67,6 @@ public:
   }
 };
 
-struct RGWLibRequest : public RGWRequest {
-  string method;
-  string resource;
-  int content_length;
-  atomic_t* fail_flag;
-
-  RGWLibRequest(uint64_t req_id, const string& _m, const  string& _r, int _cl,
-		bool user_command, atomic_t* _ff)
-    :  RGWRequest(req_id), method(_m), resource(_r), content_length(_cl),
-       fail_flag(_ff)
-    {
-      s->librgw_user_command =  user_command;
-    }
-};
-
 void RGWLibRequestEnv::set_date(utime_t& tm)
 {
   stringstream s;
@@ -148,6 +133,8 @@ void RGWLibProcess::run()
   /* XXX */
 }
 
+#warning fixme no more gen_request
+#if 0
 void RGWLibProcess::gen_request(const string& method, const string& resource,
 				int content_length, bool user_command,
 				atomic_t* fail_flag)
@@ -159,6 +146,7 @@ void RGWLibProcess::gen_request(const string& method, const string& resource,
   req_throttle.get(1);
   req_wq.queue(req);
 }
+#endif
 
 void RGWLibProcess::handle_request(RGWRequest* r)
 {
@@ -169,10 +157,13 @@ void RGWLibProcess::handle_request(RGWRequest* r)
   utime_t tm = ceph_clock_now(NULL);
 
   env.port = 80;
+#warning fixme we don't do all these ahem
+#if 0
   env.content_length = req->content_length;
   env.content_type = "binary/octet-stream"; /* TBD */
   env.request_method = req->method;
   env.uri = req->resource;
+#endif
   env.set_date(tm);
   env.sign(access_key);
 
@@ -361,92 +352,6 @@ int RGWLibIO::set_uid(RGWRados* store, string& uid)
   return ret;
 }
 
-/* TODO: implement */
-int RGWLib::get_userinfo_by_uid(const string& uid, RGWUserInfo& info)
-{
-  return 0;
-}
-
-int RGWLib::get_user_acl()
-{
-  return 0;
-}
-
-int RGWLib::set_user_permissions()
-{
-  return 0;
-}
-
-int RGWLib::set_user_quota()
-{
-  return 0;
-}
-
-int RGWLib::get_user_quota()
-{
-  return 0;
-}
-
-int RGWLib::get_user_buckets_list()
-{
-  return 0;
-}
-
-int RGWLib::get_bucket_objects_list()
-{
-  return 0;
-}
-
-int RGWLib::create_bucket()
-{
-  return 0;
-}
-
-int RGWLib::delete_bucket()
-{
-  return 0;
-}
-
-int RGWLib::get_bucket_attributes()
-{
-  return 0;
-}
-
-int RGWLib::set_bucket_attributes()
-{
-  return 0;
-}
-
-int RGWLib::create_object ()
-{
-  return 0;
-}
-
-int RGWLib::delete_object()
-{
-  return 0;
-}
-
-int RGWLib::write()
-{
-  return 0;
-}
-
-int RGWLib::read()
-{
-  return 0;
-}
-
-int RGWLib::get_object_attributes()
-{
-  return 0;
-}
-
-int RGWLib::set_object_attributes()
-{
-  return 0;
-}
-
 void RGWLibIO::init_env(CephContext* cct)
 {
   env.init(cct);
@@ -475,23 +380,24 @@ void RGWLibIO::init_env(CephContext* cct)
   env.set("SERVER_PORT", port_buf);
 }
 
-int process_request(RGWRados *store, RGWREST *rest, RGWRequest *req,
-		    RGWLibIO *io, OpsLogSocket *olog)
+int process_request(RGWRados* store, RGWREST* rest, RGWRequest* req,
+		    RGWLibIO* io, OpsLogSocket* olog)
 {
   int ret = 0;
 
-  io->init(g_ceph_context); // XXX fix me
+  io->init(g_ceph_context); // XXXX fix me--we have a local cct
 
   req->log_init();
 
-  dout(1) << "====== starting new request req=" << hex << req << dec
-	  << " =====" << dendl;
+  dout(1) << "====== " << __func__
+	  << " starting new request req=" << hex << req << dec
+	  << " ======" << dendl;
+
   perfcounter->inc(l_rgw_req);
 
   RGWEnv& rgw_env = io->get_env();
 
   struct req_state rstate(g_ceph_context, &rgw_env);
-
   struct req_state *s = &rstate;
 
   RGWObjectCtx rados_ctx(store, s);
@@ -506,10 +412,9 @@ int process_request(RGWRados *store, RGWREST *rest, RGWRequest *req,
   int init_error = 0;
   bool should_log = false;
 
-  /* XXXX changing */
+  /* XXX */
   RGWRESTMgr *mgr = nullptr;
-  RGWHandler *handler =
-    rest->get_handler(store, s, io, &mgr, &init_error);
+  RGWHandler *handler = rest->get_handler(store, s, io, &mgr, &init_error);
 
   if (init_error != 0) {
     abort_early(s, NULL, init_error);
@@ -584,6 +489,7 @@ int process_request(RGWRados *store, RGWREST *rest, RGWRequest *req,
   op->pre_exec();
   op->execute();
   op->complete();
+
 done:
   int r = io->complete_request();
   if (r < 0) {
@@ -601,8 +507,10 @@ done:
     handler->put_op(op);
   rest->put_handler(handler);
 
-  dout(1) << "====== req done req=" << hex << req << dec << " http_status="
-	  << http_ret << " ======" << dendl;
+  dout(1) << "====== " << __func__
+	  << " req done req=" << hex << req << dec << " http_status="
+	  << http_ret
+	  << " ======" << dendl;
 
   return (ret < 0 ? ret : s->err.ret);
 } /* process_request */
@@ -610,6 +518,42 @@ done:
 
 /* global RGW library object */
 static RGWLib rgwlib;
+
+RGWHandler *RGWREST::get_handler(RGWRados* store, struct req_state* s,
+				 RGWLibIO* io, RGWRESTMgr** pmgr,
+				 int* init_error)
+{
+  RGWHandler *handler = nullptr;
+
+  *init_error = preprocess(s, io);
+  if (*init_error < 0)
+    return NULL;
+
+  /* TODO: this just needs to return an already-initialized pair of
+   * RGWRESTMgr_Lib and RGWHandler_ObjStore_Lib */
+
+  RGWRESTMgr *m = librgw.get_manager();
+  if (!m) {
+    *init_error = -ERR_METHOD_NOT_ALLOWED;
+    return NULL;
+  }
+
+  if (pmgr)
+    *pmgr = m;
+
+  handler = m->get_handler(s);
+  if (!handler) {
+    *init_error = -ERR_METHOD_NOT_ALLOWED;
+    return NULL;
+  }
+  *init_error = handler->init(store, s, io);
+  if (*init_error < 0) {
+    m->put_handler(handler);
+    return NULL;
+  }
+
+  return handler;
+} /* get direct handler */
 
 extern "C" {
 

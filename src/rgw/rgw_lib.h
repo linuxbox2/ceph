@@ -14,8 +14,6 @@
 class RGWLibFrontendConfig;
 class RGWLibFrontend;
 class OpsLogSocket;
-class RGWREST;
-class RGWRESTMgr;
 
 class RGWLib {
   RGWFrontendConfig* fec;
@@ -34,6 +32,8 @@ public:
 
   RGWRados* get_store() { return store; }
 
+  RGWRESTMgr* get_manager() { return mgr; }
+
   int init();
   int init(vector<const char *>& args);
   int stop();
@@ -46,6 +46,7 @@ public:
 
   int get_uri(const uint64_t handle, string &uri);
 
+#if 0 /* XXXX delete if possible */
   /* User interface */
   int get_userinfo_by_uid(const string& uid, RGWUserInfo& info);
   int get_user_acl();
@@ -68,6 +69,7 @@ public:
   int read();
   int get_object_attributes();
   int set_object_attributes();
+#endif /* 0 */
 };
 
 /* request interface */
@@ -112,5 +114,37 @@ public:
   };
 
 }; /* RGWLibIO */
+
+#if 0
+struct RGWLibRequest : public RGWRequest {
+  string method;
+  string resource;
+  int content_length;
+  atomic_t* fail_flag;
+
+  RGWLibRequest(uint64_t req_id, const string& _m, const  string& _r, int _cl,
+		bool user_command, atomic_t* _ff)
+    :  RGWRequest(req_id), method(_m), resource(_r), content_length(_cl),
+       fail_flag(_ff)
+    {
+      s->librgw_user_command =  user_command;
+    }
+
+  virtual RGWHandler* get_handler() = 0; // XXX need req_state arg?
+
+}; /* RGWLibRequest */
+#else
+class RGWLibRequest : public RGWRequest {
+public:
+
+  RGWLibRequest(uint64_t req_id)
+    :  RGWRequest(req_id)
+    {}
+
+  virtual RGWHandler* get_handler() /* = 0; */ { return nullptr; }
+  // virtual const char* get_method() = 0;
+
+}; /* RGWLibRequest */
+#endif /* 0 */
 
 #endif /* RGW_LIB_H */
