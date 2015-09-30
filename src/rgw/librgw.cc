@@ -103,10 +103,7 @@ public:
   RGWLibFrontend(RGWProcessEnv& pe, RGWFrontendConfig *_conf)
     : RGWProcessFrontend(pe, _conf) {}
   int init();
-  void gen_request(const string& method, const string& resource,
-		   int content_length, bool user_command,
-		   atomic_t* fail_flag);
-};
+}; /* RGWLibFrontend */
 
 class RGWLibProcess : public RGWProcess {
     RGWAccessKey access_key;
@@ -117,11 +114,8 @@ public:
   void run();
   void checkpoint();
   void handle_request(RGWRequest* req);
-  void gen_request(const string& method, const string& resource,
-		   int content_length, bool user_command,
-		   atomic_t* fail_flag);
   void set_access_key(RGWAccessKey& key) { access_key = key; }
-};
+}; /* RGWLibProcess */
 
 void RGWLibProcess::checkpoint()
 {
@@ -186,15 +180,6 @@ int RGWLibFrontend::init()
   return 0;
 }
 
-void RGWLibFrontend::gen_request(const string& method, const string& resource,
-				 int content_length, bool user_command,
-				 atomic_t* fail_flag)
-{
-  RGWLibProcess* lib_process = static_cast<RGWLibProcess*>(pprocess);
-  lib_process->gen_request(method, resource, content_length, user_command,
-			   fail_flag);
-}
-
 int RGWLib::init()
 {
   vector<const char*> args;
@@ -256,9 +241,7 @@ int RGWLib::init(vector<const char*>& args)
   rgw_bucket_init(store->meta_mgr);
   rgw_log_usage_init(g_ceph_context, store);
 
-  mgr = new RGWRESTMgr_Lib();
-  mgr->set_logging(true);
-  rest.register_default_mgr(mgr);
+  // XXX ex-RGWRESTMgr_lib, mgr->set_logging(true)
 
   if (!g_conf->rgw_ops_log_socket_path.empty()) {
     olog = new OpsLogSocket(g_ceph_context, g_conf->rgw_ops_log_data_backlog);
@@ -380,10 +363,12 @@ void RGWLibIO::init_env(CephContext* cct)
   env.set("SERVER_PORT", port_buf);
 }
 
-int process_request(RGWRados* store, RGWREST* rest, RGWRequest* req,
+int process_request(RGWRados* store, RGWREST* rest, RGWRequest* base_req,
 		    RGWLibIO* io, OpsLogSocket* olog)
 {
   int ret = 0;
+
+  RGWLibRequest *req = static_cast<RGWLibRequest*>(base_req);
 
   io->init(g_ceph_context); // XXXX fix me--we have a local cct
 
@@ -408,38 +393,23 @@ int process_request(RGWRados* store, RGWREST* rest, RGWRequest* req,
 
   req->log_format(s, "initializing for trans_id = %s", s->trans_id.c_str());
 
-  RGWOp *op = NULL;
-  int init_error = 0;
-  bool should_log = false;
+  RGWOp *op = dynamic_cast<RGWOp*>(req);
+  req->op = op; // XXX but we can do this in the ctor!
 
-  /* XXX */
-  RGWRESTMgr *mgr = nullptr;
-  RGWHandler *handler = rest->get_handler(store, s, io, &mgr, &init_error);
-
-  if (init_error != 0) {
-    abort_early(s, NULL, init_error);
-    goto done;
-  }
-
-  should_log = mgr->get_logging();
-
-  req->log(s, "getting op");
-  op = handler->get_op(store);
-  if (!op) {
-    abort_early(s, NULL, -ERR_METHOD_NOT_ALLOWED);
-    goto done;
-  }
-  req->op = op;
+  bool should_log = true;
 
   // just checks the HTTP header, and that the user can access the gateway
   // may be able to skip this after MOUNT (revalidate the user info)
   req->log(s, "authorizing");
+#warning need new authorize() mechanism
+#if 0
   ret = handler->authorize(); // validates s->user
   if (ret < 0) {
     dout(10) << "failed to authorize request" << dendl;
     abort_early(s, op, ret);
     goto done;
   }
+#endif
 
   if (s->user.suspended) {
     dout(10) << "user is suspended, uid=" << s->user.user_id << dendl;
@@ -447,11 +417,14 @@ int process_request(RGWRados* store, RGWREST* rest, RGWRequest* req,
     goto done;
   }
   req->log(s, "reading permissions");
+#warning need a new read_permissions(op) mechanism
+#if 0
   ret = handler->read_permissions(op);
   if (ret < 0) {
     abort_early(s, op, ret);
     goto done;
   }
+#endif
 
   req->log(s, "init op");
   ret = op->init_processing();
@@ -503,9 +476,12 @@ done:
 
   req->log_format(s, "http status=%d", http_ret);
 
+#warning XXX what did this do (return handler?  stash op?)
+#if 0  
   if (handler)
     handler->put_op(op);
   rest->put_handler(handler);
+#endif
 
   dout(1) << "====== " << __func__
 	  << " req done req=" << hex << req << dec << " http_status="
@@ -519,6 +495,8 @@ done:
 /* global RGW library object */
 static RGWLib rgwlib;
 
+#warning while handler is going, save logic till verified (e.g., preprocess)
+#if 0
 RGWHandler *RGWREST::get_handler(RGWRados* store, struct req_state* s,
 				 RGWLibIO* io, RGWRESTMgr** pmgr,
 				 int* init_error)
@@ -554,6 +532,7 @@ RGWHandler *RGWREST::get_handler(RGWRados* store, struct req_state* s,
 
   return handler;
 } /* get direct handler */
+#endif /* 0 */
 
 extern "C" {
 

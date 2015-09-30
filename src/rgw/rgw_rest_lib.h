@@ -9,11 +9,13 @@
 #include "rgw_common.h"
 #include "rgw_lib.h"
 
+
+/* XXX do we even need an RGWRESTMgr? */
 class RGWRESTMgr_Lib : public RGWRESTMgr {
 public:
   RGWRESTMgr_Lib() {}
   virtual ~RGWRESTMgr_Lib() {}
-  virtual RGWHandler* get_handler(struct req_state* s);
+  virtual RGWHandler* get_handler(struct req_state* s) { return nullptr; }
 }; /* RGWRESTMgr_Lib */
 
 /* rgw_lib RGWHandler */
@@ -73,6 +75,5 @@ public:
   virtual void send_response();
 
 }; /* RGWListBucket_ObjStore_Lib */
-
 
 #endif /* CEPH_RGW_REST_LIB_H */

@@ -19,10 +19,9 @@ class RGWLib {
   RGWFrontendConfig* fec;
   RGWLibFrontend* fe;
   OpsLogSocket* olog;
-  RGWREST rest;
+  RGWREST rest; // XXX needed for RGWProcessEnv
   RGWProcessEnv env;
   RGWRados* store;
-  RGWRESTMgr* mgr;
   ceph::unordered_map<string, uint64_t> allocated_objects_handles;
   ceph::unordered_map<uint64_t, string> handles_map;
   atomic64_t last_allocated_handle;
@@ -31,8 +30,6 @@ public:
   ~RGWLib() {}
 
   RGWRados* get_store() { return store; }
-
-  RGWRESTMgr* get_manager() { return mgr; }
 
   int init();
   int init(vector<const char *>& args);
