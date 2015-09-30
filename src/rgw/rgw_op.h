@@ -1068,7 +1068,6 @@ public:
   virtual uint32_t op_mask() { return RGW_OP_TYPE_DELETE; }
 };
 
-
 class RGWHandler {
 protected:
   RGWRados *store;
@@ -1093,5 +1092,8 @@ public:
   virtual int read_permissions(RGWOp *op) = 0;
   virtual int authorize() = 0;
 };
+
+extern int rgw_build_policies(RGWRados *store, struct req_state *s,
+			      bool only_bucket, bool prefetch_data);
 
 #endif
