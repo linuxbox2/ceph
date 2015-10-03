@@ -76,10 +76,11 @@ protected:
   bool cors_exist;
   RGWQuotaInfo bucket_quota;
   RGWQuotaInfo user_quota;
+  uint32_t magic;
 
   virtual int init_quota();
 public:
-  RGWOp() : s(NULL), dialect_handler(NULL), store(NULL), cors_exist(false) {}
+RGWOp() : s(NULL), dialect_handler(NULL), store(NULL), cors_exist(false), magic(0) {}
   virtual ~RGWOp() {}
 
   virtual int init_processing() {
