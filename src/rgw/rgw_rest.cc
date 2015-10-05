@@ -1127,7 +1127,7 @@ void RGWRESTOp::send_response()
 
 int RGWRESTOp::verify_permission()
 {
-  return check_caps(s->user.caps);
+  return check_caps(s->user->caps);
 }
 
 RGWOp *RGWHandler_REST::get_op(RGWRados *store)

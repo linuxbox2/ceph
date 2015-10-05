@@ -203,7 +203,7 @@ void RGWListBuckets_ObjStore_S3::send_response_begin(bool has_buckets)
 
   if (!ret) {
     list_all_buckets_start(s);
-    dump_owner(s, s->user.user_id, s->user.display_name);
+    dump_owner(s, s->user->user_id, s->user->display_name);
     s->formatter->open_array_section("Buckets");
     sent_data = true;
   }
@@ -1302,7 +1302,8 @@ int RGWPostObj_ObjStore_S3::get_policy()
       return r;
     }
 
-    s->user = user_info;
+    // deep copy
+    *(s->user) = user_info;
     s->owner.set_id(user_info.user_id);
     s->owner.set_name(user_info.display_name);
   } else {
@@ -1907,8 +1908,8 @@ void RGWListBucketMultiparts_ObjStore_S3::send_response()
       s->formatter->open_array_section("Upload");
       s->formatter->dump_string("Key", mp.get_key());
       s->formatter->dump_string("UploadId", mp.get_upload_id());
-      dump_owner(s, s->user.user_id, s->user.display_name, "Initiator");
-      dump_owner(s, s->user.user_id, s->user.display_name);
+      dump_owner(s, s->user->user_id, s->user->display_name, "Initiator");
+      dump_owner(s, s->user->user_id, s->user->display_name);
       s->formatter->dump_string("StorageClass", "STANDARD");
       time_t mtime = iter->obj.mtime.sec();
       dump_time(s, "Initiated", &mtime);
@@ -2373,7 +2374,7 @@ int RGW_Auth_S3_Keystone_ValidateToken::validate_s3token(
 
 static void init_anon_user(struct req_state *s)
 {
-  rgw_get_anon_user(s->user);
+  rgw_get_anon_user(*(s->user));
   s->perm_mask = RGW_PERM_FULL_CONTROL;
 }
 
@@ -2463,15 +2464,15 @@ int RGW_Auth_S3::authorize(RGWRados *store, struct req_state *s)
 	}
 
 
-	s->user.user_id = keystone_validator.response.token.tenant.id;
-	s->user.display_name = keystone_validator.response.token.tenant.name; // wow.
+	s->user->user_id = keystone_validator.response.token.tenant.id;
+	s->user->display_name = keystone_validator.response.token.tenant.name; // wow.
 
 	/* try to store user if it not already exists */
 	if (
 	  rgw_get_user_info_by_uid(store,
 				   keystone_validator.response.token.tenant.id,
-				   s->user) < 0) {
-	  int ret = rgw_store_user_info(store, s->user, NULL, NULL, 0, true);
+				  *(s->user)) < 0) {
+	  int ret = rgw_store_user_info(store, *(s->user), NULL, NULL, 0, true);
 	  if (ret < 0)
 	    dout(10) << "NOTICE: failed to store new user's info: ret="
 		     << ret << dendl;
@@ -2490,7 +2491,7 @@ int RGW_Auth_S3::authorize(RGWRados *store, struct req_state *s)
   /* now try rados backend, but only if keystone did not succeed */
   if (keystone_result < 0) {
     /* get the user info */
-    if (rgw_get_user_info_by_access_key(store, auth_id, s->user) < 0) {
+    if (rgw_get_user_info_by_access_key(store, auth_id, *(s->user)) < 0) {
       dout(5) << "error reading user info, uid=" << auth_id
 	      << " can't authenticate" << dendl;
       return -ERR_INVALID_ACCESS_KEY;
@@ -2520,8 +2521,8 @@ int RGW_Auth_S3::authorize(RGWRados *store, struct req_state *s)
     }
 
     map<string, RGWAccessKey>::iterator iter =
-      s->user.access_keys.find(auth_id);
-    if (iter == s->user.access_keys.end()) {
+      s->user->access_keys.find(auth_id);
+    if (iter == s->user->access_keys.end()) {
       dout(0) << "ERROR: access key not encoded in user info" << dendl;
       return -EPERM;
     }
@@ -2529,8 +2530,8 @@ int RGW_Auth_S3::authorize(RGWRados *store, struct req_state *s)
 
     if (!k.subuser.empty()) {
       map<string, RGWSubUser>::iterator uiter =
-	s->user.subusers.find(k.subuser);
-      if (uiter == s->user.subusers.end()) {
+	s->user->subusers.find(k.subuser);
+      if (uiter == s->user->subusers.end()) {
 	dout(0) << "NOTICE: could not find subuser: " << k.subuser << dendl;
 	return -EPERM;
       }
@@ -2553,7 +2554,7 @@ int RGW_Auth_S3::authorize(RGWRados *store, struct req_state *s)
       return -ERR_SIGNATURE_NO_MATCH;
     }
 
-    if (s->user.system) {
+    if (s->user->system) {
       s->system_request = true;
       dout(20) << "system request" << dendl;
       s->info.args.set_system();
@@ -2565,15 +2566,16 @@ int RGW_Auth_S3::authorize(RGWRados *store, struct req_state *s)
 	  ldout(s->cct, 0) << "User lookup failed!" << dendl;
 	  return -ENOENT;
 	}
-	s->user = effective_user;
+	// deep copy
+	*(s->user) = effective_user;
       }
     }
 
   } /* if keystone_result < 0 */
 
   // populate the owner info
-  s->owner.set_id(s->user.user_id);
-  s->owner.set_name(s->user.display_name);
+  s->owner.set_id(s->user->user_id);
+  s->owner.set_name(s->user->display_name);
 
 
   return  0;

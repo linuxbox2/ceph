@@ -144,9 +144,9 @@ void req_info::rebuild_from(req_info& src)
 }
 
 
-req_state::req_state(CephContext *_cct, class RGWEnv *e) : cct(_cct), cio(NULL), op(OP_UNKNOWN),
-							   has_acl_header(false),
-                                                           os_auth_token(NULL), info(_cct, e)
+req_state::req_state(CephContext* _cct, RGWEnv* e, RGWUserInfo* u)
+  : cct(_cct), cio(NULL), op(OP_UNKNOWN), user(u), has_acl_header(false),
+    os_auth_token(NULL), info(_cct, e)
 {
   enable_ops_log = e->conf->enable_ops_log;
   enable_usage_log = e->conf->enable_usage_log;
@@ -712,7 +712,7 @@ bool verify_bucket_permission(struct req_state *s, int perm)
   if ((perm & (int)s->perm_mask) != perm)
     return false;
 
-  return s->bucket_acl->verify_permission(s->user.user_id, perm, perm);
+  return s->bucket_acl->verify_permission(s->user->user_id, perm, perm);
 }
 
 static inline bool check_deferred_bucket_acl(struct req_state *s, uint8_t deferred_check, int perm)
@@ -730,7 +730,8 @@ bool verify_object_permission(struct req_state *s, RGWAccessControlPolicy *bucke
   if (!object_acl)
     return false;
 
-  bool ret = object_acl->verify_permission(s->user.user_id, s->perm_mask, perm);
+  bool ret = object_acl->verify_permission(s->user->user_id, s->perm_mask,
+					  perm);
   if (ret)
     return true;
 
@@ -750,7 +751,8 @@ bool verify_object_permission(struct req_state *s, RGWAccessControlPolicy *bucke
     return false;
   /* we already verified the user mask above, so we pass swift_perm as the mask here,
      otherwise the mask might not cover the swift permissions bits */
-  return bucket_acl->verify_permission(s->user.user_id, swift_perm, swift_perm);
+  return bucket_acl->verify_permission(s->user->user_id, swift_perm,
+				      swift_perm);
 }
 
 bool verify_object_permission(struct req_state *s, int perm)

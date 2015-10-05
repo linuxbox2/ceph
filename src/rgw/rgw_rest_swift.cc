@@ -73,14 +73,14 @@ static void dump_account_metadata(struct req_state * const s,
   /* Dump TempURL-related stuff */
   if (s->perm_mask == RGW_PERM_FULL_CONTROL) {
     map<int, string>::iterator iter;
-    iter = s->user.temp_url_keys.find(0);
-    if (iter != s->user.temp_url_keys.end() && !iter->second.empty()) {
+    iter = s->user->temp_url_keys.find(0);
+    if (iter != s->user->temp_url_keys.end() && !iter->second.empty()) {
       STREAM_IO(s)->print("X-Account-Meta-Temp-Url-Key: %s\r\n",
 			  iter->second.c_str());
     }
 
-    iter = s->user.temp_url_keys.find(1);
-    if (iter != s->user.temp_url_keys.end() && !iter->second.empty()) {
+    iter = s->user->temp_url_keys.find(1);
+    if (iter != s->user->temp_url_keys.end() && !iter->second.empty()) {
       STREAM_IO(s)->print("X-Account-Meta-Temp-Url-Key-2: %s\r\n",
 			  iter->second.c_str());
     }
@@ -124,7 +124,7 @@ void RGWListBuckets_ObjStore_SWIFT::send_response_begin(bool has_buckets)
   if (!ret) {
     dump_start(s);
     s->formatter->open_array_section_with_attrs("account",
-            FormatterAttrs("name", s->user.display_name.c_str(), NULL));
+            FormatterAttrs("name", s->user->display_name.c_str(), NULL));
 
     sent_data = true;
   }
@@ -362,7 +362,7 @@ void RGWStatAccount_ObjStore_SWIFT::execute()
 {
   RGWStatAccount_ObjStore::execute();
 
-  ret = rgw_get_user_attrs_by_uid(store, s->user.user_id, attrs);
+  ret = rgw_get_user_attrs_by_uid(store, s->user->user_id, attrs);
 }
 
 void RGWStatAccount_ObjStore_SWIFT::send_response()
@@ -412,7 +412,7 @@ static int get_swift_container_settings(req_state *s, RGWRados *store, RGWAccess
 
   if (read_attr || write_attr) {
     RGWAccessControlPolicy_SWIFT swift_policy(s->cct);
-    int r = swift_policy.create(store, s->user.user_id, s->user.display_name, read_list, write_list);
+    int r = swift_policy.create(store, s->user->user_id, s->user->display_name, read_list, write_list);
     if (r < 0)
       return r;
 
@@ -454,7 +454,7 @@ int RGWCreateBucket_ObjStore_SWIFT::get_params()
   }
 
   if (!has_policy) {
-    policy.create_default(s->user.user_id, s->user.display_name);
+    policy.create_default(s->user->user_id, s->user->display_name);
   }
 
   location_constraint = store->region.api_name;
@@ -518,7 +518,7 @@ int RGWPutObj_ObjStore_SWIFT::get_params()
     }
   }
 
-  policy.create_default(s->user.user_id, s->user.display_name);
+  policy.create_default(s->user->user_id, s->user->display_name);
 
   obj_manifest = s->info.env->get("HTTP_X_OBJECT_MANIFEST");
 
@@ -701,7 +701,7 @@ static void dump_object_metadata(struct req_state * const s,
 
 int RGWCopyObj_ObjStore_SWIFT::init_dest_policy()
 {
-  dest_policy.create_default(s->user.user_id, s->user.display_name);
+  dest_policy.create_default(s->user->user_id, s->user->display_name);
 
   return 0;
 }
@@ -761,7 +761,7 @@ void RGWCopyObj_ObjStore_SWIFT::dump_copy_info()
 
   /* Dump X-Copied-From-Account */
   string account_name;
-  url_encode(s->user.user_id, account_name);
+  url_encode(s->user->user_id, account_name);
   STREAM_IO(s)->print("X-Copied-From-Account: %s\r\n", account_name.c_str());
 
   /* Dump X-Copied-From-Last-Modified. */
@@ -995,7 +995,7 @@ int RGWHandler_REST_SWIFT::authorize()
   if ((!s->os_auth_token && s->info.args.get("temp_url_sig").empty()) ||
       (s->op == OP_OPTIONS)) {
     /* anonymous access */
-    rgw_get_anon_user(s->user);
+    rgw_get_anon_user(*(s->user));
     s->perm_mask = RGW_PERM_FULL_CONTROL;
     return 0;
   }

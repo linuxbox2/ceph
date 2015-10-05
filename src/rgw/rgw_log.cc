@@ -181,7 +181,7 @@ static void log_usage(struct req_state *s, const string& op_name)
   if (!s->bucket_name_str.empty())
     user = s->bucket_owner.get_id();
   else
-    user = s->user.user_id;
+    user = s->user->user_id;
 
   rgw_usage_log_entry entry(user, s->bucket.name);
 
@@ -312,7 +312,7 @@ int rgw_log_op(RGWRados *store, struct req_state *s, const string& op_name, OpsL
   set_param_str(s, "REQUEST_URI", entry.uri);
   set_param_str(s, "REQUEST_METHOD", entry.op);
 
-  entry.user = s->user.user_id;
+  entry.user = s->user->user_id;
   if (s->object_acl)
     entry.object_owner = s->object_acl->get_owner().get_id();
   entry.bucket_owner = s->bucket_owner.get_id();
