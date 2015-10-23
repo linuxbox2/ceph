@@ -1613,6 +1613,20 @@ target_link_libraries(test_librgw_file
   ${UNITTEST_LIBS}
   )
 
+# librgw_file_cd (just the rgw_file create-delete bucket ops)
+add_executable(test_librgw_file_cd
+  librgw_file_cd.cc
+  $<TARGET_OBJECTS:heap_profiler_objs>
+  )
+set_target_properties(test_librgw_file_cd PROPERTIES COMPILE_FLAGS
+  ${UNITTEST_CXX_FLAGS})
+target_link_libraries(test_librgw_file_cd
+  rgw
+  librados
+  ${TCMALLOC_LIBS}
+  ${UNITTEST_LIBS}
+  )
+
 if(${WITH_FUSE})
   add_executable(test_cfuse_cache_invalidate
     test_cfuse_cache_invalidate.cc
