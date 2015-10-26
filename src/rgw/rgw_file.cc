@@ -245,8 +245,9 @@ int rgw_lookup(struct rgw_fs *rgw_fs,
   uri += "/";
   uri += path;
 
+  RGWLibFS *fs = static_cast<RGWLibFS*>(rgw_fs->fs_private);
   RGWFileHandle* parent = get_rgwfh(parent_fh);
-  RGWFileHandle* rgw_fh = new RGWFileHandle(parent, path);
+  RGWFileHandle* rgw_fh = new RGWFileHandle(fs, parent, path);
   struct rgw_file_handle *rfh = rgw_fh->get_fh();
 
   /* find or create a handle for the object or bucket */
