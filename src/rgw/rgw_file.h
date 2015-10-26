@@ -44,7 +44,8 @@ public:
       /* root */
       fh.fh_type = RGW_FS_TYPE_DIRECTORY;
       /* XXX give root buckets a locally-unique bucket hash part */
-      fh.fh_hk.bucket = XXH64(reinterpret_cast<char*>(fs), 8, 8675309);
+      fh.fh_hk.bucket = XXH64(reinterpret_cast<char*>(&fs), sizeof(RGWLibFS*),
+			      8675309);
       flags |= FLAG_ROOT;
     }
     /* content-addressable hash (object part) */
@@ -54,7 +55,7 @@ public:
 
   struct rgw_file_handle* get_fh() { return &fh; }
 
-  const std::string& bucket_name() {
+  const std::string& bucket_name() const {
     if (is_root())
       return root_name;
     if (is_object()) {
@@ -63,7 +64,7 @@ public:
     return name;
   }
 
-  const std::string& object_name() { return name; }
+  const std::string& object_name() const { return name; }
 
   bool is_open() const { return flags & FLAG_OPEN; }
   bool is_root() const { return flags & FLAG_ROOT; }
