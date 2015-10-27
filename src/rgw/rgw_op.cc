@@ -1911,6 +1911,8 @@ void RGWPutObj::execute()
 
   if (!chunked_upload && ofs != s->content_length) {
     ret = -ERR_REQUEST_TIMEOUT;
+    ldout(s->cct, 5) << " !chunked_upload && ofs != s->content_length (err) "
+		     << ret << dendl;
     goto done;
   }
   s->obj_size = ofs;
