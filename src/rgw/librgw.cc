@@ -258,12 +258,15 @@ done:
   }
 
   int http_ret = s->err.http_ret;
+  int op_ret = op->get_ret();
 
+  req->log_format(s, "op status=%d", op_ret);
   req->log_format(s, "http status=%d", http_ret);
 
   dout(1) << "====== " << __func__
-	  << " req done req=" << hex << req << dec << " http_status="
-	  << http_ret
+	  << " req done req=" << hex << req << dec
+	  << " op status=" << op_ret
+	  << " http_status=" << http_ret
 	  << " ======" << dendl;
 
   return (ret < 0 ? ret : s->err.ret);

@@ -99,11 +99,11 @@ int RGWListBucket_OS_Lib::get_params()
     marker.instance = s->info.args.get("version-id-marker");
   }
   max_keys = s->info.args.get("max-keys");
-  ret = parse_max_keys();
-  if (ret < 0) {
-    return ret;
+  op_ret = parse_max_keys();
+  if (op_ret < 0) {
+    return op_ret;
   }
-#if 0
+#if 0 /* XXX? */
   delimiter = s->info.args.get("delimiter");
   encoding_type = s->info.args.get("encoding-type");
 #endif
