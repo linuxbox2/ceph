@@ -373,6 +373,44 @@ int rgw_write(struct rgw_fs *rgw_fs,
 }
 
 /*
+   read data from file (vector)
+*/
+int rgw_readv(struct rgw_fs *rgw_fs,
+	      struct rgw_file_handle *fh, rgw_uio *uio)
+{
+  return 0;
+}
+
+/*
+   write data to file (vector)
+*/
+  int rgw_writev(struct rgw_fs *rgw_fs, struct rgw_file_handle *fh,
+		rgw_uio *uio)
+{
+  CephContext* cct = static_cast<CephContext*>(rgw_fs->rgw);
+  RGWLibFS *fs = static_cast<RGWLibFS*>(rgw_fs->fs_private);
+  RGWFileHandle* rgw_fh = get_rgwfh(fh);
+
+  if (! rgw_fh->is_object())
+    return EINVAL;
+
+  buffer::list bl;
+  for (unsigned int ix = 0; ix < uio->uio_cnt; ++ix) {
+    rgw_vio *vio = &(uio->uio_vio[ix]);
+    bl.push_back(
+      buffer::create_static(vio->vio_len,
+			    static_cast<char*>(vio->vio_base)));
+  }
+
+  RGWPutObjRequest req(cct, fs->get_user(), rgw_fh->bucket_name(),
+		      rgw_fh->object_name(), bl);
+
+  int rc = librgw.get_fe()->execute_req(&req);
+
+  return rc;
+}
+
+/*
    sync written data
 */
 int rgw_fsync(struct rgw_fs *rgw_fs, struct rgw_file_handle *handle)

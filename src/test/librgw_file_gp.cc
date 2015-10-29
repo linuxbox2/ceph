@@ -40,6 +40,7 @@ namespace {
   bool do_pre_list = false;
   bool do_put = false;
   bool do_bulk = false;
+  bool do_writev = false;
   bool do_get = false;
   bool do_delete = false;
 
@@ -216,7 +217,7 @@ TEST(LibRGW, GET_OBJECT) {
 
 TEST(LibRGW, WRITE_READ_VERIFY)
 {
-  if (do_bulk) {
+  if (do_bulk && do_put) {
     const int iovcnt = 16;
     ZPageSet zp_set1{iovcnt}; // 1M random data in 16 64K pages
     struct iovec *iovs = zp_set1.get_iovs();
@@ -230,6 +231,34 @@ TEST(LibRGW, WRITE_READ_VERIFY)
       ASSERT_EQ(nbytes, size_t(65536));
     }
     zp_set1.reset_iovs();
+  }
+}
+
+TEST(LibRGW, WRITEV)
+{
+  if (do_writev && do_put) {
+    const int iovcnt = 16;
+    ZPageSet zp_set1{iovcnt}; // 1M random data in 16 64K pages
+    struct iovec *iovs = zp_set1.get_iovs();
+
+    int uiosz = sizeof(rgw_uio) + iovcnt*sizeof(rgw_vio);
+    rgw_uio *uio = static_cast<rgw_uio*>(alloca(uiosz));
+    ASSERT_NE(uio, nullptr);
+    memset(uio, 0, uiosz);
+
+    for (int ix = 0; ix < iovcnt; ++ix) {
+      struct iovec *iov = &iovs[ix];
+      rgw_vio *vio = &(uio->uio_vio[ix]);
+      vio->vio_base = iov->iov_base;
+      vio->vio_len = iov->iov_len;
+      vio->vio_u1 = iov; // private data
+    }
+    uio->uio_cnt = iovcnt;
+    uio->uio_offset = iovcnt * 65536;
+
+    int ret = rgw_writev(fs, object_fh, uio);
+    ASSERT_EQ(ret, 0);
+    //zp_set1.reset_iovs();
   }
 }
 
@@ -302,6 +331,9 @@ int main(int argc, char *argv[])
     } else if (ceph_argparse_flag(args, arg_iter, "--bulk",
 					    (char*) nullptr)) {
       do_bulk = true;
+    } else if (ceph_argparse_flag(args, arg_iter, "--writev",
+					    (char*) nullptr)) {
+      do_writev = true;
     } else if (ceph_argparse_flag(args, arg_iter, "--delete",
 					    (char*) nullptr)) {
       do_delete = true;
