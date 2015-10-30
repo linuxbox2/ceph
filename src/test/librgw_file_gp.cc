@@ -234,17 +234,27 @@ TEST(LibRGW, WRITE_READ_VERIFY)
   }
 }
 
+/* "functions that call alloca are not inlined"
+ * --alexandre oliva
+ * http://gcc.gnu.org/ml/gcc-help/2004-04/msg00158.html
+ */
+#define alloca_uio()				\
+  do {\
+    int uiosz = sizeof(rgw_uio) + iovcnt*sizeof(rgw_vio);		\
+    uio = static_cast<rgw_uio*>(alloca(uiosz));				\
+    memset(uio, 0, uiosz);						\
+    uio->uio_vio = reinterpret_cast<rgw_vio*>(uio+sizeof(rgw_uio));	\
+  } while (0);								\
+
 TEST(LibRGW, WRITEV)
 {
   if (do_writev && do_put) {
+    rgw_uio* uio;
     const int iovcnt = 16;
     ZPageSet zp_set1{iovcnt}; // 1M random data in 16 64K pages
     struct iovec *iovs = zp_set1.get_iovs();
-
-    int uiosz = sizeof(rgw_uio) + iovcnt*sizeof(rgw_vio);
-    rgw_uio *uio = static_cast<rgw_uio*>(alloca(uiosz));
+    alloca_uio();
     ASSERT_NE(uio, nullptr);
-    memset(uio, 0, uiosz);
 
     for (int ix = 0; ix < iovcnt; ++ix) {
       struct iovec *iov = &iovs[ix];
