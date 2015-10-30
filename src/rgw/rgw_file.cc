@@ -381,7 +381,7 @@ class RGWReadV
   struct rgw_vio* vio;
 
 public:
-  RGWReadV(buffer::list& _bl) {
+  RGWReadV(buffer::list& _bl, rgw_vio* _vio) : vio(_vio) {
     bl.claim(_bl);
   }
 
@@ -393,7 +393,7 @@ public:
 
 };
 
-void rgw_readv_release(struct rgw_uio *uio, uint32_t flags)
+void rgw_readv_rele(struct rgw_uio *uio, uint32_t flags)
 {
   RGWReadV* rdv = static_cast<RGWReadV*>(uio->uio_p1);
   rdv->~RGWReadV();
@@ -422,12 +422,14 @@ int rgw_readv(struct rgw_fs *rgw_fs,
       ::operator new(sizeof(RGWReadV) +
 		    (bl.buffers().size() * sizeof(struct rgw_vio))));
 
-    (void) new (rdv) RGWReadV(bl); // placement
+    (void) new (rdv)
+      RGWReadV(bl, reinterpret_cast<rgw_vio*>(rdv+sizeof(RGWReadV)));
 
     uio->uio_p1 = rdv;
     uio->uio_cnt = rdv->buffers().size();
     uio->uio_resid = rdv->length();
     uio->uio_vio = rdv->get_vio();
+    uio->uio_rele = rgw_readv_rele;
 
     int ix = 0;
     auto& buffers = rdv->buffers();

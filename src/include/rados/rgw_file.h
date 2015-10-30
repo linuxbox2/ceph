@@ -218,7 +218,7 @@ struct rgw_vio {
 };
   
 struct rgw_uio {
-  rgw_uio_release uio_release;
+  rgw_uio_release uio_rele;
   void *uio_p1;
   void *uio_u1;
   uint64_t uio_offset;

@@ -41,6 +41,7 @@ namespace {
   bool do_put = false;
   bool do_bulk = false;
   bool do_writev = false;
+  bool do_readv = false;
   bool do_get = false;
   bool do_delete = false;
 
@@ -55,10 +56,13 @@ namespace {
 
   std::uniform_int_distribution<uint8_t> uint_dist;
   std::mt19937 rng;
-  
+
+  constexpr int iovcnt = 16;
+  constexpr int page_size = 65536;
+
   struct ZPage
   {
-    char data[65536];
+    char data[page_size];
     uint64_t cksum;
   }; /* ZPage */
   
@@ -72,15 +76,15 @@ namespace {
       iovs = (struct iovec*) calloc(n, sizeof(struct iovec));
       for (int page_ix = 0; page_ix < n; ++page_ix) {
 	ZPage* p = new ZPage();
-	for (int data_ix = 0; data_ix < 65536; ++data_ix) {
+	for (int data_ix = 0; data_ix < page_size; ++data_ix) {
 	  p->data[data_ix] = uint_dist(rng);
 	} // data_ix
-	p->cksum = XXH64(p->data, 65536, 8675309);
+	p->cksum = XXH64(p->data, page_size, 8675309);
 	pages.emplace_back(p);
 	// and iovs
 	struct iovec* iov = &iovs[page_ix];
 	iov->iov_base = p->data;
-	iov->iov_len = 65536;
+	iov->iov_len = page_size;
       } // page_ix
     }
 
@@ -103,7 +107,7 @@ namespace {
       int n = size();
       for (int page_ix = 0; page_ix < n; ++page_ix) {
 	ZPage* p = pages[page_ix];
-	p->cksum = XXH64(p->data, 65536, 8675309);
+	p->cksum = XXH64(p->data, page_size, 8675309);
       }
     }
 
@@ -113,7 +117,7 @@ namespace {
 	ZPage* p = pages[page_ix];
 	struct iovec* iov = &iovs[page_ix];
 	iov->iov_base = p->data;
-	iov->iov_len = 65536;
+	iov->iov_len = page_size;
       }
     }
 
@@ -218,17 +222,17 @@ TEST(LibRGW, GET_OBJECT) {
 TEST(LibRGW, WRITE_READ_VERIFY)
 {
   if (do_bulk && do_put) {
-    const int iovcnt = 16;
     ZPageSet zp_set1{iovcnt}; // 1M random data in 16 64K pages
     struct iovec *iovs = zp_set1.get_iovs();
 
     /* read after write POSIX-style */
     size_t nbytes, off = 0;
-    for (int ix = 0; ix < 16; ++ix, off += 65536) {
+    for (int ix = 0; ix < 16; ++ix, off += page_size) {
       struct iovec *iov = &iovs[ix];
-      int ret = rgw_write(fs, object_fh, off, 65536, &nbytes, iov->iov_base);
+      int ret = rgw_write(fs, object_fh, off, page_size, &nbytes,
+			  iov->iov_base);
       ASSERT_EQ(ret, 0);
-      ASSERT_EQ(nbytes, size_t(65536));
+      ASSERT_EQ(nbytes, size_t(page_size));
     }
     zp_set1.reset_iovs();
   }
@@ -250,7 +254,6 @@ TEST(LibRGW, WRITEV)
 {
   if (do_writev && do_put) {
     rgw_uio* uio;
-    const int iovcnt = 16;
     ZPageSet zp_set1{iovcnt}; // 1M random data in 16 64K pages
     struct iovec *iovs = zp_set1.get_iovs();
     alloca_uio();
@@ -264,11 +267,36 @@ TEST(LibRGW, WRITEV)
       vio->vio_u1 = iov; // private data
     }
     uio->uio_cnt = iovcnt;
-    uio->uio_offset = iovcnt * 65536;
+    uio->uio_offset = iovcnt * page_size;
 
     int ret = rgw_writev(fs, object_fh, uio);
     ASSERT_EQ(ret, 0);
     //zp_set1.reset_iovs();
+  }
+}
+
+TEST(LibRGW, READV)
+{
+  if (do_readv && do_get) {
+    rgw_uio uio[1];
+    memset(uio, 0, sizeof(rgw_uio));
+    uio->uio_offset = 0; // ok, it was already 0
+    int ret = rgw_readv(fs, object_fh, uio);
+    ASSERT_EQ(ret, 0);
+    //buffer::list bl;
+    buffer::list& bl = *(new buffer::list());
+    for (unsigned int ix = 0; ix < uio->uio_cnt; ++ix) {
+      rgw_vio *vio = &(uio->uio_vio[ix]);
+      bl.push_back(
+	buffer::create_static(vio->vio_len,
+			      static_cast<char*>(vio->vio_base)));
+    }
+    bl.hexdump(std::cout);
+    // release resources
+    ASSERT_NE(uio->uio_rele, nullptr);
+    if (uio->uio_rele) {
+      uio->uio_rele(uio, RGW_UIO_NONE);
+    }
   }
 }
 
@@ -344,6 +372,9 @@ int main(int argc, char *argv[])
     } else if (ceph_argparse_flag(args, arg_iter, "--writev",
 					    (char*) nullptr)) {
       do_writev = true;
+    } else if (ceph_argparse_flag(args, arg_iter, "--readv",
+					    (char*) nullptr)) {
+      do_readv = true;
     } else if (ceph_argparse_flag(args, arg_iter, "--delete",
 					    (char*) nullptr)) {
       do_delete = true;
