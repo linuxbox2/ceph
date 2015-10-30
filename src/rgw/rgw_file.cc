@@ -375,10 +375,73 @@ int rgw_write(struct rgw_fs *rgw_fs,
 /*
    read data from file (vector)
 */
+class RGWReadV
+{
+  buffer::list bl;
+  struct rgw_vio* vio;
+
+public:
+  RGWReadV(buffer::list& _bl) {
+    bl.claim(_bl);
+  }
+
+  struct rgw_vio* get_vio() { return vio; }
+
+  const std::list<buffer::ptr>& buffers() { return bl.buffers(); }
+
+  unsigned /* XXX */ length() { return bl.length(); }
+
+};
+
+void rgw_readv_release(struct rgw_uio *uio, uint32_t flags)
+{
+  RGWReadV* rdv = static_cast<RGWReadV*>(uio->uio_p1);
+  rdv->~RGWReadV();
+  ::operator delete(rdv);
+}
+
 int rgw_readv(struct rgw_fs *rgw_fs,
 	      struct rgw_file_handle *fh, rgw_uio *uio)
 {
-  return 0;
+  CephContext* cct = static_cast<CephContext*>(rgw_fs->rgw);
+  RGWLibFS *fs = static_cast<RGWLibFS*>(rgw_fs->fs_private);
+  RGWFileHandle* rgw_fh = get_rgwfh(fh);
+
+  if (! rgw_fh->is_object())
+    return EINVAL;
+
+  buffer::list bl;
+  RGWGetObjRequest req(cct, fs->get_user(), rgw_fh->bucket_name(),
+		      rgw_fh->object_name(), uio->uio_offset, uio->uio_resid,
+		      bl);
+
+  int rc = librgw.get_fe()->execute_req(&req);
+
+  if (! rc) {
+    RGWReadV* rdv = static_cast<RGWReadV*>(
+      ::operator new(sizeof(RGWReadV) +
+		    (bl.buffers().size() * sizeof(struct rgw_vio))));
+
+    (void) new (rdv) RGWReadV(bl); // placement
+
+    uio->uio_p1 = rdv;
+    uio->uio_cnt = rdv->buffers().size();
+    uio->uio_resid = rdv->length();
+    uio->uio_vio = rdv->get_vio();
+
+    int ix = 0;
+    auto& buffers = rdv->buffers();
+    for (auto& bp : buffers) {
+      rgw_vio *vio = &(uio->uio_vio[ix]);
+      vio->vio_base = const_cast<char*>(bp.c_str());
+      vio->vio_len = bp.length();
+      vio->vio_u1 = nullptr;
+      vio->vio_p1 = nullptr;
+      ++ix;
+    }
+  }
+
+  return rc;
 }
 
 /*

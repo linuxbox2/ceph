@@ -222,9 +222,10 @@ struct rgw_uio {
   void *uio_p1;
   void *uio_u1;
   uint64_t uio_offset;
+  uint64_t uio_resid;
   uint32_t uio_cnt;
   uint32_t uio_flags;
-  struct rgw_vio uio_vio[0]; /* appended vectors */
+  struct rgw_vio *uio_vio; /* appended vectors */
 };
 
 typedef struct rgw_uio rgw_uio;
