@@ -7,6 +7,7 @@
 #include "include/rados/rgw_file.h"
 
 /* internal header */
+#include <string.h>
 
 #include <atomic>
 #include <mutex>
@@ -38,11 +39,10 @@ namespace rgw {
    * However, the invariant being prototyped is that objects be
    * identifiable by their hash components alone.  We believe this can
    * be legitimately implemented using 128-hash values for bucket and
-   * object components, where together with a cluster-resident
-   * cryptographic key.  Since an MD5 or SHA-1 key is 128 bits and
-   * the (fast), non-cryptographic CityHash128 hash algorithm takes
-   * a 128-bit seed, speculatively we could use that for the final
-   * hash computations.
+   * object components, together with a cluster-resident cryptographic
+   * key.  Since an MD5 or SHA-1 key is 128 bits and the (fast),
+   * non-cryptographic CityHash128 hash algorithm takes a 128-bit seed,
+   * speculatively we could use that for the final hash computations.
    */
   struct fh_key
   {
@@ -50,14 +50,16 @@ namespace rgw {
 
     static constexpr uint64_t seed = 8675309;
 
+    fh_key() {}
+
     fh_key(const rgw_fh_hk& _hk)
       : fh_hk(_hk) {
       // nothing
     }
 
-    fh_key(const uin64_t bk, const std::string& _o) {
-      fh_hk.bucket = _b;
-      fh_hk.object = XXH64(_o.c_str(), _o.length(), seed);
+    fh_key(const uint64_t bk, const char *_o) {
+      fh_hk.bucket = bk;
+      fh_hk.object = XXH64(_o, ::strlen(_o), seed);
     }
     
     fh_key(const std::string& _b, const std::string& _o) {
@@ -114,7 +116,7 @@ namespace rgw {
     friend class RGWLibFS;
 
   private:
-    RGWFileHandle(RGWLibFS* _fs, uint32_t _flags)
+    RGWFileHandle(RGWLibFS* _fs)
       : fs(_fs), parent(nullptr), flags(FLAG_ROOT)
       {
 	/* root */
@@ -123,23 +125,23 @@ namespace rgw {
 	fh.fh_private = this;
       }
     
-    void init_rootfs(std::string& fsid, std::string& object_name) {
-	/* root */
-	fh.fh_type = RGW_FS_TYPE_DIRECTORY;
-	fh.fh_hk.bucket = XXH64(fsid.c_str(), fsid.length(), seed);
-	fh.fh_hk.object = XXH64(object_name.c_str(), object_name.length(),
-				seed);
+    void init_rootfs(std::string& fsid, const std::string& object_name) {
+      /* fh_key */
+      fh.fh_hk.bucket = XXH64(fsid.c_str(), fsid.length(), fh_key::seed);
+      fh.fh_hk.object = XXH64(object_name.c_str(), object_name.length(),
+			      fh_key::seed);
     }
 
+  public:
     RGWFileHandle(RGWLibFS* fs, RGWFileHandle* _parent, const fh_key& _fhk,
-		  const char* _name)
+		  const char *_name)
       : parent(_parent), name(_name), fhk(_fhk), flags(FLAG_NONE) {
 
       fh.fh_type = parent->is_root()
 	? RGW_FS_TYPE_DIRECTORY : RGW_FS_TYPE_FILE;      
 
-      /* save constant fhkey */
-      fh_key fhk(parent.name, name);
+      /* save constant fhk */
+      fh_key fhk(parent->name, name);
       fh.fh_hk = fhk.fh_hk; /* XXX redundant in fh_hk */
 
       /* pointer to self */
@@ -147,7 +149,7 @@ namespace rgw {
     }
 
     const fh_key& get_key() const {
-      return key;
+      return fhk;
     }
 
     struct rgw_file_handle* get_fh() { return &fh; }
@@ -261,15 +263,17 @@ namespace rgw {
     
   public:
     RGWLibFS(const char *_uid, const char *_user_id, const char* _key)
-      : root_fh(this, RGWFileHandle::root_name, FLAG_ROOT),
-	uid(_uid), key(_user_id, _key) {
+      : root_fh(this),  uid(_uid), key(_user_id, _key) {
 
       /* no bucket may be named rgw_fs_inst-(.*) */
-      fsid = FileHandle::root_name + "rgw_fs_inst-" + ++(fs_inst);
-      /* XXX move into ctor? */
-      root_fh.init_rootfs(fsid /* bucket */, object_name);
+      fsid = RGWFileHandle::root_name + "rgw_fs_inst-" +
+	std::to_string(++(fs_inst));
+
+      root_fh.init_rootfs(fsid /* bucket */, RGWFileHandle::root_name);
+
       /* pointer to self */
       fs.fs_private = this;
+
       /* expose public root fh */
       fs.root_fh = root_fh.get_fh();
     }
@@ -288,28 +292,25 @@ namespace rgw {
     }
 
     /* find or create an RGWFileHandle */
-    RGWFHRef lookup_fh(RGWFileHandle* parent, const std::string& name) {
-
-      fh_key fhk(parent.fh_hk.object, name);
+    RGWFileHandle* lookup_fh(RGWFileHandle* parent, const char *name) {
 
       RGWFileHandle::FHCache::Latch lat;
+      fh_key fhk(parent->fhk.fh_hk.object, name);
+
       RGWFileHandle* fh =
-	fh_cache.find_latch(fhk.fh_hk.object,
-			    fh_hk.object /* partition selector*/, lat,
+	fh_cache.find_latch(fhk.fh_hk.object /* partition selector*/,
+			    fhk /* key */, lat /* serializer */,
 			    RGWFileHandle::FHCache::FLAG_LOCK);
       /* LATCHED */
-      if (! oh) {
+      if (! fh) {
 	fh = new RGWFileHandle(this, parent, fhk, name);
+	intrusive_ptr_add_ref(fh); /* sentinel ref */
+	fh_cache.insert_latched(fh, lat,
+				RGWFileHandle::FHCache::FLAG_NONE);
       }
+      intrusive_ptr_add_ref(fh); /* call path/handle ref */
       lat.lock->unlock(); /* !LATCHED */
       return fh;
-    }
-
-    RGWFHRef lookup_fh(RGWFileHandle* _parent, const char* _name) {
-      const std::string &bucket_name = _parent->object_name();
-      const std::string object_name{_name};
-      fh_key proto = fh_key(bucket_name, object_name);
-      return lookup_fh(_parent, proto, bucket_name, object_name); 
     }
 
     struct rgw_fs* get_fs() { return &fs; }
