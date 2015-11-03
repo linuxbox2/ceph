@@ -9,9 +9,11 @@
 /* internal header */
 
 #include <atomic>
+#include <mutex>
 #include <boost/intrusive_ptr.hpp>
 #include "xxhash.h"
 #include "include/buffer.h"
+#include "common/cohort_lru.h"
 
 /* XXX
  * ASSERT_H somehow not defined after all the above (which bring
@@ -19,134 +21,324 @@
  */
 #include "include/assert.h"
 
+namespace rgw {
 
-class RGWLibFS;
-class RGWFileHandle;
+  namespace bi = boost::intrusive;
 
-typedef boost::intrusive_ptr<RGWFileHandle> RGWFHRef;
+  class RGWLibFS;
+  class RGWFileHandle;
 
-class RGWFileHandle
-{
-  struct rgw_file_handle fh;
-  mutable std::atomic<uint64_t> refcnt;
-  RGWFHRef parent;
-  const string name; /* XXX file or bucket name */
-  uint32_t flags;
+  typedef boost::intrusive_ptr<RGWFileHandle> RGWFHRef;
 
-public:
-  const static string root_name;
+  inline bool operator<(const rgw_fh_hk& lhs, const rgw_fh_hk& rhs)
+  {
+    return ((lhs.bucket < rhs.bucket) ||
+	    ((lhs.bucket == rhs.bucket) && (lhs.object < rhs.object)));
+  }
 
-  static constexpr uint32_t FLAG_NONE = 0x0000;
-  static constexpr uint32_t FLAG_OPEN = 0x0001;
-  static constexpr uint32_t FLAG_ROOT = 0x0002;
-  
-  RGWFileHandle(RGWLibFS* fs, RGWFileHandle* _parent, const char* _name)
-    : parent(_parent), name(_name), flags(FLAG_NONE) {
-    if (parent) {
-      fh.fh_type = parent->is_root() ?
-	RGW_FS_TYPE_DIRECTORY : RGW_FS_TYPE_FILE;
-      /* content-addressable hash (bucket part) */
-      fh.fh_hk.bucket = parent->get_fh()->fh_hk.object;
-    } else {
-      /* root */
-      fh.fh_type = RGW_FS_TYPE_DIRECTORY;
-      /* XXX give root buckets a locally-unique bucket hash part */
-      fh.fh_hk.bucket = XXH64(reinterpret_cast<char*>(&fs), sizeof(RGWLibFS*),
-			      8675309);
-      flags |= FLAG_ROOT;
+  inline bool operator>(const rgw_fh_hk& lhs, const rgw_fh_hk& rhs)
+  {
+    return (rhs < lhs);
+  }
+
+  inline bool operator==(const rgw_fh_hk& lhs, const rgw_fh_hk& rhs)
+  {
+    return (lhs.bucket == rhs.bucket && lhs.object == rhs.object);
+  }
+
+  inline bool operator!=(const rgw_fh_hk& lhs, const rgw_fh_hk& rhs)
+  {
+    return !(lhs == rhs);
+  }
+
+  inline bool operator<=(const rgw_fh_hk& lhs, const rgw_fh_hk& rhs)
+  {
+    return (lhs < rhs) || (lhs == rhs);
+  }
+
+  struct fh_key
+  {
+    rgw_fh_hk fh_hk;
+    const std::string& bucket_name;
+    const std::string& object_name;
+
+    fh_key(const rgw_fh_hk& _hk, const std::string& _b, const std::string& _o)
+      : fh_hk(_hk), bucket_name(_b), object_name(_o) {
+      // nothing
     }
-    /* content-addressable hash (object part) */
-    fh.fh_hk.object = XXH64(name.c_str(), name.length(), 8675309 /* XXX */);
-    fh.fh_private = this;
-  }
 
-  struct rgw_file_handle* get_fh() { return &fh; }
-
-  const std::string& bucket_name() const {
-    if (is_root())
-      return root_name;
-    if (is_object()) {
-      return parent->object_name();
+    fh_key(const std::string& _b, const std::string& _o)
+      : bucket_name(_b), object_name(_o) {
+      fh_hk.bucket = XXH64(_b.c_str(), _b.length(), 8675309 /* XXX */);
+      fh_hk.object = XXH64(_o.c_str(), _o.length(), 8675309 /* XXX */);
     }
-    return name;
+  }; /* fh_key */
+
+  inline bool operator<(const fh_key& lhs, const fh_key& rhs)
+  {
+    return ((lhs.fh_hk < rhs.fh_hk) ||
+	    ((lhs.fh_hk == rhs.fh_hk) &&
+	      ((lhs.bucket_name < rhs.bucket_name) ||
+		((lhs.bucket_name == rhs.bucket_name) &&
+		  (lhs.object_name < rhs.object_name)))));
   }
 
-  const std::string& object_name() const { return name; }
-
-  bool is_open() const { return flags & FLAG_OPEN; }
-  bool is_root() const { return flags & FLAG_ROOT; }
-  bool is_bucket() const { return (fh.fh_type == RGW_FS_TYPE_DIRECTORY); }
-  bool is_object() const { return (fh.fh_type == RGW_FS_TYPE_FILE); }
-
-  void open() {
-    flags |= FLAG_OPEN;
+  inline bool operator>(const fh_key& lhs, const fh_key& rhs)
+  {
+    return (rhs < lhs);
   }
 
-  void close() {
-    flags &= ~FLAG_OPEN;
+  inline bool operator==(const fh_key& lhs, const fh_key& rhs)
+  {
+    return (lhs.bucket_name == rhs.bucket_name &&
+	    lhs.object_name == rhs.object_name);
   }
 
-  friend void intrusive_ptr_add_ref(const RGWFileHandle* fh) {
-    fh->refcnt.fetch_add(1, std::memory_order_relaxed);
+  inline bool operator!=(const fh_key& lhs, const fh_key& rhs)
+  {
+    return !(lhs == rhs);
   }
 
-  friend void intrusive_ptr_release(const RGWFileHandle* fh) {
-    if (fh->refcnt.fetch_sub(1, std::memory_order_release) == 1) {
-      std::atomic_thread_fence(std::memory_order_acquire);
-      /* root handles are expanded in RGWLibFS */
-      if (! const_cast<RGWFileHandle*>(fh)->is_root())
-	delete fh;
+  inline bool operator<=(const fh_key& lhs, const fh_key& rhs)
+  {
+    return (lhs < rhs) || (lhs == rhs);
+  }
+
+  class RGWFileHandle
+  {
+    struct rgw_file_handle fh;
+    mutable std::atomic<uint64_t> refcnt;
+    RGWFHRef parent;
+    const string name; /* XXX file or bucket name */
+    const fh_key key;
+    uint32_t flags;
+
+  public:
+    const static string root_name;
+
+    static constexpr uint32_t FLAG_NONE = 0x0000;
+    static constexpr uint32_t FLAG_OPEN = 0x0001;
+    static constexpr uint32_t FLAG_ROOT = 0x0002;
+
+    RGWFileHandle(RGWLibFS* fs, RGWFileHandle* _parent, const char* _name)
+      : parent(_parent), name(_name),
+	key(fh.fh_hk, bucket_name(), object_name()),
+	flags(FLAG_NONE) {
+      if (parent) {
+	fh.fh_type = parent->is_root() ?
+	  RGW_FS_TYPE_DIRECTORY : RGW_FS_TYPE_FILE;
+	/* content-addressable hash (bucket part) */
+	fh.fh_hk.bucket = parent->get_fh()->fh_hk.object;
+      } else {
+	/* root */
+	fh.fh_type = RGW_FS_TYPE_DIRECTORY;
+	/* XXX give root buckets a locally-unique bucket hash part */
+	fh.fh_hk.bucket = XXH64(reinterpret_cast<char*>(&fs), sizeof(RGWLibFS*),
+				8675309);
+	flags |= FLAG_ROOT;
+      }
+      /* content-addressable hash (object part) */
+      fh.fh_hk.object = XXH64(name.c_str(), name.length(), 8675309 /* XXX */);
+      fh.fh_private = this;
     }
-  }
 
-  inline void rele() {
-    intrusive_ptr_release(this);
-  }
-}; /* RGWFileHandle */
+    RGWFileHandle(RGWLibFS* fs, RGWFileHandle* _parent, const fh_key& _key,
+		  const char* _name)
+      : parent(_parent), name(_name), key(_key), flags(FLAG_NONE) {
 
-static inline RGWFileHandle* get_rgwfh(struct rgw_file_handle* fh) {
-  return static_cast<RGWFileHandle*>(fh->fh_private);
-}
-
-class RGWLibFS
-{
-  struct rgw_fs fs;
-  RGWFileHandle root_fh;
-
-  std::string uid; // should match user.user_id, iiuc
-
-  RGWUserInfo user;
-  RGWAccessKey key;
-
-public:
-  RGWLibFS(const char *_uid, const char *_user_id, const char* _key)
-    : root_fh(this, nullptr, RGWFileHandle::root_name.c_str()), uid(_uid),
-      key(_user_id, _key) {
-    fs.fs_private = this;
-    fs.root_fh = root_fh.get_fh(); /* expose public root fh */
-  }
-
-  int authorize(RGWRados* store) {
-    int ret = rgw_get_user_info_by_access_key(store, key.id, user);
-    if (ret == 0) {
-      RGWAccessKey* key0 = user.get_key0();
-      if (!key0 ||
-	  (key0->key != key.key))
-	return -EINVAL;
-      if (user.suspended)
-	return -ERR_USER_SUSPENDED;
+      if (parent) {
+	fh.fh_type = parent->is_root() ?
+	  RGW_FS_TYPE_DIRECTORY : RGW_FS_TYPE_FILE;
+      } else {
+	/* root */
+	fh.fh_type = RGW_FS_TYPE_DIRECTORY;
+	/* XXX give root buckets a locally-unique bucket hash part */
+	fh.fh_hk.bucket = XXH64(reinterpret_cast<char*>(&fs), sizeof(RGWLibFS*),
+				8675309);
+	flags |= FLAG_ROOT;
+      }
+      /* content-addressable hash (object part) */
+      fh.fh_hk.object = XXH64(name.c_str(), name.length(), 8675309 /* XXX */);
+      fh.fh_private = this;
     }
-    return 0;
+
+
+    const fh_key& get_key() const {
+      return key;
+    }
+
+    struct rgw_file_handle* get_fh() { return &fh; }
+
+    const std::string& bucket_name() const {
+      if (is_root())
+	return root_name;
+      if (is_object()) {
+	return parent->object_name();
+      }
+      return name;
+    }
+
+    const std::string& object_name() const { return name; }
+
+    bool is_open() const { return flags & FLAG_OPEN; }
+    bool is_root() const { return flags & FLAG_ROOT; }
+    bool is_bucket() const { return (fh.fh_type == RGW_FS_TYPE_DIRECTORY); }
+    bool is_object() const { return (fh.fh_type == RGW_FS_TYPE_FILE); }
+
+    void open() {
+      flags |= FLAG_OPEN;
+    }
+
+    void close() {
+      flags &= ~FLAG_OPEN;
+    }
+
+    friend void intrusive_ptr_add_ref(const RGWFileHandle* fh) {
+      fh->refcnt.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    friend void intrusive_ptr_release(const RGWFileHandle* fh) {
+      if (fh->refcnt.fetch_sub(1, std::memory_order_release) == 1) {
+	std::atomic_thread_fence(std::memory_order_acquire);
+	/* root handles are expanded in RGWLibFS */
+	if (! const_cast<RGWFileHandle*>(fh)->is_root())
+	  delete fh;
+      }
+    }
+
+    inline void rele() {
+      intrusive_ptr_release(this);
+    }
+
+    struct FhLT
+    {
+      // for internal ordering
+      bool operator()(const RGWFileHandle& lhs, const RGWFileHandle& rhs) const
+	{
+	  return ((lhs.fh.fh_hk < rhs.fh.fh_hk) ||
+		  ((lhs.fh.fh_hk == rhs.fh.fh_hk) &&
+		    ((lhs.bucket_name() < rhs.bucket_name()) ||
+		      ((lhs.bucket_name() == rhs.bucket_name()) &&
+			(lhs.object_name() < rhs.object_name())))));
+	}
+
+      // for external search by fh_key
+      bool operator()(const fh_key& k, const RGWFileHandle& fh) const
+	{ return k < fh.get_key(); }
+
+      bool operator()(const RGWFileHandle& fh, const fh_key& k) const
+	{ return fh.get_key() < k; }
+    };
+
+    struct FhEQ
+    {
+      bool operator()(const RGWFileHandle& lhs, const RGWFileHandle& rhs) const
+	{
+	  return ((lhs.bucket_name() == rhs.bucket_name()) &&
+		  (lhs.object_name() == rhs.object_name()));
+	}
+
+      bool operator()(const fh_key& k, const RGWFileHandle& fh) const
+	{ return k == fh.get_key(); }
+
+      bool operator()(const RGWFileHandle& fh, const fh_key& k) const
+	{ return fh.get_key() == k; }
+    };
+
+    typedef bi::link_mode<bi::safe_link> link_mode; /* XXX normal */
+#if defined(FHCACHE_AVL)
+    typedef bi::avl_set_member_hook<link_mode> tree_hook_type;
+#else
+    /* RBT */
+    typedef bi::set_member_hook<link_mode> tree_hook_type;
+#endif
+    tree_hook_type fh_hook;
+
+    typedef bi::member_hook<
+      RGWFileHandle, tree_hook_type, &RGWFileHandle::fh_hook> FhHook;
+
+#if defined(FHCACHE_AVL)
+    typedef bi::avltree<RGWFileHandle, bi::compare<FhLT>, FhHook> FHTree;
+#else
+    typedef bi::rbtree<RGWFileHandle, bi::compare<FhLT>, FhHook> FhTree;
+#endif
+    typedef cohort::lru::TreeX<RGWFileHandle, FhTree, FhLT, FhEQ, fh_key,
+			       std::mutex> FHCache;
+  }; /* RGWFileHandle */
+
+  static inline RGWFileHandle* get_rgwfh(struct rgw_file_handle* fh) {
+    return static_cast<RGWFileHandle*>(fh->fh_private);
   }
 
-  struct rgw_fs* get_fs() { return &fs; }
-  RGWUserInfo* get_user() { return &user; }
+  class RGWLibFS
+  {
+    struct rgw_fs fs;
+    RGWFileHandle root_fh;
 
-  bool is_root(struct rgw_fs* _fs) {
-    return (&fs == _fs);
-  }
+    RGWFileHandle::FHCache fh_cache;
+    
+    std::string uid; // should match user.user_id, iiuc
 
-}; /* RGWLibFS */
+    RGWUserInfo user;
+    RGWAccessKey key;
+
+  public:
+    RGWLibFS(const char *_uid, const char *_user_id, const char* _key)
+      : root_fh(this, nullptr, RGWFileHandle::root_name.c_str()), uid(_uid),
+	key(_user_id, _key) {
+      fs.fs_private = this;
+      fs.root_fh = root_fh.get_fh(); /* expose public root fh */
+    }
+
+    int authorize(RGWRados* store) {
+      int ret = rgw_get_user_info_by_access_key(store, key.id, user);
+      if (ret == 0) {
+	RGWAccessKey* key0 = user.get_key0();
+	if (!key0 ||
+	    (key0->key != key.key))
+	  return -EINVAL;
+	if (user.suspended)
+	  return -ERR_USER_SUSPENDED;
+      }
+      return 0;
+    }
+
+    /* find or create an RGWFileHandle */
+    RGWFHRef lookup_fh(RGWFileHandle* _parent,
+		      const fh_key& k,
+		      const std::string& object_name) {
+
+      RGWFileHandle::FHCache::Latch lat;
+      RGWFileHandle* fh =
+	fh_cache.find_latch(k.fh_hk.object, k, lat,
+			    RGWFileHandle::FHCache::FLAG_LOCK);
+      /* LATCHED */
+      if (! oh) {
+	fh = new RGWFileHandle
+      }
+      lat.lock->unlock(); /* !LATCHED */
+      
+      return fh;
+    }
+
+    RGWFHRef lookup_fh(RGWFileHandle* _parent, const char* _name) {
+      const std::string &bucket_name = _parent->object_name();
+      const std::string object_name{_name};
+      fh_key proto = fh_key(bucket_name, object_name);
+      return lookup_fh(_parent, proto, bucket_name, object_name); 
+    }
+
+    struct rgw_fs* get_fs() { return &fs; }
+
+    RGWUserInfo* get_user() { return &user; }
+
+    bool is_root(struct rgw_fs* _fs) {
+      return (&fs == _fs);
+    }
+
+  }; /* RGWLibFS */
+
+} /* namespace rgw */
 
 /*
   read directory content (buckets)

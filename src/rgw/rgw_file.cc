@@ -24,6 +24,8 @@
 
 #define dout_subsys ceph_subsys_rgw
 
+using namespace rgw;
+
 extern RGWLib librgw;
 
 const string RGWFileHandle::root_name = "/";
