@@ -30,57 +30,47 @@ namespace rgw {
 
   typedef boost::intrusive_ptr<RGWFileHandle> RGWFHRef;
 
-  inline bool operator<(const rgw_fh_hk& lhs, const rgw_fh_hk& rhs)
-  {
-    return ((lhs.bucket < rhs.bucket) ||
-	    ((lhs.bucket == rhs.bucket) && (lhs.object < rhs.object)));
-  }
-
-  inline bool operator>(const rgw_fh_hk& lhs, const rgw_fh_hk& rhs)
-  {
-    return (rhs < lhs);
-  }
-
-  inline bool operator==(const rgw_fh_hk& lhs, const rgw_fh_hk& rhs)
-  {
-    return (lhs.bucket == rhs.bucket && lhs.object == rhs.object);
-  }
-
-  inline bool operator!=(const rgw_fh_hk& lhs, const rgw_fh_hk& rhs)
-  {
-    return !(lhs == rhs);
-  }
-
-  inline bool operator<=(const rgw_fh_hk& lhs, const rgw_fh_hk& rhs)
-  {
-    return (lhs < rhs) || (lhs == rhs);
-  }
-
+  /*
+   * XXX
+   * The current 64-bit, non-cryptographic hash used here is intended
+   * for prototyping only.
+   *
+   * However, the invariant being prototyped is that objects be
+   * identifiable by their hash components alone.  We believe this can
+   * be legitimately implemented using 128-hash values for bucket and
+   * object components, where together with a cluster-resident
+   * cryptographic key.  Since an MD5 or SHA-1 key is 128 bits and
+   * the (fast), non-cryptographic CityHash128 hash algorithm takes
+   * a 128-bit seed, speculatively we could use that for the final
+   * hash computations.
+   */
   struct fh_key
   {
-    rgw_fh_hk fh_hk; /* XXX const ref? */
-    const std::string& bucket_name;
-    const std::string& object_name;
+    rgw_fh_hk fh_hk;
 
-    fh_key(const rgw_fh_hk& _hk, const std::string& _b, const std::string& _o)
-      : fh_hk(_hk), bucket_name(_b), object_name(_o) {
+    static constexpr uint64_t seed = 8675309;
+
+    fh_key(const rgw_fh_hk& _hk)
+      : fh_hk(_hk) {
       // nothing
     }
 
-    fh_key(const std::string& _b, const std::string& _o)
-      : bucket_name(_b), object_name(_o) {
-      fh_hk.bucket = XXH64(_b.c_str(), _b.length(), 8675309 /* XXX */);
-      fh_hk.object = XXH64(_o.c_str(), _o.length(), 8675309 /* XXX */);
+    fh_key(const uin64_t bk, const std::string& _o) {
+      fh_hk.bucket = _b;
+      fh_hk.object = XXH64(_o.c_str(), _o.length(), seed);
+    }
+    
+    fh_key(const std::string& _b, const std::string& _o) {
+      fh_hk.bucket = XXH64(_b.c_str(), _o.length(), seed);
+      fh_hk.object = XXH64(_o.c_str(), _o.length(), seed);
     }
   }; /* fh_key */
 
   inline bool operator<(const fh_key& lhs, const fh_key& rhs)
   {
-    return ((lhs.fh_hk < rhs.fh_hk) ||
-	    ((lhs.fh_hk == rhs.fh_hk) &&
-	      ((lhs.bucket_name < rhs.bucket_name) ||
-		((lhs.bucket_name == rhs.bucket_name) &&
-		  (lhs.object_name < rhs.object_name)))));
+    return ((lhs.fh_hk.bucket < rhs.fh_hk.bucket) ||
+	    ((lhs.fh_hk.bucket == rhs.fh_hk.bucket) &&
+	      (lhs.fh_hk.object < rhs.fh_hk.object)));
   }
 
   inline bool operator>(const fh_key& lhs, const fh_key& rhs)
@@ -90,8 +80,8 @@ namespace rgw {
 
   inline bool operator==(const fh_key& lhs, const fh_key& rhs)
   {
-    return (lhs.bucket_name == rhs.bucket_name &&
-	    lhs.object_name == rhs.object_name);
+    return ((lhs.fh_hk.bucket == rhs.fh_hk.bucket) &&
+	    (lhs.fh_hk.object == rhs.fh_hk.object));
   }
 
   inline bool operator!=(const fh_key& lhs, const fh_key& rhs)
@@ -113,8 +103,6 @@ namespace rgw {
     /* const */ std::string name; /* XXX file or bucket name */
     /* const */ fh_key fhk;
     uint32_t flags;
-
-    static constexpr uint64_t seed = 8675309;
 
   public:
     const static string root_name;
@@ -151,12 +139,12 @@ namespace rgw {
 	? RGW_FS_TYPE_DIRECTORY : RGW_FS_TYPE_FILE;      
 
       /* save constant fhkey */
+      fh_key fhk(parent.name, name);
       fh.fh_hk = fhk.fh_hk; /* XXX redundant in fh_hk */
 
       /* pointer to self */
       fh.fh_private = this;
     }
-
 
     const fh_key& get_key() const {
       return key;
@@ -209,13 +197,7 @@ namespace rgw {
     {
       // for internal ordering
       bool operator()(const RGWFileHandle& lhs, const RGWFileHandle& rhs) const
-	{
-	  return ((lhs.fh.fh_hk < rhs.fh.fh_hk) ||
-		  ((lhs.fh.fh_hk == rhs.fh.fh_hk) &&
-		    ((lhs.bucket_name() < rhs.bucket_name()) ||
-		      ((lhs.bucket_name() == rhs.bucket_name()) &&
-			(lhs.object_name() < rhs.object_name())))));
-	}
+	{ return (lhs.get_key() < rhs.get_key()); }
 
       // for external search by fh_key
       bool operator()(const fh_key& k, const RGWFileHandle& fh) const
@@ -228,10 +210,7 @@ namespace rgw {
     struct FhEQ
     {
       bool operator()(const RGWFileHandle& lhs, const RGWFileHandle& rhs) const
-	{
-	  return ((lhs.bucket_name() == rhs.bucket_name()) &&
-		  (lhs.object_name() == rhs.object_name()));
-	}
+	{ return (lhs.get_key() == rhs.get_key()); }
 
       bool operator()(const fh_key& k, const RGWFileHandle& fh) const
 	{ return k == fh.get_key(); }
@@ -311,9 +290,7 @@ namespace rgw {
     /* find or create an RGWFileHandle */
     RGWFHRef lookup_fh(RGWFileHandle* parent, const std::string& name) {
 
-      fh_hk.bucket = parent.fh_hk.object;
-      fh_hk.object = XXH64(name.c_str(), name.length(), seed);
-      fh_key fhk(fh_hk, parent.name, name);
+      fh_key fhk(parent.fh_hk.object, name);
 
       RGWFileHandle::FHCache::Latch lat;
       RGWFileHandle* fh =
