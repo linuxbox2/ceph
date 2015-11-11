@@ -340,6 +340,11 @@ int rgw_fh_rele(struct rgw_fs *rgw_fs, struct rgw_file_handle *fh,
   return 0;
 }
 
+#define RGW_RWXMODE  (S_IRWXU | S_IRWXG | S_IRWXO)
+
+#define RGW_RWMODE (RGW_RWXMODE &			\
+		      ~(S_IXUSR | S_IXGRP | S_IXOTH))
+
 /*
    get unix attributes for object
 */
@@ -356,7 +361,7 @@ int rgw_getattr(struct rgw_fs *rgw_fs,
     memset(st, 0, sizeof(struct stat));
     st->st_dev = fs->get_inst();
     st->st_ino = rgw_fh->get_fh()->fh_hk.object; // XXX
-    st->st_mode = 755|S_IFDIR;
+    st->st_mode = RGW_RWXMODE|S_IFDIR;
     st->st_nlink = 3;
     st->st_uid = 0; // XXX
     st->st_gid = 0; // XXX
@@ -372,7 +377,7 @@ int rgw_getattr(struct rgw_fs *rgw_fs,
     memset(st, 0, sizeof(struct stat));
     st->st_dev = fs->get_inst();
     st->st_ino = rgw_fh->get_fh()->fh_hk.object; // XXX
-    st->st_mode = 666|S_IFDIR;
+    st->st_mode = RGW_RWXMODE|S_IFDIR;
     st->st_nlink = 3;
     st->st_uid = 0; // XXX
     st->st_gid = 0; // XXX
@@ -400,7 +405,7 @@ int rgw_getattr(struct rgw_fs *rgw_fs,
     memset(st, 0, sizeof(struct stat));
     st->st_dev = fs->get_inst();
     st->st_ino = rgw_fh->get_fh()->fh_hk.object; // XXX
-    st->st_mode = 666|S_IFREG;
+    st->st_mode = RGW_RWMODE|S_IFREG;
     st->st_nlink = 1;
     st->st_uid = 0; // XXX
     st->st_gid = 0; // XXX
