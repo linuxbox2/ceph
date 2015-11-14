@@ -22,6 +22,8 @@
 #include <map>
 #include <random>
 
+#include <boost/regex.hpp>
+
 #include "include/rados/librgw.h"
 #include "include/rados/rgw_file.h"
 
@@ -46,7 +48,7 @@ namespace {
     std::string binddn;
     std::string searchdn;
     std::string memberattr;
-    LDAP* ldap;
+    LDAP *ldap, *tldap;
 
   public:
     LDAPHelper(std::string _uri, std::string _binddn, std::string _searchdn,
@@ -57,11 +59,57 @@ namespace {
     }
 
     int init() {
-      return ldap_initialize(&ldap, uri.c_str());
+      int ret;
+      ret = ldap_initialize(&ldap, uri.c_str());
+      return ret;
     }
 
     int bind() {
       return ldap_simple_bind_s(ldap, nullptr, nullptr);
+    }
+
+    int simple_bind(const char *dn, const std::string& pwd) {
+      int ret = ldap_initialize(&tldap, uri.c_str());
+      ret = ldap_simple_bind_s(tldap, dn, pwd.c_str());
+      if (ret == LDAP_SUCCESS) {
+	ldap_unbind(tldap);
+	return 0;
+      }
+      return -1;
+    }
+
+    int auth(const std::string access_key) {
+      int ret;
+      buffer::list bl, decoded_bl;
+      bl.append(access_key);
+      decoded_bl.decode_base64(bl);
+      string str{decoded_bl.c_str()};
+      boost::regex rgx("{(\\w+)::(\\w+)}.+");
+      boost::cmatch match;
+      if (boost::regex_match(str.c_str(), match, rgx)) {
+	std::string uid = match[1];
+	std::string pwd = match[2];
+	std::string filter;
+	filter = "(";
+	filter += memberattr;
+	filter += "=";
+	filter += uid;
+	filter += ")";
+	char *attrs[] = { const_cast<char*>(memberattr.c_str()), nullptr };
+	LDAPMessage *answer, *entry;
+	ret = ldap_search_s(ldap, searchdn.c_str(), LDAP_SCOPE_SUBTREE,
+			    filter.c_str(), attrs, 0, &answer);
+	if (ret == LDAP_SUCCESS) {
+	  entry = ldap_first_entry(ldap, answer);
+	  char *dn = ldap_get_dn(ldap, entry);
+	  std::cout << dn << std::endl;
+	  ret = simple_bind(dn, pwd);
+	  ldap_memfree(dn);
+	  ldap_msgfree(answer);
+	}
+	return ret;
+      }
+      return -1;
     }
     
     ~LDAPHelper() {}
@@ -71,6 +119,7 @@ namespace {
   bool do_hexdump = false;
 
   string access_key("e2FkbWluOjpsaW51eGJveH0K"); // {admin::linuxbox} | base64
+  string other_key("e2FkbWluOjpiYWRwYXNzfQo="); // {admin::badpass} | base64
 
   string ldap_uri = "ldaps://f23-kdc.rgw.com";
   string ldap_binddn = "uid=admin,cn=users,cn=accounts,dc=rgw,dc=com";
@@ -91,6 +140,12 @@ TEST(LibRGWLDAP, BIND) {
   ASSERT_EQ(ret, 0);
 }
 
+TEST(LibRGWLDAP, AUTH) {
+  int ret = ldh.auth(access_key);
+  ASSERT_EQ(ret, 0);
+  ret = ldh.auth(other_key);
+  ASSERT_NE(ret, 0);
+}
 
 TEST(LibRGW, SHUTDOWN) {
   // nothing

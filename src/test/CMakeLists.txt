@@ -1651,6 +1651,7 @@ set_target_properties(test_librgw_ldap PROPERTIES COMPILE_FLAGS
 target_link_libraries(test_librgw_ldap
   librados
   ${OPENLDAP_LIBS}
+  ${Boost_LIBRARIES}
   ${TCMALLOC_LIBS}
   ${UNITTEST_LIBS}
   )
