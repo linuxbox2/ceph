@@ -31,6 +31,7 @@
 #include "rgw_common.h"
 #include "rgw_user.h"
 #include "rgw_lib.h"
+#include "rgw_ldap.h"
 
 /* XXX
  * ASSERT_H somehow not defined after all the above (which bring
@@ -669,9 +670,26 @@ namespace rgw {
 	  return -EINVAL;
 	if (user.suspended)
 	  return -ERR_USER_SUSPENDED;
+      } else {
+	/* try external authenticators (ldap for now) */
+	rgw::LDAPHelper* ldh = rgwlib.get_ldh();
+	auto decoded_token = ACCTokenHelper::decode(key.id);
+	if (ldh->auth(get<1>(decoded_token), get<2>(decoded_token)) == 0) {
+	  /* ok, succeeded, try to create shadow */
+	  std::string& user_id = get<1>(decoded_token);
+	  /* try to store user if it not already exists */
+	  if (rgw_get_user_info_by_uid(store, user_id, user) < 0) {
+	    int ret = rgw_store_user_info(store, user, NULL, NULL, 0,
+					  true);
+	    if (ret < 0) {
+	      dout(10) << "NOTICE: failed to store new user's info: ret=" << ret
+		       << dendl;
+	    }
+	  }
+	} /* auth success */
       }
       return ret;
-    }
+    } /* authorize */
 
     /* find or create an RGWFileHandle */
     LookupFHResult lookup_fh(RGWFileHandle* parent, const char *name,

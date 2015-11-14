@@ -1195,6 +1195,14 @@ OPTION(rgw_keystone_revocation_interval, OPT_INT, 15 * 60)  // seconds between t
 OPTION(rgw_keystone_verify_ssl, OPT_BOOL, true) // should we try to verify keystone's ssl
 OPTION(rgw_s3_auth_use_rados, OPT_BOOL, true)  // should we try to use the internal credentials for s3?
 OPTION(rgw_s3_auth_use_keystone, OPT_BOOL, false)  // should we try to use keystone for s3?
+
+OPTION(rgw_ldap_uri, OPT_STR, "ldaps://f23-kdc.rgw.com")
+OPTION(rgw_ldap_binddn, OPT_STR, "uid=admin,cn=users,cn=accounts,dc=rgw,dc=com")
+OPTION(rgw_ldap_searchdn, OPT_STR, "cn=users,cn=accounts,dc=rgw,dc=com")
+OPTION(rgw_ldap_memberattr, OPT_STR, "uid")
+OPTION(rgw_ldap_secret, OPT_STR, "/etc/openldap/secret")
+OPTION(rgw_s3_auth_use_ldap, OPT_BOOL, false)  // use ldap for s3?
+
 OPTION(rgw_admin_entry, OPT_STR, "admin")  // entry point for which a url is considered an admin request
 OPTION(rgw_enforce_swift_acls, OPT_BOOL, true)
 OPTION(rgw_swift_token_expiration, OPT_INT, 24 * 3600) // time in seconds for swift token expiration
