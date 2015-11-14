@@ -1641,6 +1641,20 @@ target_link_libraries(test_librgw_file_gp
   ${UNITTEST_LIBS}
   )
 
+# librgw_file_gp (just the rgw_file get-put bucket ops)
+add_executable(test_librgw_ldap
+  librgw_ldap.cc
+  $<TARGET_OBJECTS:heap_profiler_objs>
+  )
+set_target_properties(test_librgw_ldap PROPERTIES COMPILE_FLAGS
+  ${UNITTEST_CXX_FLAGS})
+target_link_libraries(test_librgw_ldap
+  librados
+  ${OPENLDAP_LIBS}
+  ${TCMALLOC_LIBS}
+  ${UNITTEST_LIBS}
+  )
+
 if(${WITH_FUSE})
   add_executable(test_cfuse_cache_invalidate
     test_cfuse_cache_invalidate.cc
