@@ -42,6 +42,29 @@ namespace {
     char **argv;
   } saved_args;
 
+  class ACCTokenHelper
+  {
+  public:
+    typedef std::tuple<bool,std::string,std::string> DecodeResult;
+
+    static DecodeResult decode(const std::string& encoded_token) {
+      buffer::list bl, decoded_bl;
+      bl.append(encoded_token);
+      decoded_bl.decode_base64(bl);
+      string str{decoded_bl.c_str()};
+      boost::regex rgx("{(\\w+)::(\\w+)}.+");
+      boost::cmatch match;
+      if (boost::regex_match(str.c_str(), match, rgx)) {
+	std::string uid = match[1];
+	std::string pwd = match[2];
+	return DecodeResult{true, uid, pwd};
+      }
+      return DecodeResult{false, "", ""};
+    }
+  private:
+    ACCTokenHelper();
+  };
+
   class LDAPHelper
   {
     std::string uri;
@@ -78,38 +101,27 @@ namespace {
       return -1;
     }
 
-    int auth(const std::string access_key) {
+    int auth(const std::string uid, const std::string pwd) {
       int ret;
-      buffer::list bl, decoded_bl;
-      bl.append(access_key);
-      decoded_bl.decode_base64(bl);
-      string str{decoded_bl.c_str()};
-      boost::regex rgx("{(\\w+)::(\\w+)}.+");
-      boost::cmatch match;
-      if (boost::regex_match(str.c_str(), match, rgx)) {
-	std::string uid = match[1];
-	std::string pwd = match[2];
-	std::string filter;
-	filter = "(";
-	filter += memberattr;
-	filter += "=";
-	filter += uid;
-	filter += ")";
-	char *attrs[] = { const_cast<char*>(memberattr.c_str()), nullptr };
-	LDAPMessage *answer, *entry;
-	ret = ldap_search_s(ldap, searchdn.c_str(), LDAP_SCOPE_SUBTREE,
-			    filter.c_str(), attrs, 0, &answer);
-	if (ret == LDAP_SUCCESS) {
-	  entry = ldap_first_entry(ldap, answer);
-	  char *dn = ldap_get_dn(ldap, entry);
-	  std::cout << dn << std::endl;
-	  ret = simple_bind(dn, pwd);
-	  ldap_memfree(dn);
-	  ldap_msgfree(answer);
-	}
-	return ret;
+      std::string filter;
+      filter = "(";
+      filter += memberattr;
+      filter += "=";
+      filter += uid;
+      filter += ")";
+      char *attrs[] = { const_cast<char*>(memberattr.c_str()), nullptr };
+      LDAPMessage *answer, *entry;
+      ret = ldap_search_s(ldap, searchdn.c_str(), LDAP_SCOPE_SUBTREE,
+			  filter.c_str(), attrs, 0, &answer);
+      if (ret == LDAP_SUCCESS) {
+	entry = ldap_first_entry(ldap, answer);
+	char *dn = ldap_get_dn(ldap, entry);
+	std::cout << dn << std::endl;
+	ret = simple_bind(dn, pwd);
+	ldap_memfree(dn);
+	ldap_msgfree(answer);
       }
-      return -1;
+      return ret;
     }
     
     ~LDAPHelper() {}
@@ -141,9 +153,15 @@ TEST(LibRGWLDAP, BIND) {
 }
 
 TEST(LibRGWLDAP, AUTH) {
-  int ret = ldh.auth(access_key);
+  using std::get;
+  int ret = 0;
+  auto at1 = ACCTokenHelper::decode(access_key);
+  ASSERT_EQ(get<0>(at1), true);
+  ret = ldh.auth(get<1>(at1), get<2>(at1));
   ASSERT_EQ(ret, 0);
-  ret = ldh.auth(other_key);
+  auto at2 = ACCTokenHelper::decode(other_key);
+  ASSERT_EQ(get<0>(at2), true);
+  ret = ldh.auth(get<1>(at2), get<2>(at2));
   ASSERT_NE(ret, 0);
 }
 
