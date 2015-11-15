@@ -47,23 +47,26 @@ namespace {
   public:
     typedef std::tuple<bool,std::string,std::string> DecodeResult;
 
+    static boost::regex rgx;
+
     static DecodeResult decode(const std::string& encoded_token) {
       buffer::list bl, decoded_bl;
       bl.append(encoded_token);
       decoded_bl.decode_base64(bl);
-      string str{decoded_bl.c_str()};
-      boost::regex rgx("{(\\w+)::(\\w+)}.+");
+      std::string str{decoded_bl.c_str()};
       boost::cmatch match;
       if (boost::regex_match(str.c_str(), match, rgx)) {
 	std::string uid = match[1];
 	std::string pwd = match[2];
-	return DecodeResult{true, uid, pwd};
+	return DecodeResult{true, std::move(uid), std::move(pwd)};
       }
       return DecodeResult{false, "", ""};
     }
   private:
     ACCTokenHelper();
   };
+
+  boost::regex ACCTokenHelper::rgx{"{(\\w+)::(\\w+)}.+"};
 
   class LDAPHelper
   {
