@@ -11,6 +11,7 @@
 #include "rgw_frontend.h"
 #include "rgw_process.h"
 #include "rgw_rest_s3.h" // RGW_Auth_S3
+#include "include/assert.h"
 
 
 class RGWLibFrontendConfig;

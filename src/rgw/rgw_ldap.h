@@ -103,7 +103,10 @@ namespace rgw {
       return ret;
     }
     
-    ~LDAPHelper() {}
+    ~LDAPHelper() {
+      if (ldap)
+	ldap_unbind(ldap);
+    }
 
   };
 

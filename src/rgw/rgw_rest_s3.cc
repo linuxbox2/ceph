@@ -1239,21 +1239,8 @@ int RGWPostObj_ObjStore_S3::get_policy()
 	if (! get<0>(decoded_token))
 	  return -EACCES; // failed to decode token
 
-	// XXX move all this (static)
-	const string& ldap_uri = store->ctx()->_conf->rgw_ldap_uri;
-	const string& ldap_binddn = store->ctx()->_conf->rgw_ldap_binddn;
-	const string& ldap_searchdn = store->ctx()->_conf->rgw_ldap_searchdn;
-	const string& ldap_memberattr =
-	  store->ctx()->_conf->rgw_ldap_memberattr;
-
-	rgw::LDAPHelper ldh(ldap_uri, ldap_binddn, ldap_searchdn,
-			    ldap_memberattr);
-
-	if ((ldh.init() != 0) ||
-	    (ldh.bind() != 0))
-	  return -EACCES;
-
-	if (ldh.auth(get<1>(decoded_token), get<2>(decoded_token)) != 0)
+	rgw::LDAPHelper *ldh = RGW_Auth_S3::get_ldap_ctx(store);
+	if (ldh->auth(get<1>(decoded_token), get<2>(decoded_token)) != 0)
 	  return -EACCES;
 
 	/* ok, succeeded, try to create shadow */
@@ -2346,6 +2333,25 @@ int RGWHandler_REST_S3::init(RGWRados *store, struct req_state *s,
   return RGWHandler_REST::init(store, s, cio);
 }
 
+/* RGW_Auth_S3 static members */
+std::mutex RGW_Auth_S3::mtx;
+rgw::LDAPHelper* RGW_Auth_S3::ldh;
+
+/* static */
+void RGW_Auth_S3::init_impl(RGWRados* store)
+{
+  const string& ldap_uri = store->ctx()->_conf->rgw_ldap_uri;
+  const string& ldap_binddn = store->ctx()->_conf->rgw_ldap_binddn;
+  const string& ldap_searchdn = store->ctx()->_conf->rgw_ldap_searchdn;
+  const string& ldap_memberattr =
+    store->ctx()->_conf->rgw_ldap_memberattr;
+
+  ldh = new rgw::LDAPHelper(ldap_uri, ldap_binddn, ldap_searchdn,
+			    ldap_memberattr);
+
+  ldh->init();
+  ldh->bind();
+}
 
 /*
  * Try to validate S3 auth against keystone s3token interface
@@ -2536,26 +2542,14 @@ int RGW_Auth_S3::authorize(RGWRados *store, struct req_state *s)
       (store->ctx()->_conf->rgw_s3_auth_use_ldap) &&
       (! store->ctx()->_conf->rgw_ldap_uri.empty())) {
 
+    RGW_Auth_S3::init(store);
+
     auto decoded_token = ACCTokenHelper::decode(auth_id);
 
     if (! get<0>(decoded_token))
       external_auth_result = -EACCES; // failed to decode token
     else {
-      // XXX move all this (static)
-      const string& ldap_uri = store->ctx()->_conf->rgw_ldap_uri;
-      const string& ldap_binddn = store->ctx()->_conf->rgw_ldap_binddn;
-      const string& ldap_searchdn = store->ctx()->_conf->rgw_ldap_searchdn;
-      const string& ldap_memberattr =
-	store->ctx()->_conf->rgw_ldap_memberattr;
-
-      rgw::LDAPHelper ldh(ldap_uri, ldap_binddn, ldap_searchdn,
-			  ldap_memberattr);
-
-      if ((ldh.init() != 0) ||
-	  (ldh.bind() != 0))
-	external_auth_result = -EACCES;
-
-      if (ldh.auth(get<1>(decoded_token), get<2>(decoded_token)) != 0)
+      if (ldh->auth(get<1>(decoded_token), get<2>(decoded_token)) != 0)
 	external_auth_result = -EACCES;
       else {
 	/* ok, succeeded */
