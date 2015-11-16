@@ -2557,23 +2557,22 @@ int RGW_Auth_S3::authorize(RGWRados *store, struct req_state *s)
 
       if (ldh.auth(get<1>(decoded_token), get<2>(decoded_token)) != 0)
 	external_auth_result = -EACCES;
-      else
+      else {
+	/* ok, succeeded */
 	external_auth_result = 0;
-
-      /* ok, succeeded, try to create shadow */
-      s->user->user_id = get<1>(decoded_token);
-      s->user->display_name = get<1>(decoded_token); // cn?
-
-      /* try to store user if it not already exists */
-      if (rgw_get_user_info_by_uid(store, s->user->user_id,
-				      *(s->user)) < 0) {
-	int ret = rgw_store_user_info(store, *(s->user), NULL, NULL, 0, true);
-	if (ret < 0) {
-	  dout(10) << "NOTICE: failed to store new user's info: ret=" << ret
-		   << dendl;
+	/* create local account, if none exists */
+	s->user->user_id = get<1>(decoded_token);
+	s->user->display_name = get<1>(decoded_token); // cn?
+	if (rgw_get_user_info_by_uid(store, s->user->user_id,
+					*(s->user)) < 0) {
+	  int ret = rgw_store_user_info(store, *(s->user), NULL, NULL, 0, true);
+	  if (ret < 0) {
+	    dout(10) << "NOTICE: failed to store new user's info: ret=" << ret
+		     << dendl;
+	  }
+	  s->perm_mask = RGW_PERM_FULL_CONTROL;
 	}
-	s->perm_mask = RGW_PERM_FULL_CONTROL;
-      }
+      } /* success */
     }
   } /* ldap */
 
