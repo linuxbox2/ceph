@@ -1017,7 +1017,8 @@ if(${WITH_RADOSGW})
     cls_rgw_client cls_lock_client cls_refcount_client
     cls_log_client cls_statelog_client cls_version_client
     cls_replica_log_client cls_user_client
-    curl expat global fcgi resolv ${BLKID_LIBRARIES} ${TCMALLOC_LIBS})
+    curl expat global fcgi resolv ${BLKID_LIBRARIES}
+    ${OPENLDAP_LIBS} ${TCMALLOC_LIBS})
   install(TARGETS radosgw DESTINATION bin)
 
   add_executable(radosgw-admin ${radosgw_admin_srcs} $<TARGET_OBJECTS:heap_profiler_objs>)
