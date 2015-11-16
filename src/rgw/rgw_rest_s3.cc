@@ -2557,6 +2557,8 @@ int RGW_Auth_S3::authorize(RGWRados *store, struct req_state *s)
 
       if (ldh.auth(get<1>(decoded_token), get<2>(decoded_token)) != 0)
 	external_auth_result = -EACCES;
+      else
+	external_auth_result = 0;
 
       /* ok, succeeded, try to create shadow */
       s->user->user_id = get<1>(decoded_token);
