@@ -23,6 +23,8 @@ namespace rgw {
   public:
     typedef std::tuple<bool,std::string,std::string> DecodeResult;
 
+    static constexpr const char* CRED_REGEX = "{([\\w-]+)::([\\w-]+)}.+";
+
     static boost::regex rgx;
 
     static DecodeResult decode(const std::string& encoded_token) {

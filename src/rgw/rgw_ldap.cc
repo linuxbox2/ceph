@@ -4,5 +4,5 @@
 #include "rgw_ldap.h"
 
 
-boost::regex rgw::ACCTokenHelper::rgx{"{(\\w+)::(\\w+)}.+"};
+boost::regex rgw::ACCTokenHelper::rgx{ CRED_REGEX };
 

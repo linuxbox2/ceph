@@ -39,6 +39,7 @@ namespace {
 
   string access_key("e2FkbWluOjpsaW51eGJveH0K"); // {admin::linuxbox} | base64
   string other_key("e2FkbWluOjpiYWRwYXNzfQo="); // {admin::badpass} | base64
+  string hyphen_key("e21hdHQtbGRhcDo6bGludXhib3h9Cg=="); // {matt-ldap::linuxbox} | base64
 
   string ldap_uri = "ldaps://f23-kdc.rgw.com";
   string ldap_binddn = "uid=admin,cn=users,cn=accounts,dc=rgw,dc=com";
@@ -71,6 +72,10 @@ TEST(LibRGWLDAP, AUTH) {
   ASSERT_EQ(get<0>(at2), true);
   ret = ldh.auth(get<1>(at2), get<2>(at2));
   ASSERT_NE(ret, 0);
+  auto at3 = ACCTokenHelper::decode(hyphen_key);
+  ASSERT_EQ(get<0>(at3), true);
+  ret = ldh.auth(get<1>(at3), get<2>(at3));
+  ASSERT_EQ(ret, 0);
 }
 
 TEST(LibRGW, SHUTDOWN) {
@@ -85,11 +90,6 @@ int main(int argc, char *argv[])
 
   argv_to_vec(argc, const_cast<const char**>(argv), args);
   env_to_vec(args);
-
-  v = getenv("AWS_ACCESS_KEY_ID");
-  if (v) {
-    access_key = v;
-  }
 
   for (auto arg_iter = args.begin(); arg_iter != args.end();) {
     if (ceph_argparse_witharg(args, arg_iter, &val, "--access",
