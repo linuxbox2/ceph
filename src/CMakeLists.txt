@@ -908,6 +908,7 @@ if(${WITH_RADOSGW})
     rgw/rgw_dencoder.cc
     rgw/rgw_request.cc
     rgw/rgw_os_lib.cc
+    rgw/rgw_ldap.cc
     # radosgw common
     rgw/rgw_acl.cc
     rgw/rgw_acl_s3.cc

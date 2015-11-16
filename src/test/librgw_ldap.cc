@@ -12,9 +12,6 @@
  *
  */
 
-#define LDAP_DEPRECATED 1
-#include "ldap.h"
-
 #include <stdint.h>
 #include <tuple>
 #include <iostream>
@@ -22,10 +19,7 @@
 #include <map>
 #include <random>
 
-#include <boost/regex.hpp>
-
-#include "include/rados/librgw.h"
-#include "include/rados/rgw_file.h"
+#include "rgw/rgw_ldap.h"
 
 #include "gtest/gtest.h"
 #include "common/ceph_argparse.h"
@@ -34,102 +28,12 @@
 
 #define dout_subsys ceph_subsys_rgw
 
-
 namespace {
 
   struct {
     int argc;
     char **argv;
   } saved_args;
-
-  class ACCTokenHelper
-  {
-  public:
-    typedef std::tuple<bool,std::string,std::string> DecodeResult;
-
-    static boost::regex rgx;
-
-    static DecodeResult decode(const std::string& encoded_token) {
-      buffer::list bl, decoded_bl;
-      bl.append(encoded_token);
-      decoded_bl.decode_base64(bl);
-      std::string str{decoded_bl.c_str()};
-      boost::cmatch match;
-      if (boost::regex_match(str.c_str(), match, rgx)) {
-	std::string uid = match[1];
-	std::string pwd = match[2];
-	return DecodeResult{true, std::move(uid), std::move(pwd)};
-      }
-      return DecodeResult{false, "", ""};
-    }
-  private:
-    ACCTokenHelper();
-  };
-
-  boost::regex ACCTokenHelper::rgx{"{(\\w+)::(\\w+)}.+"};
-
-  class LDAPHelper
-  {
-    std::string uri;
-    std::string binddn;
-    std::string searchdn;
-    std::string memberattr;
-    LDAP *ldap, *tldap;
-
-  public:
-    LDAPHelper(std::string _uri, std::string _binddn, std::string _searchdn,
-	      std::string _memberattr)
-      : uri(std::move(_uri)), binddn(std::move(_binddn)), searchdn(_searchdn),
-	memberattr(_memberattr), ldap(nullptr) {
-      // nothing
-    }
-
-    int init() {
-      int ret;
-      ret = ldap_initialize(&ldap, uri.c_str());
-      return ret;
-    }
-
-    int bind() {
-      return ldap_simple_bind_s(ldap, nullptr, nullptr);
-    }
-
-    int simple_bind(const char *dn, const std::string& pwd) {
-      int ret = ldap_initialize(&tldap, uri.c_str());
-      ret = ldap_simple_bind_s(tldap, dn, pwd.c_str());
-      if (ret == LDAP_SUCCESS) {
-	ldap_unbind(tldap);
-	return 0;
-      }
-      return -1;
-    }
-
-    int auth(const std::string uid, const std::string pwd) {
-      int ret;
-      std::string filter;
-      filter = "(";
-      filter += memberattr;
-      filter += "=";
-      filter += uid;
-      filter += ")";
-      char *attrs[] = { const_cast<char*>(memberattr.c_str()), nullptr };
-      LDAPMessage *answer, *entry;
-      ret = ldap_search_s(ldap, searchdn.c_str(), LDAP_SCOPE_SUBTREE,
-			  filter.c_str(), attrs, 0, &answer);
-      if (ret == LDAP_SUCCESS) {
-	entry = ldap_first_entry(ldap, answer);
-	char *dn = ldap_get_dn(ldap, entry);
-	std::cout << dn << std::endl;
-	ret = simple_bind(dn, pwd);
-	ldap_memfree(dn);
-	ldap_msgfree(answer);
-      }
-      return ret;
-    }
-    
-    ~LDAPHelper() {}
-
-  };
 
   bool do_hexdump = false;
 
@@ -141,7 +45,7 @@ namespace {
   string ldap_searchdn = "cn=users,cn=accounts,dc=rgw,dc=com";
   string ldap_memberattr = "uid";
 
-  LDAPHelper ldh(ldap_uri, ldap_binddn, ldap_searchdn, ldap_memberattr);
+  rgw::LDAPHelper ldh(ldap_uri, ldap_binddn, ldap_searchdn, ldap_memberattr);
   
 } /* namespace */
 
@@ -157,6 +61,7 @@ TEST(LibRGWLDAP, BIND) {
 
 TEST(LibRGWLDAP, AUTH) {
   using std::get;
+  using namespace rgw;
   int ret = 0;
   auto at1 = ACCTokenHelper::decode(access_key);
   ASSERT_EQ(get<0>(at1), true);

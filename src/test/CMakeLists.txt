@@ -1643,6 +1643,7 @@ target_link_libraries(test_librgw_file_gp
 
 # librgw_file_gp (just the rgw_file get-put bucket ops)
 add_executable(test_librgw_ldap
+  ../rgw/rgw_ldap.cc
   librgw_ldap.cc
   $<TARGET_OBJECTS:heap_profiler_objs>
   )
