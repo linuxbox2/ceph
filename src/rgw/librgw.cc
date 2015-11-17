@@ -351,6 +351,17 @@ int RGWLib::init(vector<const char*>& args)
     olog->init(g_conf->rgw_ops_log_socket_path);
   }
 
+  const string& ldap_uri = store->ctx()->_conf->rgw_ldap_uri;
+  const string& ldap_binddn = store->ctx()->_conf->rgw_ldap_binddn;
+  const string& ldap_searchdn = store->ctx()->_conf->rgw_ldap_searchdn;
+  const string& ldap_memberattr =
+    store->ctx()->_conf->rgw_ldap_memberattr;
+
+  ldh = new rgw::LDAPHelper(ldap_uri, ldap_binddn, ldap_searchdn,
+			    ldap_memberattr);
+  ldh->init();
+  ldh->bind();
+
   int port = 80;
   RGWProcessEnv env = { store, &rest, olog, port };
 
