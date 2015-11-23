@@ -1657,6 +1657,21 @@ target_link_libraries(test_librgw_ldap
   ${UNITTEST_LIBS}
   )
 
+# XXHash ops/sec tests
+add_executable(test_xxhash
+  test_xxhash.cc
+  $<TARGET_OBJECTS:heap_profiler_objs>
+  )
+set_target_properties(test_xxhash PROPERTIES COMPILE_FLAGS
+  ${UNITTEST_CXX_FLAGS})
+target_link_libraries(test_xxhash
+  common
+  ${Boost_LIBRARIES}
+  ${TCMALLOC_LIBS}
+  ${UNITTEST_LIBS}
+  )
+
+
 if(${WITH_FUSE})
   add_executable(test_cfuse_cache_invalidate
     test_cfuse_cache_invalidate.cc
