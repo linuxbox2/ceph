@@ -57,6 +57,14 @@ namespace {
 
   std::vector<ipv6_addr> addrs;
 
+  struct addr_rec
+  {
+    uint64_t refs;
+    addr_rec() : refs(1) {}
+  };
+
+  std::map<uint64_t,addr_rec> cmap;
+
 } /* namespace */
 
 TEST(XXHash, INIT) {
@@ -72,6 +80,23 @@ TEST(XXHash, HASH1) {
     /* naively (i.e., with cost) force evaluation of hk (defeat optimizers) */
     if (hk > sup)
       sup = hk;
+  }
+  std::cout << "hs = " << sup << " sz = " << sizeof(ipv6_addr) << std::endl;
+}
+
+TEST(XXHash, COLLISION) {
+  uint64_t hk, sup = 1;
+  for (auto& addr : addrs) {
+    hk = XXH64(&addr, sizeof(ipv6_addr), seed);
+    auto crec = cmap.find(hk);
+    if (crec != cmap.end()) {
+      ++(crec->second.refs);
+      // track most collided value
+      if (crec->second.refs > sup)
+	sup = crec->second.refs;
+    }
+    else
+      cmap.insert(decltype(cmap)::value_type(hk, addr_rec()));
   }
   std::cout << "hs = " << sup << std::endl;
 }
