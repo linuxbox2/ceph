@@ -285,7 +285,7 @@ int XioConnection::on_msg_req(struct xio_session *session,
       take_len = MIN(blen, msg_iov->iov_len);
       payload.append(
 	buffer::create_msg(
-	  take_len, (char*) msg_iov->iov_base, m_hook));
+	  take_len, (char*) msg_iov->iov_base, msg_iov, m_hook));
       blen -= take_len;
       if (! blen) {
 	left_len = msg_iov->iov_len - take_len;
@@ -314,7 +314,7 @@ int XioConnection::on_msg_req(struct xio_session *session,
 
   if (blen && left_len) {
     middle.append(
-      buffer::create_msg(left_len, left_base, m_hook));
+      buffer::create_msg(left_len, left_base, msg_iov, m_hook));
     left_len = 0;
   }
 
@@ -327,7 +327,7 @@ int XioConnection::on_msg_req(struct xio_session *session,
       take_len = MIN(blen, msg_iov->iov_len);
       middle.append(
 	buffer::create_msg(
-	  take_len, (char*) msg_iov->iov_base, m_hook));
+	  take_len, (char*) msg_iov->iov_base, msg_iov, m_hook));
       blen -= take_len;
       if (! blen) {
 	left_len = msg_iov->iov_len - take_len;
@@ -346,7 +346,7 @@ int XioConnection::on_msg_req(struct xio_session *session,
 
   if (blen && left_len) {
     data.append(
-      buffer::create_msg(left_len, left_base, m_hook));
+      buffer::create_msg(left_len, left_base, msg_iov, m_hook));
     left_len = 0;
   }
 

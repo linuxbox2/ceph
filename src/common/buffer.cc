@@ -585,11 +585,12 @@ static simple_spinlock_t buffer_debug_lock = SIMPLE_SPINLOCK_INITIALIZER;
 #if defined(HAVE_XIO)
   class buffer::xio_msg_buffer : public buffer::raw {
   private:
+    struct xio_msg_ex *msg;
     XioDispatchHook* m_hook;
   public:
-    xio_msg_buffer(XioDispatchHook* _m_hook, const char *d,
-	unsigned l) :
-      raw((char*)d, l), m_hook(_m_hook->get()) {}
+    xio_msg_buffer(XioDispatchHook* _m_hook, struct xio_msg_ex *_msg,
+		   char* buf, unsigned l) :
+      raw(buf, l), msg(_msg), m_hook(_m_hook->get()) {}
 
     bool is_shareable() { return false; }
     static void operator delete(void *p)
@@ -625,12 +626,22 @@ static simple_spinlock_t buffer_debug_lock = SIMPLE_SPINLOCK_INITIALIZER;
     return NULL;
   }
 
+  struct xio_reg_mem* get_xio_msg(const buffer::ptr& bp)
+  {
+    buffer::xio_msg_buffer *mb =
+      dynamic_cast<buffer::xio_msg_buffer*>(bp.get_raw());
+    if (mb) {
+      return mb->msg;
+    }
+    return NULL;
+  }
+
   buffer::raw* buffer::create_msg(
-      unsigned len, char *buf, XioDispatchHook* m_hook) {
+    unsigned len, char *buf, struct xio_msg_ex *msg, XioDispatchHook* m_hook) {
     XioPool& pool = m_hook->get_pool();
     buffer::raw* bp =
       static_cast<buffer::raw*>(pool.alloc(sizeof(xio_msg_buffer)));
-    new (bp) xio_msg_buffer(m_hook, buf, len);
+    new (bp) xio_msg_buffer(m_hook, msg, buf, len);
     return bp;
   }
 #endif /* HAVE_XIO */

@@ -154,7 +154,8 @@ namespace buffer CEPH_BUFFER_API {
   raw* create_unshareable(unsigned len);
 
 #if defined(HAVE_XIO)
-  static raw* create_msg(unsigned len, char *buf, XioDispatchHook *m_hook);
+  static raw* create_msg(unsigned len, char *buf, struct xio_msg_ex *msg,
+			 XioDispatchHook *m_hook);
 #endif
 
   /*
@@ -604,6 +605,7 @@ inline bufferhash& operator<<(bufferhash& l, bufferlist &r) {
 
 #if defined(HAVE_XIO)
 xio_reg_mem* get_xio_mp(const buffer::ptr& bp);
+xio_msg_ex* get_xio_msg(const buffer::ptr& bp);
 #endif
 
 }
