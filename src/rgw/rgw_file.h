@@ -792,6 +792,11 @@ public:
 	sref = boost::string_ref{iter.key.name.substr(last_del+1)};
       else
 	sref = boost::string_ref{iter.key.name};
+
+      /* if we find a trailing slash in a -listing- the parent is an
+       * empty directory */
+      if (sref=="")
+	continue;
 	
       std::cout << "RGWListBucketRequest "
 		<< __func__ << " " << "list uri=" << s->relative_uri << " "
@@ -1395,6 +1400,7 @@ public:
 		<< " prefix=" << prefix << " "
 		<< " obj path=" << name << ""
 		<< std::endl;
+      /* XXX is there a missing match-dir case (trailing '/')? */
       matched = true;
       return;
     }
