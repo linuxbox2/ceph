@@ -68,7 +68,9 @@ namespace {
     RGWFileHandle* rgw_fh = rec.rgw_fh;
     if (rgw_fh) {
       const char* type = rgw_fh->is_dir() ? "DIR " : "FILE ";
-      os << rec.name << ": "
+      os << rec.rgw_fh->full_object_name()
+	 << " (" << rec.rgw_fh->object_name() << ", "
+	 << " " << rec.name << "): "
 	 << type;
     }
     return os;
