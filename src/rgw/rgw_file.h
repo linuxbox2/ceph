@@ -1371,7 +1371,10 @@ public:
     // woo
     s->user = user;
 
-    prefix = rgw_fh->full_object_name() + path;
+    prefix = rgw_fh->full_object_name();
+    if (prefix.length() > 0)
+      prefix += "/";
+    prefix += path;
     delimiter = '/';
 
     return 0;
