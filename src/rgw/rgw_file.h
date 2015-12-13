@@ -821,7 +821,7 @@ public:
 			     << __func__ << " "
 			     << "list uri=" << s->relative_uri << " "
 			     << " prefix=" << prefix << " "
-			     << " cpref=" << sref << " (not chomped)"
+			     << " cpref=" << sref
 			     << dendl;
 
       this->operator()(sref.data(), sref.data(), (ix == size-1) ? true : false);
