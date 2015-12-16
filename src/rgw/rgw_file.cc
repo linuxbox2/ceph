@@ -235,8 +235,89 @@ done:
 } /* exec_continue */
 
 int RGWWriteRequest::exec_finish()
+
 {
-  return 0;
+  bufferlist bl, aclbl;
+  map<string, bufferlist> attrs;
+  map<string, string>::iterator iter;
+  char calc_md5[CEPH_CRYPTO_MD5_DIGESTSIZE * 2 + 1];
+  unsigned char m[CEPH_CRYPTO_MD5_DIGESTSIZE];
+  struct req_state* s = get_state();
+
+  s->obj_size = ofs; // XXX check ofs
+  perfcounter->inc(l_rgw_put_b, s->obj_size);
+
+  op_ret = get_store()->check_quota(s->bucket_owner.get_id(), s->bucket,
+				    user_quota, bucket_quota, s->obj_size);
+  if (op_ret < 0) {
+    goto done;
+  }
+
+  if (need_calc_md5) {
+    processor->complete_hash(&hash);
+    hash.Final(m);
+
+    buf_to_hex(m, CEPH_CRYPTO_MD5_DIGESTSIZE, calc_md5);
+    etag = calc_md5;
+    /* check against supplied MD5 check skipped */
+  }
+
+  policy.encode(aclbl);
+
+  attrs[RGW_ATTR_ACL] = aclbl;
+  if (obj_manifest) {
+    bufferlist manifest_bl;
+    string manifest_obj_prefix;
+    string manifest_bucket;
+
+    char etag_buf[CEPH_CRYPTO_MD5_DIGESTSIZE];
+    char etag_buf_str[CEPH_CRYPTO_MD5_DIGESTSIZE * 2 + 16];
+
+    manifest_bl.append(obj_manifest, strlen(obj_manifest) + 1);
+    attrs[RGW_ATTR_USER_MANIFEST] = manifest_bl;
+    user_manifest_parts_hash = &hash;
+    string prefix_str = obj_manifest;
+    int pos = prefix_str.find('/');
+    if (pos < 0) {
+      ldout(s->cct, 0) << "bad user manifest, missing slash separator: "
+		       << obj_manifest << dendl;
+      goto done;
+    }
+
+    manifest_bucket = prefix_str.substr(0, pos);
+    manifest_obj_prefix = prefix_str.substr(pos + 1);
+
+    hash.Final((byte *)etag_buf);
+    buf_to_hex((const unsigned char *)etag_buf, CEPH_CRYPTO_MD5_DIGESTSIZE,
+	      etag_buf_str);
+
+    ldout(s->cct, 0) << __func__ << ": calculated md5 for user manifest: "
+		     << etag_buf_str << dendl;
+    etag = etag_buf_str;
+  }
+  if (supplied_etag && etag.compare(supplied_etag) != 0) {
+    op_ret = -ERR_UNPROCESSABLE_ENTITY;
+    goto done;
+  }
+  bl.append(etag.c_str(), etag.size() + 1);
+  attrs[RGW_ATTR_ETAG] = bl;
+
+  for (iter = s->generic_attrs.begin(); iter != s->generic_attrs.end();
+       ++iter) {
+    bufferlist& attrbl = attrs[iter->first];
+    const string& val = iter->second;
+    attrbl.append(val.c_str(), val.size() + 1);
+  }
+
+  rgw_get_request_metadata(s->cct, s->info, attrs);
+
+  op_ret = processor->complete(etag, &mtime, 0, attrs, if_match, if_nomatch);
+
+done:
+  dispose_processor(processor);
+  perfcounter->tinc(l_rgw_put_lat,
+                   (ceph_clock_now(s->cct) - s->time));
+  return op_ret;
 } /* exec_finish */
 
 /* librgw */

@@ -20,6 +20,8 @@
 #include "xxhash.h"
 #include "include/buffer.h"
 #include "common/cohort_lru.h"
+#include "common/utf8.h"
+#include "common/mime.h"
 #include "rgw_common.h"
 #include "rgw_user.h"
 #include "rgw_lib.h"
