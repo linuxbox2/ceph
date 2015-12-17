@@ -119,8 +119,8 @@ int RGWFileHandle::write(uint64_t off, size_t len, size_t *bytes_written,
     /* start */
     std::string object_name = full_object_name();
     f->write_req =
-      new RGWWriteRequest(fs->get_context(), fs->get_user(), bucket_name(),
-			  object_name);
+      new RGWWriteRequest(fs->get_context(), fs->get_user(), this,
+			  bucket_name(), object_name);
     rc = librgw.get_fe()->start_req(f->write_req);
   }
 
@@ -339,6 +339,9 @@ int RGWWriteRequest::exec_finish()
   rgw_get_request_metadata(s->cct, s->info, attrs);
 
   op_ret = processor->complete(etag, &mtime, 0, attrs, if_match, if_nomatch);
+  if (! op_ret) {
+    rgw_fh->set_mtime({mtime, 0});
+  }
 
 done:
   dispose_processor(processor);
