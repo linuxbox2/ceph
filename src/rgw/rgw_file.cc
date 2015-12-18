@@ -323,10 +323,6 @@ int RGWWriteRequest::exec_finish()
 		     << etag_buf_str << dendl;
     etag = etag_buf_str;
   }
-  if (supplied_etag && etag.compare(supplied_etag) != 0) {
-    op_ret = -ERR_UNPROCESSABLE_ENTITY;
-    goto done;
-  }
   bl.append(etag.c_str(), etag.size() + 1);
   attrs[RGW_ATTR_ETAG] = bl;
 
