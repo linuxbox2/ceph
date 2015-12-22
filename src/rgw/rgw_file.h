@@ -144,6 +144,9 @@ namespace rgw {
      * w/90% of file names <= 31 (Yifan Wang, CMU) */
     using dirent_string = basic_sstring<char, uint16_t, 32>;
 
+    using marker_cache_t = flat_map<uint64_t, dirent_string>;
+    using name_cache_t = flat_map<dirent_string, uint8_t>;
+
     struct state {
       uint64_t dev;
       size_t size;
@@ -161,9 +164,22 @@ namespace rgw {
     };
 
     struct directory {
+
+      static constexpr uint32_t FLAG_NONE =     0x0000;
+      static constexpr uint32_t FLAG_CACHED =   0x0001;
+      static constexpr uint32_t FLAG_OVERFLOW = 0x0002;
+
       uint32_t flags;
-      flat_map<uint64_t, dirent_string> marker_cache;
-      directory() : flags(0) {}
+      marker_cache_t marker_cache;
+      name_cache_t name_cache;
+
+      directory() : flags(FLAG_NONE) {}
+
+      void set_overflow() {
+	marker_cache.clear();
+	name_cache.clear();
+	flags |= FLAG_OVERFLOW;
+      }
     };
 
     boost::variant<file, directory> variant_type;
@@ -331,12 +347,22 @@ namespace rgw {
       }
     }
 
-    void add_marker(uint64_t off, const boost::string_ref& marker) {
+    void add_marker(uint64_t off, const boost::string_ref& marker,
+		    uint8_t obj_type) {
       using std::get;
       directory* d = get<directory>(&variant_type);
       if (d) {
+	unique_lock guard(mtx);
 	d->marker_cache.insert(
-	  flat_map<uint64_t, dirent_string>::value_type(off, marker.data()));
+	  marker_cache_t::value_type(off, marker.data()));
+	/* 90% of directories hold <= 32 entries (Yifan Wang, CMU),
+	 * but go big */
+	if (d->name_cache.size() < 128) {
+	  d->name_cache.insert(
+	    name_cache_t::value_type(marker.data(), obj_type));
+	} else {
+	  d->set_overflow(); // too many
+	}
       }
     }
 
@@ -788,12 +814,11 @@ public:
     // do nothing
   }
 
-  int operator()(const boost::string_ref& name,
-		const boost::string_ref& marker) {
+  int operator()(const boost::string_ref& name, const boost::string_ref& marker) {
     uint64_t off = XXH64(name.data(), name.length(), fh_key::seed);
     *offset = off;
     /* update traversal cache */
-    rgw_fh->add_marker(off, marker);
+    rgw_fh->add_marker(off, marker, RGW_FS_TYPE_DIRECTORY);
     rcb(name.data(), cb_arg, (*offset)++);
     return 0;
   }
@@ -864,14 +889,14 @@ public:
     return 0;
   }
 
-  int operator()(const boost::string_ref name,
-		const boost::string_ref marker) {
+  int operator()(const boost::string_ref name, const boost::string_ref marker,
+		uint8_t type) {
     /* hash offset of name in parent (short name) for NFS readdir cookie */
     std::string sname{name};
     uint64_t off = XXH64(name.data(), name.length(), fh_key::seed);
     *offset = off;
     /* update traversal cache */
-    rgw_fh->add_marker(off, marker);
+    rgw_fh->add_marker(off, marker, type);
     rcb(name.data(), cb_arg, off);
     return 0;
   }
@@ -909,7 +934,7 @@ public:
 			     << dendl;
 
       /* call me maybe */
-      this->operator()(sref, sref);
+      this->operator()(sref, sref, RGW_FS_TYPE_FILE);
       ++ix;
     }
     for (auto& iter : common_prefixes) {
@@ -938,7 +963,7 @@ public:
 			     << " cpref=" << sref
 			     << dendl;
 
-      this->operator()(sref, sref);
+      this->operator()(sref, sref, RGW_FS_TYPE_DIRECTORY);
       ++ix;
     }
   }
