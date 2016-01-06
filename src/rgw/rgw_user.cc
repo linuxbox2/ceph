@@ -50,12 +50,14 @@ int rgw_user_sync_all_stats(RGWRados *store, const string& user_id)
   CephContext *cct = store->ctx();
   size_t max_entries = cct->_conf->rgw_list_buckets_max_chunk;
   bool done;
+  bool is_truncated;
   string marker;
   int ret;
 
   do {
     RGWUserBuckets user_buckets;
-    ret = rgw_read_user_buckets(store, user_id, user_buckets, marker, max_entries, false);
+    ret = rgw_read_user_buckets(store, user_id, user_buckets, marker,
+				max_entries, false, &is_truncated);
     if (ret < 0) {
       ldout(cct, 0) << "failed to read user buckets: ret=" << ret << dendl;
       return ret;
@@ -400,13 +402,15 @@ int rgw_delete_user(RGWRados *store, RGWUserInfo& info, RGWObjVersionTracker& ob
   vector<rgw_bucket> buckets_vec;
 
   bool done;
+  bool is_truncated;
   int ret;
   CephContext *cct = store->ctx();
   size_t max_buckets = cct->_conf->rgw_list_buckets_max_chunk;
 
   do {
     RGWUserBuckets user_buckets;
-    ret = rgw_read_user_buckets(store, info.user_id, user_buckets, marker, max_buckets, false);
+    ret = rgw_read_user_buckets(store, info.user_id, user_buckets, marker,
+				max_buckets, false, &is_truncated);
     if (ret < 0)
       return ret;
 
@@ -1901,12 +1905,14 @@ int RGWUser::execute_remove(RGWUserAdminOpState& op_state, std::string *err_msg)
   }
 
   bool done;
+  bool is_truncated;
   string marker;
   CephContext *cct = store->ctx();
   size_t max_buckets = cct->_conf->rgw_list_buckets_max_chunk;
   do {
     RGWUserBuckets buckets;
-    ret = rgw_read_user_buckets(store, uid, buckets, marker, max_buckets, false);
+    ret = rgw_read_user_buckets(store, uid, buckets, marker, max_buckets,
+				false, &is_truncated);
     if (ret < 0) {
       set_err_msg(err_msg, "unable to read user bucket info");
       return ret;
@@ -2056,11 +2062,13 @@ int RGWUser::execute_modify(RGWUserAdminOpState& op_state, std::string *err_msg)
     }
 
     bool done;
+    bool is_truncated;
     string marker;
     CephContext *cct = store->ctx();
     size_t max_buckets = cct->_conf->rgw_list_buckets_max_chunk;
     do {
-      ret = rgw_read_user_buckets(store, user_id, buckets, marker, max_buckets, false);
+      ret = rgw_read_user_buckets(store, user_id, buckets, marker, max_buckets,
+				  false, &is_truncated);
       if (ret < 0) {
         set_err_msg(err_msg, "could not get buckets for uid:  " + user_id);
         return ret;

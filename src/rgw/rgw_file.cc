@@ -728,13 +728,14 @@ void dump_buckets(void) {
   uint64_t bucket_count, bucket_objcount;
   RGWUserBuckets buckets;
   uint64_t max_buckets = g_ceph_context->_conf->rgw_list_buckets_max_chunk;
+  bool is_truncated;
 
   RGWRados* store = rgwlib.get_store();
 
   /* XXX check offsets */
   uint64_t ix = 3;
   int rc = rgw_read_user_buckets(store, "testuser", buckets, marker,
-				max_buckets, true);
+				 max_buckets, true, &is_truncated);
   if (rc == 0) {
     bucket_count = 0;
     bucket_objcount = 0;
