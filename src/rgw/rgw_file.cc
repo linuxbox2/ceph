@@ -30,7 +30,7 @@
 
 namespace rgw {
 
-  extern RGWLib librgw;
+  extern RGWLib rgwlib;
 
   const string RGWFileHandle::root_name = "/";
 
@@ -43,7 +43,7 @@ namespace rgw {
     std::string bucket_name{path};
     RGWStatBucketRequest req(cct, get_user(), bucket_name);
 
-    int rc = librgw.get_fe()->execute_req(&req);
+    int rc = rgwlib.get_fe()->execute_req(&req);
     if ((rc == 0) &&
 	(req.get_ret() == 0) &&
 	(req.matched())) {
@@ -85,7 +85,7 @@ namespace rgw {
 	RGWStatObjRequest req(cct, get_user(),
 			      parent->bucket_name(), object_name,
 			      RGWStatObjRequest::FLAG_NONE);
-	int rc = librgw.get_fe()->execute_req(&req);
+	int rc = rgwlib.get_fe()->execute_req(&req);
 	if ((rc == 0) &&
 	    (req.get_ret() == 0)) {
 	  fhr = lookup_fh(parent, path, RGWFileHandle::FLAG_NONE);
@@ -96,7 +96,7 @@ namespace rgw {
       case 1:
       {
 	RGWStatLeafRequest req(cct, get_user(), parent, object_name);
-	int rc = librgw.get_fe()->execute_req(&req);
+	int rc = rgwlib.get_fe()->execute_req(&req);
 	if ((rc == 0) &&
 	    (req.get_ret() == 0)) {
 	  if (req.matched) {
@@ -140,7 +140,7 @@ namespace rgw {
     /* force cache drain, forces objects to evict */
     fh_cache.drain(ObjUnref(this),
 		  RGWFileHandle::FHCache::FLAG_LOCK);
-    librgw.get_fe()->get_process()->unregister_fs(this);
+    rgwlib.get_fe()->get_process()->unregister_fs(this);
     rele();
   } /* RGWLibFS::close */
 
@@ -222,7 +222,7 @@ namespace rgw {
     if (is_root()) {
       RGWListBucketsRequest req(cct, fs->get_user(), this, rcb, cb_arg,
 				offset);
-      rc = librgw.get_fe()->execute_req(&req);
+      rc = rgwlib.get_fe()->execute_req(&req);
       if (! rc) {
 	parent->set_nlink(3 + d->name_cache.size());
 	state.atime = now;
@@ -233,7 +233,7 @@ namespace rgw {
     } else {
       rgw_obj_key marker{"", ""};
       RGWReaddirRequest req(cct, fs->get_user(), this, rcb, cb_arg, offset);
-      rc = librgw.get_fe()->execute_req(&req);
+      rc = rgwlib.get_fe()->execute_req(&req);
       if (! rc) {
 	state.atime = now;
 	parent->set_nlink(3 + d->name_cache.size());
@@ -266,7 +266,7 @@ namespace rgw {
       f->write_req =
 	new RGWWriteRequest(fs->get_context(), fs->get_user(), this,
 			    bucket_name(), object_name);
-      rc = librgw.get_fe()->start_req(f->write_req);
+      rc = rgwlib.get_fe()->start_req(f->write_req);
     }
 
     f->write_req->put_data(off, bl);
@@ -287,7 +287,7 @@ namespace rgw {
     int rc = 0;
     file* f = get<file>(&variant_type);
     if (f && (f->write_req)) {
-      rc = librgw.get_fe()->finish_req(f->write_req);
+      rc = rgwlib.get_fe()->finish_req(f->write_req);
       if (! rc) {
 	rc = f->write_req->get_ret();
       }
@@ -508,14 +508,14 @@ extern "C" {
 				  sec_key);
   assert(new_fs);
 
-  rc = new_fs->authorize(librgw.get_store());
+  rc = new_fs->authorize(rgwlib.get_store());
   if (rc != 0) {
     delete new_fs;
     return -EINVAL;
   }
 
   /* register fs for shared gc */
-  librgw.get_fe()->get_process()->register_fs(new_fs);
+  rgwlib.get_fe()->get_process()->register_fs(new_fs);
 
   struct rgw_fs *fs = new_fs->get_fs();
   fs->rgw = rgw;
@@ -640,7 +640,7 @@ int rgw_mkdir(struct rgw_fs *rgw_fs,
     uri += "/"; /* XXX */
     uri += name;
     RGWCreateBucketRequest req(cct, fs->get_user(), uri);
-    rc = librgw.get_fe()->execute_req(&req);
+    rc = rgwlib.get_fe()->execute_req(&req);
     rc2 = req.get_ret();
   } else {
     /* create an object representing the directory (naive version) */
@@ -650,7 +650,7 @@ int rgw_mkdir(struct rgw_fs *rgw_fs,
     string dir_name = rgw_fh->relative_object_name() + "/";
     RGWPutObjRequest req(cct, fs->get_user(), rgw_fh->bucket_name(),
 			 dir_name, bl);
-    rc = librgw.get_fe()->execute_req(&req);
+    rc = rgwlib.get_fe()->execute_req(&req);
     rc2 = req.get_ret();
   }
 
@@ -697,7 +697,7 @@ int rgw_unlink(struct rgw_fs *rgw_fs, struct rgw_file_handle *parent_fh,
     string uri = "/";
     uri += name;
     RGWDeleteBucketRequest req(cct, fs->get_user(), uri);
-    rc = librgw.get_fe()->execute_req(&req);
+    rc = rgwlib.get_fe()->execute_req(&req);
   } else {
     /*
      * leaf object
@@ -713,7 +713,7 @@ int rgw_unlink(struct rgw_fs *rgw_fs, struct rgw_file_handle *parent_fh,
       std::string oname = rgw_fh->relative_object_name();
       RGWDeleteObjRequest req(cct, fs->get_user(), parent->bucket_name(),
 			      oname);
-      rc = librgw.get_fe()->execute_req(&req);
+      rc = rgwlib.get_fe()->execute_req(&req);
       /* release */
       (void) rgw_fh_rele(rgw_fs, fh, 0 /* flags */);
     }
@@ -729,7 +729,7 @@ void dump_buckets(void) {
   RGWUserBuckets buckets;
   uint64_t max_buckets = g_ceph_context->_conf->rgw_list_buckets_max_chunk;
 
-  RGWRados* store = librgw.get_store();
+  RGWRados* store = rgwlib.get_store();
 
   /* XXX check offsets */
   uint64_t ix = 3;
@@ -857,7 +857,7 @@ int rgw_getattr(struct rgw_fs *rgw_fs,
     RGWStatObjRequest req(cct, fs->get_user(), bname, oname,
 			  RGWStatObjRequest::FLAG_NONE);
 
-    int rc = librgw.get_fe()->execute_req(&req);
+    int rc = rgwlib.get_fe()->execute_req(&req);
     if ((rc != 0) ||
 	(req.get_ret() != 0)) {
       /* XXX EINVAL is likely illegal protocol return--if the object
@@ -968,7 +968,7 @@ int rgw_read(struct rgw_fs *rgw_fs,
 		    rgw_fh->object_name(), offset, length,
 		    buffer);
 
-  int rc = librgw.get_fe()->execute_req(&req);
+  int rc = rgwlib.get_fe()->execute_req(&req);
   if ((rc == 0) &&
       (req.get_ret() == 0)) {
     *bytes_read = req.nread;
@@ -1042,7 +1042,7 @@ int rgw_readv(struct rgw_fs *rgw_fs,
 		      bl);
   req.do_hexdump = false;
 
-  rc = librgw.get_fe()->execute_req(&req);
+  rc = rgwlib.get_fe()->execute_req(&req);
 
   if (! rc) {
     RGWReadV* rdv = static_cast<RGWReadV*>(
@@ -1101,7 +1101,7 @@ int rgw_readv(struct rgw_fs *rgw_fs,
   RGWPutObjRequest req(cct, fs->get_user(), rgw_fh->bucket_name(),
 		       oname, bl);
 
-  int rc = librgw.get_fe()->execute_req(&req);
+  int rc = rgwlib.get_fe()->execute_req(&req);
 
   /* XXX update size (in request) */
 
