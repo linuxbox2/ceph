@@ -348,11 +348,6 @@ namespace rgw {
     }
 
     inline std::string relative_object_name() {
-      return full_object_name(false /* omit_bucket */);
-    }
-
-
-    inline std::string search_prefix() {
       return full_object_name(true /* omit_bucket */);
     }
     
@@ -933,7 +928,7 @@ public:
     // woo
     s->user = user;
 
-    prefix = rgw_fh->search_prefix();
+    prefix = rgw_fh->relative_object_name();
     if (prefix.length() > 0)
       prefix += "/";
     delimiter = '/';
@@ -1574,7 +1569,7 @@ public:
     // woo
     s->user = user;
 
-    prefix = rgw_fh->search_prefix();
+    prefix = rgw_fh->relative_object_name();
     if (prefix.length() > 0)
       prefix += "/";
     prefix += path;
