@@ -43,14 +43,14 @@ public:
 void BucketIndexAioManager::do_completion(int id) {
   Mutex::Locker l(lock);
 
-  map<int, librados::AioCompletion*>::iterator iter = pendings.find(id);
+  flat_map<int, librados::AioCompletion*>::iterator iter = pendings.find(id);
   assert(iter != pendings.end());
   completions[id] = iter->second;
   pendings.erase(iter);
 
   // If the caller needs a list of finished objects, store them
   // for further processing
-  map<int, string>::iterator miter = pending_objs.find(id);
+  flat_map<int, string>::iterator miter = pending_objs.find(id);
   if (miter != pending_objs.end()) {
     completion_objs[id] = miter->second;
     pending_objs.erase(miter);
@@ -60,7 +60,7 @@ void BucketIndexAioManager::do_completion(int id) {
 }
 
 bool BucketIndexAioManager::wait_for_completions(int valid_ret_code,
-    int *num_completions, int *ret_code, map<int, string> *objs) {
+    int *num_completions, int *ret_code, flat_map<int, string> *objs) {
   lock.Lock();
   if (pendings.empty() && completions.empty()) {
     lock.Unlock();
@@ -73,11 +73,11 @@ bool BucketIndexAioManager::wait_for_completions(int valid_ret_code,
   }
 
   // Clear the completed AIOs
-  map<int, librados::AioCompletion*>::iterator iter = completions.begin();
+  flat_map<int, librados::AioCompletion*>::iterator iter = completions.begin();
   for (; iter != completions.end(); ++iter) {
     int r = iter->second->get_return_value();
     if (objs && r == 0) { /* update list of successfully completed objs */
-      map<int, string>::iterator liter = completion_objs.find(iter->first);
+      flat_map<int, string>::iterator liter = completion_objs.find(iter->first);
       if (liter != completion_objs.end()) {
         (*objs)[liter->first] = liter->second;
       }
@@ -128,7 +128,8 @@ int CLSRGWIssueBucketIndexInit::issue_op(int shard_id, const string& oid)
 void CLSRGWIssueBucketIndexInit::cleanup()
 {
   // Do best effort removal
-  for (map<int, string>::iterator citer = objs_container.begin(); citer != iter; ++citer) {
+  for (flat_map<int, string>::iterator citer = objs_container.begin();
+       citer != iter; ++citer) {
     io_ctx.remove(citer->second);
   }
 }
@@ -138,8 +139,10 @@ int CLSRGWIssueSetTagTimeout::issue_op(int shard_id, const string& oid)
   return issue_bucket_set_tag_timeout_op(io_ctx, oid, tag_timeout, &manager);
 }
 
-void cls_rgw_bucket_prepare_op(ObjectWriteOperation& o, RGWModifyOp op, string& tag,
-                               const cls_rgw_obj_key& key, const string& locator, bool log_op,
+void cls_rgw_bucket_prepare_op(ObjectWriteOperation& o, RGWModifyOp op,
+			       string& tag,
+                               const cls_rgw_obj_key& key,
+			       const string& locator, bool log_op,
                                uint16_t bilog_flags)
 {
   struct rgw_cls_obj_prepare_op call;
@@ -326,9 +329,12 @@ int cls_rgw_bucket_unlink_instance(librados::IoCtx& io_ctx, const string& oid,
   return 0;
 }
 
-int cls_rgw_get_olh_log(IoCtx& io_ctx, string& oid, librados::ObjectReadOperation& op, const cls_rgw_obj_key& olh, uint64_t ver_marker,
+int cls_rgw_get_olh_log(IoCtx& io_ctx, string& oid,
+			librados::ObjectReadOperation& op,
+			const cls_rgw_obj_key& olh, uint64_t ver_marker,
                         const string& olh_tag,
-                        map<uint64_t, vector<struct rgw_bucket_olh_log_entry> > *log, bool *is_truncated)
+                        flat_map<uint64_t, vector<struct rgw_bucket_olh_log_entry> > *log,
+			bool *is_truncated)
 {
   bufferlist in, out;
   struct rgw_cls_read_olh_log_op call;
@@ -513,7 +519,9 @@ int cls_rgw_get_dir_header_async(IoCtx& io_ctx, string& oid, RGWGetDirHeader_CB 
 
 int cls_rgw_usage_log_read(IoCtx& io_ctx, string& oid, string& user,
                            uint64_t start_epoch, uint64_t end_epoch, uint32_t max_entries,
-                           string& read_iter, map<rgw_user_bucket, rgw_usage_log_entry>& usage,
+                           string& read_iter,
+			   flat_map<rgw_user_bucket,
+			   rgw_usage_log_entry>& usage,
                            bool *is_truncated)
 {
   if (is_truncated)

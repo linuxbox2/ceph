@@ -1,3 +1,6 @@
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
+// vim: ts=8 sw=2 smarttab
+
 #ifndef CEPH_JSON_H
 #define CEPH_JSON_H
 
@@ -186,6 +189,23 @@ void decode_json_obj(map<K, V>& m, JSONObj *obj)
 }
 
 template<class K, class V>
+void decode_json_obj(flat_map<K, V>& m, JSONObj *obj)
+{
+  m.clear();
+
+  JSONObjIter iter = obj->find_first();
+
+  for (; !iter.end(); ++iter) {
+    K key;
+    V val;
+    JSONObj *o = *iter;
+    JSONDecoder::decode_json("key", key, o);
+    JSONDecoder::decode_json("val", val, o);
+    m[key] = val;
+  }
+}
+
+template<class K, class V>
 void decode_json_obj(multimap<K, V>& m, JSONObj *obj)
 {
   m.clear();
@@ -311,6 +331,21 @@ static void encode_json(const char *name, const std::map<K, V>& m, ceph::Formatt
 {
   f->open_array_section(name);
   for (typename std::map<K, V>::const_iterator i = m.begin(); i != m.end(); ++i) {
+    f->open_object_section("entry");
+    encode_json("key", i->first, f);
+    encode_json("val", i->second, f);
+    f->close_section();
+  }
+  f->close_section();
+}
+
+template<class K, class V>
+static void encode_json(const char *name, const flat_map<K, V>& m,
+			ceph::Formatter *f)
+{
+  f->open_array_section(name);
+  for (typename flat_map<K, V>::const_iterator i = m.begin(); i != m.end();
+       ++i) {
     f->open_object_section("entry");
     encode_json("key", i->first, f);
     encode_json("val", i->second, f);

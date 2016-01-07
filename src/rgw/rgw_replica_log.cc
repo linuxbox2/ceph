@@ -203,32 +203,36 @@ int RGWReplicaBucketLogger::update_bound(const rgw_bucket& bucket, int shard_id,
   BucketIndexShardsManager sm;
   int ret = sm.from_string(marker, shard_id);
   if (ret < 0) {
-    ldout(cct, 0) << "ERROR: could not parse shards marker: " << marker << dendl;
+    ldout(cct, 0) << "ERROR: could not parse shards marker: " << marker
+		  << dendl;
     return ret;
   }
 
-  map<int, string>& vals = sm.get();
+  flat_map<int, string>& vals = sm.get();
 
   ret = 0;
 
-  map<int, string>::iterator iter;
+  flat_map<int, string>::iterator iter;
   for (iter = vals.begin(); iter != vals.end(); ++iter) {
-    ldout(cct, 20) << "updating bound: bucket=" << bucket << " shard=" << iter->first << " marker=" << marker << dendl;
-    int r = RGWReplicaLogger::update_bound(obj_name(bucket, iter->first, true), pool,
-                                          daemon_id, iter->second, time, entries,
-                                          true /* need to exist */);
-
+    ldout(cct, 20) << "updating bound: bucket=" << bucket << " shard="
+		   << iter->first << " marker=" << marker << dendl;
+    int r = RGWReplicaLogger::update_bound(obj_name(bucket, iter->first, true),
+					   pool, daemon_id, iter->second, time,
+					   entries, true /* need to exist */);
     if (r == -ENOENT) {
       RGWReplicaBounds bounds;
       r = convert_old_bounds(bucket, -1, bounds);
       if (r < 0 && r != -ENOENT) {
         return r;
       }
-      r = RGWReplicaLogger::update_bound(obj_name(bucket, iter->first, true), pool,
-                                         daemon_id, marker, time, entries, false);
+      r = RGWReplicaLogger::update_bound(obj_name(bucket, iter->first, true),
+					 pool, daemon_id, marker, time, entries,
+					 false);
     }
     if (r < 0) {
-      ldout(cct, 0) << "failed to update bound: bucket=" << bucket << " shard=" << iter->first << " marker=" << marker << dendl;
+      ldout(cct, 0) << "failed to update bound: bucket=" << bucket
+		    << " shard=" << iter->first << " marker=" << marker
+		    << dendl;
       ret = r;
     }
   }

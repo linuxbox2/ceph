@@ -169,32 +169,35 @@ static int log_index_operation(cls_method_context_t hctx, cls_rgw_obj_key& obj_k
 /*
  * read list of objects, skips objects in the ugly namespace
  */
-static int get_obj_vals(cls_method_context_t hctx, const string& start, const string& filter_prefix,
-                        int num_entries, map<string, bufferlist> *pkeys)
+static int get_obj_vals(cls_method_context_t hctx, const string& start,
+			const string& filter_prefix,
+                        int num_entries, flat_map<string, bufferlist> *pkeys)
 {
-  int ret = cls_cxx_map_get_vals(hctx, start, filter_prefix, num_entries, pkeys);
+  int ret = cls_cxx_map_get_vals(hctx, start, filter_prefix, num_entries,
+				pkeys);
   if (ret < 0)
     return ret;
 
   if (pkeys->empty())
     return 0;
 
-  map<string, bufferlist>::reverse_iterator last_element = pkeys->rbegin();
+  flat_map<string, bufferlist>::reverse_iterator last_element = pkeys->rbegin();
   if ((unsigned char)last_element->first[0] < BI_PREFIX_CHAR) {
     /* nothing to see here, move along */
     return 0;
   }
 
-  map<string, bufferlist>::iterator first_element = pkeys->begin();
+  flat_map<string, bufferlist>::iterator first_element = pkeys->begin();
   if ((unsigned char)first_element->first[0] > BI_PREFIX_CHAR) {
     return 0;
   }
 
   /* let's rebuild the list, only keep entries we're interested in */
-  map<string, bufferlist> old_keys;
+  flat_map<string, bufferlist> old_keys;
   old_keys.swap(*pkeys);
 
-  for (map<string, bufferlist>::iterator iter = old_keys.begin(); iter != old_keys.end(); ++iter) {
+  for (flat_map<string, bufferlist>::iterator iter = old_keys.begin();
+       iter != old_keys.end(); ++iter) {
     if ((unsigned char)iter->first[0] != BI_PREFIX_CHAR) {
       (*pkeys)[iter->first] = iter->second;
     }
@@ -203,16 +206,18 @@ static int get_obj_vals(cls_method_context_t hctx, const string& start, const st
   if (num_entries == (int)pkeys->size())
     return 0;
 
-  map<string, bufferlist> new_keys;
+  flat_map<string, bufferlist> new_keys;
   char c[] = { (char)(BI_PREFIX_CHAR + 1), 0 };
   string new_start = c;
 
   /* now get some more keys */
-  ret = cls_cxx_map_get_vals(hctx, new_start, filter_prefix, num_entries - pkeys->size(), &new_keys);
+  ret = cls_cxx_map_get_vals(hctx, new_start, filter_prefix,
+			    num_entries - pkeys->size(), &new_keys);
   if (ret < 0)
     return ret;
 
-  for (map<string, bufferlist>::iterator iter = new_keys.begin(); iter != new_keys.end(); ++iter) {
+  for (flat_map<string, bufferlist>::iterator iter = new_keys.begin();
+       iter != new_keys.end(); ++iter) {
     (*pkeys)[iter->first] = iter->second;
   }
 
@@ -422,15 +427,16 @@ int rgw_bucket_list(cls_method_context_t hctx, bufferlist *in, bufferlist *out)
 
   bufferlist bl;
 
-  map<string, bufferlist> keys;
+  flat_map<string, bufferlist> keys;
   string start_key;
   encode_list_index_key(hctx, op.start_obj, &start_key);
-  rc = get_obj_vals(hctx, start_key, op.filter_prefix, op.num_entries + 1, &keys);
+  rc = get_obj_vals(hctx, start_key, op.filter_prefix, op.num_entries + 1,
+		    &keys);
   if (rc < 0)
     return rc;
 
-  std::map<string, struct rgw_bucket_dir_entry>& m = new_dir.m;
-  std::map<string, bufferlist>::iterator kiter = keys.begin();
+  flat_map<string, struct rgw_bucket_dir_entry>& m = new_dir.m;
+  flat_map<string, bufferlist>::iterator kiter = keys.begin();
   uint32_t i;
 
   bool done = false;
@@ -448,7 +454,8 @@ int rgw_bucket_list(cls_method_context_t hctx, bufferlist *in, bufferlist *out)
     try {
       ::decode(entry, eiter);
     } catch (buffer::error& err) {
-      CLS_LOG(1, "ERROR: rgw_bucket_list(): failed to decode entry, key=%s\n", kiter->first.c_str());
+      CLS_LOG(1, "ERROR: rgw_bucket_list(): failed to decode entry, key=%s\n",
+	      kiter->first.c_str());
       return -EINVAL;
     }
 
@@ -489,7 +496,7 @@ static int check_index(cls_method_context_t hctx, struct rgw_bucket_dir_header *
 
   bufferlist bl;
 
-  map<string, bufferlist> keys;
+  flat_map<string, bufferlist> keys;
   string start_obj;
   string filter_prefix;
 
@@ -501,7 +508,7 @@ static int check_index(cls_method_context_t hctx, struct rgw_bucket_dir_header *
     if (rc < 0)
       return rc;
 
-    std::map<string, bufferlist>::iterator kiter = keys.begin();
+    flat_map<string, bufferlist>::iterator kiter = keys.begin();
     for (; kiter != keys.end(); ++kiter) {
       if (!bi_is_objs_index(kiter->first)) {
         done = true;
@@ -1628,7 +1635,8 @@ static int rgw_bucket_unlink_instance(cls_method_context_t hctx, bufferlist *in,
   return write_bucket_header(hctx, &header); /* updates header version */
 }
 
-static int rgw_bucket_read_olh_log(cls_method_context_t hctx, bufferlist *in, bufferlist *out)
+static int rgw_bucket_read_olh_log(cls_method_context_t hctx, bufferlist *in,
+				  bufferlist *out)
 {
   // decode request
   rgw_cls_read_olh_log_op op;
@@ -1662,13 +1670,15 @@ static int rgw_bucket_read_olh_log(cls_method_context_t hctx, bufferlist *in, bu
   rgw_cls_read_olh_log_ret op_ret;
 
 #define MAX_OLH_LOG_ENTRIES 1000
-  map<uint64_t, vector<rgw_bucket_olh_log_entry> >& log = olh_data_entry.pending_log;
+  flat_map<uint64_t, vector<rgw_bucket_olh_log_entry> >& log =
+    olh_data_entry.pending_log;
 
   if (log.begin()->first > op.ver_marker && log.size() <= MAX_OLH_LOG_ENTRIES) {
     op_ret.log = log;
     op_ret.is_truncated = false;
   } else {
-    map<uint64_t, vector<rgw_bucket_olh_log_entry> >::iterator iter = log.upper_bound(op.ver_marker);
+    flat_map<uint64_t, vector<rgw_bucket_olh_log_entry> >::iterator iter =
+      log.upper_bound(op.ver_marker);
 
     for (int i = 0; i < MAX_OLH_LOG_ENTRIES && iter != log.end(); ++i, ++iter) {
       op_ret.log[iter->first] = iter->second;
@@ -1714,11 +1724,13 @@ static int rgw_bucket_trim_olh_log(cls_method_context_t hctx, bufferlist *in, bu
   }
 
   /* remove all versions up to and including ver from the pending map */
-  map<uint64_t, vector<rgw_bucket_olh_log_entry> >& log = olh_data_entry.pending_log;
-  map<uint64_t, vector<rgw_bucket_olh_log_entry> >::iterator liter = log.begin();
+  flat_map<uint64_t, vector<rgw_bucket_olh_log_entry> >& log =
+    olh_data_entry.pending_log;
+  flat_map<uint64_t, vector<rgw_bucket_olh_log_entry> >::iterator liter =
+    log.begin();
   while (liter != log.end() && liter->first <= op.ver) {
-    map<uint64_t, vector<rgw_bucket_olh_log_entry> >::iterator rm_iter = liter;
-    ++liter;
+    flat_map<uint64_t, vector<rgw_bucket_olh_log_entry> >::iterator rm_iter =
+      liter; ++liter;
     log.erase(rm_iter);
   }
 
@@ -2659,7 +2671,7 @@ int rgw_user_usage_log_read(cls_method_context_t hctx, bufferlist *in, bufferlis
   }
 
   rgw_cls_usage_log_read_ret ret_info;
-  map<rgw_user_bucket, rgw_usage_log_entry> *usage = &ret_info.usage;
+  flat_map<rgw_user_bucket, rgw_usage_log_entry> *usage = &ret_info.usage;
   string iter = op.iter;
 #define MAX_ENTRIES 1000
   uint32_t max_entries = (op.max_entries ? op.max_entries : MAX_ENTRIES);

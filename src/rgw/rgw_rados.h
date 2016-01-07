@@ -10,12 +10,19 @@
 #include "common/RWLock.h"
 #include "rgw_common.h"
 #include "cls/rgw/cls_rgw_types.h"
+#include "cls/rgw/cls_rgw_client.h"
 #include "cls/version/cls_version_types.h"
 #include "cls/log/cls_log_types.h"
 #include "cls/statelog/cls_statelog_types.h"
 #include "rgw_log.h"
 #include "rgw_metadata.h"
 #include "rgw_rest_conn.h"
+
+/* XXX
+ * ASSERT_H somehow not defined after all the above (which bring
+ * in common/debug.h [e.g., dout])
+ */
+#include "include/assert.h"
 
 class RGWWatcher;
 class SafeTimer;
@@ -431,7 +438,6 @@ public:
 
     map<uint64_t, RGWObjManifestRule>::iterator rule_iter;
     map<uint64_t, RGWObjManifestRule>::iterator next_rule_iter;
-
     map<uint64_t, RGWObjManifestPart>::iterator explicit_iter;
 
     void init() {
@@ -1182,15 +1188,18 @@ class RGWRados
   int open_bucket_index_shard(rgw_bucket& bucket, librados::IoCtx& index_ctx,
       const string& obj_key, string *bucket_obj, int *shard_id);
   int open_bucket_index(rgw_bucket& bucket, librados::IoCtx& index_ctx,
-      map<int, string>& bucket_objs, int shard_id = -1, map<int, string> *bucket_instance_ids = NULL);
+			flat_map<int, string>& bucket_objs, int shard_id = -1,
+			flat_map<int, string>* bucket_instance_ids = NULL);
   template<typename T>
   int open_bucket_index(rgw_bucket& bucket, librados::IoCtx& index_ctx,
-                        map<int, string>& oids, map<int, T>& bucket_objs,
-                        int shard_id = -1, map<int, string> *bucket_instance_ids = NULL);
-  void build_bucket_index_marker(const string& shard_id_str, const string& shard_marker,
-      string *marker);
+                        flat_map<int, string>& oids,
+			flat_map<int, T>& bucket_objs, int shard_id = -1,
+			flat_map<int, string> *bucket_instance_ids = NULL);
+  void build_bucket_index_marker(const string& shard_id_str,
+				 const string& shard_marker, string *marker);
 
-  void get_bucket_instance_ids(RGWBucketInfo& bucket_info, int shard_id, map<int, string> *result);
+  void get_bucket_instance_ids(RGWBucketInfo& bucket_info, int shard_id,
+			       flat_map<int, string> *result);
 
   atomic64_t max_req_id;
   Mutex lock;
@@ -1368,8 +1377,10 @@ public:
 
   // log bandwidth info
   int log_usage(map<rgw_user_bucket, RGWUsageBatch>& usage_info);
-  int read_usage(string& user, uint64_t start_epoch, uint64_t end_epoch, uint32_t max_entries,
-                 bool *is_truncated, RGWUsageIter& read_iter, map<rgw_user_bucket, rgw_usage_log_entry>& usage);
+  int read_usage(string& user, uint64_t start_epoch, uint64_t end_epoch,
+		 uint32_t max_entries,
+                 bool *is_truncated, RGWUsageIter& read_iter,
+		 flat_map<rgw_user_bucket, rgw_usage_log_entry>& usage);
   int trim_usage(string& user, uint64_t start_epoch, uint64_t end_epoch);
 
   virtual int create_pool(rgw_bucket& bucket);
@@ -1945,12 +1956,15 @@ public:
                             const string& op_tag, struct rgw_bucket_dir_entry_meta *meta,
                             uint64_t olh_epoch);
   int bucket_index_unlink_instance(rgw_obj& obj_instance, const string& op_tag, uint64_t olh_epoch);
-  int bucket_index_read_olh_log(RGWObjState& state, rgw_obj& obj_instance, uint64_t ver_marker,
-                                map<uint64_t, vector<rgw_bucket_olh_log_entry> > *log, bool *is_truncated);
+  int bucket_index_read_olh_log(RGWObjState& state, rgw_obj& obj_instance,
+				uint64_t ver_marker,
+                                flat_map<uint64_t, vector<rgw_bucket_olh_log_entry> > *log, bool *is_truncated);
   int bucket_index_trim_olh_log(RGWObjState& obj_state, rgw_obj& obj_instance, uint64_t ver);
   int bucket_index_clear_olh(RGWObjState& state, rgw_obj& obj_instance);
-  int apply_olh_log(RGWObjectCtx& ctx, RGWObjState& obj_state, RGWBucketInfo& bucket_info, rgw_obj& obj,
-                    bufferlist& obj_tag, map<uint64_t, vector<rgw_bucket_olh_log_entry> >& log,
+  int apply_olh_log(RGWObjectCtx& ctx, RGWObjState& obj_state,
+		    RGWBucketInfo& bucket_info, rgw_obj& obj,
+                    bufferlist& obj_tag,
+		    flat_map<uint64_t, vector<rgw_bucket_olh_log_entry> >& log,
                     uint64_t *plast_ver);
   int update_olh(RGWObjectCtx& obj_ctx, RGWObjState *state, RGWBucketInfo& bucket_info, rgw_obj& obj);
   int set_olh(RGWObjectCtx& obj_ctx, RGWBucketInfo& bucket_info, rgw_obj& target_obj, bool delete_marker, rgw_bucket_dir_entry_meta *meta,
@@ -2038,7 +2052,9 @@ public:
                       uint32_t num_entries, bool list_versions, map<string, RGWObjEnt>& m,
                       bool *is_truncated, rgw_obj_key *last_entry,
                       bool (*force_check_filter)(const string&  name) = NULL);
-  int cls_bucket_head(rgw_bucket& bucket, map<string, struct rgw_bucket_dir_header>& headers, map<int, string> *bucket_instance_ids = NULL);
+  int cls_bucket_head(rgw_bucket& bucket,
+		      flat_map<string, struct rgw_bucket_dir_header>& headers,
+		      flat_map<int, string> *bucket_instance_ids = NULL);
   int cls_bucket_head_async(rgw_bucket& bucket, RGWGetDirHeader_CB *ctx, int *num_aio);
   int list_bi_log_entries(rgw_bucket& bucket, int shard_id, string& marker, uint32_t max, std::list<rgw_bi_log_entry>& result, bool *truncated);
   int trim_bi_log_entries(rgw_bucket& bucket, int shard_id, string& marker, string& end_marker);
@@ -2050,8 +2066,11 @@ public:
               list<rgw_cls_bi_entry> *entries, bool *is_truncated);
 
   int cls_obj_usage_log_add(const string& oid, rgw_usage_log_info& info);
-  int cls_obj_usage_log_read(string& oid, string& user, uint64_t start_epoch, uint64_t end_epoch, uint32_t max_entries,
-                             string& read_iter, map<rgw_user_bucket, rgw_usage_log_entry>& usage, bool *is_truncated);
+  int cls_obj_usage_log_read(string& oid, string& user, uint64_t start_epoch,
+			     uint64_t end_epoch, uint32_t max_entries,
+                             string& read_iter,
+			     flat_map<rgw_user_bucket,
+			     rgw_usage_log_entry>& usage, bool *is_truncated);
   int cls_obj_usage_log_trim(string& oid, string& user, uint64_t start_epoch, uint64_t end_epoch);
 
   void shard_name(const string& prefix, unsigned max_shards, const string& key, string& name);
@@ -2167,8 +2186,10 @@ public:
    * num_shards [in] - number of bucket index object shards.
    * bucket_objs [out] - filled by this method, a list of bucket index objects.
    */
-  void get_bucket_index_objects(const string& bucket_oid_base, uint32_t num_shards,
-      map<int, string>& bucket_objs, int shard_id = -1);
+  void get_bucket_index_objects(const string& bucket_oid_base,
+				uint32_t num_shards,
+				flat_map<int, string>& bucket_objs,
+				int shard_id = -1);
 
   /**
    * Get the bucket index object with the given base bucket index object and object key,

@@ -1,3 +1,6 @@
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
+// vim: ts=8 sw=2 smarttab
+
 #ifndef CEPH_CLS_RGW_OPS_H
 #define CEPH_CLS_RGW_OPS_H
 
@@ -262,7 +265,7 @@ WRITE_CLASS_ENCODER(rgw_cls_read_olh_log_op)
 
 struct rgw_cls_read_olh_log_ret
 {
-  map<uint64_t, vector<struct rgw_bucket_olh_log_entry> > log;
+  flat_map<uint64_t, vector<struct rgw_bucket_olh_log_entry> > log;
   bool is_truncated;
 
   rgw_cls_read_olh_log_ret() : is_truncated(false) {}
@@ -616,7 +619,7 @@ struct rgw_cls_usage_log_read_op {
 WRITE_CLASS_ENCODER(rgw_cls_usage_log_read_op)
 
 struct rgw_cls_usage_log_read_ret {
-  map<rgw_user_bucket, rgw_usage_log_entry> usage;
+  flat_map<rgw_user_bucket, rgw_usage_log_entry> usage;
   bool truncated;
   string next_iter;
 

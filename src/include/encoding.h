@@ -288,6 +288,7 @@ inline void decode(T &o, bufferlist& bl)
 #include <deque>
 #include <vector>
 #include <string>
+#include <boost/container/flat_map.hpp>
 #include <boost/optional/optional_io.hpp>
 #include <boost/tuple/tuple.hpp>
 
@@ -726,6 +727,112 @@ inline void decode_nohead(int n, std::map<T,U>& m, bufferlist::iterator& p)
     decode(m[k], p);
   }
 }
+
+// flat_map
+using boost::container::flat_map;
+template<class T, class U>
+inline void encode(const flat_map<T,U>& m, bufferlist& bl)
+{
+  __u32 n = (__u32)(m.size());
+  encode(n, bl);
+  for (typename flat_map<T,U>::const_iterator p = m.begin(); p != m.end(); ++p) {
+    encode(p->first, bl);
+    encode(p->second, bl);
+  }
+}
+template<class T, class U, class C>
+inline void encode(const flat_map<T,U,C>& m, bufferlist& bl)
+{
+  __u32 n = (__u32)(m.size());
+  encode(n, bl);
+  for (typename flat_map<T,U,C>::const_iterator p = m.begin(); p != m.end(); ++p) {
+    encode(p->first, bl);
+    encode(p->second, bl);
+  }
+}
+template<class T, class U>
+inline void encode(const flat_map<T,U>& m, bufferlist& bl, uint64_t features)
+{
+  __u32 n = (__u32)(m.size());
+  encode(n, bl);
+  for (typename flat_map<T,U>::const_iterator p = m.begin(); p != m.end(); ++p) {
+    encode(p->first, bl, features);
+    encode(p->second, bl, features);
+  }
+}
+template<class T, class U>
+inline void decode(flat_map<T,U>& m, bufferlist::iterator& p)
+{
+  __u32 n;
+  decode(n, p);
+  m.clear();
+  while (n--) {
+    T k;
+    decode(k, p);
+    decode(m[k], p);
+  }
+}
+template<class T, class U, class C>
+inline void decode(flat_map<T,U,C>& m, bufferlist::iterator& p)
+{
+  __u32 n;
+  decode(n, p);
+  m.clear();
+  while (n--) {
+    T k;
+    decode(k, p);
+    decode(m[k], p);
+  }
+}
+template<class T, class U, class C>
+inline void decode_noclear(flat_map<T,U,C>& m, bufferlist::iterator& p)
+{
+  __u32 n;
+  decode(n, p);
+  while (n--) {
+    T k;
+    decode(k, p);
+    decode(m[k], p);
+  }
+}
+template<class T, class U>
+inline void decode_noclear(flat_map<T,U>& m, bufferlist::iterator& p)
+{
+  __u32 n;
+  decode(n, p);
+  while (n--) {
+    T k;
+    decode(k, p);
+    decode(m[k], p);
+  }
+}
+template<class T, class U>
+inline void encode_nohead(const flat_map<T,U>& m, bufferlist& bl)
+{
+  for (typename flat_map<T,U>::const_iterator p = m.begin(); p != m.end(); ++p) {
+    encode(p->first, bl);
+    encode(p->second, bl);
+  }
+}
+template<class T, class U>
+inline void encode_nohead(const flat_map<T,U>& m, bufferlist& bl, uint64_t features)
+{
+  for (typename flat_map<T,U>::const_iterator p = m.begin(); p != m.end(); ++p) {
+    encode(p->first, bl, features);
+    encode(p->second, bl, features);
+  }
+}
+template<class T, class U>
+inline void decode_nohead(int n, flat_map<T,U>& m, bufferlist::iterator& p)
+{
+  m.clear();
+  while (n--) {
+    T k;
+    decode(k, p);
+    decode(m[k], p);
+  }
+}
+// end flat_map
 
 // multimap
 template<class T, class U>

@@ -122,6 +122,11 @@ extern int cls_cxx_map_get_vals(cls_method_context_t hctx,
                                 const string &filter_prefix,
                                 uint64_t max_to_get,
                                 std::map<string, bufferlist> *vals);
+extern int cls_cxx_map_get_vals(cls_method_context_t hctx,
+                                const string &start_after,
+                                const string &filter_prefix,
+                                uint64_t max_to_get,
+                                flat_map<string, bufferlist> *vals);
 extern int cls_cxx_map_read_header(cls_method_context_t hctx, bufferlist *outbl);
 extern int cls_cxx_map_get_val(cls_method_context_t hctx,
                                const string &key, bufferlist *outbl);

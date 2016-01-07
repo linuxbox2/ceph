@@ -1,6 +1,10 @@
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
+// vim: ts=8 sw=2 smarttab
+
 #ifndef CEPH_CLS_RGW_TYPES_H
 #define CEPH_CLS_RGW_TYPES_H
 
+#include <boost/container/flat_map.hpp>
 #include <map>
 
 #include "include/types.h"
@@ -425,7 +429,7 @@ struct rgw_bucket_olh_entry {
   cls_rgw_obj_key key;
   bool delete_marker;
   uint64_t epoch;
-  map<uint64_t, vector<struct rgw_bucket_olh_log_entry> > pending_log;
+  flat_map<uint64_t, vector<struct rgw_bucket_olh_log_entry> > pending_log;
   string tag;
   bool exists;
   bool pending_removal;
@@ -581,9 +585,11 @@ struct rgw_bucket_dir_header {
 };
 WRITE_CLASS_ENCODER(rgw_bucket_dir_header)
 
+using boost::container::flat_map;
+
 struct rgw_bucket_dir {
   struct rgw_bucket_dir_header header;
-  std::map<string, struct rgw_bucket_dir_entry> m;
+  flat_map<string, struct rgw_bucket_dir_entry> m;
 
   void encode(bufferlist &bl) const {
     ENCODE_START(2, 2, bl);

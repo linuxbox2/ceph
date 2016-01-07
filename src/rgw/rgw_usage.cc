@@ -42,7 +42,7 @@ int RGWUsage::show(RGWRados *store, string& uid, uint64_t start_epoch,
   RGWUsageIter usage_iter;
   Formatter *formatter = flusher.get_formatter();
 
-  map<rgw_user_bucket, rgw_usage_log_entry> usage;
+  flat_map<rgw_user_bucket, rgw_usage_log_entry> usage;
 
   flusher.start(0);
 
@@ -52,11 +52,10 @@ int RGWUsage::show(RGWRados *store, string& uid, uint64_t start_epoch,
   }
   string last_owner;
   bool user_section_open = false;
-  map<string, rgw_usage_log_entry> summary_map;
+  flat_map<string, rgw_usage_log_entry> summary_map;
   while (is_truncated) {
     int ret = store->read_usage(uid, start_epoch, end_epoch, max_entries,
                                 &is_truncated, usage_iter, usage);
-
     if (ret == -ENOENT) {
       ret = 0;
       is_truncated = false;
@@ -66,7 +65,7 @@ int RGWUsage::show(RGWRados *store, string& uid, uint64_t start_epoch,
       return ret;
     }
 
-    map<rgw_user_bucket, rgw_usage_log_entry>::iterator iter;
+    flat_map<rgw_user_bucket, rgw_usage_log_entry>::iterator iter;
     for (iter = usage.begin(); iter != usage.end(); ++iter) {
       const rgw_user_bucket& ub = iter->first;
       const rgw_usage_log_entry& entry = iter->second;
@@ -106,7 +105,7 @@ int RGWUsage::show(RGWRados *store, string& uid, uint64_t start_epoch,
 
   if (show_log_sum) {
     formatter->open_array_section("summary");
-    map<string, rgw_usage_log_entry>::iterator siter;
+    flat_map<string, rgw_usage_log_entry>::iterator siter;
     for (siter = summary_map.begin(); siter != summary_map.end(); ++siter) {
       const rgw_usage_log_entry& entry = siter->second;
       formatter->open_object_section("user");
