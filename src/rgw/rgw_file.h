@@ -1173,6 +1173,18 @@ public:
 
 }; /* RGWDeleteBucketRequest */
 
+static inline bool valid_s3_object_name(const string& name) {
+  if (name.size() > 1024) {
+    // Name too long
+    return false;
+  }
+  if (check_utf8(name.c_str(), name.size())) {
+    // Object names must be valid UTF-8.
+    return false;
+  }
+  return true;
+}
+
 /*
   put object
 */
@@ -1205,6 +1217,10 @@ public:
     assert(rados_ctx);
     RGWOp::init(rados_ctx->store, get_state(), this);
     op = this; // assign self as op: REQUIRED
+
+    if (! valid_s3_object_name(obj_name))
+      return -ERR_INVALID_OBJECT_NAME;
+
     return 0;
   }
 
