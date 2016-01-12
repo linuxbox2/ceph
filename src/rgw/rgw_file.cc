@@ -938,6 +938,16 @@ int rgw_getattr(struct rgw_fs *rgw_fs,
 		struct rgw_file_handle *fh, struct stat *st, uint32_t flags)
 {
   RGWFileHandle* rgw_fh = get_rgwfh(fh);
+
+  /* XXXXX */
+  if (rgw_fh->is_file()) {
+    /* XXX weakly consistent for now (we should consult local
+     * cached metadata) */
+    if (! rgw_fh->trust(RGWFileHandle::ATTR_FILE_SIZE)) {
+
+    }
+  }
+
   return -(rgw_fh->stat(st));
 }
 

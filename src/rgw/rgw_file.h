@@ -1370,7 +1370,7 @@ public:
     return 0;
 }
 
-}; /* RGWGetObjRequest */
+}; /* RGWReadRequest */
 
 /*
   delete object
@@ -1431,18 +1431,15 @@ class RGWStatObjRequest : public RGWLibRequest,
 			  public RGWGetObj /* RGWOp */
 {
 public:
-  const std::string& bucket_name;
-  const std::string& obj_name;
+  RGWFileHandle* rgw_fh;
   uint64_t _size;
   uint32_t flags;
 
   static constexpr uint32_t FLAG_NONE = 0x000;
 
   RGWStatObjRequest(CephContext* _cct, RGWUserInfo *_user,
-		    const std::string& _bname, const std::string& _oname,
-		    uint32_t _flags)
-    : RGWLibRequest(_cct, _user), bucket_name(_bname), obj_name(_oname),
-      _size(0), flags(_flags) {
+		    RGWFileHandle* _rgw_fh, uint32_t _flags)
+    : RGWLibRequest(_cct, _user), rgw_fh(_rgw_fh), _size(0), flags(_flags) {
     magic = 78;
     op = this;
 
@@ -1487,10 +1484,10 @@ public:
     s->op = OP_GET;
 
     /* XXX derp derp derp */
-    std::string uri = make_uri(bucket_name, obj_name);
-    s->relative_uri = uri;
-    s->info.request_uri = uri; // XXX
-    s->info.effective_uri = uri;
+    s->relative_uri = make_uri(rgw_fh->bucket_name(),
+			       rgw_fh->relative_object_name());
+    s->info.request_uri = s->relative_uri; // XXX
+    s->info.effective_uri = s->relative_uri;
     s->info.request_params = "";
     s->info.domain = ""; /* XXX ? */
 
