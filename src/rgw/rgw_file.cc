@@ -796,8 +796,12 @@ int rgw_rename(struct rgw_fs *rgw_fs,
 	       struct rgw_file_handle *newdir, const char* new_name,
 	       uint32_t flags)
 {
-  /* -ENOTSUP */
-  return -EINVAL;
+  RGWLibFS *fs = static_cast<RGWLibFS*>(rgw_fs->fs_private);
+
+  RGWFileHandle* old_fh = get_rgwfh(olddir);
+  RGWFileHandle* new_fh = get_rgwfh(newdir);
+
+  return -(fs->rename(old_fh, new_rh, old_name, new_name);
 }
 
 /*
