@@ -143,6 +143,13 @@ namespace rgw {
     return fhr;
   } /* RGWLibFS::stat_leaf */
 
+  int RGWLibFS::rename(RGWFileHandle* old_fh, RGWFileHandle* new_fh,
+		       const char *old_name, const char *new_name)
+
+  {
+    return EINVAL;
+  } /* RGWLibFS::rename */
+
   int RGWLibFS::getattr(RGWFileHandle* rgw_fh, struct stat* st)
   {
     switch(rgw_fh->fh.fh_type) {
@@ -801,7 +808,7 @@ int rgw_rename(struct rgw_fs *rgw_fs,
   RGWFileHandle* old_fh = get_rgwfh(olddir);
   RGWFileHandle* new_fh = get_rgwfh(newdir);
 
-  return -(fs->rename(old_fh, new_fh, old_name, new_name);
+  return -(fs->rename(old_fh, new_fh, old_name, new_name));
 }
 
 /*

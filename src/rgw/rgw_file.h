@@ -735,6 +735,9 @@ namespace rgw {
     LookupFHResult stat_leaf(RGWFileHandle* parent, const char *path,
 			     uint32_t flags);
 
+    int rename(RGWFileHandle* old_fh, RGWFileHandle* new_fh,
+	       const char *old_name, const char *new_name);
+
     /* find existing RGWFileHandle */
     RGWFileHandle* lookup_handle(struct rgw_fh_hk fh_hk) {
 
