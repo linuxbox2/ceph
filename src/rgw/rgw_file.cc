@@ -801,7 +801,7 @@ int rgw_rename(struct rgw_fs *rgw_fs,
   RGWFileHandle* old_fh = get_rgwfh(olddir);
   RGWFileHandle* new_fh = get_rgwfh(newdir);
 
-  return -(fs->rename(old_fh, new_rh, old_name, new_name);
+  return -(fs->rename(old_fh, new_fh, old_name, new_name);
 }
 
 /*
