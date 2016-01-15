@@ -143,10 +143,43 @@ namespace rgw {
     return fhr;
   } /* RGWLibFS::stat_leaf */
 
-  int RGWLibFS::rename(RGWFileHandle* old_fh, RGWFileHandle* new_fh,
-		       const char *old_name, const char *new_name)
+  int RGWLibFS::rename(RGWFileHandle* src_fh, RGWFileHandle* dst_fh,
+		      const char *src_name, const char *dst_name)
 
   {
+    /* XXX initial implementation: try-copy, and delete if copy
+     * succeeds */
+    for (int ix : {0, 1}) {
+      switch (ix) {
+      case 0:
+      {
+	RGWCopyObjRequest req(cct, get_user(), src_fh, dst_fh, src_name,
+			      dst_name);
+	int rc = rgwlib.get_fe()->execute_req(&req);
+	if ((rc != 0) ||
+	    ((rc = req.get_ret()) != 0)) {
+	  return rc;
+	}
+      }
+      break;
+      case 1:
+      {
+	RGWDeleteObjRequest req(cct, get_user(), src_fh->bucket_name(),
+				src_name);
+	int rc = rgwlib.get_fe()->execute_req(&req);
+	if (! rc) {
+	  rc = req.get_ret();
+	  return rc;
+	}
+      }
+      break;
+      default:
+	abort();
+      } /* switch */
+
+      return -EINVAL;
+    }
+
     return EINVAL;
   } /* RGWLibFS::rename */
 
