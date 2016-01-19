@@ -1132,6 +1132,7 @@ int rgw_write(struct rgw_fs *rgw_fs,
 	      size_t length, size_t *bytes_written, void *buffer,
 	      uint32_t flags)
 {
+  CephContext* cct = static_cast<CephContext*>(rgw_fs->rgw);
   RGWFileHandle* rgw_fh = get_rgwfh(fh);
   int rc;
 
@@ -1143,17 +1144,19 @@ int rgw_write(struct rgw_fs *rgw_fs,
   if (! rgw_fh->is_open())
     return -EPERM;
 
-  std::cout << __func__ << " before write of "
-	    << length << " bytes at offset " << offset
-	    << std::endl;
+  lsubdout(cct, rgw, 15)
+    << __func__ << " before write of "
+    << length << " bytes at offset " << offset
+    << dendl;
 
   rc = rgw_fh->write(offset, length, bytes_written, buffer);
 
-  std::cout << __func__ << " after write of "
-	    << length << " bytes at offset " << offset
-	    << " wrote " << *bytes_written
-	    << " rc " << rc
-	    << std::endl;
+  lsubdout(cct, rgw, 15)
+    << __func__ << " after write of "
+    << length << " bytes at offset " << offset
+    << " wrote " << *bytes_written
+    << " rc " << rc
+    << dendl;
 
   return rc;
 }
