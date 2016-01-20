@@ -33,12 +33,11 @@ install(TARGETS ec_jerasure_generic DESTINATION lib/erasure-code)
 
 set(jerasure_neon_srcs
   ${jerasure_srcs}
-  erasure-code/jerasure/gf-complete/src/neon/gf_w4_neon.c 
-  erasure-code/jerasure/gf-complete/src/neon/gf_w8_neon.c 
-  erasure-code/jerasure/gf-complete/src/neon/gf_w16_neon.c 
-  erasure-code/jerasure/gf-complete/src/neon/gf_w32_neon.c 
-  erasure-code/jerasure/gf-complete/src/neon/gf_w64_neon.c)
-
+  gf-complete/src/neon/gf_w4_neon.c
+  gf-complete/src/neon/gf_w8_neon.c
+  gf-complete/src/neon/gf_w16_neon.c
+  gf-complete/src/neon/gf_w32_neon.c
+  gf-complete/src/neon/gf_w64_neon.c)
 
 #TODO:build libec_jerasure_neon library on an ARM machine
 if(ARM_NEON OR ARM_NEON2)
