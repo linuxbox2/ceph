@@ -4,6 +4,7 @@
 #include <errno.h>
 #include <limits.h>
 
+#include <boost/algorithm/string.hpp>
 #include "common/Formatter.h"
 #include "common/HTMLFormatter.h"
 #include "common/utf8.h"
@@ -1515,6 +1516,15 @@ void RGWRESTMgr::register_default_mgr(RGWRESTMgr *mgr)
 {
   delete default_mgr;
   default_mgr = mgr;
+}
+
+void RGWREST::register_x_headers(const string& s_headers)
+{
+  std::vector<std::string> hdrs = get_str_vec(s_headers);
+  for (auto& hdr : hdrs) {
+    boost::algorithm::to_upper(hdr); // XXX
+    (void) x_headers.insert(hdr);
+  }
 }
 
 RGWRESTMgr *RGWRESTMgr::get_resource_mgr(struct req_state *s, const string& uri, string *out_uri)

@@ -6,6 +6,8 @@
 
 #define TIME_BUF_SIZE 128
 
+#include <boost/container/flat_set.hpp>
+#include "common/sstring.hh"
 #include "common/ceph_json.h"
 #include "include/assert.h" /* needed because of common/ceph_json.h */
 #include "rgw_op.h"
@@ -361,6 +363,7 @@ public:
 
 class RGWHandler_REST : public RGWHandler {
 protected:
+
   virtual bool is_obj_update_op() { return false; }
   virtual RGWOp *op_get() { return NULL; }
   virtual RGWOp *op_put() { return NULL; }
@@ -402,6 +405,7 @@ class RGWHandler_REST_S3;
 
 class RGWRESTMgr {
   bool should_log;
+
 protected:
   map<string, RGWRESTMgr *> resource_mgrs;
   multimap<size_t, string> resources_by_size;
@@ -426,19 +430,18 @@ public:
 class RGWLibIO;
 
 class RGWREST {
+  using x_header = basic_sstring<char, uint16_t, 32>;
+  boost::container::flat_set<x_header> x_headers;
   RGWRESTMgr mgr;
 
   static int preprocess(struct req_state *s, RGWClientIO *sio);
+
 public:
   RGWREST() {}
   RGWHandler_REST *get_handler(RGWRados *store, struct req_state *s,
 			      RGWStreamIO *sio,
 			      RGWRESTMgr **pmgr, int *init_error);
-#if 0
-  RGWHandler *get_handler(RGWRados *store, struct req_state *s,
-			  RGWLibIO *io, RGWRESTMgr **pmgr,
-			  int *init_error);
-#endif
+
   void put_handler(RGWHandler_REST *handler) {
     mgr.put_handler(handler);
   }
@@ -450,8 +453,19 @@ public:
 
     mgr.register_resource(resource, m);
   }
+
   void register_default_mgr(RGWRESTMgr *m) {
     mgr.register_default_mgr(m);
+  }
+
+  void register_x_headers(const std::string& headers);
+
+  bool log_x_headers(void) {
+    return (x_headers.size() > 0);
+  }
+
+  bool log_x_header(const std::string& header) {
+    return (x_headers.find(header) != x_headers.end());
   }
 };
 

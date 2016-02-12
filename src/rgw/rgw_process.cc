@@ -84,6 +84,18 @@ int process_request(RGWRados* store, RGWREST* rest, RGWRequest* req,
   req->op = op;
   dout(10) << "op=" << typeid(*op).name() << dendl;
 
+  /* custom header logging */
+  if (rest->log_x_headers()) {
+    for (auto& iter : s->info.env->get_map()) {
+      if (rest->log_x_header(iter.first)) {
+	dout(0) << "rgw-log-http-header op=" << s->op
+		<< " trans_id=" << s->trans_id.c_str()
+		<< " header=" << iter.first << " " << iter.second
+		<< dendl;
+      }
+    }
+  }
+
   req->log(s, "authorizing");
   ret = handler->authorize();
   if (ret < 0) {
