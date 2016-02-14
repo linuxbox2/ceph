@@ -131,6 +131,10 @@ radosgw_admin_SOURCES = rgw/rgw_admin.cc rgw/rgw_orphan.cc
 radosgw_admin_LDADD = $(LIBRGW) $(LIBRGW_DEPS) $(CEPH_GLOBAL)
 bin_PROGRAMS += radosgw-admin
 
+radosgw_token_SOURCES = rgw/rgw_token.cc
+radosgw_token_LDADD = $(LIBRGW) $(LIBRGW_DEPS) $(CEPH_GLOBAL)
+bin_PROGRAMS += radosgw-token
+
 radosgw_object_expirer_SOURCES = rgw/rgw_object_expirer.cc
 radosgw_object_expirer_LDADD = $(LIBRGW) $(LIBRGW_DEPS) $(CEPH_GLOBAL)
 bin_PROGRAMS += radosgw-object-expirer
