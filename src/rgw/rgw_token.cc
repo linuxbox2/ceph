@@ -22,6 +22,8 @@
 #include "include/utime.h"
 #include "include/str_list.h"
 
+#include "rgw_b64.h"
+
 #define dout_subsys ceph_subsys_rgw
 
 namespace rgw {
@@ -252,6 +254,24 @@ int main(int argc, char **argv)
       std::cout << "decoded: " << token2 << std::endl;
     }
   }
+
+  for (auto& elt : {
+      make_pair("", ""),
+	make_pair("M", "TQ=="),
+	make_pair("Ma", "TWE="),
+	make_pair("Man", "TWFu"),
+	make_pair("pleasure.", "cGxlYXN1cmUu"),
+	make_pair("leasure.", "bGVhc3VyZS4="),
+	make_pair("easure.", "ZWFzdXJlLg=="),
+	make_pair("asure.", "YXN1cmUu"),
+	make_pair("sure.", "c3VyZS4=")}) {
+    std::cout << "map " << elt.first << " to " << elt.second
+	      << ": " << to_base64(elt.first) << std::endl;
+  }
+
+  string a1{"Man"};
+  string a2 = to_base64(a1);
+  std::cout << "encoded: " << a2 << std::endl;
 
   return 0;
 }
