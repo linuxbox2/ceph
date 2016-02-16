@@ -266,7 +266,9 @@ int main(int argc, char **argv)
 	make_pair("asure.", "YXN1cmUu"),
 	make_pair("sure.", "c3VyZS4=")}) {
     std::cout << "map " << elt.first << " to " << elt.second
-	      << ": " << to_base64(elt.first) << std::endl;
+	      << ": " << to_base64(elt.first)
+	      << " and reversed " << from_base64(elt.second)
+	      << std::endl;
   }
 
   string a1{"Man"};

@@ -6,6 +6,7 @@
 
 #include <boost/utility/string_ref.hpp>
 #include <boost/archive/iterators/base64_from_binary.hpp>
+#include <boost/archive/iterators/binary_from_base64.hpp>
 #include <boost/archive/iterators/insert_linebreaks.hpp>
 #include <boost/archive/iterators/transform_width.hpp>
 
@@ -45,6 +46,26 @@ namespace rgw {
     // pad ostr with '=' to a length that is a multiple of 3
     for (size_t ix = 0; ix < (psize-sref.size()); ++ix)
       outstr.push_back('=');
+
+    return std::move(outstr);
+  }
+
+  std::string from_base64(boost::string_ref sref)
+  {
+    using namespace boost::archive::iterators;
+
+    typedef
+      transform_width<
+	binary_from_base64<const unsigned char *>
+      ,8
+      ,6
+      > b64_iter;
+
+    while (sref.back() == '=')
+      sref.remove_suffix(1);
+
+    std::string outstr(b64_iter(sref.data()),
+		      b64_iter(sref.data() + sref.size()));
 
     return std::move(outstr);
   }
