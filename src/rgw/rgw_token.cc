@@ -253,6 +253,7 @@ int main(int argc, char **argv)
       RGWToken token2(token_str);
       std::cout << "decoded: " << token2 << std::endl;
     }
+    std::cout << to_base64(token_str) << std::endl;
   }
 
   for (auto& elt : {
