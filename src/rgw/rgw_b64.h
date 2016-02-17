@@ -9,9 +9,22 @@
 #include <boost/archive/iterators/binary_from_base64.hpp>
 #include <boost/archive/iterators/insert_linebreaks.hpp>
 #include <boost/archive/iterators/transform_width.hpp>
+#include <boost/archive/iterators/remove_whitespace.hpp>
+#include <limits>
 
 namespace rgw {
 
+  /*
+   * A header-only Base64 encoder built on boost::archive.  The
+   * formula is based on a class poposed for inclusion in boost in
+   * 2011 by Denis Shevchenko (abandoned), updated slightly
+   * (e.g., uses boost::string_ref).
+   *
+   * Also, wrap_width added as template argument, based on
+   * feedback from Marcus.
+   */
+
+  template<int wrap_width = std::numeric_limits<int>::max()>
   std::string to_base64(boost::string_ref sref)
   {
     using namespace boost::archive::iterators;
@@ -23,21 +36,17 @@ namespace rgw {
       ++psize;
     }
 
-    /* use public-domain formula for making a transforming iterator
-     * from boost serialization primitives.
-     *
-     * RFC 2045 requires linebreaks to be present in the output
-     * sequence every at-most 76 characters. */
+    /* RFC 2045 requires linebreaks to be present in the output
+     * sequence every at-most 76 characters (MIME-compliance),
+     * but we could likely omit it. */
     typedef
       insert_linebreaks<
         base64_from_binary<
           transform_width<
-            const unsigned char *
-            ,6
-            ,8
-            >
+	    boost::string_ref::const_iterator
+            ,6,8>
           >
-          ,76
+          ,wrap_width
         > b64_iter;
 
     std::string outstr(b64_iter(sref.data()),
@@ -54,11 +63,14 @@ namespace rgw {
   {
     using namespace boost::archive::iterators;
 
+    /* MIME-compliant input will have line-breaks, so we have to
+     * filter WS */
     typedef
       transform_width<
-	binary_from_base64<const unsigned char *>
-      ,8
-      ,6
+      binary_from_base64<
+	remove_whitespace<
+	  boost::string_ref::const_iterator>>
+      ,8,6
       > b64_iter;
 
     while (sref.back() == '=')

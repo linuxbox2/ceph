@@ -1521,6 +1521,17 @@ if(${WITH_RADOSGW})
   set_target_properties(test_cors PROPERTIES COMPILE_FLAGS
     ${UNITTEST_CXX_FLAGS})
 
+  # test_rgw_b64
+  set(test_rgw_b64_srcs test_rgw_b64.cc)
+  add_executable(test_rgw_b64
+    ${test_rgw_b64_srcs}
+    $<TARGET_OBJECTS:heap_profiler_objs>
+    )
+  target_link_libraries(test_rgw_b64
+    global ${CMAKE_DL_LIBS} ${ALLOC_LIBS} ${UNITTEST_LIBS})
+  set_target_properties(test_rgw_b64 PROPERTIES COMPILE_FLAGS
+    ${UNITTEST_CXX_FLAGS})
+
   # test_rgw_manifest
   set(test_rgw_manifest_srcs rgw/test_rgw_manifest.cc)
   add_executable(test_rgw_manifest
