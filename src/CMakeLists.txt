@@ -1209,6 +1209,9 @@ if(${WITH_RADOSGW})
     rgw/rgw_admin.cc
     rgw/rgw_orphan.cc)
 
+  set(radosgw_token_srcs
+    rgw/rgw_token.cc)
+
   set(radosgw_object_expirer_srcs
     rgw/rgw_object_expirer.cc)
 
@@ -1257,6 +1260,11 @@ if(${WITH_RADOSGW})
     cls_version_client cls_replica_log_client cls_user_client
     curl expat global fcgi resolv ${BLKID_LIBRARIES} ${ALLOC_LIBS})
   install(TARGETS radosgw-admin DESTINATION bin)
+
+  add_executable(radosgw-token ${radosgw_token_srcs} $<TARGET_OBJECTS:heap_profiler_objs>)
+  target_link_libraries(radosgw-token librados
+    global ${ALLOC_LIBS})
+  install(TARGETS radosgw-token DESTINATION bin)
 
   add_executable(radosgw-object-expirer ${radosgw_object_expirer_srcs} $<TARGET_OBJECTS:heap_profiler_objs>)
   target_link_libraries(radosgw-object-expirer rgw_a librados
