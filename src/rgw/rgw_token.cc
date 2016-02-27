@@ -109,10 +109,12 @@ int main(int argc, char **argv)
     std::ostringstream os;
     formatter->flush(os);
     string token_str = os.str();
-    std::cout << token_str << std::endl;
-    if (do_decode) {
-      RGWToken token2(token_str);
-      std::cout << "decoded: " << token2 << std::endl;
+    if (verbose) {
+      std::cout << "expanded token: " << token_str << std::endl;
+      if (do_decode) {
+	RGWToken token2(token_str);
+	std::cout << "decoded expanded token: " << token2 << std::endl;
+      }
     }
     std::cout << to_base64(token_str) << std::endl;
   }
