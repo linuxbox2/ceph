@@ -17,9 +17,11 @@
 
 #include <stdint.h>
 #include <boost/algorithm/string.hpp>
+#include <sstream>
 
 #include "common/ceph_json.h"
 #include "common/Formatter.h"
+#include "rgw/rgw_b64.h"
 
 namespace rgw {
 
@@ -123,7 +125,7 @@ namespace rgw {
       f->close_section();
     }
 
-    void decode_json(JSONObj *obj) {
+    void decode_json(JSONObj* obj) {
       uint32_t version;
       string type_name;
       string typestr;
@@ -132,6 +134,14 @@ namespace rgw {
       type = to_type(typestr.c_str());
       JSONDecoder::decode_json("id", id, obj);
       JSONDecoder::decode_json("key", key, obj);
+    }
+
+    std::string encode_json_base64(Formatter* f) {
+      encode_json(f);
+      std::ostringstream os;
+      f->flush(os);
+      std::string token_str{os.str()};
+      return std::move(to_base64(token_str));
     }
 
     friend ostream& operator<<(ostream& os, const RGWToken& token);
