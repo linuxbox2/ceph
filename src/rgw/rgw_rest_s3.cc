@@ -28,6 +28,7 @@
 #include <typeinfo> // for 'typeid'
 
 #include "rgw_ldap.h"
+#include "rgw_token.h"
 #include "include/assert.h"
 
 #define dout_subsys ceph_subsys_rgw
@@ -1462,18 +1463,14 @@ int RGWPostObj_ObjStore_S3::get_policy()
 	}
       } else if (store->ctx()->_conf->rgw_s3_auth_use_ldap &&
 		store->ctx()->_conf->rgw_ldap_uri.empty()) {
-	auto decoded_token = ACCTokenHelper::decode(s3_access_key);
-
-	if (! get<0>(decoded_token))
-	  return -EACCES; // failed to decode token
-
+	RGWToken token{from_base64(s3_access_key)};
 	rgw::LDAPHelper *ldh = RGW_Auth_S3::get_ldap_ctx(store);
-	if (ldh->auth(get<1>(decoded_token), get<2>(decoded_token)) != 0)
+	if (ldh->auth(token.id, token.key) != 0)
 	  return -EACCES;
 
 	/* ok, succeeded, try to create shadow */
-	user_info.user_id = get<1>(decoded_token);
-	user_info.display_name = get<1>(decoded_token); // cn?
+	user_info.user_id = token.id;
+	user_info.display_name = token.id; // cn?
 
 	/* try to store user if it not already exists */
 	if (rgw_get_user_info_by_uid(store, user_info.user_id,
@@ -3585,30 +3582,25 @@ int RGW_Auth_S3::authorize_v2(RGWRados *store, struct req_state *s)
 
     RGW_Auth_S3::init(store);
 
-    auto decoded_token = ACCTokenHelper::decode(auth_id);
-
-    if (! get<0>(decoded_token))
-      external_auth_result = -EACCES; // failed to decode token
+    RGWToken token{from_base64(auth_id)};
+    if (ldh->auth(token.id, token.key) != 0)
+      external_auth_result = -EACCES;
     else {
-      if (ldh->auth(get<1>(decoded_token), get<2>(decoded_token)) != 0)
-	external_auth_result = -EACCES;
-      else {
-	/* ok, succeeded */
-	external_auth_result = 0;
-	/* create local account, if none exists */
-	s->user->user_id = get<1>(decoded_token);
-	s->user->display_name = get<1>(decoded_token); // cn?
-	if (rgw_get_user_info_by_uid(store, s->user->user_id,
-					*(s->user)) < 0) {
-	  int ret = rgw_store_user_info(store, *(s->user), NULL, NULL, 0, true);
-	  if (ret < 0) {
-	    dout(10) << "NOTICE: failed to store new user's info: ret=" << ret
-		     << dendl;
-	  }
-	  s->perm_mask = RGW_PERM_FULL_CONTROL;
+      /* ok, succeeded */
+      external_auth_result = 0;
+      /* create local account, if none exists */
+      s->user->user_id = token.id;
+      s->user->display_name = token.id; // cn?
+      if (rgw_get_user_info_by_uid(store, s->user->user_id,
+				   *(s->user)) < 0) {
+	int ret = rgw_store_user_info(store, *(s->user), NULL, NULL, 0, true);
+	if (ret < 0) {
+	  dout(10) << "NOTICE: failed to store new user's info: ret=" << ret
+		   << dendl;
 	}
-      } /* success */
-    }
+	s->perm_mask = RGW_PERM_FULL_CONTROL;
+      }
+    } /* success */
   } /* ldap */
 
   /* keystone failed (or not enabled); check if we want to use rados backend */

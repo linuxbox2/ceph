@@ -21,7 +21,6 @@
 
 #include "rgw/rgw_ldap.h"
 #include "rgw/rgw_token.h"
-#include "rgw/rgw_b64.h"
 
 #include "gtest/gtest.h"
 #include "common/ceph_argparse.h"

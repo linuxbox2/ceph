@@ -13,36 +13,7 @@
 #include <string>
 #include <iostream>
 
-#include <boost/regex.hpp>
-#include <include/buffer.h>
-
 namespace rgw {
-
-  class ACCTokenHelper
-  {
-  public:
-    typedef std::tuple<bool,std::string,std::string> DecodeResult;
-
-    static constexpr const char* CRED_REGEX = "{([\\w-]+)::([\\w-]+)}.+";
-
-    static boost::regex rgx;
-
-    static DecodeResult decode(const std::string& encoded_token) {
-      buffer::list bl, decoded_bl;
-      bl.append(encoded_token);
-      decoded_bl.decode_base64(bl);
-      std::string str{decoded_bl.c_str()};
-      boost::cmatch match;
-      if (boost::regex_match(str.c_str(), match, rgx)) {
-	std::string uid = match[1];
-	std::string pwd = match[2];
-	return DecodeResult{true, std::move(uid), std::move(pwd)};
-      }
-      return DecodeResult{false, "", ""};
-    }
-  private:
-    ACCTokenHelper();
-  };
 
   class LDAPHelper
   {

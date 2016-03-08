@@ -32,6 +32,8 @@
 #include "rgw_user.h"
 #include "rgw_lib.h"
 #include "rgw_ldap.h"
+#include "rgw_token.h"
+
 
 /* XXX
  * ASSERT_H somehow not defined after all the above (which bring
@@ -673,12 +675,10 @@ namespace rgw {
       } else {
 	/* try external authenticators (ldap for now) */
 	rgw::LDAPHelper* ldh = rgwlib.get_ldh();
-	auto decoded_token = ACCTokenHelper::decode(key.id);
-	if (ldh->auth(get<1>(decoded_token), get<2>(decoded_token)) == 0) {
-	  /* ok, succeeded, try to create shadow */
-	  std::string& user_id = get<1>(decoded_token);
-	  /* try to store user if it not already exists */
-	  if (rgw_get_user_info_by_uid(store, user_id, user) < 0) {
+	RGWToken token{from_base64(key.id)};
+	if (ldh->auth(token.id, token.key) == 0) {
+	  /* try to store user if it doesn't already exist */
+	  if (rgw_get_user_info_by_uid(store, token.id, user) < 0) {
 	    int ret = rgw_store_user_info(store, user, NULL, NULL, 0,
 					  true);
 	    if (ret < 0) {
