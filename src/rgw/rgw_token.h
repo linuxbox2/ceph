@@ -80,7 +80,8 @@ namespace rgw {
     RGWToken()
       : type(TOKEN_NONE) {};
 
-    RGWToken(enum token_type _type, std::string _id, std::string _key)
+    RGWToken(enum token_type _type, const std::string& _id,
+	     const std::string& _key)
       : type(_type), id(_id), key(_key) {};
 
     RGWToken(const string& json) {
@@ -143,13 +144,13 @@ namespace rgw {
       return std::move(to_base64(std::move(os.str())));
     }
 
-    friend ostream& operator<<(ostream& os, const RGWToken& token);
+    friend inline ostream& operator<<(ostream& os, const RGWToken& token);
 
     virtual ~RGWToken() {};
   };
   WRITE_CLASS_ENCODER(RGWToken)
 
-  ostream& operator<<(ostream& os, const RGWToken& token)
+  inline ostream& operator<<(ostream& os, const RGWToken& token)
   {
     os << "<<RGWToken"
        << " type=" << RGWToken::from_type(token.type)
