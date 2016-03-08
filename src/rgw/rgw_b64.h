@@ -25,7 +25,7 @@ namespace rgw {
    */
 
   template<int wrap_width = std::numeric_limits<int>::max()>
-  std::string to_base64(boost::string_ref sref)
+  inline std::string to_base64(boost::string_ref sref)
   {
     using namespace boost::archive::iterators;
     std::string ostr;
@@ -59,7 +59,7 @@ namespace rgw {
     return std::move(outstr);
   }
 
-  std::string from_base64(boost::string_ref sref)
+  inline std::string from_base64(boost::string_ref sref)
   {
     using namespace boost::archive::iterators;
 
