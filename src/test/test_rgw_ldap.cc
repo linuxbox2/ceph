@@ -20,6 +20,8 @@
 #include <random>
 
 #include "rgw/rgw_ldap.h"
+#include "rgw/rgw_token.h"
+#include "rgw/rgw_b64.h"
 
 #include "gtest/gtest.h"
 #include "common/ceph_argparse.h"
@@ -37,9 +39,8 @@ namespace {
 
   bool do_hexdump = false;
 
-  string access_key("e2FkbWluOjpsaW51eGJveH0K"); // {admin::linuxbox} | base64
-  string other_key("e2FkbWluOjpiYWRwYXNzfQo="); // {admin::badpass} | base64
-  string hyphen_key("e21hdHQtbGRhcDo6bGludXhib3h9Cg=="); // {matt-ldap::linuxbox} | base64
+  string access_key("ewogICAgIlJHV19UT0tFTiI6IHsKICAgICAgICAidmVyc2lvbiI6IDEsCiAgICAgICAgInR5cGUiOiAibGRhcCIsCiAgICAgICAgImlkIjogImFkbWluIiwKICAgICAgICAia2V5IjogImxpbnV4Ym94IgogICAgfQp9Cg=="); // {admin,linuxbox}
+  string other_key("ewogICAgIlJHV19UT0tFTiI6IHsKICAgICAgICAidmVyc2lvbiI6IDEsCiAgICAgICAgInR5cGUiOiAibGRhcCIsCiAgICAgICAgImlkIjogImFkbWluIiwKICAgICAgICAia2V5IjogImJhZHBhc3MiCiAgICB9Cn0K"); // {admin,badpass}
 
   string ldap_uri = "ldaps://f23-kdc.rgw.com";
   string ldap_binddn = "uid=admin,cn=users,cn=accounts,dc=rgw,dc=com";
@@ -50,41 +51,38 @@ namespace {
   
 } /* namespace */
 
-TEST(LibRGWLDAP, INIT) {
+TEST(RGW_LDAP, INIT) {
   int ret = ldh.init();
   ASSERT_EQ(ret, 0);
 }
 
-TEST(LibRGWLDAP, BIND) {
+TEST(RGW_LDAP, BIND) {
   int ret = ldh.bind();
   ASSERT_EQ(ret, 0);
 }
 
-TEST(LibRGWLDAP, AUTH) {
+TEST(RGW_LDAP, AUTH) {
   using std::get;
   using namespace rgw;
   int ret = 0;
-  auto at1 = ACCTokenHelper::decode(access_key);
-  ASSERT_EQ(get<0>(at1), true);
-  ret = ldh.auth(get<1>(at1), get<2>(at1));
-  ASSERT_EQ(ret, 0);
-  auto at2 = ACCTokenHelper::decode(other_key);
-  ASSERT_EQ(get<0>(at2), true);
-  ret = ldh.auth(get<1>(at2), get<2>(at2));
-  ASSERT_NE(ret, 0);
-  auto at3 = ACCTokenHelper::decode(hyphen_key);
-  ASSERT_EQ(get<0>(at3), true);
-  ret = ldh.auth(get<1>(at3), get<2>(at3));
-  ASSERT_EQ(ret, 0);
+  {
+    RGWToken token{from_base64(access_key)};
+    ret = ldh.auth(token.id, token.key);
+    ASSERT_EQ(ret, 0);
+  }
+  {
+    RGWToken token{from_base64(other_key)};
+    ret = ldh.auth(token.id, token.key);
+    ASSERT_NE(ret, 0);
+  }
 }
 
-TEST(LibRGW, SHUTDOWN) {
+TEST(RGW_LDAP, SHUTDOWN) {
   // nothing
 }
 
 int main(int argc, char *argv[])
 {
-  char *v{nullptr};
   string val;
   vector<const char*> args;
 
