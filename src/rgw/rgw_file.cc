@@ -1081,17 +1081,7 @@ int rgw_write(struct rgw_fs *rgw_fs,
   if (! rgw_fh->is_open())
     return -EPERM;
 
-  std::cout << __func__ << " before write of "
-	    << length << " bytes at offset " << offset
-	    << std::endl;
-
   rc = rgw_fh->write(offset, length, bytes_written, buffer);
-
-  std::cout << __func__ << " after write of "
-	    << length << " bytes at offset " << offset
-	    << " wrote " << *bytes_written
-	    << " rc " << rc
-	    << std::endl;
 
   return rc;
 }
