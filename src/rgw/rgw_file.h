@@ -216,6 +216,7 @@ namespace rgw {
     static constexpr uint32_t FLAG_DELETED = 0x0080;
 
     friend class RGWLibFS;
+    friend class RGWFHEncoder;
 
   private:
     RGWFileHandle(RGWLibFS* _fs, uint32_t fs_inst)
@@ -573,6 +574,17 @@ namespace rgw {
   }
 
   typedef std::tuple<RGWFileHandle*, uint32_t> LookupFHResult;
+
+  class RGWFHEncoder
+  {
+  private:
+    RGWFileHandle& rgwfh;
+  public:
+    RGWFHEncoder(RGWFileHandle& _rgwfh) : rgwfh(_rgwfh)
+      {}
+
+    /* TODO: finish */
+  }; /* RGWFHEncoder */
 
   class RGWLibFS
   {
