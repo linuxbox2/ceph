@@ -709,8 +709,9 @@ int rgw_statfs(struct rgw_fs *rgw_fs,
 */
 int rgw_create(struct rgw_fs *rgw_fs,
 	       struct rgw_file_handle *parent_fh,
-	       const char *name, mode_t mode, struct stat *st,
-	       struct rgw_file_handle **fh, uint32_t flags)
+	       const char *name, uint32_t uid, uint32_t gid,
+	       mode_t mode, struct stat *st, struct rgw_file_handle **fh,
+	       uint32_t flags)
 {
   RGWLibFS *fs = static_cast<RGWLibFS*>(rgw_fs->fs_private);
   CephContext* cct = static_cast<CephContext*>(rgw_fs->rgw);
@@ -778,8 +779,9 @@ int rgw_create(struct rgw_fs *rgw_fs,
 */
 int rgw_mkdir(struct rgw_fs *rgw_fs,
 	      struct rgw_file_handle *parent_fh,
-	      const char *name, mode_t mode, struct stat *st,
-	      struct rgw_file_handle **fh, uint32_t flags)
+	      const char *name, uint32_t uid, uint32_t gid,
+	      mode_t mode, struct stat *st, struct rgw_file_handle **fh,
+	      uint32_t flags)
 {
   int rc, rc2;
 

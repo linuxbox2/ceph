@@ -153,6 +153,9 @@ namespace rgw {
     using marker_cache_t = flat_map<uint64_t, dirent_string>;
     using name_cache_t = flat_map<dirent_string, uint8_t>;
 
+    uint32_t owner_uid; /* XXX need Unix attr */
+    uint32_t owner_gid; /* XXX need Unix attr */
+
     struct state {
       uint64_t dev;
       size_t size;
@@ -289,6 +292,9 @@ namespace rgw {
     RGWLibFS* get_fs() { return fs; }
 
     RGWFileHandle* get_parent() { return parent; }
+
+    uint32_t get_owner_uid() const { return owner_uid; }
+    uint32_t get_owner_gid() const { return owner_gid; }
 
     struct timespec get_mtime() const { return state.mtime; }
 

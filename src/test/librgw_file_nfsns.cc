@@ -50,6 +50,9 @@ namespace {
   string readf_out_name("rgwlib_readf.out");
   std::string writef_name{"bigbird"};
 
+  uint32_t owner_uid = 867;
+  uint32_t owner_gid = 5309;
+
   int n_dirs1_dirs = 3;
   int n_dirs1_objs = 2;
 
@@ -191,7 +194,8 @@ TEST(LibRGW, SETUP_HIER1)
     if (! bucket_fh) {
       if (do_create) {
 	struct stat st;
-	int rc = rgw_mkdir(fs, fs->root_fh, bucket_name.c_str(), 755, &st,
+	int rc = rgw_mkdir(fs, fs->root_fh, bucket_name.c_str(),
+			   owner_uid, owner_gid, 755, &st,
 			   &bucket_fh, RGW_MKDIR_FLAG_NONE);
 	ASSERT_EQ(rc, 0);
       }
@@ -246,7 +250,8 @@ TEST(LibRGW, SETUP_DIRS1) {
 
     if (! dirs1_b.fh) {
       if (do_create) {
-	rc = rgw_mkdir(fs, dirs1_b.parent_fh, dirs1_b.name.c_str(), 755, &st,
+	rc = rgw_mkdir(fs, dirs1_b.parent_fh, dirs1_b.name.c_str(),
+		       owner_uid, owner_gid, 755, &st,
 		       &dirs1_b.fh, RGW_MKDIR_FLAG_NONE);
 	ASSERT_EQ(rc, 0);
       }
@@ -266,7 +271,8 @@ TEST(LibRGW, SETUP_DIRS1) {
 			RGW_LOOKUP_FLAG_NONE);
       if (! dir.fh) {
 	if (do_create) {
-	  rc = rgw_mkdir(fs, dir.parent_fh, dir.name.c_str(), 755, &st,
+	  rc = rgw_mkdir(fs, dir.parent_fh, dir.name.c_str(),
+			 owner_uid, owner_gid, 755, &st,
 			 &dir.fh, RGW_MKDIR_FLAG_NONE);
 	  ASSERT_EQ(rc, 0);
 	}
@@ -289,7 +295,8 @@ TEST(LibRGW, SETUP_DIRS1) {
 
 	if (! sdir.fh) {
 	  if (do_create) {
-	    rc = rgw_mkdir(fs, sdir.parent_fh, sdir.name.c_str(), 755,
+	    rc = rgw_mkdir(fs, sdir.parent_fh, sdir.name.c_str(),
+			   owner_uid, owner_gid, 755,
 			   &st, &sdir.fh, RGW_MKDIR_FLAG_NONE);
 	    ASSERT_EQ(rc, 0);
 	  }
@@ -360,7 +367,8 @@ TEST(LibRGW, RGW_CREATE_DIRS1) {
 	(void) rgw_lookup(fs, sf.parent_fh, sf.name.c_str(), &sf.fh,
 			  RGW_LOOKUP_FLAG_NONE);
 	if (! sf.fh) {
-	  rc = rgw_create(fs, sf.parent_fh, sf.name.c_str(), 644, &st, &sf.fh,
+	  rc = rgw_create(fs, sf.parent_fh, sf.name.c_str(),
+			  owner_uid, owner_gid, 644, &st, &sf.fh,
 			  RGW_CREATE_FLAG_NONE);
 	  ASSERT_EQ(rc, 0);
 	}
@@ -385,7 +393,8 @@ TEST(LibRGW, RGW_SETUP_RENAME1) {
       if (! brec.fh) {
 	if (do_create) {
 	  struct stat st;
-	  int rc = rgw_mkdir(fs, fs->root_fh, brec.name.c_str(), 755, &st,
+	  int rc = rgw_mkdir(fs, fs->root_fh, brec.name.c_str(),
+			     owner_uid, owner_gid, 755, &st,
 			     &brec.fh, RGW_MKDIR_FLAG_NONE);
 	  ASSERT_EQ(rc, 0);
 	}
@@ -399,7 +408,8 @@ TEST(LibRGW, RGW_SETUP_RENAME1) {
 	(void) rgw_lookup(fs, rf.parent_fh, rf.name.c_str(), &rf.fh,
 			  RGW_LOOKUP_FLAG_NONE);
 	if (! rf.fh) {
-	  rc = rgw_create(fs, rf.parent_fh, rf.name.c_str(), 644, &st, &rf.fh,
+	  rc = rgw_create(fs, rf.parent_fh, rf.name.c_str(),
+			  owner_uid, owner_gid, 644, &st, &rf.fh,
 			  RGW_CREATE_FLAG_NONE);
 	  ASSERT_EQ(rc, 0);
 	}
@@ -797,7 +807,8 @@ TEST(LibRGW, MARKER1_SETUP_BUCKET) {
     int ret;
 
     if (do_create) {
-      ret = rgw_mkdir(fs, bucket_fh, marker_dir.c_str(), 755, &st, &marker_fh,
+      ret = rgw_mkdir(fs, bucket_fh, marker_dir.c_str(),
+		      owner_uid, owner_gid, 755, &st, &marker_fh,
 		      RGW_MKDIR_FLAG_NONE);
     } else {
       ret = rgw_lookup(fs, bucket_fh, marker_dir.c_str(), &marker_fh,

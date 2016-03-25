@@ -45,6 +45,9 @@ namespace {
   string bucket_name = "sorry_dave";
   string object_name = "jocaml";
 
+  uint32_t owner_uid = 867;
+  uint32_t owner_gid = 5309;
+
   struct rgw_file_handle *bucket_fh = nullptr;
   struct rgw_file_handle *object_fh = nullptr;
 
@@ -179,7 +182,8 @@ TEST(LibRGW, CREATE_BUCKET) {
   if (do_create) {
     struct stat st;
     struct rgw_file_handle *fh;
-    int ret = rgw_mkdir(fs, fs->root_fh, bucket_name.c_str(), 755, &st, &fh,
+    int ret = rgw_mkdir(fs, fs->root_fh, bucket_name.c_str(),
+			owner_uid, owner_gid, 755, &st, &fh,
 			RGW_MKDIR_FLAG_NONE);
     ASSERT_EQ(ret, 0);
   }
