@@ -157,10 +157,13 @@ namespace rgw {
       uint64_t dev;
       size_t size;
       uint64_t nlink;
+      uint32_t owner_uid; /* XXX need Unix attr */
+      uint32_t owner_gid; /* XXX need Unix attr */
       struct timespec ctime;
       struct timespec mtime;
       struct timespec atime;
-      state() : dev(0), size(0), nlink(1), ctime{0,0}, mtime{0,0}, atime{0,0} {}
+      state() : dev(0), size(0), nlink(1), owner_uid(0), owner_gid(0),
+		ctime{0,0}, mtime{0,0}, atime{0,0} {}
     } state;
 
     struct file {
@@ -291,6 +294,9 @@ namespace rgw {
 
     RGWFileHandle* get_parent() { return parent; }
 
+    uint32_t get_owner_uid() const { return state.owner_uid; }
+    uint32_t get_owner_gid() const { return state.owner_gid; }
+
     struct timespec get_mtime() const { return state.mtime; }
 
     int stat(struct stat *st) {
@@ -299,8 +305,8 @@ namespace rgw {
       st->st_dev = state.dev;
       st->st_ino = fh.fh_hk.object; // XXX
 
-      st->st_uid = 0; // XXX
-      st->st_gid = 0; // XXX
+      st->st_uid = state.owner_uid;
+      st->st_gid = state.owner_gid;
 
       st->st_atim = state.atime;
       st->st_mtim = state.mtime;
