@@ -159,6 +159,7 @@ namespace rgw {
       uint64_t nlink;
       uint32_t owner_uid; /* XXX need Unix attr */
       uint32_t owner_gid; /* XXX need Unix attr */
+      mode_t unix_mode;
       struct timespec ctime;
       struct timespec mtime;
       struct timespec atime;
@@ -228,6 +229,7 @@ namespace rgw {
 	variant_type = directory();
 	/* stat */
 	state.dev = fs_inst;
+	state.unix_mode = RGW_RWXMODE|S_IFDIR;
 	/* pointer to self */
 	fh.fh_private = this;
       }
@@ -268,6 +270,19 @@ namespace rgw {
       /* save constant fhk */
       fh.fh_hk = fhk.fh_hk; /* XXX redundant in fh_hk */
 
+      /* stat */
+      state.dev = fs_inst;
+
+      switch (fh.fh_type) {
+      case RGW_FS_TYPE_DIRECTORY:
+	state.unix_mode = RGW_RWXMODE|S_IFDIR;
+	break;
+      case RGW_FS_TYPE_FILE:
+	state.unix_mode = RGW_RWMODE|S_IFREG;
+      default:
+	break;
+      }
+      
       /* pointer to self */
       fh.fh_private = this;
     }
@@ -299,7 +314,27 @@ namespace rgw {
 
     struct timespec get_mtime() const { return state.mtime; }
 
-    int stat(struct stat *st) {
+    void create_stat(struct stat* st, uint32_t mask) {
+      if (mask & RGW_SETATTR_UID)
+	state.owner_uid = st->st_uid;
+
+      if (mask & RGW_SETATTR_GID)
+	state.owner_uid = st->st_gid;
+
+      if (mask & RGW_SETATTR_MODE)  {
+	switch (fh.fh_type) {
+	case RGW_FS_TYPE_DIRECTORY:
+	  st->st_mode = state.unix_mode|S_IFDIR;
+	  break;
+	case RGW_FS_TYPE_FILE:
+	  st->st_mode = state.unix_mode|S_IFREG;
+      default:
+	break;
+	}
+      }
+    }
+
+    int stat(struct stat* st) {
       /* partial Unix attrs */
       memset(st, 0, sizeof(struct stat));
       st->st_dev = state.dev;
@@ -307,6 +342,8 @@ namespace rgw {
 
       st->st_uid = state.owner_uid;
       st->st_gid = state.owner_gid;
+
+      st->st_mode = state.unix_mode;
 
       st->st_atim = state.atime;
       st->st_mtim = state.mtime;
@@ -574,6 +611,7 @@ namespace rgw {
   }
 
   typedef std::tuple<RGWFileHandle*, uint32_t> LookupFHResult;
+  typedef std::tuple<RGWFileHandle*, int> MkObjResult;
 
   class RGWFHEncoder
   {
@@ -797,6 +835,9 @@ namespace rgw {
 
     int rename(RGWFileHandle* old_fh, RGWFileHandle* new_fh,
 	       const char *old_name, const char *new_name);
+
+    MkObjResult mkdir(RGWFileHandle* parent, const char *name, struct stat *st,
+		      uint32_t mask, uint32_t flags);
 
     int unlink(RGWFileHandle* parent, const char *name);
 

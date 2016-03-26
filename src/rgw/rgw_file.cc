@@ -253,6 +253,68 @@ namespace rgw {
     return rc;
   } /* RGWLibFS::rename */
 
+  MkObjResult RGWLibFS::mkdir(RGWFileHandle* parent, const char *name,
+			      struct stat *st, uint32_t mask, uint32_t flags)
+  {
+    MkObjResult mkr{nullptr, -EINVAL};
+    int rc, rc2;
+
+    LookupFHResult fhr;
+    RGWFileHandle* rgw_fh = nullptr;
+
+    if (parent->is_root()) {
+      /* bucket */
+      string bname{name};
+      /* enforce S3 name restrictions */
+      rc = valid_s3_bucket_name(bname, false /* relaxed */);
+      if (rc != 0) {
+	rc = -EINVAL;
+	goto out;
+      }
+
+      string uri = "/" + bname; /* XXX get rid of URI some day soon */
+      RGWCreateBucketRequest req(get_context(), get_user(), uri);
+      rc = rgwlib.get_fe()->execute_req(&req);
+      rc2 = req.get_ret();
+    } else {
+      /* create an object representing the directory */
+      buffer::list bl;
+      string dir_name = /* XXX get rid of this some day soon, too */
+	parent->relative_object_name();
+      /* creating objects w/leading '/' makes a mess */
+      if ((dir_name.size() > 0) &&
+	  (dir_name.back() != '/'))
+	dir_name += "/";
+      dir_name += name;
+      dir_name += "/";
+      RGWPutObjRequest req(get_context(), get_user(), parent->bucket_name(),
+			  dir_name, bl);
+      rc = rgwlib.get_fe()->execute_req(&req);
+      rc2 = req.get_ret();
+    }
+
+    if ((rc == 0) &&
+	(rc2 == 0)) {
+      fhr = lookup_fh(parent, name,
+		      RGWFileHandle::FLAG_CREATE|
+		      RGWFileHandle::FLAG_DIRECTORY);
+      rgw_fh = get<0>(fhr);
+      if (rgw_fh) {
+	/* XXX unify timestamps */
+	rgw_fh->create_stat(st, mask);
+	rgw_fh->set_times(real_clock::now());
+	rgw_fh->stat(st);
+	get<0>(mkr) = rgw_fh;
+      } else
+	rc = -EIO;
+    }
+
+  out:
+    get<1>(mkr) = rc;
+
+    return mkr;
+  } /* RGWLibFS::mkdir */
+
   int RGWLibFS::getattr(RGWFileHandle* rgw_fh, struct stat* st)
   {
     switch(rgw_fh->fh.fh_type) {
@@ -780,66 +842,24 @@ int rgw_mkdir(struct rgw_fs *rgw_fs,
 	      const char *name, struct stat *st, uint32_t mask,
 	      struct rgw_file_handle **fh, uint32_t flags)
 {
-  int rc, rc2;
+  using std::get;
 
   RGWLibFS *fs = static_cast<RGWLibFS*>(rgw_fs->fs_private);
-  CephContext* cct = static_cast<CephContext*>(rgw_fs->rgw);
-
   RGWFileHandle* parent = get_rgwfh(parent_fh);
+
   if (! parent) {
     /* bad parent */
     return -EINVAL;
   }
 
-  LookupFHResult fhr;
-  RGWFileHandle* rgw_fh = nullptr;
+  MkObjResult fhr = fs->mkdir(parent, name, st, mask, flags);
+  RGWFileHandle *nfh = get<0>(fhr); // nullptr if !success
 
-  if (parent->is_root()) {
-    /* bucket */
-    string bname{name};
-    /* enforce S3 name restrictions */
-    rc = valid_s3_bucket_name(bname, false /* relaxed */);
-    if (rc != 0)
-      return -EINVAL;
-    string uri = "/" + bname; /* XXX get rid of URI some day soon */
-    RGWCreateBucketRequest req(cct, fs->get_user(), uri);
-    rc = rgwlib.get_fe()->execute_req(&req);
-    rc2 = req.get_ret();
-  } else {
-    /* create an object representing the directory */
-    buffer::list bl;
-    string dir_name = /* XXX get rid of this some day soon, too */
-      parent->relative_object_name();
-    /* creating objects w/leading '/' makes a mess */
-    if ((dir_name.size() > 0) &&
-	(dir_name.back() != '/'))
-      dir_name += "/";
-    dir_name += name;
-    dir_name += "/";
-    RGWPutObjRequest req(cct, fs->get_user(), parent->bucket_name(),
-			 dir_name, bl);
-    rc = rgwlib.get_fe()->execute_req(&req);
-    rc2 = req.get_ret();
-  }
+  if (nfh)
+    *fh = nfh->get_fh();
 
-  if ((rc == 0) &&
-      (rc2 == 0)) {
-    fhr = fs->lookup_fh(parent, name,
-			RGWFileHandle::FLAG_CREATE|
-			RGWFileHandle::FLAG_DIRECTORY);
-    rgw_fh = get<0>(fhr);
-    if (rgw_fh) {
-      /* XXX unify timestamps */
-      rgw_fh->set_times(real_clock::now());
-      rgw_fh->stat(st);
-      struct rgw_file_handle *rfh = rgw_fh->get_fh();
-      *fh = rfh;
-    } else
-      rc = -EIO;
-  }
-
-  return rc;
-}
+  return get<1>(fhr);
+} /* rgw_mkdir */
 
 /*
   rename object
