@@ -128,16 +128,23 @@ int rgw_statfs(struct rgw_fs *rgw_fs,
 	       uint32_t flags);
 
 
+/* XXX (get|set)attr mask bits */
+#define RGW_SETATTR_MODE   1
+#define RGW_SETATTR_UID    2
+#define RGW_SETATTR_GID    4
+#define RGW_SETATTR_MTIME  8
+#define RGW_SETATTR_ATIME 16
+#define RGW_SETATTR_SIZE  32
+#define RGW_SETATTR_CTIME 64
+  
 /*
   create file
 */
 #define RGW_CREATE_FLAG_NONE     0x0000
 
-int rgw_create(struct rgw_fs *rgw_fs,
-	       struct rgw_file_handle *parent_fh,
-	       const char *name, uint32_t uid, uint32_t gid,
-	       mode_t mode, struct stat *st, struct rgw_file_handle **fh,
-	       uint32_t flags);
+int rgw_create(struct rgw_fs *rgw_fs, struct rgw_file_handle *parent_fh,
+	      const char *name, struct stat *st, uint32_t mask,
+	      struct rgw_file_handle **fh, uint32_t flags);
 
 /*
   create a new directory
@@ -146,9 +153,8 @@ int rgw_create(struct rgw_fs *rgw_fs,
 
 int rgw_mkdir(struct rgw_fs *rgw_fs,
 	      struct rgw_file_handle *parent_fh,
-	      const char *name, uint32_t uid, uint32_t gid, mode_t mode,
-	      struct stat *st, struct rgw_file_handle **fh,
-	      uint32_t flags);
+	      const char *name, struct stat *st, uint32_t mask,
+	      struct rgw_file_handle **fh, uint32_t flags);
 
 /*
   rename object
@@ -181,15 +187,6 @@ int rgw_readdir(struct rgw_fs *rgw_fs,
 		struct rgw_file_handle *parent_fh, uint64_t *offset,
 		rgw_readdir_cb rcb, void *cb_arg, bool *eof,
 		uint32_t flags);
-
-/* XXX (get|set)attr mask bits */
-#define RGW_SETATTR_MODE   1
-#define RGW_SETATTR_UID    2
-#define RGW_SETATTR_GID    4
-#define RGW_SETATTR_MTIME  8
-#define RGW_SETATTR_ATIME 16
-#define RGW_SETATTR_SIZE  32
-#define RGW_SETATTR_CTIME 64
 
 /*
    get unix attributes for object
