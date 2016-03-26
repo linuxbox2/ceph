@@ -836,6 +836,9 @@ namespace rgw {
     int rename(RGWFileHandle* old_fh, RGWFileHandle* new_fh,
 	       const char *old_name, const char *new_name);
 
+    MkObjResult create(RGWFileHandle* parent, const char *name, struct stat *st,
+		      uint32_t mask, uint32_t flags);
+
     MkObjResult mkdir(RGWFileHandle* parent, const char *name, struct stat *st,
 		      uint32_t mask, uint32_t flags);
 
