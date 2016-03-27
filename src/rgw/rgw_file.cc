@@ -843,7 +843,7 @@ int rgw_create(struct rgw_fs *rgw_fs,
     return -EINVAL;
   }
 
-  MkObjResult fhr = fs->mkdir(parent, name, st, mask, flags);
+  MkObjResult fhr = fs->create(parent, name, st, mask, flags);
   RGWFileHandle *nfh = get<0>(fhr); // nullptr if !success
 
   if (nfh)
