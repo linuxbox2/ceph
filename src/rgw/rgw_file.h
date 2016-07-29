@@ -709,7 +709,18 @@ namespace rgw {
 	}
     };
 
-    /* end */
+    tree_hook_type name_hook;
+
+    typedef bi::member_hook<
+      RGWFileHandle, tree_hook_type, &RGWFileHandle::name_hook> NameHook;
+
+#if defined(FHCACHE_AVL)
+    typedef bi::avltree<RGWFileHandle, bi::compare<NameLT>, NameHook> NameTree;
+#else
+    typedef bi::rbtree<RGWFileHandle, bi::compare<NameLT>, NameHook> NameTree;
+#endif
+    typedef cohort::lru::TreeX<RGWFileHandle, NameTree, NameLT, NameEQ, NameRec,
+			       std::mutex> NameCache;
 
     virtual ~RGWFileHandle() {}
 
@@ -763,6 +774,7 @@ namespace rgw {
 
     RGWFileHandle::FHCache fh_cache;
     RGWFileHandle::FhLRU fh_lru;
+    RGWFileHandle::NameCache name_cache;
     
     std::string uid; // should match user.user_id, iiuc
 
@@ -899,6 +911,7 @@ namespace rgw {
       if (state.flags & FLAG_CLOSED)
 	return fhr;
 
+      RGWFileHandle::NameCache::Latch nlat;
       RGWFileHandle::FHCache::Latch lat;
 
       std::string obj_name{name};
@@ -912,6 +925,60 @@ namespace rgw {
 
       fh_key fhk = parent->make_fhk(key_name);
 
+      RGWFileHandle::NameRec nrec(*parent, obj_name);
+
+    retry:
+      RGWFileHandle* fh =
+	name_cache.find_latch(fhk.fh_hk.object /* partition selector*/,
+			      nrec /* key */, nlat /* serializer */,
+			      RGWFileHandle::NameCache::FLAG_LOCK);
+      /* LATCHED */
+      if (fh) {
+	fh->mtx.lock(); // XXX !RAII because may-return-LOCKED
+	if (fh->flags & RGWFileHandle::FLAG_DELETED) {
+	  /* for now, delay briefly and retry */
+	  lat.lock->unlock();
+	  fh->mtx.unlock();
+	  std::this_thread::sleep_for(std::chrono::milliseconds(20));
+	  goto retry; /* !LATCHED */
+	}
+	/* need initial ref from LRU (fast path) */
+	if (! fh_lru.ref(fh, cohort::lru::FLAG_INITIAL)) {
+	  lat.lock->unlock();
+	  fh->mtx.unlock();
+	  goto retry; /* !LATCHED */
+	}
+	/* LATCHED, LOCKED */
+	if (! (flags & RGWFileHandle::FLAG_LOCK))
+	  fh->mtx.unlock(); /* ! LOCKED */
+      } else {
+	/* make or re-use handle */
+	RGWFileHandle::Factory prototype(this, get_inst(), parent, fhk,
+					 obj_name, CREATE_FLAGS(flags));
+	fh = static_cast<RGWFileHandle*>(
+	  fh_lru.insert(&prototype,
+			cohort::lru::Edge::MRU,
+			cohort::lru::FLAG_INITIAL));
+	if (fh) {
+	  /* lock fh (LATCHED) */
+	  if (flags & RGWFileHandle::FLAG_LOCK)
+	    fh->mtx.lock();
+	  /* inserts, releasing latch */
+	  name_cache.insert_latched(fh, nlat,
+				    RGWFileHandle::FHCache::FLAG_UNLOCK);
+	  get<1>(fhr) |= RGWFileHandle::FLAG_CREATE;
+	  goto out; /* !LATCHED */
+	} else {
+	  lat.lock->unlock();
+	  goto retry; /* !LATCHED */
+	}
+      }
+      lat.lock->unlock(); /* !LATCHED */
+    out:
+      get<0>(fhr) = fh;
+      return fhr;
+
+#if 0
     retry:
       RGWFileHandle* fh =
 	fh_cache.find_latch(fhk.fh_hk.object /* partition selector*/,
@@ -961,6 +1028,7 @@ namespace rgw {
     out:
       get<0>(fhr) = fh;
       return fhr;
+#endif
     }
 
     inline void unref(RGWFileHandle* fh) {
