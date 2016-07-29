@@ -62,16 +62,11 @@ namespace rgw {
 
   /*
    * XXX
-   * The current 64-bit, non-cryptographic hash used here is intended
-   * for prototyping only.
+   * The current 64-bit, uncoordinated counter being used here to
+   * generate object identifiers is for prototyping only.
    *
-   * However, the invariant being prototyped is that objects be
-   * identifiable by their hash components alone.  We believe this can
-   * be legitimately implemented using 128-hash values for bucket and
-   * object components, together with a cluster-resident cryptographic
-   * key.  Since an MD5 or SHA-1 key is 128 bits and the (fast),
-   * non-cryptographic CityHash128 hash algorithm takes a 128-bit seed,
-   * speculatively we could use that for the final hash computations.
+   * We now anticipate moving to coordinated, stable namespace for
+   * object identifiers within the cluster.  Stay tuned.
    */
   struct fh_key
   {
@@ -590,6 +585,8 @@ namespace rgw {
 
     typedef cohort::lru::LRU<std::mutex> FhLRU;
 
+    /* fid table */
+
     struct FhLT
     {
       // for internal ordering
@@ -635,6 +632,84 @@ namespace rgw {
 #endif
     typedef cohort::lru::TreeX<RGWFileHandle, FhTree, FhLT, FhEQ, fh_key,
 			       std::mutex> FHCache;
+
+    /* name table -- objects by parent and name */
+    struct NameRec
+    {
+      const RGWFileHandle& parent;
+      const std::string& name;
+
+      NameRec(const RGWFileHandle& _p, const std::string& _n)
+	: parent(_p), name(_n) {}
+    };
+
+    struct NameLT
+    {
+      bool operator()(const RGWFileHandle& lhs, const RGWFileHandle& rhs) const
+	{
+	  const fh_key& lhs_pk =
+	    const_cast<RGWFileHandle&>(lhs).get_parent()->get_key();
+	  const fh_key& rhs_pk =
+	    const_cast<RGWFileHandle&>(rhs).get_parent()->get_key();
+
+	  return ((lhs_pk < rhs_pk) ||
+		  ((lhs_pk == rhs_pk) &&
+		   (lhs.object_name() < rhs.object_name())));
+	}
+
+      bool operator()(const NameRec& k, const RGWFileHandle& fh) const
+	{
+	  const fh_key& lhs_pk = k.parent.get_key();
+	  const fh_key& rhs_pk =
+	    const_cast<RGWFileHandle&>(fh).get_parent()->get_key();
+
+	  return ((lhs_pk < rhs_pk) ||
+		  ((lhs_pk == rhs_pk) &&
+		   (k.name < fh.object_name())));
+	}
+
+      bool operator()(const RGWFileHandle& fh, const NameRec& k) const
+	{
+	  const fh_key& lhs_pk =
+	    const_cast<RGWFileHandle&>(fh).get_parent()->get_key();
+	  const fh_key& rhs_pk = k.parent.get_key();
+
+	  return ((lhs_pk < rhs_pk) ||
+		  ((lhs_pk == rhs_pk) &&
+		   (fh.object_name() < k.name)));
+	}
+    };
+
+    struct NameEQ
+    {
+      bool operator()(const RGWFileHandle& lhs, const RGWFileHandle& rhs) const
+	{
+	  const fh_key& lhs_pk =
+	    const_cast<RGWFileHandle&>(lhs).get_parent()->get_key();
+	  const fh_key& rhs_pk =
+	    const_cast<RGWFileHandle&>(rhs).get_parent()->get_key();
+
+	  return (((lhs_pk == rhs_pk) &&
+		   (lhs.object_name() == rhs.object_name())));
+	}
+
+      bool operator()(const NameRec& k, const RGWFileHandle& fh) const
+	{
+	  const fh_key& lhs_pk = k.parent.get_key();
+	  const fh_key& rhs_pk =
+	    const_cast<RGWFileHandle&>(fh).get_parent()->get_key();
+
+	  return (((lhs_pk == rhs_pk) &&
+		   (k.name == fh.object_name())));
+	}
+
+      bool operator()(const RGWFileHandle& fh, const NameRec& k) const
+	{
+	  return operator()(k, fh);
+	}
+    };
+
+    /* end */
 
     virtual ~RGWFileHandle() {}
 
