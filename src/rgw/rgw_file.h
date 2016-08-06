@@ -149,10 +149,31 @@ namespace rgw {
   using boost::variant;
   using boost::container::flat_map;
 
+  class TraceMutex
+  {
+  public:
+    std::mutex mtx;
+    std::string file;
+    unsigned int line;
+
+    void lock(const char* _file, const unsigned int _line) {
+      mtx.lock();
+      file = _file;
+      line = _line;
+    }
+
+    void unlock() {
+      file = "unlocked";
+      line = 0;
+      mtx.unlock();
+    }
+  };
+
   class RGWFileHandle : public cohort::lru::Object
   {
     struct rgw_file_handle fh;
-    std::mutex mtx;
+    TraceMutex mtx;
+
     RGWLibFS* fs;
     RGWFileHandle* bucket;
     RGWFileHandle* parent;
@@ -461,7 +482,7 @@ namespace rgw {
       using std::get;
       directory* d = get<directory>(&variant_type);
       if (d) {
-	unique_lock guard(mtx);
+	unique_lock guard(mtx.mtx);
 	// XXXX check for failure (dup key)
 	d->marker_cache.insert(
 	  marker_cache_t::value_type(off, marker.data()));
@@ -498,7 +519,7 @@ namespace rgw {
     bool deleted() const { return flags & FLAG_DELETED; }
 
     uint32_t open(uint32_t gsh_flags) {
-      lock_guard guard(mtx);
+      lock_guard guard(mtx.mtx);
       if (! (flags & FLAG_OPEN)) {
 	flags |= FLAG_OPEN;
 	return 0;
@@ -513,12 +534,12 @@ namespace rgw {
     int close();
 
     void open_for_create() {
-      lock_guard guard(mtx);
+      lock_guard guard(mtx.mtx);
       flags |= FLAG_CREATING;
     }
 
     void clear_creating() {
-      lock_guard guard(mtx);
+      lock_guard guard(mtx.mtx);
       flags &= ~FLAG_CREATING;
     }
 
@@ -831,7 +852,7 @@ namespace rgw {
 			    RGWFileHandle::FHCache::FLAG_LOCK);
       /* LATCHED */
       if (fh) {
-	fh->mtx.lock(); // XXX !RAII because may-return-LOCKED
+	fh->mtx.lock(__FILE__, __LINE__); // XXX !RAII because may-return-LOCKED
 	/* need initial ref from LRU (fast path) */
 	if (! fh_lru.ref(fh, cohort::lru::FLAG_INITIAL)) {
 	  lat.lock->unlock();
@@ -881,7 +902,7 @@ namespace rgw {
 			    RGWFileHandle::FHCache::FLAG_LOCK);
       /* LATCHED */
       if (fh) {
-	fh->mtx.lock(); // XXX !RAII because may-return-LOCKED
+	fh->mtx.lock(__FILE__, __LINE__); // XXX !RAII because may-return-LOCKED
 	if (fh->flags & RGWFileHandle::FLAG_DELETED) {
 	  /* for now, delay briefly and retry */
 	  lat.lock->unlock();
@@ -909,7 +930,7 @@ namespace rgw {
 	if (fh) {
 	  /* lock fh (LATCHED) */
 	  if (flags & RGWFileHandle::FLAG_LOCK)
-	    fh->mtx.lock();
+	    fh->mtx.lock(__FILE__, __LINE__);
 	  /* inserts, releasing latch */
 	  fh_cache.insert_latched(fh, lat, RGWFileHandle::FHCache::FLAG_UNLOCK);
 	  get<1>(fhr) |= RGWFileHandle::FLAG_CREATE;
@@ -985,11 +1006,11 @@ namespace rgw {
 	  << dendl;
 	goto out;
       }
-      fh->mtx.lock();
+      fh->mtx.lock(__FILE__, __LINE__);
       if (fh->flags & RGWFileHandle::FLAG_DELETED) {
 	/* for now, delay briefly and retry */
 	lat.lock->unlock();
-	fh->mtx.unlock();
+	fh->mtx.unlock(); /* !LOCKED */
 	std::this_thread::sleep_for(std::chrono::milliseconds(20));
 	goto retry; /* !LATCHED */
       }
@@ -1001,6 +1022,7 @@ namespace rgw {
       /* LATCHED */
     out:
       lat.lock->unlock(); /* !LATCHED */
+      fh->mtx.unlock(); /* !LOCKED */
       return fh;
     }
 

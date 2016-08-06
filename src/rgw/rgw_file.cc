@@ -252,7 +252,7 @@ namespace rgw {
 
 	/* rgw_fh ref+ */
 	rgw_fh = get_rgwfh(fh);
-	rgw_fh->mtx.lock();
+	rgw_fh->mtx.lock(__FILE__, __LINE__); /* LOCKED */
       }
 
       std::string oname = rgw_fh->relative_object_name();
@@ -314,10 +314,8 @@ namespace rgw {
 			<< " rejecting attempt to rename directory path="
 			<< rgw_fh->full_object_name()
 			<< dendl;
-      rgw_fh->mtx.unlock(); /* !LOCKED */
-      unref(rgw_fh); /* -ref */
       rc = -EPERM;
-      goto out;
+      goto unlock;
     }
 
     /* forbid renaming open files (violates intent, for now) */
@@ -326,10 +324,8 @@ namespace rgw {
 			<< " rejecting attempt to rename open file path="
 			<< rgw_fh->full_object_name()
 			<< dendl;
-      rgw_fh->mtx.unlock(); /* !LOCKED */
-      unref(rgw_fh); /* -ref */
       rc = -EPERM;
-      goto out;
+      goto unlock;
     }
 
     t = real_clock::now();
@@ -350,7 +346,7 @@ namespace rgw {
 		    << " " << dst_name
 		    << "rc " << rc
 		    << std::endl;
-	  goto out;
+	  goto unlock;
 	}
 	std::cout << __func__
 		  << " rename step 0 success src="
@@ -393,6 +389,10 @@ namespace rgw {
 	abort();
       } /* switch */
     } /* ix */
+  unlock:
+    rgw_fh->mtx.unlock(); /* !LOCKED */
+    unref(rgw_fh); /* -ref */
+
   out:
     return rc;
   } /* RGWLibFS::rename */
@@ -667,7 +667,7 @@ namespace rgw {
 	    /* clear state */
 	    d = get<directory>(&rgw_fh->variant_type);
 	    if (d) {
-	      lock_guard guard(rgw_fh->mtx);
+	      lock_guard guard(rgw_fh->mtx.mtx);
 	      d->clear_state();
 	    }
 	  rele:
@@ -751,7 +751,7 @@ namespace rgw {
   {
     using std::get;
 
-    lock_guard guard(mtx);
+    lock_guard guard(mtx.mtx);
 
     int rc = 0;
 
@@ -841,7 +841,7 @@ namespace rgw {
 
   int RGWFileHandle::close()
   {
-    lock_guard guard(mtx);
+    lock_guard guard(mtx.mtx);
 
     int rc = 0;
     file* f = get<file>(&variant_type);
