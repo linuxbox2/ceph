@@ -8,6 +8,7 @@
 
 #include <mutex>
 
+#include "common/cohort_lru.h"
 #include "rgw_op.h"
 #include "rgw_http_errors.h"
 #include "rgw_acl_s3.h"
@@ -684,6 +685,43 @@ public:
                       std::string& signature,
                       std::string& expires,
                       bool& qsr) const override;
+};
+
+struct TokenCacheEntry : public cohort::lru::Object
+{
+  ceph::mono_clock::time_point t;
+  std::string token;
+  bool neg;
+
+  TokenCacheEntry(std::string&& _token, bool _neg = false)
+    : token(std::move(_token)), neg(_neg) {
+    t =  ceph::mono_clock::now();
+  }
+
+  struct LT
+  {
+    bool operator()(const TokenCacheEntry& lhs, const TokenCacheEntry& rhs)
+      { return (lhs.token < rhs.token); }
+
+    bool operator()(const std::string& token, const TokenCacheEntry& ce)
+      { return (token < ce.token); }
+
+    bool operator()(const TokenCacheEntry& ce, const std::string& token)
+      { return (ce.token < token); }
+  };
+
+  struct EQ
+  {
+    bool operator()(const TokenCacheEntry& lhs, const TokenCacheEntry& rhs)
+      { return (lhs.token == rhs.token); }
+
+    bool operator()(const std::string& token, const TokenCacheEntry& ce)
+      { return (token == ce.token); }
+
+    bool operator()(const TokenCacheEntry& ce, const std::string& token)
+      { return (ce.token == token); }
+  };
+
 };
 
 class RGWLDAPAuthEngine: RGWS3V2AuthEngine
