@@ -36,6 +36,31 @@ enum RGWOrphanSearchStageId {
   ORPHAN_SEARCH_STAGE_COMPARE = 5,
 };
 
+inline ostream& operator<<(ostream& out, const RGWOrphanSearchStageId o) {
+  switch (o) {
+  case ORPHAN_SEARCH_STAGE_UNKNOWN:
+    out << "ORPHAN_SEARCH_STAGE_UNKNOWN";
+    break;
+  case ORPHAN_SEARCH_STAGE_INIT:
+    out << "ORPHAN_SEARCH_STAGE_INIT";
+    break;
+  case ORPHAN_SEARCH_STAGE_LSPOOL:
+    out << "ORPHAN_SEARCH_STAGE_LSPOOL";
+    break;
+  case ORPHAN_SEARCH_STAGE_LSBUCKETS:
+    out << "ORPHAN_SEARCH_STAGE_LSBUCKETS";
+    break;
+  case ORPHAN_SEARCH_STAGE_ITERATE_BI:
+    out << "ORPHAN_SEARCH_STAGE_ITERATE_BI";
+    break;
+  case ORPHAN_SEARCH_STAGE_COMPARE:
+    out << "ORPHAN_SEARCH_STAGE_COMPARE";
+    break;
+  default:
+    out << "<unknown id>";
+  };
+  return out;
+}
 
 struct RGWOrphanSearchStage {
   RGWOrphanSearchStageId stage;
@@ -67,7 +92,12 @@ struct RGWOrphanSearchStage {
   void dump(Formatter *f) const;
 };
 WRITE_CLASS_ENCODER(RGWOrphanSearchStage)
-  
+
+inline ostream& operator<<(ostream& out, const RGWOrphanSearchStage &o) {
+  return out << "RGWOrphanSearchStage#: " << "stage=" << o.stage
+	     << " shard=" << o.shard << " marker=" << o.marker;
+}
+
 struct RGWOrphanSearchInfo {
   string job_name;
   string pool;
@@ -96,6 +126,13 @@ struct RGWOrphanSearchInfo {
 };
 WRITE_CLASS_ENCODER(RGWOrphanSearchInfo)
 
+inline ostream& operator<<(ostream& out, const RGWOrphanSearchInfo &o) {
+  return out << "RGWOrphanSearchInfo#: "
+	     << "job_name="<< o.job_name << " pool=" << o.pool
+	     << "num_shards=" << o.num_shards << " start_time="
+	     << o.start_time;
+}
+
 struct RGWOrphanSearchState {
   RGWOrphanSearchInfo info;
   RGWOrphanSearchStage stage;
@@ -119,6 +156,10 @@ struct RGWOrphanSearchState {
   void dump(Formatter *f) const;
 };
 WRITE_CLASS_ENCODER(RGWOrphanSearchState)
+
+inline ostream& operator<<(ostream& out, const RGWOrphanSearchState &o) {
+  return out << "RGWOrphanSearchState#: " << o.info << "," << o.stage;
+}
 
 class RGWOrphanStore {
   RGWRados *store;

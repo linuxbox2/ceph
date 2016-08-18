@@ -1,4 +1,16 @@
-
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
+// vim: ts=8 sw=2 smarttab
+/*
+ * Ceph - scalable distributed file system
+ *
+ * Copyright (C) 2015 Red Hat
+ *
+ * This is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License version 2.1, as published by the Free Software
+ * Foundation.  See file COPYING.
+ *
+ */
 
 #include <string>
 
@@ -17,6 +29,8 @@ using namespace std;
 
 static string obj_fingerprint(const string& oid, const char *force_ns = NULL)
 {
+  std::cout << __func__ << " oid " << oid << " force_ns " << std::endl;
+
   ssize_t pos = oid.find('_');
   if (pos < 0) {
     cerr << "ERROR: object does not have a bucket marker: " << oid << std::endl;
@@ -56,8 +70,12 @@ static string obj_fingerprint(const string& oid, const char *force_ns = NULL)
   return s.substr(0, i + 1);
 }
 
-int RGWOrphanStore::read_job(const string& job_name, RGWOrphanSearchState & state)
+int RGWOrphanStore::read_job(const string& job_name,
+			     RGWOrphanSearchState& state)
 {
+  std::cout << __func__ << " job_name " << job_name << " RGWOrphanSearchState "
+	    << state << std::endl;
+
   set<string> keys;
   map<string, bufferlist> vals;
   keys.insert(job_name);
@@ -82,8 +100,12 @@ int RGWOrphanStore::read_job(const string& job_name, RGWOrphanSearchState & stat
   return 0;
 }
 
-int RGWOrphanStore::write_job(const string& job_name, const RGWOrphanSearchState& state)
+int RGWOrphanStore::write_job(const string& job_name,
+			      const RGWOrphanSearchState& state)
 {
+  std::cout << __func__ << " job_name " << job_name << " RGWOrphanSearchState "
+	    << state << std::endl;
+
   map<string, bufferlist> vals;
   bufferlist bl;
   ::encode(state, bl);
@@ -98,6 +120,8 @@ int RGWOrphanStore::write_job(const string& job_name, const RGWOrphanSearchState
 
 int RGWOrphanStore::remove_job(const string& job_name)
 {
+  std::cout << __func__ << " job_name " << job_name << std::endl;
+
   set<string> keys;
   keys.insert(job_name);
 
@@ -109,12 +133,14 @@ int RGWOrphanStore::remove_job(const string& job_name)
   return 0;
 }
 
-int RGWOrphanStore::list_jobs(map <string,RGWOrphanSearchState>& job_list)
+int RGWOrphanStore::list_jobs(map<string,RGWOrphanSearchState>& job_list)
 {
   map <string,bufferlist> vals;
   int MAX_READ=1024;
   string marker="";
   int r = 0;
+
+  std::cout << __func__ << " job_name";
 
   // loop through all the omap vals from index object, storing them to job_list,
   // read in batches of 1024, we update the marker every iteration and exit the
@@ -132,6 +158,7 @@ int RGWOrphanStore::list_jobs(map <string,RGWOrphanSearchState>& job_list)
       try {
         bufferlist bl = it.second;
         ::decode(state, bl);
+	std::cout << " marker=" << marker << " state=" << state << std::endl;
       } catch (buffer::error& err) {
         lderr(store->ctx()) << "ERROR: could not decode buffer" << dendl;
         return -EIO;
@@ -145,6 +172,8 @@ int RGWOrphanStore::list_jobs(map <string,RGWOrphanSearchState>& job_list)
 
 int RGWOrphanStore::init()
 {
+  std::cout << __func__ << std::endl;
+  
   const char *log_pool = store->get_zone_params().log_pool.name.c_str();
   librados::Rados *rados = store->get_rados_handle();
   int r = rados->ioctx_create(log_pool, ioctx);
@@ -156,29 +185,40 @@ int RGWOrphanStore::init()
   return 0;
 }
 
-int RGWOrphanStore::store_entries(const string& oid, const map<string, bufferlist>& entries)
+int RGWOrphanStore::store_entries(const string& oid,
+				  const map<string, bufferlist>& entries)
 {
   librados::ObjectWriteOperation op;
   op.omap_set(entries);
-  cout << "storing " << entries.size() << " entries at " << oid << std::endl;
-  ldout(store->ctx(), 20) << "storing " << entries.size() << " entries at " << oid << ": " << dendl;
-  for (map<string, bufferlist>::const_iterator iter = entries.begin(); iter != entries.end(); ++iter) {
+  cout << __func__ << " storing " << entries.size() << " entries at "
+       << oid << std::endl;
+  ldout(store->ctx(), 20) << "storing " << entries.size() << " entries at "
+			  << oid << ": " << dendl;
+  for (map<string, bufferlist>::const_iterator iter = entries.begin();
+       iter != entries.end(); ++iter) {
     ldout(store->ctx(), 20) << " > " << iter->first << dendl;
   }
   int ret = ioctx.operate(oid, &op);
   if (ret < 0) {
-    lderr(store->ctx()) << "ERROR: " << __func__ << "(" << oid << ") returned ret=" << ret << dendl;
+    lderr(store->ctx()) << "ERROR: " << __func__ << "(" << oid
+			<< ") returned ret=" << ret << dendl;
   }
   
   return 0;
 }
 
-int RGWOrphanStore::read_entries(const string& oid, const string& marker, map<string, bufferlist> *entries, bool *truncated)
+int RGWOrphanStore::read_entries(const string& oid, const string& marker,
+				 map<string, bufferlist> *entries,
+				 bool *truncated)
 {
+  std::cout << __func__ << " oid=" << oid << " marker=" << marker
+	    << " entries->size()=" << entries->size() << std::endl;
+
 #define MAX_OMAP_GET 100
   int ret = ioctx.omap_get_vals(oid, marker, MAX_OMAP_GET, entries);
   if (ret < 0 && ret != -ENOENT) {
-    cerr << "ERROR: " << __func__ << "(" << oid << ") returned ret=" << cpp_strerror(-ret) << std::endl;
+    cerr << "ERROR: " << __func__ << "(" << oid << ") returned ret="
+	 << cpp_strerror(-ret) << std::endl;
   }
 
   *truncated = (entries->size() == MAX_OMAP_GET);
@@ -187,6 +227,8 @@ int RGWOrphanStore::read_entries(const string& oid, const string& marker, map<st
 }
 
 int RGWOrphanSearch::init(const string& job_name, RGWOrphanSearchInfo *info) {
+  std::cout << "RGWOrphanSearch::" << __func__ << std::endl;
+
   int r = orphan_store.init();
   if (r < 0) {
     return r;
@@ -239,6 +281,8 @@ int RGWOrphanSearch::init(const string& job_name, RGWOrphanSearchInfo *info) {
 
 int RGWOrphanSearch::log_oids(map<int, string>& log_shards, map<int, list<string> >& oids)
 {
+  std::cout << "RGWOrphanSearch::" << __func__ << std::endl;
+
   map<int, list<string> >::iterator miter = oids.begin();
 
   list<log_iter_info> liters; /* a list of iterator pairs for begin and end */
@@ -284,8 +328,9 @@ int RGWOrphanSearch::log_oids(map<int, string>& log_shards, map<int, list<string
 
 int RGWOrphanSearch::build_all_oids_index()
 {
-  librados::Rados *rados = store->get_rados_handle();
+  std::cout << "RGWOrphanSearch::" << __func__ << std::endl;
 
+  librados::Rados *rados = store->get_rados_handle();
   librados::IoCtx ioctx;
 
   int ret = rados->ioctx_create(search_info.pool.c_str(), ioctx);
@@ -364,6 +409,8 @@ int RGWOrphanSearch::build_all_oids_index()
 
 int RGWOrphanSearch::build_buckets_instance_index()
 {
+  std::cout << "RGWOrphanSearch::" << __func__ << std::endl;
+
   void *handle;
   int max = 1000;
   string section = "bucket.instance";
@@ -421,6 +468,8 @@ int RGWOrphanSearch::build_buckets_instance_index()
 
 int RGWOrphanSearch::handle_stat_result(map<int, list<string> >& oids, RGWRados::Object::Stat::Result& result)
 {
+  std::cout << "RGWOrphanSearch::" << __func__ << std::endl;
+
   set<string> obj_oids;
   rgw_bucket& bucket = result.obj.bucket;
   if (!result.has_manifest) { /* a very very old object, or part of a multipart upload during upload */
@@ -455,6 +504,8 @@ int RGWOrphanSearch::handle_stat_result(map<int, list<string> >& oids, RGWRados:
 
 int RGWOrphanSearch::pop_and_handle_stat_op(map<int, list<string> >& oids, std::deque<RGWRados::Object::Stat>& ops)
 {
+  std::cout << "RGWOrphanSearch::" << __func__ << std::endl;
+
   RGWRados::Object::Stat& front_op = ops.front();
 
   int ret = front_op.wait();
@@ -475,6 +526,9 @@ done:
 
 int RGWOrphanSearch::build_linked_oids_for_bucket(const string& bucket_instance_id, map<int, list<string> >& oids)
 {
+  std::cout << "RGWOrphanSearch::" << __func__ << " bucket="
+	    << bucket_instance_id << std::endl;
+
   ldout(store->ctx(), 10) << "building linked oids for bucket instance: " << bucket_instance_id << dendl;
   RGWBucketInfo bucket_info;
   RGWObjectCtx obj_ctx(store);
@@ -569,6 +623,8 @@ int RGWOrphanSearch::build_linked_oids_for_bucket(const string& bucket_instance_
 
 int RGWOrphanSearch::build_linked_oids_index()
 {
+  std::cout << "RGWOrphanSearch::" << __func__ << std::endl;
+
   map<int, list<string> > oids;
   map<int, string>::iterator iter = buckets_instance_index.find(search_stage.shard);
   for (; iter != buckets_instance_index.end(); ++iter) {
@@ -750,6 +806,8 @@ int RGWOrphanSearch::run()
 {
   int r;
 
+  std::cout << "RGWOrphanSearch::" << __func__ << std::endl;
+
   switch (search_stage.stage) {
     
     case ORPHAN_SEARCH_STAGE_INIT:
@@ -826,9 +884,10 @@ int RGWOrphanSearch::run()
   return 0;
 }
 
-
 int RGWOrphanSearch::remove_index(map<int, string>& index)
 {
+  std::cout << "RGWOrphanSearch::" << __func__ << std::endl;
+
   librados::IoCtx& ioctx = orphan_store.get_ioctx();
 
   for (map<int, string>::iterator iter = index.begin(); iter != index.end(); ++iter) {
@@ -844,6 +903,8 @@ int RGWOrphanSearch::remove_index(map<int, string>& index)
 
 int RGWOrphanSearch::finish()
 {
+  std::cout << "RGWOrphanSearch::" << __func__ << std::endl;
+
   int r = remove_index(all_objs_index);
   if (r < 0) {
     ldout(store->ctx(), 0) << "ERROR: remove_index(" << all_objs_index << ") returned ret=" << r << dendl;
