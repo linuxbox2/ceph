@@ -33,3 +33,6 @@
 [submodule "src/isa-l"]
 	path = src/isa-l
 	url = https://github.com/ceph/isa-l
+[submodule "boost"]
+	path = boost
+	url = https://github.com/boostorg/boost.git
