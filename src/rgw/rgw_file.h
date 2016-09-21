@@ -167,9 +167,7 @@ namespace rgw {
     /* median file name length (HPC) has been found to be 16,
      * w/90% of file names <= 31 (Yifan Wang, CMU) */
     using dirent_string = basic_sstring<char, uint16_t, 32>;
-
     using marker_cache_t = flat_map<uint64_t, dirent_string>;
-    using name_cache_t = flat_map<dirent_string, uint8_t>;
 
     struct State {
       uint64_t dev;
@@ -198,14 +196,14 @@ namespace rgw {
       static constexpr uint32_t FLAG_OVERFLOW = 0x0002;
 
       uint32_t flags;
+      uint32_t name_cnt;
       marker_cache_t marker_cache;
-      name_cache_t name_cache;
 
-      directory() : flags(FLAG_NONE) {}
+      directory() : flags(FLAG_NONE), name_cnt(0) {}
 
       void clear_state() {
 	marker_cache.clear();
-	name_cache.clear();
+	name_cnt = 0;
       }
 
       void set_overflow() {
@@ -460,25 +458,8 @@ namespace rgw {
       }
     }
 
-    void add_marker(uint64_t off, const boost::string_ref& marker,
-		    uint8_t obj_type) {
-      using std::get;
-      directory* d = get<directory>(&variant_type);
-      if (d) {
-	unique_lock guard(mtx);
-	// XXXX check for failure (dup key)
-	d->marker_cache.insert(
-	  marker_cache_t::value_type(off, marker.data()));
-	/* 90% of directories hold <= 32 entries (Yifan Wang, CMU),
-	 * but go big */
-	if (d->name_cache.size() < 128) {
-	  d->name_cache.insert(
-	    name_cache_t::value_type(marker.data(), obj_type));
-	} else {
-	  d->set_overflow(); // too many
-	}
-      }
-    }
+    inline void add_marker(uint64_t off, const boost::string_ref& marker,
+			   uint8_t obj_type);
 
     /* XXX */
     std::string find_marker(uint64_t off) { // XXX copy
@@ -717,6 +698,7 @@ namespace rgw {
 
     static atomic<uint32_t> fs_inst;
     static uint32_t write_completion_interval_s;
+    uint32_t max_marker;
     std::string fsid;
 
     using lock_guard = std::lock_guard<std::mutex>;
@@ -773,13 +755,13 @@ namespace rgw {
     static constexpr uint32_t FLAG_CLOSED =    0x0001;
 
     RGWLibFS(CephContext* _cct, const char *_uid, const char *_user_id,
-	    const char* _key)
+	     const char* _key, uint32_t _max_marker)
       : cct(_cct), root_fh(this, get_inst()), refcnt(1),
 	fh_cache(cct->_conf->rgw_nfs_fhcache_partitions,
 		 cct->_conf->rgw_nfs_fhcache_size),
 	fh_lru(cct->_conf->rgw_nfs_lru_lanes,
 	       cct->_conf->rgw_nfs_lru_lane_hiwat),
-	uid(_uid), key(_user_id, _key) {
+	uid(_uid), key(_user_id, _key), max_marker(_max_marker) {
 
       /* no bucket may be named rgw_fs_inst-(.*) */
       fsid = RGWFileHandle::root_name + "rgw_fs_inst-" +
@@ -1057,6 +1039,23 @@ namespace rgw {
     void close();
     void gc();
   }; /* RGWLibFS */
+
+  inline void RGWFileHandle::add_marker(uint64_t off,
+					const boost::string_ref& marker,
+					uint8_t obj_type) {
+    using std::get;
+    directory* d = get<directory>(&variant_type);
+    if (d) {
+      marker_cache_t& mc = d->marker_cache;
+      unique_lock guard(mtx);
+      // XXXX check for failure (dup key)
+      mc.insert(marker_cache_t::value_type(off, marker.data()));
+      if (mc.size() > get_fs()->max_marker) {
+	mc.erase(mc.begin());
+      }
+      ++d->name_cnt;
+    }
+  }
 
 static inline std::string make_uri(const std::string& bucket_name,
 				   const std::string& object_name) {

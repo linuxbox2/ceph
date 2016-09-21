@@ -79,27 +79,10 @@ namespace rgw {
     using std::get;
 
     LookupFHResult fhr{nullptr, 0};
-#if 0
-    RGWFileHandle::directory* d = parent->get_directory();
-    if (! d->name_cache.empty()) {
-      RGWFileHandle::dirent_string name{path};
-      const auto& diter = d->name_cache.find(name);
-      if (diter != d->name_cache.end()) {
-	fhr = lookup_fh(parent, path,
-			RGWFileHandle::FLAG_CREATE|
-			((diter->second == RGW_FS_TYPE_DIRECTORY) ?
-			  RGWFileHandle::FLAG_DIRECTORY :
-			  RGWFileHandle::FLAG_NONE));
-	if (get<0>(fhr))
-	  return fhr;
-      }
-    }
-#endif
 
     /* XXX the need for two round-trip operations to identify file or
-     * directory leaf objects is unecessary--the current proposed
-     * mechanism to avoid this is to store leaf object names with an
-     * object locator w/o trailing slash */
+     * directory leaf objects arises from RGW object name model, not sure
+     * if it can be avoided */
 
     /* mutating path */
     std::string obj_path{parent->relative_object_name()};
@@ -744,7 +727,7 @@ namespace rgw {
 				offset);
       rc = rgwlib.get_fe()->execute_req(&req);
       if (! rc) {
-	set_nlink(2 + d->name_cache.size());
+	set_nlink(2 + d->name_cnt);
 	state.atime = now;
 	*eof = req.eof();
 	event ev(event::type::READDIR, get_key(), state.atime);
@@ -756,7 +739,7 @@ namespace rgw {
       rc = rgwlib.get_fe()->execute_req(&req);
       if (! rc) {
 	state.atime = now;
-	set_nlink(2 + d->name_cache.size());
+	set_nlink(2 + d->name_cnt);
 	*eof = req.eof();
 	event ev(event::type::READDIR, get_key(), state.atime);
 	fs->state.push_event(ev);
@@ -1094,10 +1077,11 @@ extern "C" {
 		uint32_t flags)
 {
   int rc = 0;
+  CephContext* cct = static_cast<CephContext*>(rgw);
 
   /* stash access data for "mount" */
-  RGWLibFS* new_fs = new RGWLibFS(static_cast<CephContext*>(rgw), uid, acc_key,
-				  sec_key);
+  RGWLibFS* new_fs = new RGWLibFS(cct, uid, acc_key, sec_key,
+				  cct->_conf->rgw_nfs_marker_cache_size);
   assert(new_fs);
 
   rc = new_fs->authorize(rgwlib.get_store());
