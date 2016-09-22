@@ -117,7 +117,6 @@ CHECK_FUNCTION_EXISTS(pthread_setname_np HAVE_PTHREAD_SETNAME_NP)
 CHECK_FUNCTION_EXISTS(pthread_getname_np HAVE_PTHREAD_GETNAME_NP)
 CHECK_FUNCTION_EXISTS(eventfd HAVE_EVENTFD)
 
-CHECK_INCLUDE_FILE_CXX("boost/asio/coroutine.hpp" HAVE_BOOST_ASIO_COROUTINE)
 CHECK_INCLUDE_FILES("inttypes.h" HAVE_INTTYPES_H)
 CHECK_INCLUDE_FILES("linux/types.h" HAVE_LINUX_TYPES_H)
 CHECK_INCLUDE_FILES("linux/version.h" HAVE_LINUX_VERSION_H)
@@ -375,6 +374,26 @@ if(LINUX)
   add_definitions(-D__linux__)
 endif(LINUX)
 
+# Boost
+option(WITH_SYSTEM_BOOST "require and build with system Boost" OFF)
+if (NOT WITH_SYSTEM_BOOST)
+  option(BOOST_J "max jobs to use in Boost build" 1)
+  option(BOOST_PREFIX "/opt/ceph-boost")
+  # 1. prep and build it w/required components
+  set(BOOST_BUILD_DIR "${PROJECT_BINARY_DIR}/src/boost")
+  execute_process(COMMAND "mkdir" "-p" ${BOOST_BUILD_DIR})
+  execute_process(COMMAND "./bootstrap.sh"
+    "--prefix=${BOOST_PREFIX}"
+    "--with-libraries=container,context,coroutine,coroutine2,date_time,filesystem,iostreams,program_options,random,regex,system,thread"
+    WORKING_DIRECTORY ${BOOST_BUILD_DIR})
+  execute_process(COMMAND "./b2" "-a" "-j${BOOST_J}"
+    WORKING_DIRECTORY ${BOOST_BUILD_DIR})
+  # 2. set hints for FindBoost.cmake
+  set(BOOST_INCLUDEDIR "${PROJECT_SOURCE_DIR}/src/boost/include")
+  set(BOOST_LIBRARYDIR "${PROJECT_BINARY_DIR}/src/boost/lib")
+  set(Boost_NO_SYSTEM_PATHS ON)
+endif()
+
 if(ENABLE_SHARED)
   set(Boost_USE_STATIC_LIBS   OFF)
 else(ENABLE_SHARED)
@@ -382,9 +401,13 @@ else(ENABLE_SHARED)
 endif(ENABLE_SHARED)
 
 set(Boost_USE_MULTITHREADED ON)
-find_package(Boost COMPONENTS thread system regex random program_options date_time iostreams REQUIRED)
+
+# require minimally the bundled version
+find_package(Boost 1.61 COMPONENTS thread system regex random program_options date_time iostreams REQUIRED)
 include_directories(${Boost_INCLUDE_DIRS})
 include_directories(${PROJECT_BINARY_DIR}/include)
+
+CHECK_INCLUDE_FILE_CXX("boost/asio/coroutine.hpp" HAVE_BOOST_ASIO_COROUTINE)
 
 find_package(Threads REQUIRED)
 
