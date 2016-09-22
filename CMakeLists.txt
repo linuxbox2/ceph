@@ -376,21 +376,24 @@ endif(LINUX)
 
 # Boost
 option(WITH_SYSTEM_BOOST "require and build with system Boost" OFF)
+
+set(BOOST_PREFIX "/opt/ceph-boost")
+
 if (NOT WITH_SYSTEM_BOOST)
-  option(BOOST_J "max jobs to use in Boost build" 1)
-  option(BOOST_PREFIX "/opt/ceph-boost")
+  set(BOOST_J 1 CACHE STRING "max jobs for Boost build")
+  message(STATUS "BUILDING Boost Libraries at j ${BOOST_J}")
   # 1. prep and build it w/required components
+  set(BOOST_SOURCE_DIR "${PROJECT_SOURCE_DIR}/src/boost")
   set(BOOST_BUILD_DIR "${PROJECT_BINARY_DIR}/src/boost")
   execute_process(COMMAND "mkdir" "-p" ${BOOST_BUILD_DIR})
   execute_process(COMMAND "./bootstrap.sh"
     "--prefix=${BOOST_PREFIX}"
     "--with-libraries=container,context,coroutine,coroutine2,date_time,filesystem,iostreams,program_options,random,regex,system,thread"
-    WORKING_DIRECTORY ${BOOST_BUILD_DIR})
-  execute_process(COMMAND "./b2" "-a" "-j${BOOST_J}"
-    WORKING_DIRECTORY ${BOOST_BUILD_DIR})
+    WORKING_DIRECTORY ${BOOST_SOURCE_DIR})
+  execute_process(COMMAND "./b2" "-a" "-j11"
+    WORKING_DIRECTORY ${BOOST_SOURCE_DIR})
   # 2. set hints for FindBoost.cmake
-  set(BOOST_INCLUDEDIR "${PROJECT_SOURCE_DIR}/src/boost/include")
-  set(BOOST_LIBRARYDIR "${PROJECT_BINARY_DIR}/src/boost/lib")
+  set(BOOST_ROOT "${PROJECT_SOURCE_DIR}/src/boost")
   set(Boost_NO_SYSTEM_PATHS ON)
 endif()
 
