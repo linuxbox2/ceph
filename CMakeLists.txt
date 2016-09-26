@@ -395,7 +395,7 @@ else()
   message(STATUS "BUILDING Boost Libraries at j ${BOOST_J}")
   # 1. prep w/required components
   set(BOOST_SOURCE_DIR "${PROJECT_SOURCE_DIR}/src/boost")
-  set(BOOST_PREFIX "${PROJECT_BINARY_DIR}/src/boost")
+  set(BOOST_PREFIX "${PROJECT_BINARY_DIR}/boost")
   set(Boost_USE_STATIC_LIBS ON)
   execute_process(COMMAND "./bootstrap.sh"
     "--prefix=${BOOST_PREFIX}"
@@ -411,6 +411,7 @@ else()
     "install"
     WORKING_DIRECTORY ${BOOST_SOURCE_DIR})
   # 3. install headers
+  message(STATUS "install headers: ./b2 --includedir=${BOOST_PREFIX}/include headers install (working dir ${BOOST_SOURCE_DIR})")
   execute_process(COMMAND "./b2"
     "--includedir=${BOOST_PREFIX}/include"
     "headers install"
