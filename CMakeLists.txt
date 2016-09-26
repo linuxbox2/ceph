@@ -396,6 +396,7 @@ else()
   # 1. prep w/required components
   set(BOOST_SOURCE_DIR "${PROJECT_SOURCE_DIR}/src/boost")
   set(BOOST_PREFIX "${PROJECT_BINARY_DIR}/src/boost")
+  set(Boost_USE_STATIC_LIBS ON)
   execute_process(COMMAND "./bootstrap.sh"
     "--prefix=${BOOST_PREFIX}"
     "--with-libraries=atomic,container,context,coroutine,coroutine2,date_time,filesystem,iostreams,program_options,random,regex,system,thread"
