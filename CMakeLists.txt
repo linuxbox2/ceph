@@ -330,7 +330,7 @@ option(WITH_MGR "ceph-mgr is enabled" ON)
 if(WITH_MGR)
     set(Python_ADDITIONAL_VERSIONS 2.7)
     find_package(PythonLibs 2.7 REQUIRED)
-    find_package(Boost COMPONENTS python REQUIRED)
+    # Boost dependency check deferred to Boost section
 endif(WITH_MGR)
 
 option(WITH_THREAD_SAFE_RES_QUERY "res_query is thread safe" OFF)
@@ -437,6 +437,12 @@ else()
 endif()
 
 set(Boost_USE_MULTITHREADED ON)
+
+set(BOOST_COMPONENTS
+	thread system regex random program_options date_time iostreams)
+if(WITH_MGR)
+	list(APPEND BOOST_COMPONENTS python)
+endif()
 
 # require minimally the bundled version
 find_package(Boost 1.61 COMPONENTS thread system regex random program_options date_time iostreams REQUIRED)
