@@ -415,6 +415,7 @@ else()
     "--variant=release" # could override
     "--link=static" # avoid library versioning issues
     "--threading=multi"
+    "--with-python"
     "--build-dir=${BOOST_BUILD}"
     "-j${BOOST_J}"
     "cxxflags=${BOOST_CFLAGS}"
@@ -426,6 +427,7 @@ else()
     "--variant=release" # could override
     "--link=static" # avoid library versioning issues
     "--threading=multi"
+    "--with-python"
     "--build-dir=${BOOST_BUILD}"
     "-j${BOOST_J}"
     "cxxflags=${BOOST_CFLAGS}"
