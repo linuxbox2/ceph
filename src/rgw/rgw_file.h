@@ -1109,6 +1109,7 @@ class RGWListBucketsRequest : public RGWLibRequest,
 public:
   RGWFileHandle* rgw_fh;
   uint64_t* offset;
+  uint64_t orig_offset;
   void* cb_arg;
   rgw_readdir_cb rcb;
   size_t ix;
@@ -1117,7 +1118,7 @@ public:
 			RGWFileHandle* _rgw_fh, rgw_readdir_cb _rcb,
 			void* _cb_arg, uint64_t* _offset)
     : RGWLibRequest(_cct, _user), rgw_fh(_rgw_fh), offset(_offset),
-      cb_arg(_cb_arg), rcb(_rcb), ix(0) {
+      orig_offset(*_offset), cb_arg(_cb_arg), rcb(_rcb), ix(0) {
     const auto& mk = rgw_fh->find_marker(*offset);
     if (mk) {
       marker = mk->name;
@@ -1197,7 +1198,9 @@ public:
     lsubdout(cct, rgw, 15) << "READDIR offset: " << *offset
 			   << " is_truncated: " << is_truncated
 			   << dendl;
-    return !is_truncated;
+    /* ensure offset advanced */
+    return ((*offset == orig_offset) ||
+	    (!is_truncated));
   }
 
 }; /* RGWListBucketsRequest */
@@ -1212,6 +1215,7 @@ public:
 public:
   RGWFileHandle* rgw_fh;
   uint64_t* offset;
+  uint64_t orig_offset;
   void* cb_arg;
   rgw_readdir_cb rcb;
   size_t ix;
@@ -1220,7 +1224,7 @@ public:
 		    RGWFileHandle* _rgw_fh, rgw_readdir_cb _rcb,
 		    void* _cb_arg, uint64_t* _offset)
     : RGWLibRequest(_cct, _user), rgw_fh(_rgw_fh), offset(_offset),
-      cb_arg(_cb_arg), rcb(_rcb), ix(0) {
+      orig_offset(*_offset), cb_arg(_cb_arg), rcb(_rcb), ix(0) {
     const auto& mk = rgw_fh->find_marker(*offset);
     if (mk) {
       marker = *mk;
@@ -1358,7 +1362,9 @@ public:
 			   << " next marker: " << next_marker
 			   << " is_truncated: " << is_truncated
 			   << dendl;
-    return !is_truncated;
+    /* ensure offset advanced */
+    return ((*offset == orig_offset) ||
+	    (!is_truncated));
   }
 
 }; /* RGWReaddirRequest */
