@@ -79,3 +79,19 @@ target_link_libraries(ceph_test_rgw_obj
   )
 set_target_properties(ceph_test_rgw_obj PROPERTIES COMPILE_FLAGS
   ${UNITTEST_CXX_FLAGS})
+
+# sig_tool_v2
+set(sig_tool_v2_srcs sig_tool_v2.cc)
+add_executable(sig_tool_v2
+  ${sig_tool_v2_srcs}
+  )
+target_link_libraries(sig_tool_v2
+  rgw_a
+  global
+  ${Boost_FILESYSTEM_LIBRARY}
+  ${CMAKE_DL_LIBS}
+  ${UNITTEST_LIBS}
+  ${CRYPTO_LIBS}
+  )
+set_target_properties(sig_tool_v2 PROPERTIES COMPILE_FLAGS
+  ${UNITTEST_CXX_FLAGS})

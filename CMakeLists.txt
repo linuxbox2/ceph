@@ -568,7 +568,8 @@ endif()
 set(Boost_USE_MULTITHREADED ON)
 
 set(BOOST_COMPONENTS
-	thread system regex random program_options date_time iostreams)
+  thread system regex random program_options filesystem date_time
+  iostreams)
 if(WITH_MGR)
 	list(APPEND BOOST_COMPONENTS python)
 endif()
