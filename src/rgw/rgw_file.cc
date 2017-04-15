@@ -879,6 +879,67 @@ namespace rgw {
     return os;
   }
 
+  std::ostream& operator<<(std::ostream &os, WPage const &page)
+  {
+    os << "<WPage:";
+    os << "pno=" << page.pno << ";";
+    os << "off=" << "implicit;";
+    os << "len=" << page.len;
+    os << ">";
+    return os;
+  }
+
+  int WPageList::write_back(uint64_t off, uint64_t len, void* buf)
+  {
+      uint64_t toff = off;
+      uint64_t tlen = len;
+      bool need_sort = false;
+
+      lock_guard guard(mtx);
+
+      do {
+	int32_t pno = WPage::page_no(off);
+	if (unlikely(pno <= high_retired)) {
+	  /* out-of-order write, skew to great */
+	  std::cout << "write order skew: "
+		    << " off=" << off
+		    << " page_no=" << pno
+		    << " high_retired=" << high_retired
+		    << " window exceeded, page already sent"
+		    << std::endl;
+	  return -EIO;
+	}
+
+	/* if pno is < high_retired, pno is in queue already, or
+	 * else should be appended by us */
+	WPage *page = get_page(pno);
+	if (! page) {
+	  page = fh->get_fs()->writeback.get_page();
+	  if (! page) {
+	    return -EIO;
+	  }
+	  page->pno = pno;
+	  if (high_pno != pno-1) {
+	    need_sort = true;
+	  }
+	  put_page(page);
+	}
+
+	/* write part of a page */
+	uint32_t poff = WPage::page_off(toff);
+	uint32_t wlen = std::min(tlen, (WPage::PAGE_SIZE-poff));
+	page->store(poff, wlen, buf);
+	toff += wlen;
+	tlen -= wlen;
+
+      } while(tlen > 0);
+
+      if (need_sort)
+	pages.sort();
+
+      return 0;
+    } /* WPageList::write_back */
+
   RGWFileHandle::~RGWFileHandle() {
     /* in the non-delete case, handle may still be in handle table */
     if (fh_hook.is_linked()) {
@@ -1125,21 +1186,122 @@ namespace rgw {
     }
 
     file* f = get<file>(&variant_type);
-    if (f && (f->write_req)) {
+    if (f && (f->write_req2)) {
       lsubdout(fs->get_context(), rgw, 10)
 	<< __func__
 	<< " finishing write trans on " << object_name()
 	<< dendl;
-      rc = rgwlib.get_fe()->finish_req(f->write_req);
+      rc = rgwlib.get_fe()->finish_req(f->write_req2);
       if (! rc) {
-	rc = f->write_req->get_ret();
+	rc = f->write_req2->get_ret();
       }
-      delete f->write_req;
-      f->write_req = nullptr;
+      delete f->write_req2;
+      f->write_req2 = nullptr;
     }
 
     return rc;
   } /* RGWFileHandle::write_finish */
+
+  /* async write */
+  int RGWFileHandle::write2(uint64_t off, size_t len, size_t *bytes_written,
+			    void *buffer)
+  {
+    using std::get;
+    using WriteCompletion = RGWLibFS::WriteCompletion;
+
+    lock_guard guard(mtx);
+    int rc = 0;
+
+    file* f = get<file>(&variant_type);
+    if (! f)
+      return -EISDIR;
+
+    if (deleted()) {
+      lsubdout(fs->get_context(), rgw, 5)
+	<< __func__
+	<< " write attempted on deleted object "
+	<< this->object_name()
+	<< dendl;
+      /* zap write transaction, if any */
+      if (f->write_req) {
+	delete f->write_req;
+	f->write_req = nullptr;
+      }
+      return -ESTALE;
+    }
+
+    std::cout
+      << __func__
+      << " off=" << off
+      << " len=" << len
+      << std::endl;
+
+    if (off &&
+	(f->last_off > off)) {
+      std::cout
+	<< __func__
+	<< " OUT OF ORDER WRITE at off=" << off
+	<< " last_off=" << f->last_off
+	<< std::endl;
+    }
+
+    f->last_off = off;
+
+    if (! f->write_req2) {
+      /* guard--we do not support (e.g., COW-backed) partial writes */
+      if (off != 0) {
+	lsubdout(fs->get_context(), rgw, 5)
+	  << __func__
+	  << " " << object_name()
+	  << " non-0 initial write position " << off
+	  << dendl;
+	return -EIO;
+      }
+
+      /* start */
+      std::string object_name = relative_object_name();
+      f->write_req2 =
+	new RGWWriteRequest2(fs->get_context(), fs->get_user(), this,
+			     bucket_name(), object_name);
+
+      std::cout << "created new RGWWriteRequest2"
+		<< " high_retired="
+		<< f->write_req2->page_list.high_retired
+		<< std::endl;
+
+      rc = rgwlib.get_fe()->start_req(f->write_req2);
+      if (rc < 0) {
+	lsubdout(fs->get_context(), rgw, 5)
+	  << __func__
+	  << this->object_name()
+	  << " write start failed " << off
+	  << " (" << rc << ")"
+	  << dendl;
+	/* zap failed write transaction */
+	delete f->write_req2;
+	f->write_req2 = nullptr;
+        return -EIO;
+      } else {
+	if (stateless_open())  {
+	  /* start write timer */
+	  f->write_req2->timer_id =
+	    RGWLibFS::write_timer.add_event(
+	      std::chrono::seconds(RGWLibFS::write_completion_interval_s),
+	      WriteCompletion(*this));
+	}
+      }
+    } /* ! f->write_req2 */
+
+    rc = f->write_req2->page_list.write_back(off, len, buffer);
+    if (likely(rc == 0)) {
+      rc = f->write_req2->exec_continue();
+    }
+
+    *bytes_written = (rc == 0) ? len : 0;
+    return rc;
+  } /* RGWFileHandle::write2 */
+
+  /* end async write */
 
   int RGWFileHandle::close()
   {
@@ -1338,6 +1500,251 @@ namespace rgw {
 		      (ceph_clock_now() - s->time));
     return op_ret;
   } /* exec_finish */
+
+/* async write 2 */
+  int RGWWriteRequest2::exec_start() {
+    struct req_state* s = get_state();
+
+    /* not obviously supportable */
+    assert(! dlo_manifest);
+    assert(! slo_info);
+
+    perfcounter->inc(l_rgw_put);
+    op_ret = -EINVAL;
+
+    if (s->object.empty()) {
+      ldout(s->cct, 0) << __func__ << " called on empty object" << dendl;
+      goto done;
+    }
+
+    op_ret = get_params();
+    if (op_ret < 0)
+      goto done;
+
+    op_ret = get_system_versioning_params(s, &olh_epoch, &version_id);
+    if (op_ret < 0) {
+      goto done;
+    }
+
+    /* user-supplied MD5 check skipped (not supplied) */
+    /* early quota check skipped--we don't have size yet */
+    /* skipping user-supplied etag--we might have one in future, but
+     * like data it and other attrs would arrive after open */
+    processor = select_processor(*static_cast<RGWObjectCtx *>(s->obj_ctx),
+				 &multipart);
+    op_ret = processor->prepare(get_store(), NULL);
+
+  done:
+    return op_ret;
+  } /* exec_start */
+
+  int RGWWriteRequest2::write_page(WPage* page, uint32_t flags)
+  {
+    int rc = 0;
+    struct req_state* s = get_state();
+    buffer::list data;
+
+    std::cout << __func__
+	      << " page=" << *page
+	      << " flags=" << flags
+	      << std::endl;
+
+    data.push_back(
+      buffer::create_static(page->len,
+			    static_cast<char*>(page->base)));
+
+    size_t len = data.length();
+    if (! len)
+      return 0;
+
+    /* XXX we are currently synchronous--not clear we need to be
+     * now that buffers are write-behind */
+    bool need_to_wait = true;
+    bufferlist orig_data;
+
+    /* partial writes are always whole-page */
+    ofs = page->file_offset();
+
+    if ((! page->full()) &&
+	(! (flags & FLAG_FINISH))) {
+      /* non-full pages contain zeroed data--for upload-only use
+       * case, this is never correct */
+      rgw_fh->get_fs()->writeback.put_page(page);
+      rc = -EIO;
+      goto done;
+    }
+
+    if (need_to_wait) {
+      orig_data = data;
+    }
+    hash.Update((const byte *)data.c_str(), data.length());
+    rc = put_data_and_throttle(processor, data, ofs,
+				   need_to_wait);
+    if (rc < 0) {
+      if (!need_to_wait || rc != -EEXIST) {
+	ldout(s->cct, 20) << "processor->thottle_data() returned ret="
+			  << rc << dendl;
+	rgw_fh->get_fs()->writeback.put_page(page);
+	goto done;
+      }
+
+      ldout(s->cct, 5) << "NOTICE: processor->throttle_data() returned"
+		       << " -EEXIST, need to restart write" << dendl;
+
+      /* restore original data */
+      data.swap(orig_data);
+
+      /* restart processing with different oid suffix */
+      dispose_processor(processor);
+      processor = select_processor(*static_cast<RGWObjectCtx *>(s->obj_ctx),
+				   &multipart);
+
+      string oid_rand;
+      char buf[33];
+      gen_rand_alphanumeric(get_store()->ctx(), buf, sizeof(buf) - 1);
+      oid_rand.append(buf);
+
+      rc = processor->prepare(get_store(), &oid_rand);
+      if (rc < 0) {
+	ldout(s->cct, 0) << "ERROR: processor->prepare() returned "
+			 << rc << dendl;
+	rgw_fh->get_fs()->writeback.put_page(page);
+	goto done;
+      }
+
+      rc = put_data_and_throttle(processor, data, ofs, false);
+      if (rc < 0) {
+	rgw_fh->get_fs()->writeback.put_page(page);
+	goto done;
+      }
+    }
+    rgw_fh->get_fs()->writeback.put_page(page);
+    bytes_written += len;
+
+  done:
+    return rc;
+  }
+
+  int RGWWriteRequest2::exec_continue()
+  {
+    op_ret = 0;
+
+    WPage* page = nullptr;
+    while (((page = page_list.retire_page_lock()) != nullptr) &&
+	   (op_ret == 0)) {
+
+      std::cout
+	<< __func__
+	<< " retire page=" << *page
+	<< std::endl;
+
+      op_ret = write_page(page, FLAG_NONE);
+    } /* retire pages */
+
+    return op_ret;
+  } /* exec_continue */
+
+  int RGWWriteRequest2::exec_finish()
+  {
+    buffer::list bl, aclbl, ux_key, ux_attrs;
+    map<string, string>::iterator iter;
+    char calc_md5[CEPH_CRYPTO_MD5_DIGESTSIZE * 2 + 1];
+    unsigned char m[CEPH_CRYPTO_MD5_DIGESTSIZE];
+    struct req_state* s = get_state();
+
+    vector<WPage*> page_vec;
+    page_list.get_pages_lock(page_vec);
+
+    std::cout << __func__
+	      << " reached with " << page_vec.size()
+	      << " tail pages"
+	      << std::endl;
+
+    for (uint32_t ix = 0; ix < page_vec.size(); ++ix) {
+      WPage* page = page_vec[ix];
+      if (op_ret == 0) {
+	/* only last page can be !FULL */
+	uint32_t wp_flags =
+	  (ix == (page_vec.size()-1)) ? FLAG_FINISH : FLAG_NONE;
+
+      std::cout << __func__
+		<< " write_page=" << *page
+		<< std::endl;
+
+      op_ret = write_page(page, wp_flags);
+      } else {
+	// release page
+
+	std::cout << __func__
+		<< " ERROR on write_page=" << *page
+		<< std::endl;
+
+	rgw_fh->get_fs()->writeback.put_page(page);
+      }
+    } /* outstanding pages */
+    if (op_ret != 0)
+      goto done;
+
+    s->obj_size = ofs; // XXX check ofs!!!
+    perfcounter->inc(l_rgw_put_b, s->obj_size);
+
+    op_ret = get_store()->check_quota(s->bucket_owner.get_id(), s->bucket,
+				      user_quota, bucket_quota, s->obj_size);
+    if (op_ret < 0) {
+      goto done;
+    }
+
+    hash.Final(m);
+
+    buf_to_hex(m, CEPH_CRYPTO_MD5_DIGESTSIZE, calc_md5);
+    etag = calc_md5;
+
+    bl.append(etag.c_str(), etag.size() + 1);
+    emplace_attr(RGW_ATTR_ETAG, std::move(bl));
+
+    policy.encode(aclbl);
+    emplace_attr(RGW_ATTR_ACL, std::move(aclbl));
+
+    rgw_fh->encode_attrs(ux_key, ux_attrs);
+    emplace_attr(RGW_ATTR_UNIX_KEY1, std::move(ux_key));
+    emplace_attr(RGW_ATTR_UNIX1, std::move(ux_attrs));
+
+    for (iter = s->generic_attrs.begin(); iter != s->generic_attrs.end();
+	 ++iter) {
+      buffer::list& attrbl = attrs[iter->first];
+      const string& val = iter->second;
+      attrbl.append(val.c_str(), val.size() + 1);
+    }
+
+    rgw_get_request_metadata(s->cct, s->info, attrs);
+    encode_delete_at_attr(delete_at, attrs);
+
+    /* Add a custom metadata to expose the information whether an object
+     * is an SLO or not. Appending the attribute must be performed AFTER
+     * processing any input from user in order to prohibit overwriting. */
+    if (unlikely(!! slo_info)) {
+      buffer::list slo_userindicator_bl;
+      ::encode("True", slo_userindicator_bl);
+      emplace_attr(RGW_ATTR_SLO_UINDICATOR, std::move(slo_userindicator_bl));
+    }
+
+    op_ret = processor->complete(s->obj_size, etag, &mtime, real_time(), attrs,
+                                 (delete_at ? *delete_at : real_time()), if_match, if_nomatch);
+    if (! op_ret) {
+      /* update stats */
+      rgw_fh->set_mtime(real_clock::to_timespec(mtime));
+      rgw_fh->set_ctime(real_clock::to_timespec(mtime));
+      rgw_fh->set_size(bytes_written);
+    }
+
+  done:
+    dispose_processor(processor);
+    perfcounter->tinc(l_rgw_put_lat,
+		      (ceph_clock_now() - s->time));
+    return op_ret;
+  } /* exec_finish */
+
+/* end async write 2 */
 
 } /* namespace rgw */
 
@@ -1730,7 +2137,7 @@ int rgw_write(struct rgw_fs *rgw_fs,
   if (! rgw_fh->is_open())
     return -EPERM;
 
-  rc = rgw_fh->write(offset, length, bytes_written, buffer);
+  rc = rgw_fh->write2(offset, length, bytes_written, buffer);
 
   return rc;
 }
