@@ -968,7 +968,7 @@ namespace rgw {
 	<< " (" << obj_name << ")"
 	<< dendl;
 
-      fh_key fhk = parent->make_fhk(key_name);
+      fh_key fhk = parent->make_fhk(obj_name);
 
     retry:
       RGWFileHandle* fh =
@@ -2317,8 +2317,7 @@ public:
     /* XXX and fixup key attr (could optimize w/string ref and
      * dest_object) */
     buffer::list ux_key;
-    std::string key_name{dst_parent->make_key_name(dst_name.c_str())};
-    fh_key fhk = dst_parent->make_fhk(key_name);
+    fh_key fhk = dst_parent->make_fhk(dst_name);
     rgw::encode(fhk, ux_key);
     emplace_attr(RGW_ATTR_UNIX_KEY1, std::move(ux_key));
 
