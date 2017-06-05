@@ -8,7 +8,7 @@ struct RGWZoneGroup;
 struct RGWZoneParams;
 
 static inline bool rgw_raw_obj_to_obj(const rgw_bucket& bucket,
-				      const rgw_raw_obj& raw_obj, rgw_obj *obj)
+				      const rgw_raw_obj& raw_obj, rgw_obj* obj)
 {
   ssize_t pos = raw_obj.oid.find('_');
   if (pos < 0) {
@@ -27,7 +27,7 @@ struct rgw_bucket_placement {
   string placement_rule;
   rgw_bucket bucket;
 
-  void dump(Formatter *f) const;
+  void dump(Formatter* f) const;
 };
 
 class rgw_obj_select {
@@ -39,7 +39,9 @@ class rgw_obj_select {
 public:
   rgw_obj_select() : is_raw(false) {}
   rgw_obj_select(const rgw_obj& _obj) : obj(_obj), is_raw(false) {}
-  rgw_obj_select(const rgw_raw_obj& _raw_obj) : raw_obj(_raw_obj), is_raw(true) {}
+  rgw_obj_select(const rgw_raw_obj& _raw_obj) : raw_obj(_raw_obj), is_raw(true)
+    {}
+
   rgw_obj_select(const rgw_obj_select& rhs) {
     is_raw = rhs.is_raw;
     if (is_raw) {
@@ -49,8 +51,9 @@ public:
     }
   }
 
-  rgw_raw_obj get_raw_obj(const RGWZoneGroup& zonegroup, const RGWZoneParams& zone_params) const;
-  rgw_raw_obj get_raw_obj(RGWRados *store) const;
+  rgw_raw_obj get_raw_obj(const RGWZoneGroup& zonegroup,
+			  const RGWZoneParams& zone_params) const;
+  rgw_raw_obj get_raw_obj(RGWRados* store) const;
 
   rgw_obj_select& operator=(const rgw_obj& rhs) {
     obj = rhs;
@@ -92,7 +95,7 @@ struct RGWObjManifestPart {
      DECODE_FINISH(bl);
   }
 
-  void dump(Formatter *f) const;
+  void dump(Formatter* f) const;
   static void generate_test_instances(list<RGWObjManifestPart*>& o);
 };
 WRITE_CLASS_ENCODER(RGWObjManifestPart)
@@ -116,13 +119,17 @@ WRITE_CLASS_ENCODER(RGWObjManifestPart)
 struct RGWObjManifestRule {
   uint32_t start_part_num;
   uint64_t start_ofs;
-  uint64_t part_size; /* each part size, 0 if there's no part size, meaning it's unlimited */
+  uint64_t part_size; /* each part size, 0 if there's no part size,
+			 meaning it's unlimited */
   uint64_t stripe_max_size; /* underlying obj max size */
   string override_prefix;
 
-  RGWObjManifestRule() : start_part_num(0), start_ofs(0), part_size(0), stripe_max_size(0) {}
-  RGWObjManifestRule(uint32_t _start_part_num, uint64_t _start_ofs, uint64_t _part_size, uint64_t _stripe_max_size) :
-                       start_part_num(_start_part_num), start_ofs(_start_ofs), part_size(_part_size), stripe_max_size(_stripe_max_size) {}
+  RGWObjManifestRule() : start_part_num(0), start_ofs(0), part_size(0),
+			 stripe_max_size(0) {}
+  RGWObjManifestRule(uint32_t _start_part_num, uint64_t _start_ofs,
+		     uint64_t _part_size, uint64_t _stripe_max_size) :
+    start_part_num(_start_part_num), start_ofs(_start_ofs),
+    part_size(_part_size), stripe_max_size(_stripe_max_size) {}
 
   void encode(bufferlist& bl) const {
     ENCODE_START(2, 1, bl);
@@ -144,7 +151,7 @@ struct RGWObjManifestRule {
       ::decode(override_prefix, bl);
     DECODE_FINISH(bl);
   }
-  void dump(Formatter *f) const;
+  void dump(Formatter* f) const;
 };
 WRITE_CLASS_ENCODER(RGWObjManifestRule)
 
@@ -161,15 +168,20 @@ protected:
 
   uint64_t max_head_size;
   string prefix;
-  rgw_bucket_placement tail_placement; /* might be different than the original bucket,
-                                       as object might have been copied across pools */
+  rgw_bucket_placement tail_placement; /* might be different than the
+					* original bucket, as object
+					* might have been copied across pools */
   map<uint64_t, RGWObjManifestRule> rules;
 
   string tail_instance; /* tail object's instance */
 
-  void convert_to_explicit(const RGWZoneGroup& zonegroup, const RGWZoneParams& zone_params);
-  int append_explicit(RGWObjManifest& m, const RGWZoneGroup& zonegroup, const RGWZoneParams& zone_params);
-  void append_rules(RGWObjManifest& m, map<uint64_t, RGWObjManifestRule>::iterator& iter, string *override_prefix);
+  void convert_to_explicit(const RGWZoneGroup& zonegroup,
+			   const RGWZoneParams& zone_params);
+  int append_explicit(RGWObjManifest& m, const RGWZoneGroup& zonegroup,
+		      const RGWZoneParams& zone_params);
+  void append_rules(RGWObjManifest& m,
+		    map<uint64_t, RGWObjManifestRule>::iterator& iter,
+		    string* override_prefix);
 
   void update_iterators() {
     begin_iter.seek(0);
@@ -177,11 +189,14 @@ protected:
   }
 public:
 
-  RGWObjManifest() : explicit_objs(false), obj_size(0), head_size(0), max_head_size(0),
-                     begin_iter(this), end_iter(this) {}
+  RGWObjManifest() : explicit_objs(false), obj_size(0), head_size(0),
+		     max_head_size(0), begin_iter(this), end_iter(this)
+    {}
+
   RGWObjManifest(const RGWObjManifest& rhs) {
     *this = rhs;
   }
+
   RGWObjManifest& operator=(const RGWObjManifest& rhs) {
     explicit_objs = rhs.explicit_objs;
     objs = rhs.objs;
@@ -214,7 +229,9 @@ public:
     objs.swap(_objs);
   }
 
-  void get_implicit_location(uint64_t cur_part_id, uint64_t cur_stripe, uint64_t ofs, string *override_prefix, rgw_obj_select *location);
+  void get_implicit_location(uint64_t cur_part_id, uint64_t cur_stripe,
+			     uint64_t ofs, string* override_prefix,
+			     rgw_obj_select* location);
 
   void set_trivial_rule(uint64_t tail_ofs, uint64_t stripe_max_size) {
     RGWObjManifestRule rule(0, tail_ofs, 0, stripe_max_size);
@@ -277,8 +294,9 @@ public:
 
     if (explicit_objs && head_size > 0 && !objs.empty()) {
       /* patch up manifest due to issue 16435:
-       * the first object in the explicit objs list might not be the one we need to access, use the
-       * head object instead if set. This would happen if we had an old object that was created
+       * the first object in the explicit objs list might not be the
+       * one we need to access, use the head object instead if
+       * set. This would happen if we had an old object that was created
        * when the explicit objs manifest was around, and it got copied.
        */
       rgw_obj& obj_0 = objs[0].loc;
@@ -314,7 +332,8 @@ public:
           tail_instance = obj.key.instance;
         }
       }
-    } else { // old object created before 'tail_instance' field added to manifest
+    } else { /* old object created before 'tail_instance' field added
+	      * to manifest */
       tail_instance = obj.key.instance;
     }
 
@@ -327,13 +346,14 @@ public:
     DECODE_FINISH(bl);
   }
 
-  void dump(Formatter *f) const;
+  void dump(Formatter* f) const;
   static void generate_test_instances(list<RGWObjManifest*>& o);
 
-  int append(RGWObjManifest& m, RGWZoneGroup& zonegroup, RGWZoneParams& zone_params);
-  int append(RGWObjManifest& m, RGWRados *store);
+  int append(RGWObjManifest& m, RGWZoneGroup& zonegroup,
+	     RGWZoneParams& zone_params);
+  int append(RGWObjManifest& m, RGWRados* store);
 
-  bool get_rule(uint64_t ofs, RGWObjManifestRule *rule);
+  bool get_rule(uint64_t ofs, RGWObjManifestRule* rule);
 
   bool empty() {
     if (explicit_objs)
@@ -428,7 +448,7 @@ public:
   }
 
   class obj_iterator {
-    RGWObjManifest *manifest;
+    RGWObjManifest* manifest;
     uint64_t part_ofs; /* where current part starts */
     uint64_t stripe_ofs; /* where current stripe starts */
     uint64_t ofs;       /* current position within the object */
@@ -457,7 +477,7 @@ public:
 
   protected:
 
-    void set_manifest(RGWObjManifest *m) {
+    void set_manifest(RGWObjManifest* m) {
       manifest = m;
     }
 
@@ -466,14 +486,14 @@ public:
       init();
     }
 
-    explicit obj_iterator(RGWObjManifest *_m) : manifest(_m) {
+    explicit obj_iterator(RGWObjManifest* _m) : manifest(_m) {
       init();
       if (!manifest->empty()) {
         seek(0);
       }
     }
 
-  obj_iterator(RGWObjManifest *_m, uint64_t _ofs) : manifest(_m) {
+  obj_iterator(RGWObjManifest* _m, uint64_t _ofs) : manifest(_m) {
       init();
       if (!manifest->empty()) {
         seek(_ofs);
@@ -545,7 +565,7 @@ public:
    * simple object generator. Using a simple single rule manifest.
    */
   class generator {
-    RGWObjManifest *manifest;
+    RGWObjManifest* manifest;
     uint64_t last_ofs;
     uint64_t cur_part_ofs;
     int cur_part_id;
@@ -560,12 +580,20 @@ public:
   public:
     generator() : manifest(NULL), last_ofs(0), cur_part_ofs(0), cur_part_id(0), 
                   cur_stripe(0), cur_stripe_size(0) {}
-    int create_begin(CephContext *cct, RGWObjManifest *manifest, const string& placement_rule, rgw_bucket& bucket, rgw_obj& obj);
+    int create_begin(CephContext* cct, RGWObjManifest* manifest,
+		     const string& placement_rule, rgw_bucket& bucket,
+		     rgw_obj& obj);
 
     int create_next(uint64_t ofs);
 
-    rgw_raw_obj get_cur_obj(RGWZoneGroup& zonegroup, RGWZoneParams& zone_params) { return cur_obj.get_raw_obj(zonegroup, zone_params); }
-    rgw_raw_obj get_cur_obj(RGWRados *store) { return cur_obj.get_raw_obj(store); }
+    rgw_raw_obj get_cur_obj(RGWZoneGroup& zonegroup,
+			    RGWZoneParams& zone_params) {
+      return cur_obj.get_raw_obj(zonegroup, zone_params);
+    }
+
+    rgw_raw_obj get_cur_obj(RGWRados* store) {
+      return cur_obj.get_raw_obj(store);
+    }
 
     /* total max size of current stripe (including head obj) */
     uint64_t cur_stripe_max_size() {
@@ -606,8 +634,10 @@ struct RGWObjState {
   map<string, bufferlist> attrset;
   RGWObjState() : is_atomic(false), has_attrs(0), exists(false),
                   size(0), epoch(0), fake_tag(false), has_manifest(false),
-                  has_data(false), prefetch_data(false), keep_tail(false), is_olh(false),
-                  pg_ver(0), zone_short_id(0) {}
+                  has_data(false), prefetch_data(false), keep_tail(false),
+		  is_olh(false), pg_ver(0), zone_short_id(0)
+    {}
+
   RGWObjState(const RGWObjState& rhs) : obj (rhs.obj) {
     is_atomic = rhs.is_atomic;
     has_attrs = rhs.has_attrs;
