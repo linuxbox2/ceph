@@ -4,13 +4,32 @@
 #ifndef CEPH_RGWRADOS_OBJ_V2_H
 #define CEPH_RGWRADOS_OBJ_V2_H
 
+#include <string>
+#include <map>
+
 namespace rgw {
+  namespace mv2 {
 
-  class RGWObjManifestV2
-  {
-  public:
-  };
+    static constexpr uint32_t manifest_v2_ver = 1;
 
-};
+    class MFSeg
+    {
+      int foo;
+    };
+
+    class RGWObjManifestV2
+    {
+    public:
+      uint32_t ver;
+
+    RGWObjManifestV2()
+      : ver(manifest_v2_ver)
+	{}
+    };
+  }; /* mv2 */
+
+  using RGWObjManifestV2 = mv2::RGWObjManifestV2;
+
+}; /* rgw */
 
 #endif /* CEPH_RGWRADOS_OBJ_V2_H */
