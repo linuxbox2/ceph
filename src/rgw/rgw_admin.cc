@@ -1341,7 +1341,7 @@ int check_min_obj_stripe_size(RGWRados *store, RGWBucketInfo& bucket_info, rgw_o
     return 0;
   }
 
-  RGWObjManifest manifest;
+  RGWObjManifestV1 manifest;
 
   try {
     bufferlist& bl = iter->second;
@@ -5838,7 +5838,7 @@ next:
       bufferlist& bl = iter->second;
       bool handled = false;
       if (iter->first == RGW_ATTR_MANIFEST) {
-        handled = decode_dump<RGWObjManifest>("manifest", bl, formatter);
+        handled = decode_dump<RGWObjManifestV1>("manifest", bl, formatter);
       } else if (iter->first == RGW_ATTR_ACL) {
         handled = decode_dump<RGWAccessControlPolicy>("policy", bl, formatter);
       } else if (iter->first == RGW_ATTR_ID_TAG) {

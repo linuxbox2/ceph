@@ -427,9 +427,8 @@ int RGWOrphanSearch::handle_stat_result(map<int, list<string> >& oids, RGWRados:
      */
     obj_oids.insert(obj_fingerprint(loc, "shadow"));
   } else {
-    RGWObjManifest& manifest = result.manifest;
-
-    RGWObjManifest::obj_iterator miter;
+    RGWObjManifestV1& manifest = result.manifest;
+    RGWObjManifestV1::obj_iterator miter;
     for (miter = manifest.obj_begin(); miter != manifest.obj_end(); ++miter) {
       const rgw_raw_obj& loc = miter.get_location().get_raw_obj(store);
       string s = loc.oid;

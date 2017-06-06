@@ -148,7 +148,7 @@ struct RGWUploadPartInfo {
   uint64_t accounted_size{0};
   string etag;
   ceph::real_time modified;
-  RGWObjManifest manifest;
+  RGWObjManifestV1 manifest;
   RGWCompressionInfo cs_info;
 
   RGWUploadPartInfo() : num(0), size(0) {}
@@ -2126,7 +2126,7 @@ public:
     rgw_obj& get_obj() { return obj; }
     RGWObjectCtx& get_ctx() { return ctx; }
     RGWBucketInfo& get_bucket_info() { return bucket_info; }
-    int get_manifest(RGWObjManifest **pmanifest);
+    int get_manifest(RGWObjManifestV1 **pmanifest);
 
     int get_bucket_shard(BucketShard **pbs) {
       if (!bs_initialized) {
@@ -2196,7 +2196,7 @@ public:
         ceph::real_time *mtime;
         map<std::string, bufferlist>* rmattrs;
         const bufferlist *data;
-        RGWObjManifest *manifest;
+        RGWObjManifestV1 *manifest;
         const string *ptag;
         list<rgw_obj_index_key> *remove_objs;
         ceph::real_time set_mtime;
@@ -2271,7 +2271,7 @@ public:
 
       struct Result {
         rgw_obj obj;
-        RGWObjManifest manifest;
+        RGWObjManifestV1 manifest;
         bool has_manifest;
         uint64_t size;
 	struct timespec mtime;
@@ -3031,7 +3031,7 @@ public:
   int unlock(rgw_pool& pool, const string& oid, string& zone_id,
 	     string& owner_id);
 
-  void update_gc_chain(rgw_obj& head_obj, RGWObjManifest& manifest,
+  void update_gc_chain(rgw_obj& head_obj, RGWObjManifestV1& manifest,
 		       cls_rgw_obj_chain *chain);
   int send_chain_to_gc(cls_rgw_obj_chain& chain, const string& tag, bool sync);
   int gc_operate(string& oid, librados::ObjectWriteOperation *op);
@@ -3424,8 +3424,8 @@ protected:
   string unique_tag;
 
   rgw_raw_obj cur_obj;
-  RGWObjManifest manifest;
-  RGWObjManifest::generator manifest_gen;
+  RGWObjManifestV1 manifest;
+  RGWObjManifestV1::generator manifest_gen;
 
   int write_data(bufferlist& bl, off_t ofs, void **phandle, rgw_raw_obj *pobj,
 		 bool exclusive);

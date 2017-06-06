@@ -155,7 +155,7 @@ struct RGWObjManifestRule {
 };
 WRITE_CLASS_ENCODER(RGWObjManifestRule)
 
-class RGWObjManifest {
+class RGWObjManifestV1 {
 protected:
   bool explicit_objs; /* old manifest? */
   map<uint64_t, RGWObjManifestPart> objs;
@@ -177,9 +177,9 @@ protected:
 
   void convert_to_explicit(const RGWZoneGroup& zonegroup,
 			   const RGWZoneParams& zone_params);
-  int append_explicit(RGWObjManifest& m, const RGWZoneGroup& zonegroup,
+  int append_explicit(RGWObjManifestV1& m, const RGWZoneGroup& zonegroup,
 		      const RGWZoneParams& zone_params);
-  void append_rules(RGWObjManifest& m,
+  void append_rules(RGWObjManifestV1& m,
 		    map<uint64_t, RGWObjManifestRule>::iterator& iter,
 		    string* override_prefix);
 
@@ -189,15 +189,16 @@ protected:
   }
 public:
 
-  RGWObjManifest() : explicit_objs(false), obj_size(0), head_size(0),
-		     max_head_size(0), begin_iter(this), end_iter(this)
+  RGWObjManifestV1()
+    : explicit_objs(false), obj_size(0), head_size(0), max_head_size(0),
+      begin_iter(this), end_iter(this)
     {}
 
-  RGWObjManifest(const RGWObjManifest& rhs) {
+  RGWObjManifestV1(const RGWObjManifestV1& rhs) {
     *this = rhs;
   }
 
-  RGWObjManifest& operator=(const RGWObjManifest& rhs) {
+  RGWObjManifestV1& operator=(const RGWObjManifestV1& rhs) {
     explicit_objs = rhs.explicit_objs;
     objs = rhs.objs;
     obj_size = rhs.obj_size;
@@ -347,11 +348,11 @@ public:
   }
 
   void dump(Formatter* f) const;
-  static void generate_test_instances(list<RGWObjManifest*>& o);
+  static void generate_test_instances(list<RGWObjManifestV1*>& o);
 
-  int append(RGWObjManifest& m, RGWZoneGroup& zonegroup,
+  int append(RGWObjManifestV1& m, RGWZoneGroup& zonegroup,
 	     RGWZoneParams& zone_params);
-  int append(RGWObjManifest& m, RGWRados* store);
+  int append(RGWObjManifestV1& m, RGWRados* store);
 
   bool get_rule(uint64_t ofs, RGWObjManifestRule* rule);
 
@@ -448,7 +449,7 @@ public:
   }
 
   class obj_iterator {
-    RGWObjManifest* manifest;
+    RGWObjManifestV1* manifest;
     uint64_t part_ofs; /* where current part starts */
     uint64_t stripe_ofs; /* where current stripe starts */
     uint64_t ofs;       /* current position within the object */
@@ -477,7 +478,7 @@ public:
 
   protected:
 
-    void set_manifest(RGWObjManifest* m) {
+    void set_manifest(RGWObjManifestV1* m) {
       manifest = m;
     }
 
@@ -486,14 +487,14 @@ public:
       init();
     }
 
-    explicit obj_iterator(RGWObjManifest* _m) : manifest(_m) {
+    explicit obj_iterator(RGWObjManifestV1* _m) : manifest(_m) {
       init();
       if (!manifest->empty()) {
         seek(0);
       }
     }
 
-  obj_iterator(RGWObjManifest* _m, uint64_t _ofs) : manifest(_m) {
+  obj_iterator(RGWObjManifestV1* _m, uint64_t _ofs) : manifest(_m) {
       init();
       if (!manifest->empty()) {
         seek(_ofs);
@@ -551,7 +552,7 @@ public:
 
     void update_location();
 
-    friend class RGWObjManifest;
+    friend class RGWObjManifestV1;
   };
 
   const obj_iterator& obj_begin();
@@ -565,7 +566,7 @@ public:
    * simple object generator. Using a simple single rule manifest.
    */
   class generator {
-    RGWObjManifest* manifest;
+    RGWObjManifestV1* manifest;
     uint64_t last_ofs;
     uint64_t cur_part_ofs;
     int cur_part_id;
@@ -580,7 +581,7 @@ public:
   public:
     generator() : manifest(NULL), last_ofs(0), cur_part_ofs(0), cur_part_id(0), 
                   cur_stripe(0), cur_stripe_size(0) {}
-    int create_begin(CephContext* cct, RGWObjManifest* manifest,
+    int create_begin(CephContext* cct, RGWObjManifestV1* manifest,
 		     const string& placement_rule, rgw_bucket& bucket,
 		     rgw_obj& obj);
 
@@ -601,7 +602,7 @@ public:
     }
   };
 };
-WRITE_CLASS_ENCODER(RGWObjManifest)
+WRITE_CLASS_ENCODER(RGWObjManifestV1)
 
 struct RGWObjState {
   rgw_obj obj;
@@ -615,7 +616,7 @@ struct RGWObjState {
   bufferlist obj_tag;
   string write_tag;
   bool fake_tag;
-  RGWObjManifest manifest;
+  RGWObjManifestV1 manifest;
   bool has_manifest;
   string shadow_obj;
   bool has_data;

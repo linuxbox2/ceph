@@ -2026,7 +2026,7 @@ void RGWObjVersionTracker::prepare_op_for_write(ObjectWriteOperation *op)
   }
 }
 
-void RGWObjManifest::obj_iterator::operator++()
+void RGWObjManifestV1::obj_iterator::operator++()
 {
   if (manifest->explicit_objs) {
     ++explicit_iter;
@@ -2072,12 +2072,12 @@ void RGWObjManifest::obj_iterator::operator++()
 
   stripe_ofs += rule->stripe_max_size;
   cur_stripe++;
-  dout(20) << "RGWObjManifest::operator++(): rule->part_size=" << rule->part_size << " rules.size()=" << manifest->rules.size() << dendl;
+  dout(20) << "RGWObjManifestV1::operator++(): rule->part_size=" << rule->part_size << " rules.size()=" << manifest->rules.size() << dendl;
 
   if (rule->part_size > 0) {
     /* multi part, multi stripes object */
 
-    dout(20) << "RGWObjManifest::operator++(): stripe_ofs=" << stripe_ofs << " part_ofs=" << part_ofs << " rule->part_size=" << rule->part_size << dendl;
+    dout(20) << "RGWObjManifestV1::operator++(): stripe_ofs=" << stripe_ofs << " part_ofs=" << part_ofs << " rule->part_size=" << rule->part_size << dendl;
 
     if (stripe_ofs >= part_ofs + rule->part_size) {
       /* moved to the next part */
@@ -2113,11 +2113,11 @@ void RGWObjManifest::obj_iterator::operator++()
     stripe_size = 0;
   }
 
-  dout(20) << "RGWObjManifest::operator++(): result: ofs=" << ofs << " stripe_ofs=" << stripe_ofs << " part_ofs=" << part_ofs << " rule->part_size=" << rule->part_size << dendl;
+  dout(20) << "RGWObjManifestV1::operator++(): result: ofs=" << ofs << " stripe_ofs=" << stripe_ofs << " part_ofs=" << part_ofs << " rule->part_size=" << rule->part_size << dendl;
   update_location();
 }
 
-int RGWObjManifest::generator::create_begin(CephContext *cct, RGWObjManifest *_m, const string& placement_rule, rgw_bucket& _b, rgw_obj& _obj)
+int RGWObjManifestV1::generator::create_begin(CephContext *cct, RGWObjManifestV1 *_m, const string& placement_rule, rgw_bucket& _b, rgw_obj& _obj)
 {
   manifest = _m;
 
@@ -2162,7 +2162,7 @@ int RGWObjManifest::generator::create_begin(CephContext *cct, RGWObjManifest *_m
   return 0;
 }
 
-int RGWObjManifest::generator::create_next(uint64_t ofs)
+int RGWObjManifestV1::generator::create_next(uint64_t ofs)
 {
   if (ofs < last_ofs) /* only going forward */
     return -EINVAL;
@@ -2193,27 +2193,27 @@ int RGWObjManifest::generator::create_next(uint64_t ofs)
   return 0;
 }
 
-const RGWObjManifest::obj_iterator& RGWObjManifest::obj_begin()
+const RGWObjManifestV1::obj_iterator& RGWObjManifestV1::obj_begin()
 {
   return begin_iter;
 }
 
-const RGWObjManifest::obj_iterator& RGWObjManifest::obj_end()
+const RGWObjManifestV1::obj_iterator& RGWObjManifestV1::obj_end()
 {
   return end_iter;
 }
 
-RGWObjManifest::obj_iterator RGWObjManifest::obj_find(uint64_t ofs)
+RGWObjManifestV1::obj_iterator RGWObjManifestV1::obj_find(uint64_t ofs)
 {
   if (ofs > obj_size) {
     ofs = obj_size;
   }
-  RGWObjManifest::obj_iterator iter(this);
+  RGWObjManifestV1::obj_iterator iter(this);
   iter.seek(ofs);
   return iter;
 }
 
-int RGWObjManifest::append(RGWObjManifest& m, RGWZoneGroup& zonegroup, RGWZoneParams& zone_params)
+int RGWObjManifestV1::append(RGWObjManifestV1& m, RGWZoneGroup& zonegroup, RGWZoneParams& zone_params)
 {
   if (explicit_objs || m.explicit_objs) {
     return append_explicit(m, zonegroup, zone_params);
@@ -2290,12 +2290,12 @@ int RGWObjManifest::append(RGWObjManifest& m, RGWZoneGroup& zonegroup, RGWZonePa
   return 0;
 }
 
-int RGWObjManifest::append(RGWObjManifest& m, RGWRados *store)
+int RGWObjManifestV1::append(RGWObjManifestV1& m, RGWRados *store)
 {
   return append(m, store->get_zonegroup(), store->get_zone_params());
 }
 
-void RGWObjManifest::append_rules(RGWObjManifest& m, map<uint64_t, RGWObjManifestRule>::iterator& miter,
+void RGWObjManifestV1::append_rules(RGWObjManifestV1& m, map<uint64_t, RGWObjManifestRule>::iterator& miter,
                                   string *override_prefix)
 {
   for (; miter != m.rules.end(); ++miter) {
@@ -2307,7 +2307,7 @@ void RGWObjManifest::append_rules(RGWObjManifest& m, map<uint64_t, RGWObjManifes
   }
 }
 
-void RGWObjManifest::convert_to_explicit(const RGWZoneGroup& zonegroup, const RGWZoneParams& zone_params)
+void RGWObjManifestV1::convert_to_explicit(const RGWZoneGroup& zonegroup, const RGWZoneParams& zone_params)
 {
   if (explicit_objs) {
     return;
@@ -2338,7 +2338,7 @@ void RGWObjManifest::convert_to_explicit(const RGWZoneGroup& zonegroup, const RG
   prefix.clear();
 }
 
-int RGWObjManifest::append_explicit(RGWObjManifest& m, const RGWZoneGroup& zonegroup, const RGWZoneParams& zone_params)
+int RGWObjManifestV1::append_explicit(RGWObjManifestV1& m, const RGWZoneGroup& zonegroup, const RGWZoneParams& zone_params)
 {
   if (!explicit_objs) {
     convert_to_explicit(zonegroup, zone_params);
@@ -2357,7 +2357,7 @@ int RGWObjManifest::append_explicit(RGWObjManifest& m, const RGWZoneGroup& zoneg
   return 0;
 }
 
-bool RGWObjManifest::get_rule(uint64_t ofs, RGWObjManifestRule *rule)
+bool RGWObjManifestV1::get_rule(uint64_t ofs, RGWObjManifestRule *rule)
 {
   if (rules.empty()) {
     return false;
@@ -6054,8 +6054,8 @@ int RGWRados::fix_tail_obj_locator(const RGWBucketInfo& bucket_info, rgw_obj_key
     return r;
 
   if (astate->has_manifest) {
-    RGWObjManifest::obj_iterator miter;
-    RGWObjManifest& manifest = astate->manifest;
+    RGWObjManifestV1::obj_iterator miter;
+    RGWObjManifestV1& manifest = astate->manifest;
     for (miter = manifest.obj_begin(); miter != manifest.obj_end(); ++miter) {
       rgw_raw_obj raw_loc = miter.get_location().get_raw_obj(this);
       rgw_obj loc;
@@ -7588,7 +7588,7 @@ int RGWRados::copy_obj(RGWObjectCtx& obj_ctx,
   if (cmp != src_attrs.end())
     attrs[RGW_ATTR_COMPRESSION] = cmp->second;
 
-  RGWObjManifest manifest;
+  RGWObjManifestV1 manifest;
   RGWObjState *astate = NULL;
 
   ret = get_obj_state(&obj_ctx, src_bucket_info, src_obj, &astate);
@@ -7653,7 +7653,7 @@ int RGWRados::copy_obj(RGWObjectCtx& obj_ctx,
                          version_id, ptag, petag);
   }
 
-  RGWObjManifest::obj_iterator miter = astate->manifest.obj_begin();
+  RGWObjManifestV1::obj_iterator miter = astate->manifest.obj_begin();
 
   if (copy_first) { // we need to copy first chunk, not increase refcount
     ++miter;
@@ -7677,7 +7677,7 @@ int RGWRados::copy_obj(RGWObjectCtx& obj_ctx,
   bufferlist first_chunk;
 
   bool copy_itself = (dest_obj == src_obj);
-  RGWObjManifest *pmanifest; 
+  RGWObjManifestV1 *pmanifest; 
   ldout(cct, 0) << "dest_obj=" << dest_obj << " src_obj=" << src_obj << " copy_itself=" << (int)copy_itself << dendl;
 
   RGWRados::Object dest_op_target(this, dest_bucket_info, obj_ctx, dest_obj);
@@ -7789,7 +7789,7 @@ int RGWRados::copy_obj_data(RGWObjectCtx& obj_ctx,
                ceph::buffer::list *petag)
 {
   bufferlist first_chunk;
-  RGWObjManifest manifest;
+  RGWObjManifestV1 manifest;
 
   string tag;
   append_rand_alpha(cct, tag, tag, 32);
@@ -8054,9 +8054,9 @@ int RGWRados::Object::complete_atomic_modification()
   return store->gc->send_chain(chain, tag, false);  // do it async
 }
 
-void RGWRados::update_gc_chain(rgw_obj& head_obj, RGWObjManifest& manifest, cls_rgw_obj_chain *chain)
+void RGWRados::update_gc_chain(rgw_obj& head_obj, RGWObjManifestV1& manifest, cls_rgw_obj_chain *chain)
 {
-  RGWObjManifest::obj_iterator iter;
+  RGWObjManifestV1::obj_iterator iter;
   rgw_raw_obj raw_head;
   obj_to_raw(manifest.get_head_placement_rule(), head_obj, &raw_head);
   for (iter = manifest.obj_begin(); iter != manifest.obj_end(); ++iter) {
@@ -8569,11 +8569,11 @@ int RGWRados::delete_obj_index(const rgw_obj& obj)
   return r;
 }
 
-static void generate_fake_tag(RGWRados *store, map<string, bufferlist>& attrset, RGWObjManifest& manifest, bufferlist& manifest_bl, bufferlist& tag_bl)
+static void generate_fake_tag(RGWRados *store, map<string, bufferlist>& attrset, RGWObjManifestV1& manifest, bufferlist& manifest_bl, bufferlist& tag_bl)
 {
   string tag;
 
-  RGWObjManifest::obj_iterator mi = manifest.obj_begin();
+  RGWObjManifestV1::obj_iterator mi = manifest.obj_begin();
   if (mi != manifest.obj_end()) {
     if (manifest.has_tail()) // first object usually points at the head, let's skip to a more unique part
       ++mi;
@@ -8770,7 +8770,7 @@ int RGWRados::get_obj_state_impl(RGWObjectCtx *rctx, const RGWBucketInfo& bucket
     }
     ldout(cct, 10) << "manifest: total_size = " << s->manifest.get_obj_size() << dendl;
     if (cct->_conf->subsys.should_gather(ceph_subsys_rgw, 20) && s->manifest.has_explicit_objs()) {
-      RGWObjManifest::obj_iterator mi;
+      RGWObjManifestV1::obj_iterator mi;
       for (mi = s->manifest.obj_begin(); mi != s->manifest.obj_end(); ++mi) {
         ldout(cct, 20) << "manifest: ofs=" << mi.get_ofs() << " loc=" << mi.get_location().get_raw_obj(this) << dendl;
       }
@@ -8847,7 +8847,7 @@ int RGWRados::get_obj_state(RGWObjectCtx *rctx, const RGWBucketInfo& bucket_info
   return ret;
 }
 
-int RGWRados::Object::get_manifest(RGWObjManifest **pmanifest)
+int RGWRados::Object::get_manifest(RGWObjManifestV1 **pmanifest)
 {
   RGWObjState *astate;
   int r = get_state(&astate, true);
@@ -9644,7 +9644,7 @@ int RGWRados::Object::Read::read(int64_t ofs, int64_t end, bufferlist& bl)
 
   if (astate->has_manifest && astate->manifest.has_tail()) {
     /* now get the relevant object part */
-    RGWObjManifest::obj_iterator iter = astate->manifest.obj_find(ofs);
+    RGWObjManifestV1::obj_iterator iter = astate->manifest.obj_find(ofs);
 
     uint64_t stripe_ofs = iter.get_stripe_ofs();
     read_obj = iter.get_location().get_raw_obj(store);
@@ -10218,9 +10218,9 @@ int RGWRados::iterate_obj(RGWObjectCtx& obj_ctx,
 
   if (astate->has_manifest) {
     /* now get the relevant object stripe */
-    RGWObjManifest::obj_iterator iter = astate->manifest.obj_find(ofs);
+    RGWObjManifestV1::obj_iterator iter = astate->manifest.obj_find(ofs);
 
-    RGWObjManifest::obj_iterator obj_end = astate->manifest.obj_end();
+    RGWObjManifestV1::obj_iterator obj_end = astate->manifest.obj_end();
 
     for (; iter != obj_end && ofs <= end; ++iter) {
       off_t stripe_ofs = iter.get_stripe_ofs();
@@ -12399,8 +12399,8 @@ int RGWRados::check_disk_state(librados::IoCtx io_ctx,
   }
 
   if (astate->has_manifest) {
-    RGWObjManifest::obj_iterator miter;
-    RGWObjManifest& manifest = astate->manifest;
+    RGWObjManifestV1::obj_iterator miter;
+    RGWObjManifestV1& manifest = astate->manifest;
     for (miter = manifest.obj_begin(); miter != manifest.obj_end(); ++miter) {
       const rgw_raw_obj& raw_loc = miter.get_location().get_raw_obj(this);
       rgw_obj loc;

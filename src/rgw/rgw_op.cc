@@ -4997,7 +4997,7 @@ void RGWCompleteMultipart::execute()
   rgw_obj meta_obj;
   rgw_obj target_obj;
   RGWMPObj mp;
-  RGWObjManifest manifest;
+  RGWObjManifestV1 manifest;
   uint64_t olh_epoch = 0;
   string version_id;
 

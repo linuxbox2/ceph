@@ -87,7 +87,7 @@ void rgw_bucket_placement::dump(Formatter *f) const
   encode_json("placement_rule", placement_rule, f);
 }
 
-void RGWObjManifest::dump(Formatter *f) const
+void RGWObjManifestV1::dump(Formatter *f) const
 {
   map<uint64_t, RGWObjManifestPart>::const_iterator iter = objs.begin();
   f->open_array_section("objs");

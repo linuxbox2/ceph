@@ -283,7 +283,7 @@ TYPE(rbd_replay::action::ActionEntry);
 
 #include "rgw/rgw_rados.h"
 TYPE(RGWObjManifestPart)
-TYPE(RGWObjManifest)
+TYPE(RGWObjManifestV1)
 TYPE(RGWOLHInfo)
 TYPE(RGWZoneGroup)
 TYPE(RGWZone)

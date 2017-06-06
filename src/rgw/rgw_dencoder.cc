@@ -36,7 +36,7 @@ void RGWObjManifestPart::generate_test_instances(std::list<RGWObjManifestPart*>&
   o.push_back(p);
 }
 
-void RGWObjManifest::obj_iterator::seek(uint64_t o)
+void RGWObjManifestV1::obj_iterator::seek(uint64_t o)
 {
   ofs = o;
   if (manifest->explicit_objs) {
@@ -109,7 +109,8 @@ void RGWObjManifest::obj_iterator::seek(uint64_t o)
   update_location();
 }
 
-void RGWObjManifest::obj_iterator::update_location()
+/* XXX move impl */
+void RGWObjManifestV1::obj_iterator::update_location()
 {
   if (manifest->explicit_objs) {
     location = explicit_iter->second.loc;
@@ -125,7 +126,8 @@ void RGWObjManifest::obj_iterator::update_location()
   manifest->get_implicit_location(cur_part_id, cur_stripe, ofs, &cur_override_prefix, &location);
 }
 
-void RGWObjManifest::obj_iterator::update_explicit_pos()
+/* XXX move impl */
+void RGWObjManifestV1::obj_iterator::update_explicit_pos()
 {
   ofs = explicit_iter->first;
   stripe_ofs = ofs;
@@ -139,9 +141,10 @@ void RGWObjManifest::obj_iterator::update_explicit_pos()
   }
 }
 
-void RGWObjManifest::generate_test_instances(std::list<RGWObjManifest*>& o)
+/* XXX move impl */
+void RGWObjManifestV1::generate_test_instances(std::list<RGWObjManifestV1*>& o)
 {
-  RGWObjManifest *m = new RGWObjManifest;
+  RGWObjManifestV1 *m = new RGWObjManifestV1;
   for (int i = 0; i<10; i++) {
     RGWObjManifestPart p;
     rgw_bucket b;
@@ -155,10 +158,11 @@ void RGWObjManifest::generate_test_instances(std::list<RGWObjManifest*>& o)
 
   o.push_back(m);
 
-  o.push_back(new RGWObjManifest);
+  o.push_back(new RGWObjManifestV1);
 }
 
-void RGWObjManifest::get_implicit_location(uint64_t cur_part_id, uint64_t cur_stripe, uint64_t ofs, string *override_prefix, rgw_obj_select *location)
+/* XXX move impl */
+void RGWObjManifestV1::get_implicit_location(uint64_t cur_part_id, uint64_t cur_stripe, uint64_t ofs, string *override_prefix, rgw_obj_select *location)
 {
   rgw_obj loc;
 
@@ -208,8 +212,6 @@ void RGWObjManifest::get_implicit_location(uint64_t cur_part_id, uint64_t cur_st
   location->set_placement_rule(tail_placement.placement_rule);
   *location = loc;
 }
-
-
 
 void rgw_log_entry::generate_test_instances(list<rgw_log_entry*>& o)
 {

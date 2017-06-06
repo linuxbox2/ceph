@@ -11,8 +11,10 @@
 
 namespace rgw {
 
-  typedef boost::variant <RGWObjManifest,
-			  RGWObjManifestV2> RGWObjManifestV; /* XXX rename */
+  typedef boost::variant <RGWObjManifestV1,
+			  RGWObjManifestV2> RGWObjManifest;
 };
+
+using RGWObjManifest = rgw::RGWObjManifest;
 
 #endif /* CEPH_RGWRADOS_OBJ_H */

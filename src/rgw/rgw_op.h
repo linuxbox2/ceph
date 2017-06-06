@@ -1931,7 +1931,7 @@ public:
 
 class RGWGetObjLayout : public RGWOp {
 protected:
-  RGWObjManifest *manifest{nullptr};
+  RGWObjManifestV1 *manifest{nullptr};
   rgw_raw_obj head_obj;
 
 public:

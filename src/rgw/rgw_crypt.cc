@@ -633,7 +633,7 @@ RGWGetObj_BlockDecrypt::~RGWGetObj_BlockDecrypt() {
 
 int RGWGetObj_BlockDecrypt::read_manifest(bufferlist& manifest_bl) {
   parts_len.clear();
-  RGWObjManifest manifest;
+  RGWObjManifestV1 manifest;
   if (manifest_bl.length()) {
     bufferlist::iterator miter = manifest_bl.begin();
     try {
@@ -642,7 +642,7 @@ int RGWGetObj_BlockDecrypt::read_manifest(bufferlist& manifest_bl) {
       ldout(cct, 0) << "ERROR: couldn't decode manifest" << dendl;
       return -EIO;
     }
-    RGWObjManifest::obj_iterator mi;
+    RGWObjManifestV1::obj_iterator mi;
     for (mi = manifest.obj_begin(); mi != manifest.obj_end(); ++mi) {
       if (mi.get_cur_stripe() == 0) {
         parts_len.push_back(0);
