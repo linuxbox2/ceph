@@ -478,13 +478,28 @@ static inline bool char_needs_aws4_escaping(const char c)
   return true;
 }
 
+static inline void aws4_uri_escape_char(char c, string& dst)
+{
+  /*
+   * Percent-encode all other characters with %XY, where X and Y are
+   * hexadecimal characters (0-9 and uppercase A-F). For example, the
+   * space character must be encoded as %20 (not using '+', as some
+   * encoding schemes do) and extended UTF-8 characters must be in the
+   * form %XY%ZA%BC. */
+  char buf[16];
+  int d = (c == '+') ? 32 /* space */ : (int)(unsigned char)c;
+  snprintf(buf, sizeof(buf), "%%%.2X", d);
+  dst.append(buf);
+}
+
 static inline std::string aws4_uri_encode(const std::string& src)
 {
   std::string result;
+  result.reserve(src.length() + 16);
 
   for (const std::string::value_type c : src) {
     if (char_needs_aws4_escaping(c)) {
-      rgw_uri_escape_char(c, result);
+      aws4_uri_escape_char(c, result);
     } else {
       result.push_back(c);
     }
