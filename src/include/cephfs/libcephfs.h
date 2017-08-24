@@ -97,6 +97,23 @@ typedef struct vinodeno_t vinodeno;
 
 #endif /* ! __cplusplus */
 
+
+/*
+ * This is the callback that a client application will receive when a
+ * previously received delegation is being recalled.
+ *
+ * FIXME: specify the context in which the callbacks are run. Cap revocation
+ * for sure, plus other situations like local write opens. Do we need a
+ * dedicated thread or is there a generic workqueue of sorts?
+ *
+ * I'm inclined to punt on the whole thing and offer no thread safety
+ * guarantees. This should work something like a signal handler. You want to
+ * do as little as possible in the callback. Any major work should be deferred
+ * in some fashion as it's difficult to predict the context in which this
+ * function will be called.
+ */
+typedef void (*ceph_deleg_cb_t)(struct Fh *fh, void *priv);
+
 struct UserPerm;
 typedef struct UserPerm UserPerm;
 
@@ -1571,7 +1588,8 @@ int ceph_ll_getlk(struct ceph_mount_info *cmount,
 		  Fh *fh, struct flock *fl, uint64_t owner);
 int ceph_ll_setlk(struct ceph_mount_info *cmount,
 		  Fh *fh, struct flock *fl, uint64_t owner, int sleep);
-
+int ceph_ll_delegation(struct ceph_mount_info *cmount, Fh *fh,
+		       unsigned int cmd, ceph_deleg_cb_t cb, void *priv);
 #ifdef __cplusplus
 }
 #endif
