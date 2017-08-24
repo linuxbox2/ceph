@@ -5,6 +5,7 @@
 
 #include "include/xlist.h"
 #include "common/Clock.h"
+#include "common/Timer.h"
 
 #include "Fh.h"
 
@@ -51,10 +52,12 @@ private:
   // time of first recall
   utime_t			recall_time;
 
+  // timer for unreturned delegations
+  Context			*timeout_event;
 public:
   Delegation(Fh *_fh, unsigned _mode, ceph_deleg_cb_t _cb, void *_priv)
 	: inode_item(this), fh(_fh), priv(_priv), mode(_mode),
-	  recall_cb(_cb), recall_time(utime_t()) {};
+	  recall_cb(_cb), recall_time(utime_t()), timeout_event(nullptr) {};
 
   Fh *get_fh() { return fh; }
   unsigned get_mode() { return mode; }
@@ -65,6 +68,27 @@ public:
     mode = _mode;
     recall_cb = _recall_cb;
     priv = _priv;
+  }
+
+  void arm_timeout(SafeTimer *timer, Context *event, double timeout)
+  {
+    if (timeout_event) {
+      delete event;
+      return;
+    }
+
+    timeout_event = event;
+    // FIXME: make timeout tunable
+    timer->add_event_after(timeout, event);
+  }
+
+  void disarm_timeout(SafeTimer *timer)
+  {
+    if (!timeout_event)
+      return;
+
+    timer->cancel_event(timeout_event);
+    timeout_event = nullptr;
   }
 
   bool is_recalled() { return !recall_time.is_zero(); }
@@ -81,4 +105,5 @@ public:
     }
   }
 };
+
 #endif /* _CEPH_CLIENT_DELEGATION_H */

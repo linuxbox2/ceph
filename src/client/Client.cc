@@ -5832,7 +5832,7 @@ void Client::flush_mdlog(MetaSession *session)
 }
 
 
-void Client::unmount()
+void Client::_unmount()
 {
   Mutex::Locker lock(client_lock);
 
@@ -5956,7 +5956,11 @@ void Client::unmount()
   ldout(cct, 2) << "unmounted." << dendl;
 }
 
-
+void Client::unmount()
+{
+  Mutex::Locker lock(client_lock);
+  _unmount();
+}
 
 class C_C_Tick : public Context {
   Client *client;
