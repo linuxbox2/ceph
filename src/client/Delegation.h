@@ -6,6 +6,8 @@
 #include "include/xlist.h"
 #include "common/Clock.h"
 #include "common/Timer.h"
+#include <boost/intrusive/list.hpp>
+#include <list>
 
 #include "Fh.h"
 
@@ -25,17 +27,15 @@
  */
 typedef void (*ceph_deleg_cb_t)(Fh *fh, void *priv);
 
+
 /*
  * A delegation is a container for holding caps on behalf of a client that
  * wants to be able to rely on them until recalled.
  */
-class Delegation {
-protected:
-  // per-inode linkage
-  xlist<Delegation*>::item	inode_item;
+using namespace boost::intrusive;
 
-  friend class Inode;
-
+class Delegation : public list_base_hook<>
+{
 private:
   // Filehandle against which it was acquired
   Fh				*fh;
@@ -56,8 +56,8 @@ private:
   Context			*timeout_event;
 public:
   Delegation(Fh *_fh, unsigned _mode, ceph_deleg_cb_t _cb, void *_priv)
-	: inode_item(this), fh(_fh), priv(_priv), mode(_mode),
-	  recall_cb(_cb), recall_time(utime_t()), timeout_event(nullptr) {};
+	: fh(_fh), priv(_priv), mode(_mode), recall_cb(_cb),
+	  recall_time(utime_t()), timeout_event(nullptr) {};
 
   Fh *get_fh() { return fh; }
   unsigned get_mode() { return mode; }
@@ -105,5 +105,7 @@ public:
     }
   }
 };
+
+typedef list<Delegation> DelegationList;
 
 #endif /* _CEPH_CLIENT_DELEGATION_H */

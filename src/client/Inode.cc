@@ -581,9 +581,9 @@ bool Inode::has_recalled_deleg()
   if (delegations.empty())
     return false;
 
-  Delegation *deleg = delegations.front();
+  Delegation deleg = delegations.front();
 
-  return deleg->is_recalled();
+  return deleg.is_recalled();
 }
 
 void Inode::recall_deleg(bool skip_read)
@@ -592,11 +592,11 @@ void Inode::recall_deleg(bool skip_read)
     return;
 
   // Issue any recalls
-  for (xlist<Delegation*>::iterator p = delegations.begin(); !p.end(); ++p) {
-    Delegation *deleg = *p;
-    Context *timeout_event = new C_C_Deleg_Timeout(deleg);
-    deleg->recall(skip_read);
-    deleg->arm_timeout(&client->timer, timeout_event,
+  for (DelegationList::iterator d = delegations.begin(); !d.end(); ++d) {
+    Delegation deleg = *d;
+    Context *timeout_event = new C_C_Deleg_Timeout(&deleg);
+    deleg.recall(skip_read);
+    deleg.arm_timeout(&client->timer, timeout_event,
 		       client->cct->_conf->client_deleg_timeout);
   }
 }
@@ -607,8 +607,8 @@ bool Inode::delegations_broken(bool skip_read)
     return true;
 
   if (skip_read) {
-    Delegation *deleg = delegations.front();
-    if (deleg->get_mode() == CEPH_FILE_MODE_RD)
+    Delegation deleg = delegations.front();
+    if (deleg.get_mode() == CEPH_FILE_MODE_RD)
 	return true;
   }
   return false;
@@ -668,11 +668,11 @@ int Inode::set_deleg(Fh *fh, bool ro, ceph_deleg_cb_t cb, void *priv)
     return -EAGAIN;
   }
 
-  Delegation *deleg, *old = NULL;
-  for (xlist<Delegation*>::iterator p = delegations.begin(); !p.end(); ++p) {
-    deleg = *p;
-    if (deleg->get_fh() == fh) {
-      old = deleg;
+  Delegation *old = NULL;
+  for (DelegationList::iterator d = delegations.begin(); !d.end(); ++d) {
+    Delegation deleg = *d;
+    if (deleg.get_fh() == fh) {
+      old = &deleg;
       break;
     }
   }
@@ -684,12 +684,12 @@ int Inode::set_deleg(Fh *fh, bool ro, ceph_deleg_cb_t cb, void *priv)
     old->reinit(filemode, cb, priv);
     client->put_cap_ref(this, ceph_caps_for_mode(oldmode));
   } else {
-    deleg = new (std::nothrow) Delegation(fh, filemode, cb, priv);
+    Delegation *deleg = new (std::nothrow) Delegation(fh, filemode, cb, priv);
     if (!deleg)
       return -ENOMEM;
 
     client->get_cap_ref(this, need);
-    delegations.push_back(&deleg->inode_item);
+    delegations.push_back(*deleg);
   }
   return 0;
 }
@@ -704,9 +704,10 @@ void Inode::unset_deleg(Fh *fh)
 {
   Delegation *deleg = NULL;
 
-  for (xlist<Delegation*>::iterator p = delegations.begin(); !p.end(); ++p) {
-    if ((*p)->get_fh() == fh) {
-      deleg = *p;
+  for (DelegationList::iterator d = delegations.begin(); !d.end(); ++d) {
+    Delegation cur = *d;
+    if (cur.get_fh() == fh) {
+      deleg = &cur;
       break;
     }
   }
@@ -716,7 +717,7 @@ void Inode::unset_deleg(Fh *fh)
 
   deleg->disarm_timeout(&fh->inode.get()->client->timer);
   client->put_cap_ref(this, ceph_caps_for_mode(deleg->get_mode()));
-  delegations.remove(&deleg->inode_item);
+  delegations.remove(deleg);
   client->signal_cond_list(waitfor_deleg);
 
   delete deleg;

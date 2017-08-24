@@ -232,7 +232,7 @@ struct Inode {
   ceph_lock_state_t *fcntl_locks;
   ceph_lock_state_t *flock_locks;
 
-  xlist<Delegation*> delegations;
+  DelegationList delegations;
 
   xlist<MetaRequest*> unsafe_ops;
 
