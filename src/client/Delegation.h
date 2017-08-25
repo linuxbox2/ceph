@@ -106,6 +106,6 @@ public:
   }
 };
 
-typedef list<Delegation> DelegationList;
+typedef boost::intrusive::list<Delegation> DelegationList;
 
 #endif /* _CEPH_CLIENT_DELEGATION_H */

@@ -414,7 +414,7 @@ void Inode::dump(Formatter *f) const
   if (is_dir()) {
     if (!dir_contacts.empty()) {
       f->open_object_section("dir_contants");
-      for (set<int>::iterator p = dir_contacts.begin(); p != dir_contacts.end(); ++p)
+      for (std::set<int>::iterator p = dir_contacts.begin(); p != dir_contacts.end(); ++p)
 	f->dump_int("mds", *p);
       f->close_section();
     }
@@ -503,7 +503,7 @@ void Inode::dump(Formatter *f) const
 
   if (!dn_set.empty()) {
     f->open_array_section("parents");
-    for (set<Dentry*>::const_iterator p = dn_set.begin(); p != dn_set.end(); ++p) {
+    for (std::set<Dentry*>::const_iterator p = dn_set.begin(); p != dn_set.end(); ++p) {
       f->open_object_section("dentry");
       f->dump_stream("dir_ino") << (*p)->dir->parent_inode->ino;
       f->dump_string("name", (*p)->name);
@@ -592,7 +592,8 @@ void Inode::recall_deleg(bool skip_read)
     return;
 
   // Issue any recalls
-  for (DelegationList::iterator d = delegations.begin(); !d.end(); ++d) {
+  for (DelegationList::iterator d = delegations.begin();
+       d != delegations.end(); ++d) {
     Delegation deleg = *d;
     Context *timeout_event = new C_C_Deleg_Timeout(&deleg);
     deleg.recall(skip_read);
@@ -669,7 +670,8 @@ int Inode::set_deleg(Fh *fh, bool ro, ceph_deleg_cb_t cb, void *priv)
   }
 
   Delegation *old = NULL;
-  for (DelegationList::iterator d = delegations.begin(); !d.end(); ++d) {
+  for (DelegationList::iterator d = delegations.begin();
+       d != delegations.end(); ++d) {
     Delegation deleg = *d;
     if (deleg.get_fh() == fh) {
       old = &deleg;
@@ -704,7 +706,8 @@ void Inode::unset_deleg(Fh *fh)
 {
   Delegation *deleg = NULL;
 
-  for (DelegationList::iterator d = delegations.begin(); !d.end(); ++d) {
+  for (DelegationList::iterator d = delegations.begin();
+       d != delegations.end(); ++d) {
     Delegation cur = *d;
     if (cur.get_fh() == fh) {
       deleg = &cur;
@@ -717,7 +720,7 @@ void Inode::unset_deleg(Fh *fh)
 
   deleg->disarm_timeout(&fh->inode.get()->client->timer);
   client->put_cap_ref(this, ceph_caps_for_mode(deleg->get_mode()));
-  delegations.remove(deleg);
+  delegations.remove(*deleg);
   client->signal_cond_list(waitfor_deleg);
 
   delete deleg;

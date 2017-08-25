@@ -165,12 +165,12 @@ struct Inode {
   // about the dir (if this is one!)
   Dir       *dir;     // if i'm a dir.
   fragtree_t dirfragtree;
-  set<int>  dir_contacts;
+  std::set<int> dir_contacts;
   uint64_t dir_release_count, dir_ordered_count;
   bool dir_hashed, dir_replicated;
 
   // per-mds caps
-  map<mds_rank_t, Cap*> caps;            // mds -> Cap
+  std::map<mds_rank_t, Cap*> caps;            // mds -> Cap
   Cap *auth_cap;
   int64_t cap_dirtier_uid;
   int64_t cap_dirtier_gid;
@@ -184,11 +184,11 @@ struct Inode {
   SnapRealm *snaprealm;
   xlist<Inode*>::item snaprealm_item;
   InodeRef snapdir_parent;  // only if we are a snapdir inode
-  map<snapid_t,CapSnap> cap_snaps;   // pending flush to mds
+  std::map<snapid_t,CapSnap> cap_snaps;   // pending flush to mds
 
   //int open_by_mode[CEPH_FILE_MODE_NUM];
-  map<int,int> open_by_mode;
-  map<int,int> cap_refs;
+  std::map<int,int> open_by_mode;
+  std::map<int,int> cap_refs;
 
   ObjectCacher::ObjectSet oset; // ORDER DEPENDENCY: ino
 
@@ -196,14 +196,14 @@ struct Inode {
 
   int       _ref;      // ref count. 1 for each dentry, fh that links to me.
   int       ll_ref;   // separate ref count for ll client
-  set<Dentry*> dn_set;      // if i'm linked to a dentry.
+  std::set<Dentry*> dn_set;      // if i'm linked to a dentry.
   string    symlink;  // symlink content, if it's a symlink
-  map<string,bufferptr> xattrs;
-  map<frag_t,int> fragmap;  // known frag -> mds mappings
+  std::map<string,bufferptr> xattrs;
+  std::map<frag_t,int> fragmap;  // known frag -> mds mappings
 
-  list<Cond*>       waitfor_caps;
-  list<Cond*>       waitfor_commit;
-  list<Cond*>	    waitfor_deleg;
+  std::list<Cond*>       waitfor_caps;
+  std::list<Cond*>       waitfor_commit;
+  std::list<Cond*>	    waitfor_deleg;
 
   Dentry *get_first_parent() {
     assert(!dn_set.empty());

@@ -370,7 +370,7 @@ Inode *Client::get_root()
 
 // debug crapola
 
-void Client::dump_inode(Formatter *f, Inode *in, set<Inode*>& did, bool disconnected)
+void Client::dump_inode(Formatter *f, Inode *in, std::set<Inode*>& did, bool disconnected)
 {
   filepath path;
   in->make_long_path(path);
@@ -410,7 +410,7 @@ void Client::dump_inode(Formatter *f, Inode *in, set<Inode*>& did, bool disconne
 
 void Client::dump_cache(Formatter *f)
 {
-  set<Inode*> did;
+  std::set<Inode*> did;
 
   ldout(cct, 1) << "dump_cache" << dendl;
 
@@ -638,7 +638,7 @@ void Client::trim_cache_for_reconnect(MetaSession *s)
   ldout(cct, 20) << "trim_cache_for_reconnect mds." << mds << dendl;
 
   int trimmed = 0;
-  list<Dentry*> skipped;
+  std::list<Dentry*> skipped;
   while (lru.lru_get_size() > 0) {
     Dentry *dn = static_cast<Dentry*>(lru.lru_expire());
     if (!dn)
@@ -652,7 +652,7 @@ void Client::trim_cache_for_reconnect(MetaSession *s)
       skipped.push_back(dn);
   }
 
-  for(list<Dentry*>::iterator p = skipped.begin(); p != skipped.end(); ++p)
+  for(std::list<Dentry*>::iterator p = skipped.begin(); p != skipped.end(); ++p)
     lru.lru_insert_mid(*p);
 
   ldout(cct, 20) << "trim_cache_for_reconnect mds." << mds
@@ -1491,7 +1491,7 @@ void Client::connect_mds_targets(mds_rank_t mds)
   ldout(cct, 10) << "connect_mds_targets for mds." << mds << dendl;
   assert(mds_sessions.count(mds));
   const MDSMap::mds_info_t& info = mdsmap->get_mds_info(mds);
-  for (set<mds_rank_t>::const_iterator q = info.export_targets.begin();
+  for (std::set<mds_rank_t>::const_iterator q = info.export_targets.begin();
        q != info.export_targets.end();
        ++q) {
     if (mds_sessions.count(*q) == 0 &&
@@ -2808,7 +2808,7 @@ void Client::resend_unsafe_requests(MetaSession *session)
 
 void Client::wait_unsafe_requests()
 {
-  list<MetaRequest*> last_unsafe_reqs;
+  std::list<MetaRequest*> last_unsafe_reqs;
   for (map<mds_rank_t,MetaSession*>::iterator p = mds_sessions.begin();
        p != mds_sessions.end();
        ++p) {
@@ -2820,7 +2820,7 @@ void Client::wait_unsafe_requests()
     }
   }
 
-  for (list<MetaRequest*>::iterator p = last_unsafe_reqs.begin();
+  for (std::list<MetaRequest*>::iterator p = last_unsafe_reqs.begin();
        p != last_unsafe_reqs.end();
        ++p) {
     MetaRequest *req = *p;
@@ -3660,7 +3660,7 @@ void Client::flush_snaps(Inode *in, bool all_again)
 
 
 
-void Client::wait_on_list(list<Cond*>& ls)
+void Client::wait_on_list(std::list<Cond*>& ls)
 {
   Cond cond;
   ls.push_back(&cond);
@@ -3668,13 +3668,13 @@ void Client::wait_on_list(list<Cond*>& ls)
   ls.remove(&cond);
 }
 
-void Client::signal_cond_list(list<Cond*>& ls)
+void Client::signal_cond_list(std::list<Cond*>& ls)
 {
-  for (list<Cond*>::iterator it = ls.begin(); it != ls.end(); ++it)
+  for (std::list<Cond*>::iterator it = ls.begin(); it != ls.end(); ++it)
     (*it)->Signal();
 }
 
-void Client::wait_on_context_list(list<Context*>& ls)
+void Client::wait_on_context_list(std::list<Context*>& ls)
 {
   Cond cond;
   bool done = false;
@@ -3684,7 +3684,7 @@ void Client::wait_on_context_list(list<Context*>& ls)
     cond.Wait(client_lock);
 }
 
-void Client::signal_context_list(list<Context*>& ls)
+void Client::signal_context_list(std::list<Context*>& ls)
 {
   while (!ls.empty()) {
     ls.front()->complete(0);
@@ -4090,7 +4090,7 @@ void Client::trim_caps(MetaSession *s, int max)
     } else {
       ldout(cct, 20) << " trying to trim dentries for " << *in << dendl;
       bool all = true;
-      set<Dentry*>::iterator q = in->dn_set.begin();
+      std::set<Dentry*>::iterator q = in->dn_set.begin();
       InodeRef tmp_ref(in);
       while (q != in->dn_set.end()) {
 	Dentry *dn = *q++;
@@ -4333,7 +4333,7 @@ void Client::kick_maxsize_requests(MetaSession *session)
 
 void SnapRealm::build_snap_context()
 {
-  set<snapid_t> snaps;
+  std::set<snapid_t> snaps;
   snapid_t max_seq = seq;
   
   // start with prior_parents?
@@ -4358,13 +4358,14 @@ void SnapRealm::build_snap_context()
   cached_snap_context.seq = max_seq;
   cached_snap_context.snaps.resize(0);
   cached_snap_context.snaps.reserve(snaps.size());
-  for (set<snapid_t>::reverse_iterator p = snaps.rbegin(); p != snaps.rend(); ++p)
+  for (std::set<snapid_t>::reverse_iterator p = snaps.rbegin();
+       p != snaps.rend(); ++p)
     cached_snap_context.snaps.push_back(*p);
 }
 
 void Client::invalidate_snaprealm_and_children(SnapRealm *realm)
 {
-  list<SnapRealm*> q;
+  std::list<SnapRealm*> q;
   q.push_back(realm);
 
   while (!q.empty()) {
@@ -4374,7 +4375,7 @@ void Client::invalidate_snaprealm_and_children(SnapRealm *realm)
     ldout(cct, 10) << "invalidate_snaprealm_and_children " << *realm << dendl;
     realm->invalidate_cache();
 
-    for (set<SnapRealm*>::iterator p = realm->pchildren.begin();
+    for (std::set<SnapRealm*>::iterator p = realm->pchildren.begin();
 	 p != realm->pchildren.end(); 
 	 ++p)
       q.push_back(*p);
@@ -4463,13 +4464,13 @@ void Client::update_snap_trace(bufferlist& bl, SnapRealm **realm_ret, bool flush
       if (flush) {
 	// writeback any dirty caps _before_ updating snap list (i.e. with old snap info)
 	//  flush me + children
-	list<SnapRealm*> q;
+	std::list<SnapRealm*> q;
 	q.push_back(realm);
 	while (!q.empty()) {
 	  SnapRealm *realm = q.front();
 	  q.pop_front();
 
-	  for (set<SnapRealm*>::iterator p = realm->pchildren.begin(); 
+	  for (std::set<SnapRealm*>::iterator p = realm->pchildren.begin();
 	       p != realm->pchildren.end();
 	       ++p)
 	    q.push_back(*p);
@@ -4987,7 +4988,7 @@ void Client::_try_to_trim_inode(Inode *in, bool sched_inval)
   }
 
   if (ref > 0 && in->ll_ref > 0 && sched_inval) {
-    set<Dentry*>::iterator q = in->dn_set.begin();
+    std::set<Dentry*>::iterator q = in->dn_set.begin();
     while (q != in->dn_set.end()) {
       Dentry *dn = *q++;
       // FIXME: we play lots of unlink/link tricks when handling MDS replies,
@@ -5863,7 +5864,7 @@ void Client::_unmount()
   }
   
   while (!ll_unclosed_fh_set.empty()) {
-    set<Fh*>::iterator it = ll_unclosed_fh_set.begin();
+    std::set<Fh*>::iterator it = ll_unclosed_fh_set.begin();
     Fh *fh = *it;
     ll_unclosed_fh_set.erase(fh);
     ldout(cct, 0) << " destroyed lost open file " << fh << " on " << *(fh->inode) << dendl;
@@ -8077,7 +8078,7 @@ int Client::_getdents(dir_result_t *dir, char *buf, int buflen, bool fullent)
 
 /* getdir */
 struct getdir_result {
-  list<string> *contents;
+  std::list<string> *contents;
   int num;
 };
 
@@ -8090,7 +8091,7 @@ static int _getdir_cb(void *p, struct dirent *de, struct ceph_statx *stx, off_t 
   return 0;
 }
 
-int Client::getdir(const char *relpath, list<string>& contents,
+int Client::getdir(const char *relpath, std::list<string>& contents,
 		   const UserPerm& perms)
 {
   ldout(cct, 3) << "getdir(" << relpath << ")" << dendl;
@@ -9875,7 +9876,7 @@ void Client::_release_filelocks(Fh *fh)
   Inode *in = fh->inode.get();
   ldout(cct, 10) << "_release_filelocks " << fh << " ino " << in->ino << dendl;
 
-  list<pair<int, ceph_filelock> > to_release;
+  std::list<std::pair<int, ceph_filelock> > to_release;
 
   if (fh->fcntl_locks) {
     ceph_lock_state_t* lock_state = fh->fcntl_locks;
@@ -9902,7 +9903,8 @@ void Client::_release_filelocks(Fh *fh)
   fl.l_whence = SEEK_SET;
   fl.l_type = F_UNLCK;
 
-  for (list<pair<int, ceph_filelock> >::iterator p = to_release.begin();
+  for (std::list<std::pair<int, ceph_filelock> >::iterator p
+	 = to_release.begin();
        p != to_release.end();
        ++p) {
     fl.l_start = p->second.start;
@@ -9934,7 +9936,7 @@ void Client::_update_lock_state(struct flock *fl, uint64_t owner,
   filelock.type = lock_cmd;
 
   if (filelock.type == CEPH_LOCK_UNLOCK) {
-    list<ceph_filelock> activated_locks;
+    std::list<ceph_filelock> activated_locks;
     lock_state->remove_lock(filelock, activated_locks);
   } else {
     bool r = lock_state->add_lock(filelock, false, false, NULL);
@@ -11436,7 +11438,7 @@ int Client::ll_readlink(Inode *in, char *buf, size_t buflen, const UserPerm& per
   tout(cct) << "ll_readlink" << std::endl;
   tout(cct) << vino.ino.val << std::endl;
 
-  set<Dentry*>::iterator dn = in->dn_set.begin();
+  std::set<Dentry*>::iterator dn = in->dn_set.begin();
   while (dn != in->dn_set.end()) {
     touch_dn(*dn);
     ++dn;
@@ -13389,7 +13391,7 @@ void Client::ms_handle_remote_reset(Connection *con)
 	case MetaSession::STATE_OPENING:
 	  {
 	    ldout(cct, 1) << "reset from mds we were opening; retrying" << dendl;
-	    list<Context*> waiters;
+	    std::list<Context*> waiters;
 	    waiters.swap(s->waiting_for_open);
 	    _closed_mds_session(s);
 	    MetaSession *news = _get_or_open_mds_session(mds);

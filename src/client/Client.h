@@ -319,10 +319,10 @@ protected:
 
   // mds sessions
   map<mds_rank_t, MetaSession*> mds_sessions;  // mds -> push seq
-  list<Cond*> waiting_for_mdsmap;
+  std::list<Cond*> waiting_for_mdsmap; // XXX vector?
 
   // FSMap, for when using mds_command
-  list<Cond*> waiting_for_fsmap;
+  std::list<Cond*> waiting_for_fsmap; // XXX vector?
   std::unique_ptr<FSMap> fsmap;
   std::unique_ptr<FSMapUser> fsmap_user;
 
@@ -405,8 +405,8 @@ protected:
 public:
   entity_name_t get_myname() { return messenger->get_myname(); } 
   void _sync_write_commit(Inode *in);
-  void wait_on_list(list<Cond*>& ls);
-  void signal_cond_list(list<Cond*>& ls);
+  void wait_on_list(std::list<Cond*>& ls);
+  void signal_cond_list(std::list<Cond*>& ls);
 
 protected:
   std::unique_ptr<Filer>             filer;
@@ -457,7 +457,7 @@ protected:
   // file handles, etc.
   interval_set<int> free_fd_set;  // unused fds
   ceph::unordered_map<int, Fh*> fd_map;
-  set<Fh*> ll_unclosed_fh_set;
+  std::set<Fh*> ll_unclosed_fh_set;
   ceph::unordered_set<dir_result_t*> opened_dirs;
   
   int get_fd() {
@@ -486,8 +486,8 @@ protected:
   // helpers
   void wake_inode_waiters(MetaSession *s);
 
-  void wait_on_context_list(list<Context*>& ls);
-  void signal_context_list(list<Context*>& ls);
+  void wait_on_context_list(std::list<Context*>& ls);
+  void signal_context_list(std::list<Context*>& ls);
 
   // -- metadata cache stuff
 
@@ -543,7 +543,7 @@ protected:
   void trim_caps(MetaSession *s, int max);
   void _invalidate_kernel_dcache();
   
-  void dump_inode(Formatter *f, Inode *in, set<Inode*>& did, bool disconnected);
+  void dump_inode(Formatter *f, Inode *in, std::set<Inode*>& did, bool disconnected);
   void dump_cache(Formatter *f);  // debug
 
   // force read-only
@@ -579,7 +579,7 @@ protected:
   bool is_quota_bytes_approaching(Inode *in, const UserPerm& perms);
 
   std::map<std::pair<int64_t,std::string>, int> pool_perms;
-  list<Cond*> waiting_for_pool_perm;
+  std::list<Cond*> waiting_for_pool_perm;
   int check_pool_perm(Inode *in, int need);
 
   /**
@@ -984,7 +984,7 @@ public:
   int readdir_r(dir_result_t *dirp, struct dirent *de);
   int readdirplus_r(dir_result_t *dirp, struct dirent *de, struct ceph_statx *stx, unsigned want, unsigned flags, Inode **out);
 
-  int getdir(const char *relpath, list<string>& names,
+  int getdir(const char *relpath, std::list<string>& names,
 	     const UserPerm& perms);  // get the whole dir at once.
 
   /**

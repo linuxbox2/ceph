@@ -22,7 +22,7 @@ struct SnapRealm {
   vector<snapid_t> my_snaps;
 
   SnapRealm *pparent;
-  set<SnapRealm*> pchildren;
+  std::set<SnapRealm*> pchildren;
 
 private:
   SnapContext cached_snap_context;  // my_snaps + parent snaps + past_parent_snaps

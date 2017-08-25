@@ -127,7 +127,7 @@ public:
    * @param activated_locks A return parameter, holding activated wait locks.
    */
   void remove_lock(const ceph_filelock removal_lock,
-                   list<ceph_filelock>& activated_locks);
+                   std::list<ceph_filelock>& activated_locks);
 
   bool remove_all_from(client_t client);
 private:
@@ -142,7 +142,7 @@ private:
    * @depth recursion call depth
    */
   bool is_deadlock(const ceph_filelock& fl,
-		   list<multimap<uint64_t, ceph_filelock>::iterator>&
+		   std::list<multimap<uint64_t, ceph_filelock>::iterator>&
 		      overlapping_locks,
 		   const ceph_filelock *first_fl=NULL, unsigned depth=0) const;
 
@@ -172,9 +172,10 @@ private:
    * @param neighbor_locks locks owned by same process that neighbor new_lock on
    *    left or right side.
    */
-  void adjust_locks(list<multimap<uint64_t, ceph_filelock>::iterator> old_locks,
+  void adjust_locks(std::list<multimap<uint64_t,
+		    ceph_filelock>::iterator> old_locks,
                     ceph_filelock& new_lock,
-                    list<multimap<uint64_t, ceph_filelock>::iterator>
+                    std::list<multimap<uint64_t, ceph_filelock>::iterator>
                       neighbor_locks);
 
   //get last lock prior to start position
@@ -212,14 +213,14 @@ private:
    * Returns: true if at least one lock overlaps.
    */
   bool get_overlapping_locks(const ceph_filelock& lock,
-                             list<multimap<uint64_t,
+                             std::list<multimap<uint64_t,
                                  ceph_filelock>::iterator> & overlaps,
-                             list<multimap<uint64_t,
+                             std::list<multimap<uint64_t,
                                  ceph_filelock>::iterator> *self_neighbors);
 
   
   bool get_overlapping_locks(const ceph_filelock& lock,
-			     list<multimap<uint64_t, ceph_filelock>::iterator>& overlaps) {
+			     std::list<multimap<uint64_t, ceph_filelock>::iterator>& overlaps) {
     return get_overlapping_locks(lock, overlaps, NULL);
   }
 
@@ -230,7 +231,7 @@ private:
    * Returns: true if at least one waiting_lock overlaps
    */
   bool get_waiting_overlaps(const ceph_filelock& lock,
-                            list<multimap<uint64_t,
+                            std::list<multimap<uint64_t,
                                 ceph_filelock>::iterator>& overlaps);
   /*
    * split a list of locks up by whether they're owned by same
@@ -241,12 +242,12 @@ private:
    * owned_locks: an empty list, to be filled with the locks owned by owner
    */
   void split_by_owner(const ceph_filelock& owner,
-		      list<multimap<uint64_t,
+		      std::list<multimap<uint64_t,
 		          ceph_filelock>::iterator> & locks,
-		      list<multimap<uint64_t,
+		      std::list<multimap<uint64_t,
 		          ceph_filelock>::iterator> & owned_locks);
 
-  ceph_filelock *contains_exclusive_lock(list<multimap<uint64_t,
+  ceph_filelock *contains_exclusive_lock(std::list<multimap<uint64_t,
                                          ceph_filelock>::iterator>& locks);
 
 public:

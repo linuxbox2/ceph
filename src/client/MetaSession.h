@@ -38,7 +38,7 @@ struct MetaSession {
   int mds_state;
   bool readonly;
 
-  list<Context*> waiting_for_open;
+  std::list<Context*> waiting_for_open;
 
   xlist<Cap*> caps;
   xlist<Inode*> flushing_caps;

@@ -66,7 +66,7 @@ public:
 
   Cond  *caller_cond;          // who to take up
   Cond  *dispatch_cond;        // who to kick back
-  list<Cond*> waitfor_safe;
+  std::list<Cond*> waitfor_safe;
 
   InodeRef target;
   UserPerm perms;
