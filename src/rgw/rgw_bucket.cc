@@ -1351,8 +1351,9 @@ int RGWBucketAdminOp::check_index(RGWRados *store, RGWBucketAdminOpState& op_sta
   return 0;
 }
 
-int RGWBucketAdminOp::remove_bucket(RGWRados *store, RGWBucketAdminOpState& op_state,
-                                    bool bypass_gc, bool keep_index_consistent)
+int RGWBucketAdminOp::remove_bucket(RGWRados *store,
+				    RGWBucketAdminOpState& op_state,
+                                    bool bypass_gc)
 {
   RGWBucket bucket;
 
@@ -1361,7 +1362,8 @@ int RGWBucketAdminOp::remove_bucket(RGWRados *store, RGWBucketAdminOpState& op_s
     return ret;
 
   std::string err_msg;
-  ret = bucket.remove(op_state, bypass_gc, keep_index_consistent, &err_msg);
+  ret = bucket.remove(op_state, bypass_gc, true /* consistent index */,
+		      &err_msg);
   if (!err_msg.empty()) {
     lderr(store->ctx()) << "ERROR: " << err_msg << dendl;
   }

@@ -299,9 +299,6 @@ void usage()
   cout << "                             objects per shard value\n";
   cout << "   --bypass-gc               when specified with bucket deletion, triggers\n";
   cout << "                             object deletions by not involving GC\n";
-  cout << "   --inconsistent-index      when specified with bucket deletion and bypass-gc set to true,\n";
-  cout << "                             ignores bucket index consistency\n";
-  cout << "\n";
   cout << "<date> := \"YYYY-MM-DD[ hh:mm:ss]\"\n";
   cout << "\nQuota options:\n";
   cout << "   --bucket                  specified bucket for quota command\n";
@@ -2427,7 +2424,6 @@ int main(int argc, const char **argv)
   int sync_stats = false;
   int bypass_gc = false;
   int warnings_only = false;
-  int inconsistent_index = false;
 
   int verbose = false;
 
@@ -2668,8 +2664,6 @@ int main(int argc, const char **argv)
     } else if (ceph_argparse_binary_flag(args, i, &bypass_gc, NULL, "--bypass-gc", (char*)NULL)) {
      // do nothing
     } else if (ceph_argparse_binary_flag(args, i, &warnings_only, NULL, "--warnings-only", (char*)NULL)) {
-     // do nothing
-    } else if (ceph_argparse_binary_flag(args, i, &inconsistent_index, NULL, "--inconsistent-index", (char*)NULL)) {
      // do nothing
     } else if (ceph_argparse_witharg(args, i, &val, "--caps", (char*)NULL)) {
       caps = val;
@@ -5851,11 +5845,7 @@ next:
   }
 
   if (opt_cmd == OPT_BUCKET_RM) {
-    if (inconsistent_index == false) {
-      RGWBucketAdminOp::remove_bucket(store, bucket_op, bypass_gc, true);
-    } else {
-      RGWBucketAdminOp::remove_bucket(store, bucket_op, bypass_gc, false);
-    }
+      RGWBucketAdminOp::remove_bucket(store, bucket_op, bypass_gc);
   }
 
   if (opt_cmd == OPT_GC_LIST) {
