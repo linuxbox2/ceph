@@ -8117,7 +8117,6 @@ int RGWRados::Object::Delete::delete_obj()
 
   index_op.set_bilog_flags(params.bilog_flags);
 
-
   r = index_op.prepare(CLS_RGW_OP_DEL);
   if (r < 0)
     return r;
