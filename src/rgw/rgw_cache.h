@@ -13,6 +13,8 @@
 #include "include/assert.h"
 #include "common/RWLock.h"
 
+namespace rgw::cache {
+
 enum {
   UPDATE_OBJ,
   REMOVE_OBJ,
@@ -614,5 +616,7 @@ int RGWCache<T>::watch_cb(uint64_t notify_id,
 
   return 0;
 }
+
+} /* namespace rgw::cache */
 
 #endif

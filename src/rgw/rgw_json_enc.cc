@@ -215,6 +215,8 @@ void RGWAccessControlPolicy::dump(Formatter *f) const
   encode_json("owner", owner, f);
 }
 
+namespace rgw::cache {
+
 void ObjectMetaInfo::dump(Formatter *f) const
 {
   encode_json("size", size, f);
@@ -240,6 +242,8 @@ void RGWCacheNotifyInfo::dump(Formatter *f) const
   encode_json("ofs", ofs, f);
   encode_json("ns", ns, f);
 }
+
+} /* namespace rgw::cache */
 
 void RGWAccessKey::dump(Formatter *f) const
 {

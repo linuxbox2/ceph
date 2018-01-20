@@ -347,8 +347,10 @@ void RGWAccessControlPolicy::generate_test_instances(list<RGWAccessControlPolicy
   o.push_back(new RGWAccessControlPolicy(NULL));
 }
 
+namespace rgw::cache {
 
-void ObjectMetaInfo::generate_test_instances(list<ObjectMetaInfo*>& o)
+void ObjectMetaInfo::generate_test_instances(
+  list<ObjectMetaInfo*>& o)
 {
   ObjectMetaInfo *m = new ObjectMetaInfo;
   m->size = 1024 * 1024;
@@ -381,6 +383,8 @@ void RGWCacheNotifyInfo::generate_test_instances(list<RGWCacheNotifyInfo*>& o)
 {
   o.push_back(new RGWCacheNotifyInfo);
 }
+
+} /* namespace rgw::cache */
 
 void RGWAccessKey::generate_test_instances(list<RGWAccessKey*>& o)
 {

@@ -307,9 +307,9 @@ TYPE(ACLOwner)
 TYPE(RGWAccessControlPolicy)
 
 #include "rgw/rgw_cache.h"
-TYPE(ObjectMetaInfo)
-TYPE(ObjectCacheInfo)
-TYPE(RGWCacheNotifyInfo)
+TYPE(rgw::cache::ObjectMetaInfo)
+TYPE(rgw::cache::ObjectCacheInfo)
+TYPE(rgw::cache::RGWCacheNotifyInfo)
 
 #include "rgw/rgw_lc.h"
 TYPE(RGWLifecycleConfiguration)

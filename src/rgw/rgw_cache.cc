@@ -7,6 +7,7 @@
 
 #define dout_subsys ceph_subsys_rgw
 
+namespace rgw::cache {
 
 int ObjectCache::get(std::string& name, ObjectCacheInfo& info, uint32_t mask,
 		     rgw_cache_entry_info* cache_info)
@@ -314,3 +315,5 @@ void ObjectCache::chain_cache(RGWChainedCache *cache) {
   RWLock::WLocker l(lock);
   chained_cache.push_back(cache);
 }
+
+} /* namespace rgw::cache */

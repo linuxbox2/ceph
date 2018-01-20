@@ -13829,17 +13829,21 @@ uint64_t RGWRados::next_bucket_id()
   return ++max_bucket_id;
 }
 
-RGWRados *RGWStoreManager::init_storage_provider(CephContext *cct, bool use_gc_thread, bool use_lc_thread, bool quota_threads, bool run_sync_thread, bool run_reshard_thread)
+RGWRados *RGWStoreManager::init_storage_provider(
+	CephContext *cct, bool use_gc_thread, bool use_lc_thread,
+	bool quota_threads, bool run_sync_thread, bool run_reshard_thread)
 {
-  int use_cache = cct->_conf->rgw_cache_enabled;
-  RGWRados *store = NULL;
-  if (!use_cache) {
-    store = new RGWRados;
+  const auto use_cache = cct->_conf->get_val<bool>("rgw_cache_enabled");
+  RGWRados* store{nullptr};
+
+  if (use_cache) {
+    store = new rgw::cache::RGWCache<RGWRados>;
   } else {
-    store = new RGWCache<RGWRados>; 
+    store = new RGWRados;
   }
 
-  if (store->initialize(cct, use_gc_thread, use_lc_thread, quota_threads, run_sync_thread, run_reshard_thread) < 0) {
+  if (store->initialize(cct, use_gc_thread, use_lc_thread, quota_threads,
+						run_sync_thread, run_reshard_thread) < 0) {
     delete store;
     return NULL;
   }
