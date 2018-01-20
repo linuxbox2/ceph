@@ -8,10 +8,10 @@
 #include <string>
 #include <map>
 #include <unordered_map>
+#include <shared_mutex>
 #include "include/types.h"
 #include "include/utime.h"
 #include "include/assert.h"
-#include "common/RWLock.h"
 
 namespace rgw::cache {
 
@@ -99,7 +99,7 @@ WRITE_CLASS_ENCODER(ObjectCacheInfo)
 struct RGWCacheNotifyInfo {
   uint32_t op;
   rgw_raw_obj obj;
-  ObjectCacheInfo obj_info; /* XXX move semantics? */
+  ObjectCacheInfo obj_info; /* XXX refcnting to save space? */
   off_t ofs;
   string ns;
 
@@ -145,7 +145,7 @@ class ObjectCache {
   unsigned long lru_size;
   unsigned long lru_counter;
   unsigned long lru_window;
-  RWLock lock; /* XXX std::shard_mutex */
+  std::shared_mutex shared_mtx;
   CephContext *cct;
 
   vector<RGWChainedCache*> chained_cache; /* XXX maybe intrusive? */
@@ -158,11 +158,14 @@ class ObjectCache {
 		 std::list<string>::iterator& lru_iter);
   void remove_lru(string& name, std::list<string>::iterator& lru_iter);
   void invalidate_lru(ObjectCacheEntry& entry);
-
   void do_invalidate_all();
+
 public:
+  using lock_guard = std::lock_guard<std::shared_mutex>;
+  using shared_lock = std::shared_lock<std::shared_mutex>;
+
   ObjectCache() : lru_size(0), lru_counter(0), lru_window(0),
-		  lock("ObjectCache"), cct(NULL), enabled(false) { }
+		  cct(NULL), enabled(false) { }
   int get(std::string& name, ObjectCacheInfo& bl, uint32_t mask,
 	  rgw_cache_entry_info* cache_info);
   void put(std::string& name, ObjectCacheInfo& bl,

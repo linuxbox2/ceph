@@ -12,7 +12,7 @@ namespace rgw::cache {
 int ObjectCache::get(std::string& name, ObjectCacheInfo& info, uint32_t mask,
 		     rgw_cache_entry_info* cache_info)
 {
-  RWLock::RLocker l(lock);
+  shared_lock reader(shared_mtx);
 
   if (!enabled) {
     return -ENOENT;
@@ -34,8 +34,10 @@ int ObjectCache::get(std::string& name, ObjectCacheInfo& info, uint32_t mask,
   if (lru_counter - entry->lru_promotion_ts > lru_window) {
     ldout(cct, 20) << "cache get: touching lru, lru_counter=" << lru_counter
                    << " promotion_ts=" << entry->lru_promotion_ts << dendl;
-    lock.unlock();
-    lock.get_write(); /* promote lock to writer */
+
+    /* promote to writer lock */
+    reader.unlock();
+    lock_guard writer(shared_mutex);
 
     /* need to redo this because entry might have dropped off the cache */
     iter = cache_map.find(name);
@@ -79,7 +81,7 @@ bool ObjectCache::chain_cache_entry(
   std::initializer_list<rgw_cache_entry_info*> cache_info_entries,
   RGWChainedCache::Entry* chained_entry)
 {
-  RWLock::WLocker l(lock);
+  lock_guard writer(shared_mtx);
 
   if (!enabled) {
     return false;
@@ -122,7 +124,7 @@ bool ObjectCache::chain_cache_entry(
 void ObjectCache::put(std::string& name, ObjectCacheInfo& info,
 		      rgw_cache_entry_info* cache_info)
 {
-  RWLock::WLocker l(lock);
+  lock_guard writer(shared_mtx);
 
   if (!enabled) {
     return;
@@ -197,7 +199,7 @@ void ObjectCache::put(std::string& name, ObjectCacheInfo& info,
 
 void ObjectCache::remove(std::string& name)
 {
-  RWLock::WLocker l(lock);
+  lock_guard writer(shared_mtx);
 
   if (!enabled) {
     return;
@@ -281,7 +283,7 @@ void ObjectCache::invalidate_lru(ObjectCacheEntry& entry)
 
 void ObjectCache::set_enabled(bool status)
 {
-  RWLock::WLocker l(lock);
+  lock_guard writer(shared_mtx);
 
   enabled = status;
 
@@ -292,7 +294,7 @@ void ObjectCache::set_enabled(bool status)
 
 void ObjectCache::invalidate_all()
 {
-  RWLock::WLocker l(lock);
+  lock_guard writer(shared_mtx);
 
   do_invalidate_all();
 }
@@ -312,7 +314,7 @@ void ObjectCache::do_invalidate_all()
 }
 
 void ObjectCache::chain_cache(RGWChainedCache *cache) {
-  RWLock::WLocker l(lock);
+  lock_guard writer(shared_mtx);
   chained_cache.push_back(cache);
 }
 
