@@ -8,7 +8,8 @@
 #define dout_subsys ceph_subsys_rgw
 
 
-int ObjectCache::get(string& name, ObjectCacheInfo& info, uint32_t mask, rgw_cache_entry_info *cache_info)
+int ObjectCache::get(std::string& name, ObjectCacheInfo& info, uint32_t mask,
+		     rgw_cache_entry_info* cache_info)
 {
   RWLock::RLocker l(lock);
 
@@ -19,7 +20,8 @@ int ObjectCache::get(string& name, ObjectCacheInfo& info, uint32_t mask, rgw_cac
   auto iter = cache_map.find(name);
   if (iter == cache_map.end() ||
       (expiry.count() &&
-       (ceph::coarse_mono_clock::now() - iter->second.info.time_added) > expiry)) {
+       (ceph::coarse_mono_clock::now() - iter->second.info.time_added)
+       > expiry)) {
     ldout(cct, 10) << "cache get: name=" << name << " : miss" << dendl;
     if (perfcounter)
       perfcounter->inc(l_rgw_cache_miss);
@@ -37,7 +39,8 @@ int ObjectCache::get(string& name, ObjectCacheInfo& info, uint32_t mask, rgw_cac
     /* need to redo this because entry might have dropped off the cache */
     iter = cache_map.find(name);
     if (iter == cache_map.end()) {
-      ldout(cct, 10) << "lost race! cache get: name=" << name << " : miss" << dendl;
+      ldout(cct, 10) << "lost race! cache get: name=" << name << " : miss"
+		     << dendl;
       if(perfcounter) perfcounter->inc(l_rgw_cache_miss);
       return -ENOENT;
     }
@@ -71,8 +74,9 @@ int ObjectCache::get(string& name, ObjectCacheInfo& info, uint32_t mask, rgw_cac
   return 0;
 }
 
-bool ObjectCache::chain_cache_entry(std::initializer_list<rgw_cache_entry_info*> cache_info_entries,
-				    RGWChainedCache::Entry *chained_entry)
+bool ObjectCache::chain_cache_entry(
+  std::initializer_list<rgw_cache_entry_info*> cache_info_entries,
+  RGWChainedCache::Entry* chained_entry)
 {
   RWLock::WLocker l(lock);
 
@@ -88,7 +92,8 @@ bool ObjectCache::chain_cache_entry(std::initializer_list<rgw_cache_entry_info*>
 		   << cache_info->cache_locator << dendl;
     auto iter = cache_map.find(cache_info->cache_locator);
     if (iter == cache_map.end()) {
-      ldout(cct, 20) << "chain_cache_entry: couldn't find cache locator" << dendl;
+      ldout(cct, 20) << "chain_cache_entry: couldn't find cache locator"
+		     << dendl;
       return false;
     }
 
@@ -103,18 +108,18 @@ bool ObjectCache::chain_cache_entry(std::initializer_list<rgw_cache_entry_info*>
     entries.push_back(entry);
   }
 
-
   chained_entry->cache->chain_cb(chained_entry->key, chained_entry->data);
 
   for (auto entry : entries) {
-    entry->chained_entries.push_back(make_pair(chained_entry->cache,
-					       chained_entry->key));
+    entry->chained_entries.push_back(
+      make_pair(chained_entry->cache, chained_entry->key));
   }
 
   return true;
 }
 
-void ObjectCache::put(string& name, ObjectCacheInfo& info, rgw_cache_entry_info *cache_info)
+void ObjectCache::put(std::string& name, ObjectCacheInfo& info,
+		      rgw_cache_entry_info* cache_info)
 {
   RWLock::WLocker l(lock);
 
@@ -164,19 +169,21 @@ void ObjectCache::put(string& name, ObjectCacheInfo& info, rgw_cache_entry_info 
 
   if (info.flags & CACHE_FLAG_XATTRS) {
     target.xattrs = info.xattrs;
-    map<string, bufferlist>::iterator iter;
-    for (iter = target.xattrs.begin(); iter != target.xattrs.end(); ++iter) {
-      ldout(cct, 10) << "updating xattr: name=" << iter->first << " bl.length()=" << iter->second.length() << dendl;
+    /* XXX wrap loop in debug level condition */
+    for (const auto& iter : target.xattrs) {
+      ldout(cct, 10) << "updating xattr: name=" << iter.first
+		     << " bl.length()=" << iter.second.length()
+		     << dendl;
     }
   } else if (info.flags & CACHE_FLAG_MODIFY_XATTRS) {
-    map<string, bufferlist>::iterator iter;
-    for (iter = info.rm_xattrs.begin(); iter != info.rm_xattrs.end(); ++iter) {
-      ldout(cct, 10) << "removing xattr: name=" << iter->first << dendl;
-      target.xattrs.erase(iter->first);
+    for (const auto& iter : info.rm_xattrs) {
+      ldout(cct, 10) << "removing xattr: name=" << iter.first << dendl;
+      target.xattrs.erase(iter.first);
     }
-    for (iter = info.xattrs.begin(); iter != info.xattrs.end(); ++iter) {
-      ldout(cct, 10) << "appending xattr: name=" << iter->first << " bl.length()=" << iter->second.length() << dendl;
-      target.xattrs[iter->first] = iter->second;
+    for (const auto& iter : info.xattrs) {
+      ldout(cct, 10) << "appending xattr: name=" << iter.first
+		     << " bl.length()=" << iter.second.length() << dendl;
+      target.xattrs[iter.first] = iter.second;
     }
   }
 
@@ -187,7 +194,7 @@ void ObjectCache::put(string& name, ObjectCacheInfo& info, rgw_cache_entry_info 
     target.version = info.version;
 }
 
-void ObjectCache::remove(string& name)
+void ObjectCache::remove(std::string& name)
 {
   RWLock::WLocker l(lock);
 
@@ -210,20 +217,21 @@ void ObjectCache::remove(string& name)
   cache_map.erase(iter);
 }
 
-void ObjectCache::touch_lru(string& name, ObjectCacheEntry& entry,
-			    std::list<string>::iterator& lru_iter)
+void ObjectCache::touch_lru(std::string& name, ObjectCacheEntry& entry,
+			    std::list<std::string>::iterator& lru_iter)
 {
-  while (lru_size > (size_t)cct->_conf->rgw_cache_lru_size) {
+  while (lru_size > cct->_conf->get_val<size_t>("rgw_cache_lru_size")) {
     auto iter = lru.begin();
     if ((*iter).compare(name) == 0) {
       /*
-       * if the entry we're touching happens to be at the lru end, don't remove it,
-       * lru shrinking can wait for next time
+       * if the entry we're touching happens to be at the lru end,
+       * don't remove it, lru shrinking can wait for next time
        */
       break;
     }
     auto map_iter = cache_map.find(*iter);
-    ldout(cct, 10) << "removing entry: name=" << *iter << " from cache LRU" << dendl;
+    ldout(cct, 10) << "removing entry: name=" << *iter << " from cache LRU"
+		   << dendl;
     if (map_iter != cache_map.end()) {
       ObjectCacheEntry& entry = map_iter->second;
       invalidate_lru(entry);
@@ -250,8 +258,8 @@ void ObjectCache::touch_lru(string& name, ObjectCacheEntry& entry,
   entry.lru_promotion_ts = lru_counter;
 }
 
-void ObjectCache::remove_lru(string& name,
-			     std::list<string>::iterator& lru_iter)
+void ObjectCache::remove_lru(std::string& name,
+			     std::list<std::string>::iterator& lru_iter)
 {
   if (lru_iter == lru.end())
     return;
@@ -306,4 +314,3 @@ void ObjectCache::chain_cache(RGWChainedCache *cache) {
   RWLock::WLocker l(lock);
   chained_cache.push_back(cache);
 }
-
