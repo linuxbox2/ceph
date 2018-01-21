@@ -166,9 +166,9 @@ public:
 
   ObjectCache() : lru_size(0), lru_counter(0), lru_window(0),
 		  cct(NULL), enabled(false) { }
-  int get(std::string& name, ObjectCacheInfo& bl, uint32_t mask,
+  int get(std::string& name, ObjectCacheInfo& info, uint32_t mask,
 	  rgw_cache_entry_info* cache_info);
-  void put(std::string& name, ObjectCacheInfo& bl,
+  void put(std::string& name, ObjectCacheInfo& info,
 	   rgw_cache_entry_info* cache_info);
   void remove(std::string& name);
   void set_ctx(CephContext *_cct) {
