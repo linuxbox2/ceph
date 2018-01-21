@@ -9,8 +9,11 @@
 #include <map>
 #include <unordered_map>
 #include <shared_mutex>
+#include <boost/intrusive_ptr.hpp>
+#include "xxhash.h"
 #include "include/types.h"
 #include "include/utime.h"
+#include "common/cohort_lru.h"
 #include "include/assert.h"
 
 namespace rgw::cache {
@@ -51,7 +54,51 @@ struct ObjectMetaInfo {
 };
 WRITE_CLASS_ENCODER(ObjectMetaInfo)
 
+struct ObjKey
+{
+  uint64_t hk;
+  std::string name;
+
+  static constexpr uint64_t seed = 90210;
+
+  ObjKey() {} /* XXXX deleteme */
+
+  ObjKey(const std::string& _name)
+    : name(_name) {
+    hk =  XXH64(name.c_str(), name.length(), seed);
+  }
+};
+
+inline bool operator< (const ObjKey& lhs, const ObjKey& rhs)
+{
+  return ((lhs.hk < rhs.hk) ||
+	  ((lhs.hk == rhs.hk) &&
+	   (lhs.name < rhs.name)));
+}
+
+inline bool operator> (const ObjKey& lhs, const ObjKey& rhs)
+{
+  return rhs < lhs;
+}
+
+inline bool operator<=(const ObjKey& lhs, const ObjKey& rhs)
+{
+  return !(lhs > rhs);
+}
+
+inline bool operator>=(const ObjKey& lhs, const ObjKey& rhs)
+{
+  return !(lhs < rhs);
+}
+
+inline bool operator==(const ObjKey& lhs, const ObjKey& rhs)
+{
+  return ((lhs.hk == rhs.hk) &&
+	  (lhs.name == rhs.name));
+}
+
 struct ObjectCacheInfo {
+  ObjKey key;
   int status = 0;
   uint32_t flags = 0;
   uint64_t epoch = 0;
@@ -62,7 +109,35 @@ struct ObjectCacheInfo {
   obj_version version = {};
   ceph::coarse_mono_time time_added = ceph::coarse_mono_clock::now();
 
-  ObjectCacheInfo() = default;
+  ObjectCacheInfo() = default; /* XXX will need to init ObjKey */
+
+  struct LT
+  {
+    // for internal ordering
+    bool operator()(const ObjectCacheInfo& lhs,
+		    const ObjectCacheInfo& rhs) const
+      { return (lhs.key < rhs.key); }
+
+    // for external search by ObjKey
+    bool operator()(const ObjKey& k, const ObjectCacheInfo& rhs) const
+      { return k < rhs.key; }
+
+      bool operator()(const ObjectCacheInfo& lhs, const ObjKey& k) const
+      { return lhs.key < k; }
+    };
+
+  struct EQ
+  {
+    bool operator()(const ObjectCacheInfo& lhs,
+		    const ObjectCacheInfo& rhs) const
+      { return (lhs.key == rhs.key); }
+
+    bool operator()(const ObjKey& k, const ObjectCacheInfo& rhs) const
+      { return k == rhs.key; }
+
+    bool operator()(const ObjectCacheInfo& lhs, const ObjKey& k) const
+      { return lhs.key == k; }
+  };
 
   void encode(buffer::list& bl) const {
     ENCODE_START(5, 3, bl);
