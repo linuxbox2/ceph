@@ -97,7 +97,8 @@ inline bool operator==(const ObjKey& lhs, const ObjKey& rhs)
 	  (lhs.name == rhs.name));
 }
 
-struct ObjectCacheInfo {
+struct ObjectCacheInfo : public cohort::lru::Object
+{
   ObjKey key;
   int status = 0;
   uint32_t flags = 0;
@@ -110,6 +111,11 @@ struct ObjectCacheInfo {
   ceph::coarse_mono_time time_added = ceph::coarse_mono_clock::now();
 
   ObjectCacheInfo() = default; /* XXX will need to init ObjKey */
+
+  bool reclaim() override {
+    /* XXX return false if this not reclaimable */
+    return true;
+  }
 
   struct LT
   {
