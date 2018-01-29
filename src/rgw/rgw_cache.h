@@ -180,11 +180,11 @@ WRITE_CLASS_ENCODER(ObjectCacheInfo)
 struct RGWCacheNotifyInfo {
   uint32_t op;
   rgw_raw_obj obj;
-  ObjectCacheInfo obj_info; /* XXX refcnting to save space? */
+  ObjectCacheInfo* obj_info; /* XXX refcnting to save space? */
   off_t ofs;
   string ns;
 
-  RGWCacheNotifyInfo() : op(0), ofs(0) {}
+  RGWCacheNotifyInfo() : op(0), obj_info(nullptr), ofs(0) {}
 
   void encode(buffer::list& obl) const {
     ENCODE_START(2, 2, obl);
