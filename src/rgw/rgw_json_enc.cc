@@ -238,7 +238,7 @@ void RGWCacheNotifyInfo::dump(Formatter *f) const
 {
   encode_json("op", op, f);
   encode_json("obj", obj, f);
-  encode_json("obj_info", obj_info, f);
+  encode_json("obj_info", *obj_info, f);
   encode_json("ofs", ofs, f);
   encode_json("ns", ns, f);
 }

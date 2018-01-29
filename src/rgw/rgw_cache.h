@@ -145,6 +145,10 @@ struct ObjectCacheInfo : public cohort::lru::Object
       { return lhs.key == k; }
   };
 
+  typedef bi::link_mode<bi::safe_link> link_mode; /* XXX safe_link */
+  typedef bi::avl_set_member_hook<link_mode> tree_hook_type;
+  tree_hook_type obj_cache_hook;
+
   void encode(buffer::list& bl) const {
     ENCODE_START(5, 3, bl);
     encode(status, bl);
@@ -199,7 +203,9 @@ struct RGWCacheNotifyInfo {
     DECODE_START_LEGACY_COMPAT_LEN(2, 2, 2, ibl);
     decode(op, ibl);
     decode(obj, ibl);
-    decode(obj_info, ibl);
+    /* XXXX fixme! */
+    obj_info = new ObjectCacheInfo();
+    decode(*obj_info, ibl);
     decode(ofs, ibl);
     decode(ns, ibl);
     DECODE_FINISH(ibl);
@@ -242,12 +248,19 @@ class ObjectCache {
   void do_invalidate_all();
 
 public:
+
+  typedef std::tuple<ObjectCacheInfo*, int32_t> GetObjResult;
+
+  static constexpr GetObjResult GetObj_ENOENT =
+    GetObjResult { nullptr, -ENOENT };
+
   using lock_guard = std::lock_guard<std::shared_mutex>;
   using shared_lock = std::shared_lock<std::shared_mutex>;
 
   ObjectCache() : lru_size(0), lru_counter(0), lru_window(0),
 		  cct(NULL), enabled(false) { }
-  int get(std::string& name, ObjectCacheInfo& info, uint32_t mask,
+  ObjectCache::GetObjResult get(std::string& name, ObjectCacheInfo& info,
+				uint32_t mask,
 	  rgw_cache_entry_info* cache_info);
   void put(std::string& name, ObjectCacheInfo& info,
 	   rgw_cache_entry_info* cache_info);
@@ -307,7 +320,7 @@ class RGWCache  : public T
   }
 
   int distribute_cache(const string& normal_name, rgw_raw_obj& obj,
-		       ObjectCacheInfo& obj_info, int op);
+		       ObjectCacheInfo* obj_info, int op);
   int watch_cb(uint64_t notify_id,
 	       uint64_t cookie,
 	       uint64_t notifier_id,
@@ -391,7 +404,8 @@ int RGWCache<T>::delete_system_obj(
   cache.remove(name);
 
   ObjectCacheInfo info;
-  distribute_cache(name, obj, info, REMOVE_OBJ);
+  /* XXXX fixme with correct info ptr!! */
+  distribute_cache(name, obj, &info, REMOVE_OBJ);
 
   return T::delete_system_obj(obj, objv_tracker);
 }
@@ -422,7 +436,10 @@ int RGWCache<T>::get_system_obj(
   if (attrs)
     flags |= CACHE_FLAG_XATTRS;
 
-  if ((cache.get(name, info, flags, cache_info) == 0) &&
+  /* XXXX lots wrong here info, to start */
+  ObjectCache::GetObjResult get_r =
+    cache.get(name, info, flags, cache_info);
+  if ((get<1>(get_r) == 0) &&
       (!refresh_version || !info.version.compare(&(*refresh_version)))) {
     if (info.status < 0)
       return info.status;
@@ -494,7 +511,8 @@ int RGWCache<T>::system_obj_set_attrs(
   std::string name = normal_name(pool, oid);
   if (ret >= 0) {
     cache.put(name, info, NULL);
-    int r = distribute_cache(name, obj, info, UPDATE_OBJ);
+    /* XXXX fixme with correct info ptr~~ */
+    int r = distribute_cache(name, obj, &info, UPDATE_OBJ);
     if (r < 0)
       mydout(0) << "ERROR: failed to distribute cache for " << obj << dendl;
   } else {
@@ -534,10 +552,14 @@ int RGWCache<T>::put_system_obj_impl(
   info.meta.size = size;
   string name = normal_name(pool, oid);
   if (ret >= 0) {
+    /* XXXX put_ref */
     cache.put(name, info, NULL);
-    int r = distribute_cache(name, obj, info, UPDATE_OBJ);
+    int r = distribute_cache(name, obj, &info, UPDATE_OBJ); // XXXX
+                                                           // take
+							   // ref, fix ptr!!
     if (r < 0)
       mydout(0) << "ERROR: failed to distribute cache for " << obj << dendl;
+    /* XXXX rele() -- maybe use scope_guard */
   } else {
     cache.remove(name);
   }
@@ -571,7 +593,8 @@ int RGWCache<T>::put_system_obj_data(
     string name = normal_name(pool, oid);
     if (ret >= 0) {
       cache.put(name, info, NULL);
-      int r = distribute_cache(name, obj, info, UPDATE_OBJ);
+      /* XXXX fixme with correct info ptr!! */
+      int r = distribute_cache(name, obj, &info, UPDATE_OBJ);
       if (r < 0)
         mydout(0) << "ERROR: failed to distribute cache for " << obj << dendl;
     } else {
@@ -601,11 +624,17 @@ int RGWCache<T>::raw_obj_stat(rgw_raw_obj& obj, uint64_t* psize,
   uint64_t epoch;
 
   ObjectCacheInfo info;
+
   uint32_t flags = CACHE_FLAG_META | CACHE_FLAG_XATTRS;
   if (objv_tracker)
     flags |= CACHE_FLAG_OBJV;
-  int r = cache.get(name, info, flags, NULL);
-  if (r == 0) {
+
+  /* XXXX lots wrong here info, to start */
+  ObjectCache::GetObjResult get_r =
+    cache.get(name, info, flags, NULL);
+  int r{0};
+
+  if (get<1>(get_r) == 0) {
     if (info.status < 0)
       return info.status;
 
@@ -649,13 +678,13 @@ done:
 
 template <class T>
 int RGWCache<T>::distribute_cache(
-  const string& normal_name, rgw_raw_obj& obj, ObjectCacheInfo& obj_info,
+  const string& normal_name, rgw_raw_obj& obj, ObjectCacheInfo* obj_info,
   int op)
 {
   RGWCacheNotifyInfo info;
 
   info.op = op;
-  info.obj_info = obj_info;
+  info.obj_info = obj_info; /* XXX have call path ref, need ++ref? */
   info.obj = obj;
   buffer::list bl;
   encode(info, bl);
@@ -688,7 +717,8 @@ int RGWCache<T>::watch_cb(uint64_t notify_id,
   
   switch (info.op) {
   case UPDATE_OBJ:
-    cache.put(name, info.obj_info, NULL);
+    /* XXXX fix ptr!! */
+    cache.put(name, *info.obj_info, NULL);
     break;
   case REMOVE_OBJ:
     cache.remove(name);

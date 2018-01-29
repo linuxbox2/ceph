@@ -9,15 +9,17 @@
 
 namespace rgw::cache {
 
-int ObjectCache::get(std::string& name, ObjectCacheInfo& info, uint32_t mask,
-		     rgw_cache_entry_info* cache_info)
+ObjectCache::GetObjResult ObjectCache::get(
+  std::string& name, ObjectCacheInfo& info, uint32_t mask,
+  rgw_cache_entry_info* cache_info)
 {
   shared_lock reader(shared_mtx);
 
   if (!enabled) {
-    return -ENOENT;
+    return GetObj_ENOENT;
   }
 
+  /* XXX convertme */
   auto iter = cache_map.find(name);
   if (iter == cache_map.end() ||
       (expiry.count() &&
@@ -26,7 +28,7 @@ int ObjectCache::get(std::string& name, ObjectCacheInfo& info, uint32_t mask,
     ldout(cct, 10) << "cache get: name=" << name << " : miss" << dendl;
     if (perfcounter)
       perfcounter->inc(l_rgw_cache_miss);
-    return -ENOENT;
+    return GetObj_ENOENT;
   }
 
   ObjectCacheEntry *entry = &iter->second;
@@ -45,7 +47,7 @@ int ObjectCache::get(std::string& name, ObjectCacheInfo& info, uint32_t mask,
       ldout(cct, 10) << "lost race! cache get: name=" << name << " : miss"
 		     << dendl;
       if(perfcounter) perfcounter->inc(l_rgw_cache_miss);
-      return -ENOENT;
+      return GetObj_ENOENT;
     }
 
     entry = &iter->second;
@@ -61,20 +63,23 @@ int ObjectCache::get(std::string& name, ObjectCacheInfo& info, uint32_t mask,
                    << std::hex << mask << ", cached=0x" << src.flags
                    << std::dec << ")" << dendl;
     if(perfcounter) perfcounter->inc(l_rgw_cache_miss);
-    return -ENOENT;
+    return GetObj_ENOENT;
   }
   ldout(cct, 10) << "cache get: name=" << name << " : hit (requested=0x"
                  << std::hex << mask << ", cached=0x" << src.flags
                  << std::dec << ")" << dendl;
 
-  info = src;
+  /* XXXX this is where we would return a ref to cached entry --
+   * fixme!! */
+  ObjectCache::GetObjResult result { &src, 0 };
+
   if (cache_info) {
     cache_info->cache_locator = name;
     cache_info->gen = entry->gen;
   }
   if(perfcounter) perfcounter->inc(l_rgw_cache_hit);
 
-  return 0;
+  return result;
 }
 
 bool ObjectCache::chain_cache_entry(
@@ -136,7 +141,9 @@ void ObjectCache::put(std::string& name, ObjectCacheInfo& info,
   if (iter == cache_map.end()) {
     ObjectCacheEntry entry;
     entry.lru_iter = lru.end();
+#if 0 /* XXXX fixme!!!! */
     cache_map.insert(pair<string, ObjectCacheEntry>(name, entry));
+#endif
     iter = cache_map.find(name);
   }
   ObjectCacheEntry& entry = iter->second;
