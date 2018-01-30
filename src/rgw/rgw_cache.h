@@ -117,6 +117,8 @@ struct ObjectCacheInfo : public cohort::lru::Object
     return true;
   }
 
+  typedef cohort::lru::LRU<std::mutex> ObjLRU;
+
   struct LT
   {
     // for internal ordering
@@ -147,7 +149,18 @@ struct ObjectCacheInfo : public cohort::lru::Object
 
   typedef bi::link_mode<bi::safe_link> link_mode; /* XXX safe_link */
   typedef bi::avl_set_member_hook<link_mode> tree_hook_type;
+
   tree_hook_type obj_cache_hook;
+
+  typedef bi::member_hook<
+    ObjectCacheInfo, tree_hook_type,
+    &ObjectCacheInfo::obj_cache_hook> ObjCacheHook;
+
+  typedef bi::avltree<ObjectCacheInfo, bi::compare<LT>,
+		      ObjCacheHook> ObjCacheAVL;
+
+  typedef cohort::lru::TreeX<ObjectCacheInfo, ObjCacheAVL, LT, EQ, ObjKey,
+			     std::mutex> ObjCache;
 
   void encode(buffer::list& bl) const {
     ENCODE_START(5, 3, bl);
@@ -235,6 +248,9 @@ class ObjectCache {
   std::shared_mutex shared_mtx;
   CephContext *cct;
 
+  ObjectCacheInfo::ObjCache cache_ng;
+  ObjectCacheInfo::ObjLRU lru_ng;
+
   vector<RGWChainedCache*> chained_cache; /* XXX maybe intrusive? */
 
   bool enabled;
@@ -257,8 +273,16 @@ public:
   using lock_guard = std::lock_guard<std::shared_mutex>;
   using shared_lock = std::shared_lock<std::shared_mutex>;
 
+  /* XXXX due to NULL cct, will crash */
   ObjectCache() : lru_size(0), lru_counter(0), lru_window(0),
-		  cct(NULL), enabled(false) { }
+		  cct(NULL),
+		  cache_ng(
+		    cct->_conf->get_val<int64_t>("rgw_ngcache_partitions"),
+		    cct->_conf->get_val<int64_t>("rgw_ngcache_size")),
+		  lru_ng(
+		    cct->_conf->get_val<int64_t>("rgw_ngcache_lru_lanes"),
+		    cct->_conf->get_val<int64_t>("rgw_ngcache_lru_hiwat")),
+		  enabled(false) { }
   ObjectCache::GetObjResult get(std::string& name, ObjectCacheInfo& info,
 				uint32_t mask,
 	  rgw_cache_entry_info* cache_info);

@@ -4648,6 +4648,34 @@ std::vector<Option> get_rgw_options() {
         "When full, the RGW metadata cache evicts least recently used entries.")
     .add_see_also("rgw_cache_enabled"),
 
+    Option("rgw_ngcache_lru_lanes", Option::TYPE_INT, Option::LEVEL_ADVANCED)
+    .set_default(5)
+    .set_description("Number of LRU lanes in NG RGW metadata cache.")
+    .set_long_description(
+        "NG Cache entries are managed on a linked, intrusive LRU.")
+    .add_see_also("rgw_cache_enabled"),
+
+    Option("rgw_ngcache_lru_hiwat", Option::TYPE_INT, Option::LEVEL_ADVANCED)
+    .set_default(2131)
+    .set_description("NG Cache LRU high water mark.")
+    .set_long_description(
+        "NG Cache LRU high water mark.")
+    .add_see_also("rgw_cache_enabled"),
+
+    Option("rgw_ngcache_partitions", Option::TYPE_INT, Option::LEVEL_ADVANCED)
+    .set_default(3)
+    .set_description("Number of partitions in NG RGW metadata cache.")
+    .set_long_description(
+        "NG Cache is structured as independent hash partitions backed by AVL.")
+    .add_see_also("rgw_cache_enabled"),
+
+    Option("rgw_ngcache_size", Option::TYPE_INT, Option::LEVEL_ADVANCED)
+    .set_default(3)
+    .set_description("Size of hash table in NG RGW metadata cache.")
+    .set_long_description(
+        "Misses in each hash partition fall through to local AVL.")
+    .add_see_also("rgw_cache_enabled"),
+
     Option("rgw_socket_path", Option::TYPE_STR, Option::LEVEL_ADVANCED)
     .set_default("")
     .set_description("RGW FastCGI socket path (for FastCGI over Unix domain sockets).")
