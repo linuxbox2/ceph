@@ -246,7 +246,7 @@ class ObjectCache {
   unsigned long lru_counter;
   unsigned long lru_window;
   std::shared_mutex shared_mtx;
-  CephContext *cct;
+  CephContext* cct;
 
   ObjectCacheInfo::ObjCache cache_ng;
   ObjectCacheInfo::ObjLRU lru_ng;
@@ -273,9 +273,8 @@ public:
   using lock_guard = std::lock_guard<std::shared_mutex>;
   using shared_lock = std::shared_lock<std::shared_mutex>;
 
-  /* XXXX due to NULL cct, will crash */
-  ObjectCache() : lru_size(0), lru_counter(0), lru_window(0),
-		  cct(NULL),
+  ObjectCache(CephContext* _cct) : lru_size(0), lru_counter(0), lru_window(0),
+		  cct(_cct),
 		  cache_ng(
 		    cct->_conf->get_val<int64_t>("rgw_ngcache_partitions"),
 		    cct->_conf->get_val<int64_t>("rgw_ngcache_size")),
@@ -355,7 +354,7 @@ class RGWCache  : public T
   }
 
 public:
-  RGWCache() {}
+  RGWCache(CephContext* _cct) : cache (_cct) {}
 
   void register_chained_cache(RGWChainedCache *cc) override {
     cache.chain_cache(cc);

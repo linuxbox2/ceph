@@ -13837,7 +13837,7 @@ RGWRados *RGWStoreManager::init_storage_provider(
   RGWRados* store{nullptr};
 
   if (use_cache) {
-    store = new rgw::cache::RGWCache<RGWRados>;
+	store = new rgw::cache::RGWCache<RGWRados>(cct);
   } else {
     store = new RGWRados;
   }
