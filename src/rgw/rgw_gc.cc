@@ -81,7 +81,7 @@ int RGWGC::defer_chain(const string& tag, bool sync)
   return store->gc_aio_operate(obj_names[i], &op);
 }
 
-int RGWGC::remove(int index, const std::list<string>& tags, AioCompletion **pc)
+int RGWGC::remove(int index, const std::vector<string>& tags, AioCompletion **pc)
 {
   ObjectWriteOperation op;
   cls_rgw_gc_remove(op, tags);
@@ -145,7 +145,7 @@ class RGWGCIOManager {
   };
 
   deque<IO> ios;
-  vector<std::list<string> > remove_tags;
+  vector<std::vector<string> > remove_tags;
 
 #define MAX_AIO_DEFAULT 10
   size_t max_aio{MAX_AIO_DEFAULT};
@@ -229,7 +229,7 @@ done:
     drain_ios();
   }
 
-  void flush_remove_tags(int index, list<string>& rt) {
+  void flush_remove_tags(int index, vector<string>& rt) {
     IO index_io{IO::IndexIO, nullptr, "", index, ""};
 
     int ret = gc->remove(index, rt, &index_io.c);
