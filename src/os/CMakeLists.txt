@@ -108,7 +108,6 @@ target_link_libraries(os kv)
 add_dependencies(os compressor_plugins)
 add_dependencies(os crypto_plugins)
 
-
 if(WITH_BLUESTORE)
   add_executable(ceph-bluestore-tool
     bluestore/bluestore_tool.cc)

@@ -7,6 +7,13 @@ if (WITH_LEVELDB)
   list(APPEND kv_srcs LevelDBStore.cc)
 endif (WITH_LEVELDB)
 
+if(WITH_WIREDTIGER)
+  list(APPEND kv_srcs
+    WiredDB.cc
+  )
+endif(WITH_WIREDTIGER)
+
+
 add_library(kv_objs OBJECT ${kv_srcs})
 add_library(kv STATIC $<TARGET_OBJECTS:kv_objs>)
 target_include_directories(kv_objs SYSTEM BEFORE PUBLIC ${ROCKSDB_INCLUDE_DIR})

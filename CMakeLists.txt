@@ -286,6 +286,11 @@ if(WITH_LEVELDB)
   find_file(HAVE_LEVELDB_FILTER_POLICY leveldb/filter_policy.h PATHS ${LEVELDB_INCLUDE_DIR})
 endif(WITH_LEVELDB)
 
+option(WITH_WIREDTIGER "WiredTiger keyvalue db" ON)
+if(WITH_WIREDTIGER)
+  find_package(wiredtiger REQUIRED)
+endif(WITH_WIREDTIGER)
+
 find_package(snappy REQUIRED)
 
 option(WITH_BROTLI "Brotli compression support" OFF)

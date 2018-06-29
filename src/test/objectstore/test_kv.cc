@@ -470,7 +470,7 @@ TEST_P(KVTest, RocksDBCFMerge) {
 INSTANTIATE_TEST_CASE_P(
   KeyValueDB,
   KVTest,
-  ::testing::Values("leveldb", "rocksdb", "memdb"));
+  ::testing::Values("leveldb", "rocksdb", "wiredtiger", "memdb"));
 
 #else
 
@@ -494,7 +494,7 @@ int main(int argc, char **argv) {
   common_init_finish(g_ceph_context);
   g_ceph_context->_conf->set_val(
     "enable_experimental_unrecoverable_data_corrupting_features",
-    "rocksdb, memdb");
+    "rocksdb, wiredtiger, memdb");
   g_ceph_context->_conf->apply_changes(NULL);
 
   ::testing::InitGoogleTest(&argc, argv);

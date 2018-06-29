@@ -1,0 +1,37 @@
+# CMake module to search for wiredtiger
+#
+# If it's found it sets WIREDTIGER_FOUND to TRUE
+# and following variables are set:
+# WIREDTIGER_INCLUDE_DIRS
+# WIREDTIGER_LIBRARIES
+
+if(WIREDTIGER_PREFIX)
+  set(WIREDTIGER_INCLUDE_DIR ${WIREDTIGER_PREFIX}/include)
+  set(WIREDTIGER_LIBRARY ${WIREDTIGER_PREFIX}/lib)
+endif()
+
+find_path(WIREDTIGER_INCLUDE_DIR
+  liboath/oath.h
+  PATHS
+  /usr/include
+  /usr/local/include)
+find_library(WIREDTIGER_LIBRARY NAMES oath liboath PATHS
+  /usr/local/lib
+  /usr/lib)
+
+include(FindPackageHandleStandardArgs)
+find_package_handle_standard_args(WIREDTIGER DEFAULT_MSG WIREDTIGER_LIBRARY WIREDTIGER_INCLUDE_DIR)
+
+mark_as_advanced(WIREDTIGER_LIBRARY WIREDTIGER_INCLUDE_DIR)
+
+if(WIREDTIGER_FOUND)
+  set(WIREDTIGER_INCLUDE_DIRS "${WIREDTIGER_INCLUDE_DIR}")
+  set(WIREDTIGER_LIBRARIES "${WIREDTIGER_LIBRARY}")
+  if(NOT TARGET WIREDTIGER::WIREDTIGER)
+    add_library(WIREDTIGER::WIREDTIGER UNKNOWN IMPORTED)
+  endif()
+  set_target_properties(WIREDTIGER::WIREDTIGER PROPERTIES
+    INTERFACE_INCLUDE_DIRECTORIES "${WIREDTIGER_INCLUDE_DIRS}"
+    IMPORTED_LINK_INTERFACE_LANGUAGES "C"
+    IMPORTED_LOCATION "${WIREDTIGER_LIBRARIES}")
+endif()
