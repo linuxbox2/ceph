@@ -34,24 +34,23 @@
 
 class WiredDB : public KeyValueDB
 {
-  CephContext *m_cct;
-  WT_CONNECTION* conn;
+  CephContext *cct;
   std::string path;
+  WT_CONNECTION *conn;
   map<std::string,std::string> kv_options;
+  void *priv;
   std::string options_str;
-  int64_t high_pri_watermark;
 
-  WiredDBStore(CephContext* cct, const std::string& path,
+  WiredDB(CephContext* cct, const std::string& path,
 	       std::map<std::string,std::string> opt, void *p) :
     cct(cct),
     path(path),
-    kv_options(opt),
-    priv(p),
     conn(nullptr),
-    high_pri_watermark(0)
+    kv_options(opt),
+    priv(p)
   {}
 
-  ~RocksDBStore() override;
+  ~WiredDB() override;
 
   /* nested classes */
 
