@@ -41,14 +41,18 @@ class WiredDB : public KeyValueDB
   void *priv;
   std::string options_str;
 
+public:
   WiredDB(CephContext* cct, const std::string& path,
-	       std::map<std::string,std::string> opt, void *p) :
-    cct(cct),
-    path(path),
-    conn(nullptr),
-    kv_options(opt),
-    priv(p)
-  {}
+	  std::map<std::string,std::string> opt, void *p);
+
+  int init(std::string option_str="") override;
+  int open(std::ostream &out, const std::vector<ColumnFamily>&) override; // vector cfs contains column families to be created when db is created.
+  int create_and_open(std::ostream &out, const vector<ColumnFamily>&) override;
+  void close() override;
+
+  uint64_t get_estimated_size(std::map<std::string, uint64_t> &extra) override {
+    return 76UL;
+  };
 
   ~WiredDB() override;
 

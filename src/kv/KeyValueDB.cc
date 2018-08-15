@@ -12,6 +12,9 @@
 #ifdef HAVE_KINETIC
 #include "KineticStore.h"
 #endif
+#ifdef WITH_WIREDTIGER
+#include "WiredDB.h"
+#endif
 
 KeyValueDB *KeyValueDB::create(CephContext *cct, const string& type,
 			       const string& dir,
@@ -34,11 +37,16 @@ KeyValueDB *KeyValueDB::create(CephContext *cct, const string& type,
     return new RocksDBStore(cct, dir, options, p);
   }
 #endif
-
   if ((type == "memdb") && 
     cct->check_experimental_feature_enabled("memdb")) {
     return new MemDB(cct, dir, p);
   }
+#ifdef WITH_WIREDTIGER
+  if ((type == "wiredtiger") &&
+      cct->check_experimental_feature_enabled("wiredtiger")) {
+    return new WiredDB(cct, dir, options, p);
+  }
+#endif
   return NULL;
 }
 
