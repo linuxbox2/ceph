@@ -58,11 +58,12 @@ public:
 
   void init() {
     cout << "Creating " << string(GetParam()) << "\n";
-    db.reset(KeyValueDB::create(g_ceph_context, string(GetParam()),
-				"kv_test_temp_dir"));
+    auto ptr = KeyValueDB::create(g_ceph_context, string(GetParam()),
+				  "kv_test_temp_dir");
+    db.reset(ptr);
   }
   void fini() {
-    db.reset(NULL);
+    db.reset(nullptr);
   }
 
   void SetUp() override {
@@ -82,15 +83,18 @@ public:
 };
 
 TEST_P(KVTest, OpenClose) {
-  ASSERT_EQ(0, db->create_and_open(cout));
+  int r = db->create_and_open(cout);
+  ASSERT_EQ(0, r);
   fini();
 }
 
 TEST_P(KVTest, OpenCloseReopenClose) {
-  ASSERT_EQ(0, db->create_and_open(cout));
+  int r = db->create_and_open(cout);
+  ASSERT_EQ(0, r);
   fini();
   init();
-  ASSERT_EQ(0, db->open(cout));
+  r = db->open(cout);
+  ASSERT_EQ(0, r);
   fini();
 }
 
@@ -98,7 +102,8 @@ TEST_P(KVTest, OpenCloseReopenClose) {
  * Basic write and read test case in same database session.
  */
 TEST_P(KVTest, OpenWriteRead) {
-  ASSERT_EQ(0, db->create_and_open(cout));
+  int r = db->create_and_open(cout);
+  ASSERT_EQ(0, r);
   {
     KeyValueDB::Transaction t = db->get_transaction();
     bufferlist value;
@@ -113,11 +118,13 @@ TEST_P(KVTest, OpenWriteRead) {
     db->submit_transaction_sync(t);
 
     bufferlist v1, v2;
-    ASSERT_EQ(0, db->get("prefix", "key", &v1));
+    r = db->get("prefix", "key", &v1);
+    ASSERT_EQ(0, r);
     ASSERT_EQ(v1.length(), 5u);
     (v1.c_str())[v1.length()] = 0x0;
     ASSERT_EQ(std::string(v1.c_str()), std::string("value"));
-    ASSERT_EQ(0, db->get("prefix", "key2", &v2));
+    r = db->get("prefix", "key2", &v2);
+    ASSERT_EQ(0, r);
     ASSERT_EQ(v2.length(), 6u);
     (v2.c_str())[v2.length()] = 0x0;
     ASSERT_EQ(std::string(v2.c_str()), std::string("value2"));
@@ -126,7 +133,8 @@ TEST_P(KVTest, OpenWriteRead) {
 }
 
 TEST_P(KVTest, PutReopen) {
-  ASSERT_EQ(0, db->create_and_open(cout));
+  int r = db->create_and_open(cout);
+  ASSERT_EQ(0, r);
   {
     KeyValueDB::Transaction t = db->get_transaction();
     bufferlist value;
@@ -139,12 +147,15 @@ TEST_P(KVTest, PutReopen) {
   fini();
 
   init();
-  ASSERT_EQ(0, db->open(cout));
+  r = db->open(cout);
+  ASSERT_EQ(0, r);
   {
     bufferlist v1, v2;
-    ASSERT_EQ(0, db->get("prefix", "key", &v1));
+    int r = db->get("prefix", "key", &v1);
+    ASSERT_EQ(0, r);
     ASSERT_EQ(v1.length(), 5u);
-    ASSERT_EQ(0, db->get("prefix", "key2", &v2));
+    r = db->get("prefix", "key2", &v2);
+    ASSERT_EQ(0, r);
     ASSERT_EQ(v2.length(), 5u);
   }
   {
@@ -159,10 +170,13 @@ TEST_P(KVTest, PutReopen) {
   ASSERT_EQ(0, db->open(cout));
   {
     bufferlist v1, v2, v3;
-    ASSERT_EQ(-ENOENT, db->get("prefix", "key", &v1));
-    ASSERT_EQ(0, db->get("prefix", "key2", &v2));
+    int r = db->get("prefix", "key", &v1);
+    ASSERT_EQ(-ENOENT, r);
+    r = db->get("prefix", "key2", &v2);
+    ASSERT_EQ(0, r);
     ASSERT_EQ(v2.length(), 5u);
-    ASSERT_EQ(-ENOENT, db->get("prefix", "key3", &v3));
+    r = db->get("prefix", "key3", &v3);
+    ASSERT_EQ(-ENOENT, r);
   }
   fini();
 }
@@ -228,7 +242,8 @@ TEST_P(KVTest, Merge) {
   int r = db->set_merge_operator("A",p);
   if (r < 0)
     return; // No merge operators for this database type
-  ASSERT_EQ(0, db->create_and_open(cout));
+  r = db->create_and_open(cout);
+  ASSERT_EQ(0, r);
   {
     KeyValueDB::Transaction t = db->get_transaction();
     bufferlist v1, v2, v3;
@@ -243,11 +258,14 @@ TEST_P(KVTest, Merge) {
   }
   {
     bufferlist v1, v2, v3;
-    ASSERT_EQ(0, db->get("P", "K1", &v1));
+    int r = db->get("P", "K1", &v1);
+    ASSERT_EQ(0, r);
     ASSERT_EQ(tostr(v1), "1");
-    ASSERT_EQ(0, db->get("A", "A1", &v2));
+    r = db->get("A", "A1", &v2);
+    ASSERT_EQ(0, r);
     ASSERT_EQ(tostr(v2), "2");
-    ASSERT_EQ(0, db->get("A", "A2", &v3));
+    r = db->get("A", "A2", &v3);
+    ASSERT_EQ(0, r);
     ASSERT_EQ(tostr(v3), "?3");
   }
   {
@@ -259,7 +277,8 @@ TEST_P(KVTest, Merge) {
   }
   {
     bufferlist v;
-    ASSERT_EQ(0, db->get("A", "A2", &v));
+    int r = db->get("A", "A2", &v);
+    ASSERT_EQ(0, r);
     ASSERT_EQ(tostr(v), "?31");
   }
   fini();
@@ -288,13 +307,18 @@ TEST_P(KVTest, RMRange) {
     t->rm_range_keys("prefix", "key2", "key7");
     db->submit_transaction_sync(t);
     bufferlist v1, v2;
-    ASSERT_EQ(0, db->get("prefix", "key1", &v1));
+    int r = db->get("prefix", "key1", &v1);
+    ASSERT_EQ(0, r);
     v1.clear();
-    ASSERT_EQ(-ENOENT, db->get("prefix", "key45", &v1));
-    ASSERT_EQ(0, db->get("prefix", "key8", &v1));
+    r = db->get("prefix", "key45", &v1);
+    ASSERT_EQ(-ENOENT, r);
+    r = db->get("prefix", "key8", &v1);
+    ASSERT_EQ(0, r);
     v1.clear();
-    ASSERT_EQ(-ENOENT, db->get("prefix", "key2", &v1));
-    ASSERT_EQ(0, db->get("prefix", "key7", &v2));
+    r = db->get("prefix", "key2", &v1);
+    ASSERT_EQ(-ENOENT, r);
+    r = db->get("prefix", "key7", &v2);
+    ASSERT_EQ(0, r);
   }
 
   {
@@ -302,8 +326,10 @@ TEST_P(KVTest, RMRange) {
     t->rm_range_keys("prefix", "key", "key");
     db->submit_transaction_sync(t);
     bufferlist v1, v2;
-    ASSERT_EQ(0, db->get("prefix", "key1", &v1));
-    ASSERT_EQ(0, db->get("prefix", "key8", &v2));
+    int r = db->get("prefix", "key1", &v1);
+    ASSERT_EQ(0, r);
+    r = db->get("prefix", "key8", &v2);
+    ASSERT_EQ(0, r);
   }
 
   {
@@ -311,8 +337,10 @@ TEST_P(KVTest, RMRange) {
     t->rm_range_keys("prefix", "key-", "key~");
     db->submit_transaction_sync(t);
     bufferlist v1, v2;
-    ASSERT_EQ(-ENOENT, db->get("prefix", "key1", &v1));
-    ASSERT_EQ(-ENOENT, db->get("prefix", "key8", &v2));
+    int r = db->get("prefix", "key1", &v1);
+    ASSERT_EQ(-ENOENT, r);
+    r = db->get("prefix", "key8", &v2);
+    ASSERT_EQ(-ENOENT, r);
   }
 
   fini();
@@ -325,9 +353,11 @@ TEST_P(KVTest, RocksDBColumnFamilyTest) {
   std::vector<KeyValueDB::ColumnFamily> cfs;
   cfs.push_back(KeyValueDB::ColumnFamily("cf1", ""));
   cfs.push_back(KeyValueDB::ColumnFamily("cf2", ""));
-  ASSERT_EQ(0, db->init(g_conf->bluestore_rocksdb_options));
+  int r = db->init(g_conf->bluestore_rocksdb_options);
+  ASSERT_EQ(0, r);
   cout << "creating two column families and opening them" << std::endl;
-  ASSERT_EQ(0, db->create_and_open(cout, cfs));
+  r = db->create_and_open(cout, cfs);
+  ASSERT_EQ(0, r);
   {
     KeyValueDB::Transaction t = db->get_transaction();
     bufferlist value;
@@ -336,20 +366,25 @@ TEST_P(KVTest, RocksDBColumnFamilyTest) {
     t->set("prefix", "key", value);
     t->set("cf1", "key", value);
     t->set("cf2", "key2", value);
-    ASSERT_EQ(0, db->submit_transaction_sync(t));
+    r = db->submit_transaction_sync(t);
+    ASSERT_EQ(0, r);
   }
   fini();
 
   init();
-  ASSERT_EQ(0, db->open(cout, cfs));
+  r = db->open(cout, cfs);
+  ASSERT_EQ(0, r);
   {
     bufferlist v1, v2, v3;
     cout << "reopen db and read those keys" << std::endl;
-    ASSERT_EQ(0, db->get("prefix", "key", &v1));
+    r = db->get("prefix", "key", &v1);
+    ASSERT_EQ(0, r);
     ASSERT_EQ(0, _bl_to_str(v1) != "value");
-    ASSERT_EQ(0, db->get("cf1", "key", &v2));
+    r = db->get("cf1", "key", &v2);
+    ASSERT_EQ(0, r);
     ASSERT_EQ(0, _bl_to_str(v2) != "value");
-    ASSERT_EQ(0, db->get("cf2", "key2", &v3));
+    r = db->get("cf2", "key2", &v3);
+    ASSERT_EQ(0, r);
     ASSERT_EQ(0, _bl_to_str(v2) != "value");
   }
   {
@@ -366,10 +401,13 @@ TEST_P(KVTest, RocksDBColumnFamilyTest) {
   {
     cout << "reopen db and read keys again." << std::endl;
     bufferlist v1, v2, v3;
-    ASSERT_EQ(-ENOENT, db->get("prefix", "key", &v1));
-    ASSERT_EQ(0, db->get("cf1", "key", &v2));
+    r = db->get("prefix", "key", &v1);
+    ASSERT_EQ(-ENOENT, r);
+    r = db->get("cf1", "key", &v2);
+    ASSERT_EQ(0, r);
     ASSERT_EQ(0, _bl_to_str(v2) != "value");
-    ASSERT_EQ(-ENOENT, db->get("cf2", "key2", &v3));
+    r = db->get("cf2", "key2", &v3);
+    ASSERT_EQ(-ENOENT, r);
   }
   fini();
 }
@@ -380,9 +418,11 @@ TEST_P(KVTest, RocksDBIteratorTest) {
 
   std::vector<KeyValueDB::ColumnFamily> cfs;
   cfs.push_back(KeyValueDB::ColumnFamily("cf1", ""));
-  ASSERT_EQ(0, db->init(g_conf->bluestore_rocksdb_options));
+  int r = db->init(g_conf->bluestore_rocksdb_options);
+  ASSERT_EQ(0, r);
   cout << "creating one column family and opening it" << std::endl;
-  ASSERT_EQ(0, db->create_and_open(cout, cfs));
+  r = db->create_and_open(cout, cfs);
+  ASSERT_EQ(0, r);
   {
     KeyValueDB::Transaction t = db->get_transaction();
     bufferlist bl1;
@@ -394,7 +434,8 @@ TEST_P(KVTest, RocksDBIteratorTest) {
     t->set("prefix", "key2", bl2);
     t->set("cf1", "key1", bl1);
     t->set("cf1", "key2", bl2);
-    ASSERT_EQ(0, db->submit_transaction_sync(t));
+    r = db->submit_transaction_sync(t);
+    ASSERT_EQ(0, r);
   }
   {
     cout << "iterating the default CF" << std::endl;
@@ -433,9 +474,11 @@ TEST_P(KVTest, RocksDBCFMerge) {
     return; // No merge operators for this database type
   std::vector<KeyValueDB::ColumnFamily> cfs;
   cfs.push_back(KeyValueDB::ColumnFamily("cf1", ""));
-  ASSERT_EQ(0, db->init(g_conf->bluestore_rocksdb_options));
+  r = db->init(g_conf->bluestore_rocksdb_options);
+  ASSERT_EQ(0, r);
   cout << "creating one column family and opening it" << std::endl;
-  ASSERT_EQ(0, db->create_and_open(cout, cfs));
+  r = db->create_and_open(cout, cfs);
+  ASSERT_EQ(0, r);
 
   {
     KeyValueDB::Transaction t = db->get_transaction();
@@ -451,11 +494,14 @@ TEST_P(KVTest, RocksDBCFMerge) {
   }
   {
     bufferlist v1, v2, v3;
-    ASSERT_EQ(0, db->get("P", "K1", &v1));
+    r = db->get("P", "K1", &v1);
+    ASSERT_EQ(0, r);
     ASSERT_EQ(tostr(v1), "1");
-    ASSERT_EQ(0, db->get("cf1", "A1", &v2));
+    r = db->get("cf1", "A1", &v2);
+    ASSERT_EQ(0, r);
     ASSERT_EQ(tostr(v2), "2");
-    ASSERT_EQ(0, db->get("cf1", "A2", &v3));
+    r = db->get("cf1", "A2", &v3);
+    ASSERT_EQ(0, r);
     ASSERT_EQ(tostr(v3), "?3");
   }
   {
@@ -467,7 +513,8 @@ TEST_P(KVTest, RocksDBCFMerge) {
   }
   {
     bufferlist v;
-    ASSERT_EQ(0, db->get("cf1", "A2", &v));
+    int r = db->get("cf1", "A2", &v);
+    ASSERT_EQ(0, r);
     ASSERT_EQ(tostr(v), "?31");
   }
   fini();
