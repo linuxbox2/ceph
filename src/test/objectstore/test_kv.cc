@@ -27,9 +27,15 @@
 #include "include/stringify.h"
 #include <gtest/gtest.h>
 
+namespace {
+
+  std::vector<std::string> kvdb_list = {"leveldb", "rocksdb", "wiredtiger",
+					"memdb"};
+} /* anonymous namespace */
+
 #if GTEST_HAS_PARAM_TEST
 
-class KVTest : public ::testing::TestWithParam<const char*> {
+class KVTest : public ::testing::TestWithParam<std::string> {
 public:
   boost::scoped_ptr<KeyValueDB> db;
 
@@ -470,7 +476,7 @@ TEST_P(KVTest, RocksDBCFMerge) {
 INSTANTIATE_TEST_CASE_P(
   KeyValueDB,
   KVTest,
-  ::testing::Values("leveldb", "rocksdb", "wiredtiger", "memdb"));
+  ::testing::ValuesIn(kvdb_list));
 
 #else
 
@@ -496,6 +502,13 @@ int main(int argc, char **argv) {
     "enable_experimental_unrecoverable_data_corrupting_features",
     "rocksdb, wiredtiger, memdb");
   g_ceph_context->_conf->apply_changes(NULL);
+
+  for (std::vector<const char*>::iterator i = args.begin(); i != args.end();) {
+    string val;
+    if (ceph_argparse_witharg(args, i, &val, "--db-list", nullptr)) {
+      get_str_vec(val, " ,", kvdb_list);
+    }
+  }
 
   ::testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();
