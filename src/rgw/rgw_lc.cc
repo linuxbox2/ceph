@@ -77,8 +77,14 @@ bool RGWLifecycleConfiguration::_add_rule(LCRule *rule)
   } else {
     prefix = rule->get_prefix();
   }
-  auto ret = prefix_map.emplace(std::move(prefix), std::move(op));
-  return ret.second;
+
+  /* prefix is optional, update prefix map only if prefix...exists */
+  if (!prefix.empty()) {
+    auto ret = prefix_map.emplace(std::move(prefix), std::move(op));
+    return ret.second;
+  } else {
+    return true; /* suspicious, but */
+  }
 }
 
 int RGWLifecycleConfiguration::check_and_add_rule(LCRule *rule)
