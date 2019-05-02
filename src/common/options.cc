@@ -6283,7 +6283,7 @@ std::vector<Option> get_rgw_options() {
     .add_see_also({"rgw_gc_obj_min_wait", "rgw_gc_processor_max_time", "rgw_gc_processor_period", "rgw_gc_max_concurrent_io"}),
 
     Option("rgw_gc_obj_min_wait", Option::TYPE_INT, Option::LEVEL_ADVANCED)
-    .set_default(2_hr)
+    .set_default(300)
     .set_description("Garbage collection object expiration time")
     .set_long_description(
        "The length of time (in seconds) that the RGW collector will wait before purging "
@@ -6293,7 +6293,7 @@ std::vector<Option> get_rgw_options() {
     .add_see_also({"rgw_gc_max_objs", "rgw_gc_processor_max_time", "rgw_gc_processor_period", "rgw_gc_max_concurrent_io"}),
 
     Option("rgw_gc_processor_max_time", Option::TYPE_INT, Option::LEVEL_ADVANCED)
-    .set_default(1_hr)
+    .set_default(600)
     .set_description("Length of time GC processor can lease shard")
     .set_long_description(
         "Garbage collection thread in RGW process holds a lease on its data shards. These "
@@ -6305,7 +6305,7 @@ std::vector<Option> get_rgw_options() {
     .add_see_also({"rgw_gc_max_objs", "rgw_gc_obj_min_wait", "rgw_gc_processor_period", "rgw_gc_max_concurrent_io"}),
 
     Option("rgw_gc_processor_period", Option::TYPE_INT, Option::LEVEL_ADVANCED)
-    .set_default(1_hr)
+    .set_default(600)
     .set_description("Garbage collector cycle run time")
     .set_long_description(
         "The amount of time between the start of consecutive runs of the garbage collector "
@@ -6325,6 +6325,10 @@ std::vector<Option> get_rgw_options() {
     .set_default(16)
     .set_description("Max number of keys to remove from garbage collector log in a single operation")
     .add_see_also({"rgw_gc_max_objs", "rgw_gc_obj_min_wait", "rgw_gc_processor_max_time", "rgw_gc_max_concurrent_io"}),
+
+    Option("rgw_gc_queue_head_size", Option::TYPE_UINT, Option::LEVEL_ADVANCED)
+    .set_default(4096)
+    .set_description("size of queue head for gc"),
 
     Option("rgw_s3_success_create_obj_status", Option::TYPE_INT, Option::LEVEL_ADVANCED)
     .set_default(0)
@@ -7043,7 +7047,6 @@ std::vector<Option> get_rgw_options() {
     .set_description("mclock limit for metadata requests")
     .add_see_also("rgw_dmclock_metadata_res")
     .add_see_also("rgw_dmclock_metadata_wgt"),
-
   });
 }
 

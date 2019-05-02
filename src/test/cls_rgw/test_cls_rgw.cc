@@ -928,7 +928,6 @@ TEST(cls_rgw, usage_clear)
 
 }
 
-
 /* must be last test! */
 
 TEST(cls_rgw, finalize)
