@@ -668,6 +668,20 @@ if(WITH_LIBCEPHFS)
   add_subdirectory(mount)
 endif(WITH_LIBCEPHFS)
 
+if(WITH_LIBCEPHSQLITE)
+  set(libcephsqlite_srcs libcephsqlite.cc)
+  add_library(cephsqlite ${CEPH_SHARED} ${libcephsqlite_srcs})
+  set_target_properties(cephsqlite PROPERTIES COMPILE_FLAGS "-I${SQLITE3_INCLUDE_DIRS}")
+  target_link_libraries(cephsqlite radosstriper librados ${SQLITE3_LIBRARIES} ${EXTRALIBS})
+  if(ENABLE_SHARED)
+    set_target_properties(cephsqlite PROPERTIES
+      OUTPUT_NAME cephsqlite
+      VERSION 1.0.0
+      SOVERSION 1)
+  endif(ENABLE_SHARED)
+  install(TARGETS cephsqlite DESTINATION ${CMAKE_INSTALL_LIBDIR})
+endif(WITH_LIBCEPHSQLITE)
+
 if(WITH_FUSE)
   set(ceph_fuse_srcs
     ceph_fuse.cc
