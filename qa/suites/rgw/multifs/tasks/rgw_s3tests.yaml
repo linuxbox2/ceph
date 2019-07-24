@@ -4,7 +4,8 @@ tasks:
 - rgw: [client.0]
 - s3tests:
     client.0:
-      force-branch: ceph-master
+      git_remote: https://github.com/linuxbox2/
+      force-branch: wip-lc-exphdr
       rgw_server: client.0
 overrides:
   ceph:
