@@ -893,6 +893,7 @@ add_ceph_unittest(unittest_weighted_shuffle)
 
 if(WITH_LIBCEPHSQLITE)
   add_executable(test_libcephsqlite test_libcephsqlite.cc)
+  include_directories(test_libcephsqlite "${CMAKE_SOURCE_DIR}/src/include")
   target_link_libraries(test_libcephsqlite cephsqlite radosstriper librados)
 endif(WITH_LIBCEPHSQLITE)
 
