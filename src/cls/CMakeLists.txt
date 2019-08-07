@@ -194,6 +194,7 @@ if (WITH_RADOSGW)
   set(cls_rgw_srcs
     rgw/cls_rgw.cc
     rgw/cls_rgw_ops.cc
+    rgw/cls_rgw_trmap.cc
     rgw/cls_rgw_types.cc
     ${CMAKE_SOURCE_DIR}/src/common/ceph_json.cc)
   add_library(cls_rgw SHARED ${cls_rgw_srcs})

@@ -3,8 +3,20 @@
 
 #include "cls_rgw_trmap.h"
 
-extern "C" {
+namespace rgw::cls::trmap {
+
+  TRMap* get_instance(const std::string& path) 
+  {
+    return nullptr;
+  }
+  
+  extern "C" {
+    void get_muggle(void) 
+    {
+      int x;
+    }
+
+  } /* extern "C" */
 
 
-
-} /* extern "C" */
+} /* */
