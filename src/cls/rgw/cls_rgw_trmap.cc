@@ -58,7 +58,7 @@ namespace rgw::cls::trmap {
       buffer::list bl;
       bl.push_back(
 	buffer::create_static(len, static_cast<char*>(_buf)));
-      int ret = cls_cxx_read(f->hctx, off, len, &bl);
+      auto ret = cls_cxx_read(f->hctx, off, len, &bl);
       if ( ret < 0) {
 	return SQLITE_IOERR_READ;
       }
@@ -77,13 +77,27 @@ namespace rgw::cls::trmap {
 	buffer::create_static(len, static_cast<char*>(
 				const_cast<void*>(_buf))));
 
-      int ret = cls_cxx_write2(f->hctx, off, len, &bl,
-			       CEPH_OSD_OP_FLAG_FADVISE_WILLNEED);
+      auto ret = cls_cxx_write2(f->hctx, off, len, &bl,
+				CEPH_OSD_OP_FLAG_FADVISE_WILLNEED);
       if (ret < 0)
 	return SQLITE_IOERR;
 
       return SQLITE_OK;
     } /* trmap_sqlite_write */
+
+    static
+    int trmap_sqlite_truncate(sqlite3_file *_f, sqlite_int64 size)
+    {
+      auto f = reinterpret_cast<TRMapFile*>(_f);
+
+      auto ret = cls_cxx_write_zero(f->hctx, size+1,
+				    std::numeric_limits<std::size_t>::max());
+      if (ret < 0) {
+	return SQLITE_IOERR;
+      }
+
+      return SQLITE_OK;
+    } /* trmap_sqlite_truncate */
 
     
   } /* extern "C" */
