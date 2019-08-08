@@ -66,6 +66,25 @@ namespace rgw::cls::trmap {
       return SQLITE_OK;
     } /* trmap_sqlite_read */
 
+    static
+    int trmap_sqlite_write(sqlite3_file *_f, const void *_buf, int len,
+			   sqlite_int64 off)
+    {
+      auto f = reinterpret_cast<TRMapFile*>(_f);
+
+      buffer::list bl;
+      bl.push_back(
+	buffer::create_static(len, static_cast<char*>(
+				const_cast<void*>(_buf))));
+
+      int ret = cls_cxx_write2(f->hctx, off, len, &bl,
+			       CEPH_OSD_OP_FLAG_FADVISE_WILLNEED);
+      if (ret < 0)
+	return SQLITE_IOERR;
+
+      return SQLITE_OK;
+    } /* trmap_sqlite_write */
+
     
   } /* extern "C" */
 
