@@ -90,7 +90,7 @@ namespace rgw::cls::trmap {
     {
       auto f = reinterpret_cast<TRMapFile*>(_f);
 
-      auto ret = cls_cxx_write_zero(f->hctx, size+1,
+      auto ret = cls_cxx_write_zero(f->hctx, size,
 				    std::numeric_limits<std::size_t>::max());
       if (ret < 0) {
 	return SQLITE_IOERR;
@@ -99,6 +99,12 @@ namespace rgw::cls::trmap {
       return SQLITE_OK;
     } /* trmap_sqlite_truncate */
 
+    static
+    int trmap_sqlite_sync(sqlite3_file *_f, int flags)
+    {
+      /* in RADOS all i/o is immediately consistent */
+      return SQLITE_OK;
+    }
     
   } /* extern "C" */
 
