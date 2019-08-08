@@ -90,8 +90,10 @@ namespace rgw::cls::trmap {
     {
       auto f = reinterpret_cast<TRMapFile*>(_f);
 
+      /* XXX this suspicious size arises from RADOS object size
+       * limits */
       auto ret = cls_cxx_write_zero(f->hctx, size,
-				    std::numeric_limits<std::size_t>::max());
+				    std::numeric_limits<int>::max());
       if (ret < 0) {
 	return SQLITE_IOERR;
       }
@@ -105,6 +107,25 @@ namespace rgw::cls::trmap {
       /* in RADOS all i/o is immediately consistent */
       return SQLITE_OK;
     }
+
+    static
+    int trmap_sqlite_filesize(sqlite3_file *_f, sqlite_int64 *osz)
+    {
+      uint64_t size{0};
+      time_t mtime{0};
+
+      auto f = reinterpret_cast<TRMapFile*>(_f);
+
+      int ret = cls_cxx_stat(f->hctx, &size, &mtime);
+      if (ret < 0) {
+	return SQLITE_IOERR; // XXX ok?
+      }
+
+      *osz = size;
+
+      return SQLITE_OK;
+    } /* trmap_sqlite_filesize */
+
     
   } /* extern "C" */
 
