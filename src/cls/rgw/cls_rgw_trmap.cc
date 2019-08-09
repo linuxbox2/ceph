@@ -193,7 +193,7 @@ namespace rgw::cls::trmap {
 
 
   /* TRMap Singleton */  
-  TRMap* TRMap::get_instance(const std::string& path) 
+  TRMap* TRMap::get_instance(const std::string& path)
   {
     return nullptr;
   }
