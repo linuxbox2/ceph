@@ -41,17 +41,19 @@ namespace rgw::cls::trmap {
   extern "C" {
 
     /* VFS Ops */
+
+    /* File/IO Ops */
     static
-    int trmap_sqlite_close(sqlite3_file *_f)
+    int io_close(sqlite3_file *_f)
     {
       auto f = reinterpret_cast<TRMapFile*>(_f);
       /* XXX do something with f */
       return SQLITE_OK;
-    } /* trmap_sqlite_close */
+    } /* io_close */
 
     static
-    int trmap_sqlite_read(sqlite3_file *_f, void *_buf, int len,
-			  sqlite_int64 off)
+    int io_read(sqlite3_file *_f, void *_buf, int len,
+		sqlite_int64 off)
     {
       auto f = reinterpret_cast<TRMapFile*>(_f);
 
@@ -64,11 +66,11 @@ namespace rgw::cls::trmap {
       }
 
       return SQLITE_OK;
-    } /* trmap_sqlite_read */
+    } /* io_read */
 
     static
-    int trmap_sqlite_write(sqlite3_file *_f, const void *_buf, int len,
-			   sqlite_int64 off)
+    int io_write(sqlite3_file *_f, const void *_buf, int len,
+		 sqlite_int64 off)
     {
       auto f = reinterpret_cast<TRMapFile*>(_f);
 
@@ -83,10 +85,10 @@ namespace rgw::cls::trmap {
 	return SQLITE_IOERR;
 
       return SQLITE_OK;
-    } /* trmap_sqlite_write */
+    } /* io_write */
 
     static
-    int trmap_sqlite_truncate(sqlite3_file *_f, sqlite_int64 size)
+    int io_truncate(sqlite3_file *_f, sqlite_int64 size)
     {
       auto f = reinterpret_cast<TRMapFile*>(_f);
 
@@ -99,17 +101,17 @@ namespace rgw::cls::trmap {
       }
 
       return SQLITE_OK;
-    } /* trmap_sqlite_truncate */
+    } /* io_truncate */
 
     static
-    int trmap_sqlite_sync(sqlite3_file *_f, int flags)
+    int io_sync(sqlite3_file *_f, int flags)
     {
       /* in RADOS all i/o is immediately consistent */
       return SQLITE_OK;
     }
 
     static
-    int trmap_sqlite_filesize(sqlite3_file *_f, sqlite_int64 *osz)
+    int io_filesize(sqlite3_file *_f, sqlite_int64 *osz)
     {
       uint64_t size{0};
       time_t mtime{0};
@@ -124,8 +126,67 @@ namespace rgw::cls::trmap {
       *osz = size;
 
       return SQLITE_OK;
-    } /* trmap_sqlite_filesize */
+    } /* io_filesize */
 
+    /* if we need these at all, the semantic is basically
+     * that of a shared-exclusive lock with an additional pending
+     * state that can seemingly be ignored;  for a single-threaded
+     * access model, moreover, the embedded example just does: */
+
+    static
+    int io_lock(sqlite3_file *file, int type) {
+      return SQLITE_OK;
+    } /* io_lock */
+
+    static
+    int io_unlock(sqlite3_file *file, int type){
+      return SQLITE_OK;
+    } /* io_unlock */
+
+    static
+    int io_checkreservedlock(sqlite3_file *file, int *result){
+      *result = 0;
+      return SQLITE_OK;
+    } /* io_checkreservedlock */
+
+    /* nothing defined */
+    static
+    int io_fcntl(sqlite3_file *file, int op, void *arg)
+    {
+      return SQLITE_NOTFOUND;
+    } /* io_fcntl */
+
+    static
+    int io_sectorsize(sqlite3_file *file)
+    {
+      return 4096;
+    } /* io_sectorsize */
+
+    static
+    int io_devicecharacteristics(sqlite3_file *file)
+    {
+      return 0;
+    } /* io_devicecharacteristics */
+
+    static const sqlite3_io_methods trmap_sqlite_io = {
+      1,                           /* iVersion */
+      io_close,                    /* xClose */
+      io_read,                     /* xRead */
+      io_write,                    /* xWrite */
+      io_truncate,                 /* xTruncate */
+      io_sync,                     /* xSync */
+      io_filesize,                 /* xFileSize */
+      io_lock,                     /* xLock */
+      io_unlock,                   /* xUnlock */
+      io_checkreservedlock,        /* xCheckReservedLock */
+      io_fcntl,                    /* xFileControl */
+      io_sectorsize,               /* xSectorSize */
+      io_devicecharacteristics,    /* xDeviceCharacteristics */
+      nullptr,                     /* xShmMap */
+      nullptr,                     /* xShmLock */
+      nullptr,                     /* xShmBarrier */
+      nullptr                      /* xShmUnmap */
+    }; /* trmap_sqlite_io */
     
   } /* extern "C" */
 
