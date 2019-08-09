@@ -3,6 +3,7 @@
 
 #include "include/types.h"
 
+#include <random>
 #include <sqlite3.h>
 #include <sys/types.h>
 #include <sys/stat.h>
@@ -32,8 +33,21 @@ namespace rgw::cls::trmap {
 
   class VFSCtx
   {
+    using mt_clock = chrono::high_resolution_clock;
+    using mt_char = std::independent_bits_engine<
+      mt19937, CHAR_BIT, unsigned char>;
+
+    mt_char mt_gen;
+
   public:
-    
+    VFSCtx()
+      : mt_gen(mt_clock::now().time_since_epoch().count())
+    {}
+
+    auto& rbe() {
+      return mt_gen;
+    }
+
   }; /* VFSCtx */
 
   static VFSCtx vCtx;
@@ -187,6 +201,17 @@ namespace rgw::cls::trmap {
     }; /* trmap_sqlite_io */
 
     /* VFS Ops */
+
+    static
+    int vfs_randomness(sqlite3_vfs *_vfs, int len, char *buf)
+    {
+      auto vfs = reinterpret_cast<VFSCtx*>(_vfs);
+
+      //std::vector<unsigned char> data(1000);
+      //std::generate(begin(data), end(data), std::ref(vfs->rbe()));
+      std::generate(buf, buf+len, std::ref(vfs->rbe()));
+      return SQLITE_OK;
+    } /* vfs_randomness */
 
 
   } /* extern "C" */
