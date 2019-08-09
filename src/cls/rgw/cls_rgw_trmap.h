@@ -12,7 +12,7 @@ namespace rgw::cls::trmap {
     TRMap() = delete;
     
   public:
-    static TRMap* get_instance(const std::string path);
+    static TRMap* get_instance(const std::string& path);
     void unref();
  
     // XXX map ops

@@ -40,8 +40,6 @@ namespace rgw::cls::trmap {
 
   extern "C" {
 
-    /* VFS Ops */
-
     /* File/IO Ops */
     static
     int io_close(sqlite3_file *_f)
@@ -187,12 +185,15 @@ namespace rgw::cls::trmap {
       nullptr,                     /* xShmBarrier */
       nullptr                      /* xShmUnmap */
     }; /* trmap_sqlite_io */
-    
+
+    /* VFS Ops */
+
+
   } /* extern "C" */
 
 
   /* TRMap Singleton */  
-  TRMap* get_instance(const std::string& path) 
+  TRMap* TRMap::get_instance(const std::string& path) 
   {
     return nullptr;
   }
