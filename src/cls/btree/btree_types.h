@@ -16,18 +16,33 @@
 
 #include <errno.h>
 #include "include/types.h"
-#include <array>
+#include <vector>
 
 namespace cls { namespace bplus {
 
-template <typename SZ = 480 /* 480 * 64 * 4096 = 125M bits */>
+template <typename SZ = 480 /* 480 * 64 * 4096 = 30720 bits */>
 class Bitmap
 {
 public:
   std::vector<uint64_t> data;
   Bitmap()
     : data(SZ, 0) {}
-};
+  constexpr uint16_t size() const {
+    return SZ * 64;
+  }
+  inline to_chunk(uint16_t bit) const {
+    return data[bit/64];
+  }
+  inline bit_offset(uint16_t bit) const {
+    return uint64_t(1) << (bit % 64);
+  }
+  inline bool test(uint16_t bit) const {
+    return to_chunk(bit) & bit_offset(bit);
+  }
+  inline void set(uint16_t bit) {
+    to_chunk(bit) |= bit_offset(bit);
+  }
+}; /* Bitmap */
 
 class FreeList
 {
