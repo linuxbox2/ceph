@@ -45,13 +45,25 @@ class Page
   uint32_t linked_page_off; // indirect to a new page, or 0
 };
 
-class KeyType
+struct Addr
 {
-  std::string key;
-  uint32_t val_size;
   uint32_t page_no;
   uint16_t slot_off;
   uint16_t slot_cnt;
+};
+
+struct KeyPrefix
+{
+  uint32_t refcnt;
+  std::string prefix;
+};
+
+class KeyType
+{
+  uint16_t flags;
+  // XXX optional key prefix
+  std::string key;
+  variant<std::string,Addr> val;
 };
 
 class KeyPage : public Page
@@ -73,9 +85,11 @@ class Header
 {
   uint32_t struct_ver;
   uint64_t gen;
-  
+
   // XXX fence_key upper_bound
   // XXX fence_key lower_bound
+
+  boost::container::flat_map<uint16_t, KeyPrefix> key_prefixes;
   
 };
 
