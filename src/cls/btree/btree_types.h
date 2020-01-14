@@ -20,7 +20,7 @@
 
 namespace cls { namespace bplus {
 
-template <typename SZ = 4000>
+template <typename SZ = 480 /* 480 * 64 * 4096 = 125M bits */>
 class Bitmap
 {
 public:
@@ -31,7 +31,7 @@ public:
 
 class FreeList
 {
-  Bitmap<4000> map;
+  Bitmap<480> map;
   std::vector<uint32_t> free_list; // short list of free chunks
   uint32_t highest_offset;
   uint16_t last_chunk_searched;
