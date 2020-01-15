@@ -121,7 +121,23 @@ struct Addr
   uint32_t page_no;
   uint16_t slot_off;
   uint16_t slot_cnt;
+  void encode(buffer::list& bl) const {
+    ENCODE_START(1, 1, bl);
+    encode(page_no, bl);
+    encode(slot_off, bl);
+    encode(slot_cnt, bl);
+    ENCODE_FINISH(bl);
+  }
+
+  void decode(buffer::list::const_iterator& bl) {
+    DECODE_START(1, bl);
+    decode(page_no, bl);
+    decode(slot_off, bl);
+    decode(slot_cnt, bl);
+    DECODE_FINISH(bl);
+  }
 };
+WRITE_CLASS_ENCODER(Addr);
 
 struct KeyPrefix
 {
