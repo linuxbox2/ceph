@@ -65,7 +65,7 @@ struct Bitmap
 }; /* Bitmap */
 WRITE_CLASS_ENCODER(Bitmap<500>);
 
-struct FreeSpace
+struct FreeSpaceMap
 {
   Bitmap<500> map;
   std::vector<uint16_t> free_list; // short list of free chunks
@@ -89,8 +89,8 @@ struct FreeSpace
     decode(last_chunk_searched, bl);
     DECODE_FINISH(bl);
   }
-}; /* FreeSpace */
-WRITE_CLASS_ENCODER(FreeSpace);
+}; /* FreeSpaceMap */
+WRITE_CLASS_ENCODER(FreeSpaceMap);
 
 struct Page
 {
@@ -212,17 +212,53 @@ WRITE_CLASS_ENCODER(KeyType);
 struct KeyPage : public Page
 {
   std::vector<KeyType> keys;
+  void encode(buffer::list& bl) const {
+    ENCODE_START(1, 1, bl);
+    encode(keys, bl);
+    ENCODE_FINISH(bl);
+  }
+
+  void decode(buffer::list::const_iterator& bl) {
+    DECODE_START(1, bl);
+    decode(keys, bl);
+    DECODE_FINISH(bl);
+  }
 };
+WRITE_CLASS_ENCODER(KeyPage);
 
 struct ValType
 {
   std::string val;
+  void encode(buffer::list& bl) const {
+    ENCODE_START(1, 1, bl);
+    encode(val, bl);
+    ENCODE_FINISH(bl);
+  }
+
+  void decode(buffer::list::const_iterator& bl) {
+    DECODE_START(1, bl);
+    decode(val, bl);
+    DECODE_FINISH(bl);
+  }
 };
+WRITE_CLASS_ENCODER(ValType);
 
 struct ValPage : public Page
 {
   std::vector<ValType> vals;
+  void encode(buffer::list& bl) const {
+    ENCODE_START(1, 1, bl);
+    encode(vals, bl);
+    ENCODE_FINISH(bl);
+  }
+
+  void decode(buffer::list::const_iterator& bl) {
+    DECODE_START(1, bl);
+    decode(vals, bl);
+    DECODE_FINISH(bl);
+  }
 };
+WRITE_CLASS_ENCODER(ValPage);
 
 struct Header
 {
@@ -233,8 +269,27 @@ struct Header
   // XXX fence_key lower_bound
 
   flat_map<uint16_t, KeyPrefix> key_prefixes;
-  
+  FreeSpaceMap free_space;
+
+  void encode(buffer::list& bl) const {
+    ENCODE_START(1, 1, bl);
+    encode(struct_ver, bl);
+    encode(gen, bl);
+    encode(key_prefixes, bl);
+    encode(free_space, bl);
+    ENCODE_FINISH(bl);
+  }
+
+  void decode(buffer::list::const_iterator& bl) {
+    DECODE_START(1, bl);
+    decode(struct_ver, bl);
+    decode(gen, bl);
+    decode(key_prefixes, bl);
+    decode(free_space, bl);
+    DECODE_FINISH(bl);
+  }
 };
+WRITE_CLASS_ENCODER(Header);
 
 } /* namespace */
 
