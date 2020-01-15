@@ -17,7 +17,10 @@
 #include <errno.h>
 #include "include/types.h"
 
-#include <boost/variant.hpp>
+#include <functional>
+#include <utility>
+#include <limits>
+#include <variant>
 #include <boost/container/flat_map.hpp>
 
 namespace rgw::bplus::ondisk {
@@ -159,7 +162,8 @@ struct KeyPrefix
 };
 WRITE_CLASS_ENCODER(KeyPrefix);
 
-using boost::variant;
+using std::get;
+using std::variant;
 using boost::container::flat_map;
 
 struct KeyType
@@ -168,7 +172,42 @@ struct KeyType
   // XXX optional key prefix
   std::string key;
   variant<std::string,Addr> val;
+  void encode(buffer::list& bl) const {
+    ENCODE_START(1, 1, bl);
+    encode(flags, bl);
+    encode(key, bl);
+    uint16_t var_type;
+    if (std::holds_alternative<std::string>(val)) {
+      var_type = 1;
+      encode(var_type, bl);
+      encode(get<std::string>(val), bl);
+    } else {
+      var_type = 2;
+      encode(var_type, bl);
+      encode(get<Addr>(val), bl);
+    }
+    ENCODE_FINISH(bl);
+  }
+
+  void decode(buffer::list::const_iterator& bl) {
+    DECODE_START(1, bl);
+    decode(flags, bl);
+    decode(key, bl);
+    uint16_t var_type;
+    decode(var_type, bl);
+    if (var_type == 1) {
+      std::string tval;
+      decode(tval, bl);
+      val = tval;
+    } else {
+      Addr tval;
+      decode(tval, bl);
+      val = tval;
+    }
+    DECODE_FINISH(bl);
+  }
 };
+WRITE_CLASS_ENCODER(KeyType);
 
 struct KeyPage : public Page
 {
