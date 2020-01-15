@@ -14,11 +14,11 @@
 #ifndef BPLUS_ONDISK_H
 #define BPLUS_ONDISK_H
 
+#include <errno.h>
+#include "include/types.h"
+
 #include <boost/variant.hpp>
 #include <boost/container/flat_map.hpp>
-
-#include "compat.h"
-#include "bplus_node.h"
 
 namespace rgw::bplus::ondisk {
 
@@ -45,11 +45,23 @@ public:
     to_chunk(bit) |= bit_offset(bit);
   }
   void clear() {
-    for (auto& elt : data) {
-      elt = 0;
+    for (auto& chunk : data) {
+      chunk = 0;
     }
   }
+  void encode(buffer::list& bl) const {
+    ENCODE_START(1, 1, bl);
+    encode(data, bl);
+    ENCODE_FINISH(bl);
+  }
+
+  void decode(bufferlist::const_iterator& bl) {
+    DECODE_START(1, bl);
+    decode(data, bl);
+    DECODE_FINISH(bl);
+  }
 }; /* Bitmap */
+WRITE_CLASS_ENCODER(Bitmap<500>);
 
 class FreeList
 {
