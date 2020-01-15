@@ -143,7 +143,21 @@ struct KeyPrefix
 {
   uint32_t refcnt;
   std::string prefix;
+  void encode(buffer::list& bl) const {
+    ENCODE_START(1, 1, bl);
+    encode(refcnt, bl);
+    encode(prefix, bl);
+    ENCODE_FINISH(bl);
+  }
+
+  void decode(buffer::list::const_iterator& bl) {
+    DECODE_START(1, bl);
+    decode(refcnt, bl);
+    decode(prefix, bl);
+    DECODE_FINISH(bl);
+  }
 };
+WRITE_CLASS_ENCODER(KeyPrefix);
 
 using boost::variant;
 using boost::container::flat_map;
