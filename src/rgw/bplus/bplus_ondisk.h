@@ -23,9 +23,8 @@
 namespace rgw::bplus::ondisk {
 
 template <uint16_t SZ = 500 /* 500 * 64 = 32000 chunks, * 4096 = 125M */>
-class Bitmap
+struct Bitmap
 {
-public:
   std::vector<uint64_t> data;
   Bitmap()
     : data(SZ, 0) {}
@@ -63,9 +62,8 @@ public:
 }; /* Bitmap */
 WRITE_CLASS_ENCODER(Bitmap<500>);
 
-class FreeSpace
+struct FreeSpace
 {
-public:
   Bitmap<500> map;
   std::vector<uint16_t> free_list; // short list of free chunks
   uint32_t highest_chunk;
@@ -88,16 +86,35 @@ public:
     decode(last_chunk_searched, bl);
     DECODE_FINISH(bl);
   }
-};
+}; /* FreeSpace */
 WRITE_CLASS_ENCODER(FreeSpace);
 
-class Page
+struct Page
 {
   uint32_t offset;
   uint16_t type;
   uint16_t refcnt;
   uint32_t linked_page_off; // indirect to a new page, or 0
-};
+
+  void encode(buffer::list& bl) const {
+    ENCODE_START(1, 1, bl);
+    encode(offset, bl);
+    encode(type, bl);
+    encode(refcnt, bl);
+    encode(linked_page_off, bl);
+    ENCODE_FINISH(bl);
+  }
+
+  void decode(buffer::list::const_iterator& bl) {
+    DECODE_START(1, bl);
+    decode(offset, bl);
+    decode(type, bl);
+    decode(refcnt, bl);
+    decode(linked_page_off, bl);
+    DECODE_FINISH(bl);
+  }
+}; /* Page */
+WRITE_CLASS_ENCODER(Page);
 
 struct Addr
 {
@@ -115,7 +132,7 @@ struct KeyPrefix
 using boost::variant;
 using boost::container::flat_map;
 
-class KeyType
+struct KeyType
 {
   uint16_t flags;
   // XXX optional key prefix
@@ -123,22 +140,22 @@ class KeyType
   variant<std::string,Addr> val;
 };
 
-class KeyPage : public Page
+struct KeyPage : public Page
 {
   std::vector<KeyType> keys;
 };
 
-class ValType
+struct ValType
 {
   std::string val;
 };
 
-class ValPage : public Page
+struct ValPage : public Page
 {
   std::vector<ValType> vals;
 };
 
-class Header
+struct Header
 {
   uint32_t struct_ver;
   uint64_t gen;
