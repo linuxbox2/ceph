@@ -55,7 +55,7 @@ public:
     ENCODE_FINISH(bl);
   }
 
-  void decode(bufferlist::const_iterator& bl) {
+  void decode(buffer::list::const_iterator& bl) {
     DECODE_START(1, bl);
     decode(data, bl);
     DECODE_FINISH(bl);
@@ -63,13 +63,33 @@ public:
 }; /* Bitmap */
 WRITE_CLASS_ENCODER(Bitmap<500>);
 
-class FreeList
+class FreeSpace
 {
+public:
   Bitmap<500> map;
   std::vector<uint16_t> free_list; // short list of free chunks
   uint32_t highest_chunk;
   uint16_t last_chunk_searched;
+
+  void encode(buffer::list& bl) const {
+    ENCODE_START(1, 1, bl);
+    encode(map, bl);
+    encode(free_list, bl);
+    encode(highest_chunk, bl);
+    encode(last_chunk_searched, bl);
+    ENCODE_FINISH(bl);
+  }
+
+  void decode(buffer::list::const_iterator& bl) {
+    DECODE_START(1, bl);
+    decode(map, bl);
+    decode(free_list, bl);
+    decode(highest_chunk, bl);
+    decode(last_chunk_searched, bl);
+    DECODE_FINISH(bl);
+  }
 };
+WRITE_CLASS_ENCODER(FreeSpace);
 
 class Page
 {
