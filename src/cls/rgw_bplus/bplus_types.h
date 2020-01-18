@@ -71,7 +71,8 @@ struct FreeSpaceMap
 {
   Bitmap<500> map;
   std::vector<uint16_t> free_list; // short list of free chunks
-  uint32_t highest_chunk;
+  static constexpr uint16_t fl_maxsz = 256;
+  uint16_t highest_chunk;
   uint16_t last_chunk_searched;
 
   void encode(buffer::list& bl) const {
