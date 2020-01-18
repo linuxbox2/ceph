@@ -34,10 +34,10 @@ struct Bitmap
   constexpr uint16_t size() const {
     return SZ * 64;
   }
-  uint16_t to_chunk(uint16_t bit) const {
-    return data[bit/64];
+  uint64_t& to_chunk(uint16_t bit) const {
+    return const_cast<uint64_t&>(data[bit/64]);
   }
-  uint16_t bit_offset(uint16_t bit) const {
+  uint64_t bit_offset(uint16_t bit) const {
     return uint64_t(1) << (bit % 64);
   }
   bool test(uint16_t bit) const {
@@ -45,6 +45,9 @@ struct Bitmap
   }
   void set(uint16_t bit) {
     to_chunk(bit) |= bit_offset(bit);
+  }
+  void clear(uint16_t bit) {
+    to_chunk(bit) &= ~bit_offset(bit);
   }
   void clear() {
     for (auto& chunk : data) {

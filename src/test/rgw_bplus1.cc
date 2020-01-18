@@ -43,11 +43,22 @@ namespace {
   };
 
 
-
 } /* namespace */
 
 TEST_F(Bitmap1, test1) {
-  ASSERT_EQ(0, 0);
+  using namespace rgw::bplus::ondisk;
+  Bitmap<500> bmap;
+  std::cout << "bmap size: " << bmap.data.size() << std::endl;
+  ASSERT_EQ(bmap.test(13), false);
+  bmap.set(13);
+  std::cout << "1 chunk0: " << bmap.data[0] << std::endl;
+  ASSERT_EQ(bmap.test(13), true);
+  ASSERT_EQ(bmap.data[0], uint64_t(1) << 13);
+  bmap.set(63);
+  std::cout << "2 chunk0: " << bmap.data[0] << std::endl;
+  ASSERT_EQ(bmap.test(63), true);
+  bmap.clear(13);
+  ASSERT_EQ(bmap.data[0], uint64_t(1) << 63);
 }
 
 
