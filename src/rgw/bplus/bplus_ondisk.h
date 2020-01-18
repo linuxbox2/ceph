@@ -59,7 +59,6 @@ struct Bitmap
     encode(data, bl);
     ENCODE_FINISH(bl);
   }
-
   void decode(buffer::list::const_iterator& bl) {
     DECODE_START(1, bl);
     decode(data, bl);
