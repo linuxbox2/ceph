@@ -83,4 +83,17 @@ namespace rgw::bplus::ondisk {
     return rlen;
   } /* write2 */
 
+  int MockHctx::write_zero(int ofs, int len) {
+    // assert ofs+len <= mmap.size()
+    char* ptr = mmap.data();
+    memset(ptr+ofs, 0, len);
+    std::error_code error;
+    mmap.sync(error);
+    if (error) {
+      std::cerr << "error syncing file: " << error.message() << std::endl;
+      return 0;
+    }
+    return len;
+  } /* write_full */
+
 } /* namespace */
