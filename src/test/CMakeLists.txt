@@ -338,6 +338,7 @@ target_include_directories(ceph_test_rgw_bplus1
 target_link_libraries(ceph_test_rgw_bplus1
   librados
   ceph-common
+  Boost::filesystem
   ${UNITTEST_LIBS}
   ${EXTRALIBS}
   )
