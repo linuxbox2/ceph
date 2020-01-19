@@ -48,14 +48,21 @@ namespace rgw::bplus::ondisk {
       }
     }
     
-  }
+  } /* MockHctx(string, size_t, uint32_t) */
 
-  int MockHctx::read(int ofs, int len, char** outdata, int* outdatalen)
+  int MockHctx::read2(int ofs, int len, ceph::buffer::list *bl,
+		      uint32_t op_flags)
   {
     // assert ofs+len <= mmap.size()
     char* ptr = mmap.data() + ofs;
     //memcpy(
     return 0;
-  } /* read */
-  
+  } /* read2 */
+
+  int MockHctx::write2(int ofs, int len, ceph::buffer::list *bl,
+		      uint32_t op_flags)
+  {
+    // TODO:: implement
+    return 0;
+  } /* write2 */
 } /* namespace */
