@@ -332,7 +332,7 @@ add_executable(ceph_test_rgw_bplus1
   rgw/bplus/rgw_bplus1.cc
   )
 target_include_directories(ceph_test_rgw_bplus1
-  PUBLIC ${CMAKE_SOURCE_DIR}/src/cls/
+  PUBLIC ${CMAKE_SOURCE_DIR}/src/cls/rgw_bplus
   rgw_bplus)
 target_link_libraries(ceph_test_rgw_bplus1
   librados

@@ -23,7 +23,7 @@
 #include <boost/program_options.hpp>
 #include "xxhash.h"
 
-#include "bplus_ondisk.h"
+#include "bplus_types.h"
 
 #define dout_subsys ceph_subsys_rgw
 
