@@ -63,7 +63,24 @@ namespace rgw::bplus::ondisk {
   int MockHctx::write2(int ofs, int len, ceph::buffer::list *bl,
 		      uint32_t op_flags)
   {
-    // TODO:: implement
-    return 0;
+    // assert ofs+len <= mmap.size()
+    char* ptr = mmap.data();
+    int rlen = 0;
+    for (auto& p : bl->buffers()) {
+      auto plen = int(p.length());
+      auto wlen = std::min(len-rlen, plen);
+      memcpy(ptr, p.c_str(), wlen);
+      ptr += wlen;
+      rlen += wlen;
+      if (rlen >= len)
+	break;
+    }
+    std::error_code error;
+    mmap.sync(error);
+    if (error) {
+      std::cerr << "error syncing file: " << error.message() << std::endl;
+    }
+    return rlen;
   } /* write2 */
+
 } /* namespace */
