@@ -144,7 +144,7 @@ set(librgw_common_srcs
   rgw_object_lock.cc
   rgw_kms.cc
   rgw_url.cc
-  bplus/bplus_ondisk.cc
+  #bplus/bplus_cache.cc
   )
 
 if(WITH_RADOSGW_AMQP_ENDPOINT)
