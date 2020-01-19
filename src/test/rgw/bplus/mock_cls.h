@@ -41,7 +41,20 @@ namespace rgw::bplus::ondisk {
   }; /* MockHctx */
 
   using cls_method_context_t = void*;
-  
+
+  int cls_cxx_stat2(cls_method_context_t hctx, uint64_t *size,
+		    ceph::real_time *mtime);
+  int cls_cxx_read2(cls_method_context_t hctx, int ofs, int len,
+		    ceph::buffer::list *bl, uint32_t op_flags);
+  int cls_cxx_write2(cls_method_context_t hctx, int ofs, int len,
+		    ceph::buffer::list *bl, uint32_t op_flags);
+  int cls_cxx_write_full(cls_method_context_t hctx, ceph::buffer::list *bl);
+  int cls_cxx_replace(cls_method_context_t hctx, int ofs, int len,
+			   ceph::buffer::list *bl);
+  int cls_cxx_truncate(cls_method_context_t hctx, int ofs);
+  int cls_cxx_write_zero(cls_method_context_t hctx, int ofs, int len);
+
+// XXX kill me
   int cls_read(cls_method_context_t hctx, int ofs, int len, char **outdata,
 	      int *outdatalen) {
     MockHctx* mhctx = static_cast<MockHctx*>(hctx);
