@@ -55,8 +55,9 @@ namespace rgw::bplus::ondisk {
   {
     // assert ofs+len <= mmap.size()
     char* ptr = mmap.data() + ofs;
-    //memcpy(
-    return 0;
+    bl->push_back(
+      buffer::copy(ptr, len)); // XXX yes, we could share mapping here
+    return len;
   } /* read2 */
 
   int MockHctx::write2(int ofs, int len, ceph::buffer::list *bl,
