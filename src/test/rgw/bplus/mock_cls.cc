@@ -52,6 +52,9 @@ namespace rgw::bplus::ondisk {
 
   int MockHctx::read(int ofs, int len, char** outdata, int* outdatalen)
   {
+    // assert ofs+len <= mmap.size()
+    char* ptr = mmap.data() + ofs;
+    //memcpy(
     return 0;
   } /* read */
   
