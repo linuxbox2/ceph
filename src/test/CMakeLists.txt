@@ -329,10 +329,11 @@ target_link_libraries(ceph_test_librgw_file_marker
 
 # rgw_bplus
 add_executable(ceph_test_rgw_bplus1
-  rgw_bplus1.cc
+  rgw/bplus/rgw_bplus1.cc
   )
 target_include_directories(ceph_test_rgw_bplus1
-  PUBLIC ${CMAKE_SOURCE_DIR}/src/rgw/bplus)
+  PUBLIC ${CMAKE_SOURCE_DIR}/src/cls/
+  rgw_bplus)
 target_link_libraries(ceph_test_rgw_bplus1
   librados
   ceph-common
