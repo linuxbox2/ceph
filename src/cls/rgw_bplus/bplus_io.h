@@ -18,6 +18,15 @@
 
 namespace rgw::bplus::ondisk {
 
+  class BTreeIO
+  {
+    Header header;
+
+  }; /* BTreeIO */
+
+  class BTreeCache
+  {
+  }; /* BTreeCache */
 
 } /* namespace */
 
