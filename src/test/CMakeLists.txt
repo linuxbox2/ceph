@@ -331,6 +331,7 @@ target_link_libraries(ceph_test_librgw_file_marker
 add_executable(ceph_test_rgw_bplus1
   rgw/bplus/rgw_bplus1.cc
   rgw/bplus/mock_cls.cc
+  ${CMAKE_SOURCE_DIR}/src/cls/rgw_bplus/bplus_io.cc
   )
 target_include_directories(ceph_test_rgw_bplus1
   PUBLIC ${CMAKE_SOURCE_DIR}/src/cls/rgw_bplus

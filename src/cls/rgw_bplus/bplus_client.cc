@@ -11,25 +11,4 @@
  *
  */
 
-#ifndef BPLUS_IO_H
-#define BPLUS_IO_H
-
-#include "bplus_types.h"
-#include "include/types.h"
-
-
-namespace rgw::bplus::ondisk {
-
-  class BTreeIO
-  {
-    object_t oid; // XXX sufficient?
-    ondisk::Header header;
-  }; /* BTreeIO */
-
-  class BTreeCache
-  {
-  }; /* BTreeCache */
-
-} /* namespace */
-
-#endif /* BPLUS_IO_H */
+#include "bplus_client.h"
