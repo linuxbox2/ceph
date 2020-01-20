@@ -17,8 +17,14 @@
 #include "bplus_types.h"
 #include "include/types.h"
 
+#include <atomic>
+#include <chrono>
+#include <thread>
+#include <mutex>
+#include <vector>
+#include <algorithm>
+#include <boost/container/flat_map.hpp>
 #include "common/ceph_timer.h"
-
 
 namespace rgw::bplus::ondisk {
 
@@ -34,6 +40,9 @@ namespace rgw::bplus::ondisk {
 
   class BTreeCache
   {
+    static constexpr uint16_t entries_hiwat = 12;
+    static constexpr uint16_t max_idle_s = 120;
+
   }; /* BTreeCache */
 
 } /* namespace */
