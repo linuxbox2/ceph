@@ -13,6 +13,7 @@
 #ifndef COHORT_LRU_H
 #define COHORT_LRU_H
 
+#include <atomic>
 #include <boost/intrusive/list.hpp>
 #include <boost/intrusive/slist.hpp>
 

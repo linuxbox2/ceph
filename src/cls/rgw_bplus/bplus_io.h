@@ -17,6 +17,8 @@
 #include "bplus_types.h"
 #include "include/types.h"
 
+#include "common/ceph_timer.h"
+
 
 namespace rgw::bplus::ondisk {
 
@@ -24,6 +26,10 @@ namespace rgw::bplus::ondisk {
   {
     object_t oid; // XXX sufficient?
     ondisk::Header header;
+
+    typedef bi::link_mode<bi::safe_link> link_mode; /* XXX normal */
+    typedef bi::avl_set_member_hook<link_mode> tree_hook_type;
+
   }; /* BTreeIO */
 
   class BTreeCache
