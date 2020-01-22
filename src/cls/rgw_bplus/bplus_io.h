@@ -78,9 +78,6 @@ namespace rgw::bplus::ondisk {
 	}
       }
       auto t = new BTreeIO(oid);
-#if 0
-      // TODO: implement
-#endif
       return t;
     }
   private:
