@@ -89,7 +89,15 @@ namespace rgw::bplus::ondisk {
       auto t = new BTreeIO(oid);
       cache.push_back(*t);
       return t;
-    }
+    } /* get_tree */
+
+    void put_tree(BTreeIO* t) {
+      lock_guard guard(mtx);
+      if (t->unref() > 0) {
+	cache.push_back(*t);
+      }
+    } /* put_tree */
+
   private:
     std::mutex mtx;
     BTreeIO::TreeQueue cache;
