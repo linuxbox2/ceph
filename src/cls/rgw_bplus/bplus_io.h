@@ -27,17 +27,25 @@
 #include <boost/intrusive/list.hpp>
 #include <boost/intrusive_ptr.hpp>
 #include "common/ceph_timer.h"
+#include "common/likely.h"
 
 namespace rgw::bplus::ondisk {
+
+  class BTreeCache;
 
   using link_mode = bi::link_mode<bi::safe_link>; /* XXX normal */
 
   class BTreeIO
   {
+
+    static constexpr uint32_t FLAG_NONE =   0x0000;
+    static constexpr uint32_t FLAG_INAVL =  0x0001;
+
     object_t oid; // XXX sufficient?
     ondisk::Header header;
     mutable std::atomic<uint32_t> refcnt;
     bi::list_member_hook<link_mode> tree_cache_hook;
+    uint32_t flags;
     BTreeCache* cache;
 
     typedef bi::list<BTreeIO,
@@ -50,7 +58,7 @@ namespace rgw::bplus::ondisk {
 
   public:
     BTreeIO(std::string oid, BTreeCache* cache)
-      : oid(oid), refcnt(1), cache(cache) {}
+      : oid(oid), refcnt(1), flags(FLAG_NONE), cache(cache) {}
 
     BTreeIO* ref() {
       intrusive_ptr_add_ref(this);
@@ -58,6 +66,7 @@ namespace rgw::bplus::ondisk {
     }
 
     inline void rele() {
+      intrusive_ptr_release(this);
     }
 
     friend void intrusive_ptr_add_ref(const BTreeIO* tree) {
@@ -67,9 +76,14 @@ namespace rgw::bplus::ondisk {
     friend void intrusive_ptr_release(const BTreeIO* tree) {
       if (tree->refcnt.fetch_sub(1, std::memory_order_release) == 0) {
 	std::atomic_thread_fence(std::memory_order_acquire);
+	if (likely(tree->flags & FLAG_INAVL)) {
+	  const_cast<BTreeIO*>(tree)->uncache_this();
+	}
 	delete tree;
       }
-    }
+    } /* intrusive_ptr_release */
+
+    void uncache_this();
 
     friend class BTreeCache;
   }; /* BTreeIO */
@@ -87,27 +101,27 @@ namespace rgw::bplus::ondisk {
       lock_guard guard(mtx);
       for (auto& elt : cache) {
 	if (elt.oid == oid) {
-	  auto t = elt;
-	  cache.erase(elt);
+	  cache.erase(BTreeIO::TreeQueue::s_iterator_to(elt));
 	  cache.push_front(elt);
 	  return elt.ref();
 	}
       }
-      auto t = new BTreeIO(oid);
+      auto t = new BTreeIO(oid, this);
+      t->flags |= BTreeIO::FLAG_INAVL;
       cache.push_back(*t);
       return t;
     } /* get_tree */
 
     void put_tree(BTreeIO* t) {
-      
       lock_guard guard(mtx);
-      /* TODO: unref */
-      
+      t->rele();
     } /* put_tree */
 
   private:
     std::mutex mtx;
     BTreeIO::TreeQueue cache;
+
+    friend class BTreeIO;
 
   }; /* BTreeCache */
 

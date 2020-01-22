@@ -12,3 +12,11 @@
  */
 
 #include "bplus_io.h"
+
+namespace rgw::bplus::ondisk {
+
+  void BTreeIO::uncache_this() {
+    cache->cache.erase(BTreeIO::TreeQueue::s_iterator_to(*this));
+  } /* intrusive_ptr_release */
+
+} /* namespace */
