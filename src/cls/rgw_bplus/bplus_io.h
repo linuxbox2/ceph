@@ -57,7 +57,7 @@ namespace rgw::bplus::ondisk {
     using tree_hook_type = bi::avl_set_member_hook<link_mode>;
 
   public:
-    BTreeIO(std::string oid, BTreeCache* cache)
+    BTreeIO(const std::string& oid, BTreeCache* cache)
       : oid(oid), refcnt(1), flags(FLAG_NONE), cache(cache) {}
 
     BTreeIO* ref() {
