@@ -24,19 +24,28 @@
 #include <vector>
 #include <algorithm>
 #include <boost/container/flat_map.hpp>
+#include <boost/intrusive/list.hpp>
 #include <boost/intrusive_ptr.hpp>
 #include "common/ceph_timer.h"
 
 namespace rgw::bplus::ondisk {
+
+  using link_mode = bi::link_mode<bi::safe_link>; /* XXX normal */
 
   class BTreeIO
   {
     object_t oid; // XXX sufficient?
     ondisk::Header header;
     mutable std::atomic<uint32_t> refcnt;
+    bi::list_member_hook<link_mode> tree_cache_hook;
 
-    typedef bi::link_mode<bi::safe_link> link_mode; /* XXX normal */
-    typedef bi::avl_set_member_hook<link_mode> tree_hook_type;
+    typedef bi::list<BTreeIO,
+		     bi::member_hook<
+		       BTreeIO, bi::list_member_hook<link_mode>,
+		       &BTreeIO::tree_cache_hook>,
+		     bi::constant_time_size<true>> TreeQueue;
+
+    using tree_hook_type = bi::avl_set_member_hook<link_mode>;
 
   public:
     BTreeIO(std::string oid)
@@ -73,16 +82,17 @@ namespace rgw::bplus::ondisk {
     BTreeIO* get_tree(const std::string& oid) {
       lock_guard guard(mtx);
       for (auto& elt : cache) {
-	if (elt->oid == oid) {
-	  return elt->ref();
+	if (elt.oid == oid) {
+	  return elt.ref();
 	}
       }
       auto t = new BTreeIO(oid);
+      cache.push_back(*t);
       return t;
     }
   private:
     std::mutex mtx;
-    std::vector<BTreeIO*> cache;
+    BTreeIO::TreeQueue cache;
 
   }; /* BTreeCache */
 
