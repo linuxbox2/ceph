@@ -38,6 +38,7 @@ namespace rgw::bplus::ondisk {
     ondisk::Header header;
     mutable std::atomic<uint32_t> refcnt;
     bi::list_member_hook<link_mode> tree_cache_hook;
+    BTreeCache* cache;
 
     typedef bi::list<BTreeIO,
 		     bi::member_hook<
@@ -48,12 +49,15 @@ namespace rgw::bplus::ondisk {
     using tree_hook_type = bi::avl_set_member_hook<link_mode>;
 
   public:
-    BTreeIO(std::string oid)
-      : oid(oid), refcnt(1) {}
+    BTreeIO(std::string oid, BTreeCache* cache)
+      : oid(oid), refcnt(1), cache(cache) {}
 
     BTreeIO* ref() {
       intrusive_ptr_add_ref(this);
       return this;
+    }
+
+    inline void rele() {
     }
 
     friend void intrusive_ptr_add_ref(const BTreeIO* tree) {
@@ -83,6 +87,9 @@ namespace rgw::bplus::ondisk {
       lock_guard guard(mtx);
       for (auto& elt : cache) {
 	if (elt.oid == oid) {
+	  auto t = elt;
+	  cache.erase(elt);
+	  cache.push_front(elt);
 	  return elt.ref();
 	}
       }
@@ -92,10 +99,10 @@ namespace rgw::bplus::ondisk {
     } /* get_tree */
 
     void put_tree(BTreeIO* t) {
+      
       lock_guard guard(mtx);
-      if (t->unref() > 0) {
-	cache.push_back(*t);
-      }
+      /* TODO: unref */
+      
     } /* put_tree */
 
   private:
