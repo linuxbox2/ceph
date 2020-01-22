@@ -32,16 +32,47 @@ namespace rgw::bplus::ondisk {
   {
     object_t oid; // XXX sufficient?
     ondisk::Header header;
-
+    // XXX refcnt
     typedef bi::link_mode<bi::safe_link> link_mode; /* XXX normal */
     typedef bi::avl_set_member_hook<link_mode> tree_hook_type;
 
+  public:
+    BTreeIO(std::string oid)
+      : oid(oid) {}
+
+    BTreeIO* ref() {
+      // XXX do it
+      return this;
+    }
+
+    friend class BTreeCache;
   }; /* BTreeIO */
 
   class BTreeCache
   {
+  public:
     static constexpr uint16_t entries_hiwat = 12;
     static constexpr uint16_t max_idle_s = 120;
+
+    using lock_guard = std::lock_guard<std::mutex>;
+    using unique_lock = std::unique_lock<std::mutex>;
+
+    BTreeIO* get_tree(const std::string& oid) {
+      lock_guard guard(mtx);
+      for (auto& elt : cache) {
+	if (elt->oid == oid) {
+	  return elt->ref();
+	}
+      }
+      auto t = new BTreeIO(oid);
+#if 0
+      // TODO: implement
+#endif
+      return t;
+    }
+  private:
+    std::mutex mtx;
+    std::vector<BTreeIO*> cache;
 
   }; /* BTreeCache */
 
