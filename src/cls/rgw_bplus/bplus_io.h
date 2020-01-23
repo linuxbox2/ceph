@@ -120,13 +120,13 @@ namespace rgw::bplus::ondisk {
       t->rele();
       /* reclaim entries at LRU if that is idle, iff
        * cache is over target size */
-    retry:
+    again:
       if (cache.size() > entries_hiwat) {
 	/* potentially reclaim LRU */
 	auto& elt = cache.back();
 	if (elt.refcnt.load() == SENTINEL_REFCNT) {
 	  elt.rele(); /* dequeues and frees elt if refcnt drops to 0 */
-	  goto retry;
+	  goto again;
 	} /* node now idle */
       } /* cache too big */
     } /* put_tree */
