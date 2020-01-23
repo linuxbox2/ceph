@@ -106,26 +106,24 @@ namespace rgw::bplus::ondisk {
 	  cache.erase(BTreeIO::TreeQueue::s_iterator_to(elt));
 	  cache.push_front(elt);
 	  t = elt.ref();
-	  goto shrink;
+	  break;
 	}
       }
       t = new BTreeIO(oid, this);
       t->flags |= BTreeIO::FLAG_INAVL;
       cache.push_front(*t);
-shrink:
-      /* shrink cache */
-      if (cache.size() > entries_hiwat) {
-	auto& elt = cache.back();
-	/* MUST NOT hold mtx */
-	guard.unlock();
-	elt.rele();
-      }
       return t;
     } /* get_tree */
 
     void put_tree(BTreeIO* t) {
-      /* MUST NOT hold mtx */
+      unique_lock guard(mtx);
       t->rele();
+      if (cache.size() > entries_hiwat) {
+	if (t->refcnt.load() == SENTINEL_REFCNT) {
+	  /* reclaim it */
+	  t->rele();
+	} /* node now idle */
+      } /* cache too big */
     } /* put_tree */
 
   private:
