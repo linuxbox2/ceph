@@ -100,16 +100,19 @@ namespace rgw::bplus::ondisk {
 
     BTreeIO* get_tree(const std::string& oid) {
       unique_lock guard(mtx);
+      BTreeIO* t{nullptr};
       for (auto& elt : cache) {
 	if (elt.oid == oid) {
 	  cache.erase(BTreeIO::TreeQueue::s_iterator_to(elt));
 	  cache.push_front(elt);
-	  return elt.ref();
+	  t = elt.ref();
+	  goto shrink;
 	}
       }
-      auto t = new BTreeIO(oid, this);
+      t = new BTreeIO(oid, this);
       t->flags |= BTreeIO::FLAG_INAVL;
       cache.push_front(*t);
+shrink:
       /* shrink cache */
       if (cache.size() > entries_hiwat) {
 	auto& elt = cache.back();
