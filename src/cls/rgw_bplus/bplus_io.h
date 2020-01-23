@@ -29,6 +29,8 @@
 #include "common/ceph_timer.h"
 #include "common/likely.h"
 
+#include "objclass/objclass.h"
+
 namespace rgw::bplus::ondisk {
 
   class BTreeCache;
@@ -45,8 +47,9 @@ namespace rgw::bplus::ondisk {
     ondisk::Header header;
     mutable std::atomic<uint32_t> refcnt;
     bi::list_member_hook<link_mode> tree_cache_hook;
-    uint32_t flags;
     BTreeCache* cache;
+    uint32_t flags;
+    cls_method_context_t hctx;
 
     typedef bi::list<BTreeIO,
 		     bi::member_hook<
@@ -57,8 +60,13 @@ namespace rgw::bplus::ondisk {
     using tree_hook_type = bi::avl_set_member_hook<link_mode>;
 
   public:
-    BTreeIO(const std::string& oid, BTreeCache* cache)
-      : oid(oid), refcnt(1), flags(FLAG_NONE), cache(cache) {}
+    BTreeIO(const std::string& oid, BTreeCache* cache,
+	    cls_method_context_t _hctx)
+      : oid(oid), refcnt(1), cache(cache), flags(FLAG_NONE), hctx(_hctx) {}
+
+    void set_hctx(cls_method_context_t _hctx) {
+      hctx = _hctx;
+    }
 
     BTreeIO* ref() {
       intrusive_ptr_add_ref(this);
@@ -83,6 +91,8 @@ namespace rgw::bplus::ondisk {
       }
     } /* intrusive_ptr_release */
 
+    void load();
+
     void uncache_this();
 
     friend class BTreeCache;
@@ -98,7 +108,7 @@ namespace rgw::bplus::ondisk {
     using lock_guard = std::lock_guard<std::mutex>;
     using unique_lock = std::unique_lock<std::mutex>;
 
-    BTreeIO* get_tree(const std::string& oid) {
+    BTreeIO* get_tree(const std::string& oid, cls_method_context_t hctx) {
       unique_lock guard(mtx);
       BTreeIO* t{nullptr};
       for (auto& elt : cache) {
@@ -106,20 +116,32 @@ namespace rgw::bplus::ondisk {
 	  cache.erase(BTreeIO::TreeQueue::s_iterator_to(elt));
 	  cache.push_front(elt);
 	  t = elt.ref();
-	  break;
+	  t->set_hctx(hctx);
+	  goto out;
 	}
       }
-      t = new BTreeIO(oid, this);
+      t = new BTreeIO(oid, this, hctx);
       t->flags |= BTreeIO::FLAG_INAVL;
       cache.push_front(*t);
+    out:
       return t;
     } /* get_tree */
 
     void put_tree(BTreeIO* t) {
       unique_lock guard(mtx);
+      /* return refcnt w/mtx LOCKED */
       t->rele();
       /* reclaim entries at LRU if that is idle, iff
        * cache is over target size */
+      try_shrink_cache();
+    } /* put_tree */
+
+  private:
+    std::mutex mtx;
+    BTreeIO::TreeQueue cache;
+
+    void try_shrink_cache() {
+      /* assert mtx LOCKED */
     again:
       if (cache.size() > entries_hiwat) {
 	/* potentially reclaim LRU */
@@ -129,11 +151,7 @@ namespace rgw::bplus::ondisk {
 	  goto again;
 	} /* node now idle */
       } /* cache too big */
-    } /* put_tree */
-
-  private:
-    std::mutex mtx;
-    BTreeIO::TreeQueue cache;
+    } /* try_shrink_cache */
 
     friend class BTreeIO;
 

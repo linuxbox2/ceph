@@ -15,10 +15,18 @@
 
 namespace rgw::bplus::ondisk {
 
-  void BTreeIO::uncache_this() {
-    /* mtx NOT HELD in rele() path */
-    lock_guard guard(cache->mtx);
-    cache->cache.erase(BTreeIO::TreeQueue::s_iterator_to(*this));
+  void BTreeIO::load()
+  {
+    buffer::list bl_header;
+    int ret = cls_cxx_read(hctx, header_offset, header_len, &bl_header);
+
+  } /* load (i.e., from primary storage) */
+
+  void BTreeIO::uncache_this()
+  {
+    /* asser: mtx HELD in rele() path */
+    auto& c = cache->cache;
+    c.erase(BTreeIO::TreeQueue::s_iterator_to(*this));
     flags &= ~FLAG_INAVL;
   } /* intrusive_ptr_release */
 
