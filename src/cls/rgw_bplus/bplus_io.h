@@ -99,7 +99,7 @@ namespace rgw::bplus::ondisk {
     using unique_lock = std::unique_lock<std::mutex>;
 
     BTreeIO* get_tree(const std::string& oid) {
-      lock_guard guard(mtx);
+      unique_lock guard(mtx);
       for (auto& elt : cache) {
 	if (elt.oid == oid) {
 	  cache.erase(BTreeIO::TreeQueue::s_iterator_to(elt));
@@ -110,13 +110,12 @@ namespace rgw::bplus::ondisk {
       auto t = new BTreeIO(oid, this);
       t->flags |= BTreeIO::FLAG_INAVL;
       cache.push_front(*t);
-      /* shallow shrink cache */
-      while (cache.size() > entries_hiwat) {
+      /* shrink cache */
+      if (cache.size() > entries_hiwat) {
 	auto& elt = cache.back();
-	if (elt.refcnt == SENTINEL_REFCNT) {
-	  cache.erase(BTreeIO::TreeQueue::s_iterator_to(elt));
-	} else
-	  break;
+	/* MUST NOT hold mtx */
+	guard.unlock();
+	elt.rele();
       }
       return t;
     } /* get_tree */
