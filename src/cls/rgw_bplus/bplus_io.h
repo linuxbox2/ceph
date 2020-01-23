@@ -118,10 +118,15 @@ namespace rgw::bplus::ondisk {
     void put_tree(BTreeIO* t) {
       unique_lock guard(mtx);
       t->rele();
+      /* reclaim entries at LRU if that is idle, iff
+       * cache is over target size */
+    retry:
       if (cache.size() > entries_hiwat) {
-	if (t->refcnt.load() == SENTINEL_REFCNT) {
-	  /* reclaim it */
-	  t->rele();
+	/* potentially reclaim LRU */
+	auto elt = cache.back();
+	if (elt.refcnt.load() == SENTINEL_REFCNT) {
+	  elt.rele(); /* dequeues and frees elt if refcnt drops to 0 */
+	  goto retry;
 	} /* node now idle */
       } /* cache too big */
     } /* put_tree */
