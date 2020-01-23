@@ -284,15 +284,15 @@ namespace rgw::bplus::ondisk {
     // XXX fence_key upper_bound
     // XXX fence_key lower_bound
 
-    flat_map<uint16_t, KeyPrefix> key_prefixes;
     FreeSpaceMap free_space;
+    flat_map<uint16_t, KeyPrefix> key_prefixes;
 
     void encode(buffer::list& bl) const {
       ENCODE_START(1, 1, bl);
       encode(struct_ver, bl);
       encode(gen, bl);
-      encode(key_prefixes, bl);
       encode(free_space, bl);
+      encode(key_prefixes, bl);
       ENCODE_FINISH(bl);
     }
 
@@ -300,8 +300,8 @@ namespace rgw::bplus::ondisk {
       DECODE_START(1, bl);
       decode(struct_ver, bl);
       decode(gen, bl);
-      decode(key_prefixes, bl);
       decode(free_space, bl);
+      decode(key_prefixes, bl);
       DECODE_FINISH(bl);
     }
   };
