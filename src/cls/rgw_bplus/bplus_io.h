@@ -123,7 +123,7 @@ namespace rgw::bplus::ondisk {
     retry:
       if (cache.size() > entries_hiwat) {
 	/* potentially reclaim LRU */
-	auto elt = cache.back();
+	auto& elt = cache.back();
 	if (elt.refcnt.load() == SENTINEL_REFCNT) {
 	  elt.rele(); /* dequeues and frees elt if refcnt drops to 0 */
 	  goto retry;
