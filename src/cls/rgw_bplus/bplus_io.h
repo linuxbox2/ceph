@@ -108,7 +108,7 @@ namespace rgw::bplus::ondisk {
       }
       auto t = new BTreeIO(oid, this);
       t->flags |= BTreeIO::FLAG_INAVL;
-      cache.push_back(*t);
+      cache.push_front(*t);
       return t;
     } /* get_tree */
 
