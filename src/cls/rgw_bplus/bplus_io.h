@@ -93,6 +93,7 @@ namespace rgw::bplus::ondisk {
   public:
     static constexpr uint16_t entries_hiwat = 12;
     static constexpr uint16_t max_idle_s = 120;
+    static constexpr uint32_t SENTINEL_REFCNT = 1;
 
     using lock_guard = std::lock_guard<std::mutex>;
     using unique_lock = std::unique_lock<std::mutex>;
@@ -109,11 +110,19 @@ namespace rgw::bplus::ondisk {
       auto t = new BTreeIO(oid, this);
       t->flags |= BTreeIO::FLAG_INAVL;
       cache.push_front(*t);
+      /* shallow shrink cache */
+      while (cache.size() > entries_hiwat) {
+	auto& elt = cache.back();
+	if (elt.refcnt == SENTINEL_REFCNT) {
+	  cache.erase(BTreeIO::TreeQueue::s_iterator_to(elt));
+	} else
+	  break;
+      }
       return t;
     } /* get_tree */
 
     void put_tree(BTreeIO* t) {
-      lock_guard guard(mtx);
+      /* MUST NOT hold mtx */
       t->rele();
     } /* put_tree */
 

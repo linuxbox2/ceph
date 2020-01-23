@@ -16,6 +16,8 @@
 namespace rgw::bplus::ondisk {
 
   void BTreeIO::uncache_this() {
+    /* mtx NOT HELD in rele() path */
+    lock_guard guard(cache->mtx);
     cache->cache.erase(BTreeIO::TreeQueue::s_iterator_to(*this));
   } /* intrusive_ptr_release */
 
