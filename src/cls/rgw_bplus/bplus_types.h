@@ -318,8 +318,8 @@ namespace rgw::bplus::ondisk {
       decode(gen, bl);
       decode(free_space, bl);
       decode(key_prefixes, bl);
-      kp_reverse.reserve(key_prefixes.size());
       /* prefix map is small, so keep a lookup table */
+      kp_reverse.reserve(key_prefixes.size());
       for (const auto& it : key_prefixes) {
 	kp_reverse.insert(
 	  decltype(kp_reverse)::value_type(it.second.prefix, it.first));
