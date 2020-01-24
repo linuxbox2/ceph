@@ -182,14 +182,21 @@ namespace rgw::bplus::ondisk {
   struct KeyType
   {
     uint16_t flags;
-    // XXX optional key prefix
-    std::string key;
+    variant<uint16_t,std::string> key;
     variant<std::string,Addr> val;
     void encode(buffer::list& bl) const {
       ENCODE_START(1, 1, bl);
       encode(flags, bl);
-      encode(key, bl);
       uint16_t var_type;
+      if (std::holds_alternative<uint16_t>(key)) {
+	var_type = 1;
+	encode(var_type, bl);
+	encode(get<uint16_t>(key), bl);
+      } else {
+	var_type = 2;
+	encode(var_type, bl);
+	encode(get<std::string>(key), bl);
+      }
       if (std::holds_alternative<std::string>(val)) {
 	var_type = 1;
 	encode(var_type, bl);
@@ -205,8 +212,16 @@ namespace rgw::bplus::ondisk {
     void decode(buffer::list::const_iterator& bl) {
       DECODE_START(1, bl);
       decode(flags, bl);
-      decode(key, bl);
       uint16_t var_type;
+      if (var_type == 1) {
+	uint16_t tkey;
+	decode(tkey, bl);
+	key = tkey;
+      } else {
+	std::string tkey;
+	decode(tkey, bl);
+	key = tkey;
+      }
       decode(var_type, bl);
       if (var_type == 1) {
 	std::string tval;
@@ -286,6 +301,7 @@ namespace rgw::bplus::ondisk {
 
     FreeSpaceMap free_space;
     flat_map<uint16_t, KeyPrefix> key_prefixes;
+    flat_map<std::string, uint16_t> kp_reverse; // not serialized
 
     void encode(buffer::list& bl) const {
       ENCODE_START(1, 1, bl);
@@ -302,6 +318,12 @@ namespace rgw::bplus::ondisk {
       decode(gen, bl);
       decode(free_space, bl);
       decode(key_prefixes, bl);
+      kp_reverse.reserve(key_prefixes.size());
+      /* prefix map is small, so keep a lookup table */
+      for (const auto& it : key_prefixes) {
+	kp_reverse.insert(
+	  decltype(kp_reverse)::value_type(it.second.prefix, it.first));
+      }
       DECODE_FINISH(bl);
     }
   };
