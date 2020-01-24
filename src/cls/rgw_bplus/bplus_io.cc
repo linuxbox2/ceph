@@ -18,7 +18,10 @@ namespace rgw::bplus::ondisk {
   void BTreeIO::load()
   {
     buffer::list bl_header;
-    int ret = cls_cxx_read(hctx, header_offset, header_len, &bl_header);
+    int ret = cls_cxx_read(hctx,
+			  ondisk::Layout::header_offset,
+			  ondisk::Layout::header_size,
+			  &bl_header);
 
   } /* load (i.e., from primary storage) */
 

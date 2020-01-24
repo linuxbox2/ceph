@@ -288,9 +288,6 @@ namespace rgw::bplus::ondisk {
   };
   WRITE_CLASS_ENCODER(ValPage);
 
-  static constexpr uint32_t header_offset = 0;
-  static constexpr uint32_t header_len = 4096;
-
   struct Header
   {
     uint32_t struct_ver;
@@ -329,6 +326,13 @@ namespace rgw::bplus::ondisk {
   };
   WRITE_CLASS_ENCODER(Header);
 
+  struct Layout
+  {
+    static constexpr uint32_t header_offset = 0;
+    static constexpr uint32_t header_size = 4096;
+
+  };
+  
 } /* namespace */
 
 #endif /* BPLUS_ONDISK_H */
