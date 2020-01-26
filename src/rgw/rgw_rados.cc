@@ -7891,7 +7891,17 @@ int RGWRados::list_lc_progress(const string& marker, uint32_t max_entries, map<s
 
 int RGWRados::process_lc()
 {
-  return lc->process();
+#if 0
+  std::unique_ptr<RGWLC::LCWorker> worker
+    = std::make_unique<RGWLC::LCWorker>(get_lc(), cct, get_lc());
+#else
+  auto worker = new RGWLC::LCWorker(get_lc(), cct, get_lc());
+#endif
+  worker->create("lc_process_thr");
+  auto ret = lc->process(worker);
+  worker->stop();
+  worker->join();
+  return ret;
 }
 
 bool RGWRados::process_expire_objects()
