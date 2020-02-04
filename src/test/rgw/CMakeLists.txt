@@ -13,6 +13,23 @@ if(WITH_RADOSGW_KAFKA_ENDPOINT)
   add_library(kafka_stub STATIC ${kafka_stub_src})
 endif()
 
+# rgw_bplus
+add_executable(ceph_test_rgw_bplus1
+  bplus/rgw_bplus1.cc
+  bplus/mock_cls.cc
+  ${CMAKE_SOURCE_DIR}/src/cls/rgw_bplus/bplus_io.cc
+  )
+target_include_directories(ceph_test_rgw_bplus1
+  PUBLIC ${CMAKE_SOURCE_DIR}/src/cls/rgw_bplus
+  rgw_bplus)
+target_link_libraries(ceph_test_rgw_bplus1
+  librados
+  ceph-common
+  Boost::filesystem
+  ${UNITTEST_LIBS}
+  ${EXTRALIBS}
+  )
+
 #unittest_rgw_bencode
 add_executable(unittest_rgw_bencode test_rgw_bencode.cc)
 add_ceph_unittest(unittest_rgw_bencode)

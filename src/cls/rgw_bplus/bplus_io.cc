@@ -25,6 +25,10 @@ namespace rgw::bplus::ondisk {
 
   } /* load (i.e., from primary storage) */
 
+  int insert(const std::string& key, const std::string &val)
+  {
+  }
+
   void BTreeIO::uncache_this()
   {
     /* asser: mtx HELD in rele() path */
