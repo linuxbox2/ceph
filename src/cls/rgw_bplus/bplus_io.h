@@ -59,12 +59,16 @@ namespace rgw::bplus::ondisk {
 
     using tree_hook_type = bi::avl_set_member_hook<link_mode>;
 
-    PageCache pages;
+    PageLRU page_lru;
+    PageCache page_cache;
 
   public:
     BTreeIO(const std::string& oid, BTreeCache* cache,
 	    cls_method_context_t _hctx)
-      : oid(oid), refcnt(1), cache(cache), flags(FLAG_NONE), hctx(_hctx) {}
+      : oid(oid), refcnt(1), cache(cache), flags(FLAG_NONE), hctx(_hctx),
+	page_lru(1 /* lanes */, 23 /* hiwat */),
+	page_cache(1 /* partitions */, 23 /* size */)
+      {}
 
     void set_hctx(cls_method_context_t _hctx) {
       hctx = _hctx;

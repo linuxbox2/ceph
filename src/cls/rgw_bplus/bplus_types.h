@@ -99,7 +99,7 @@ namespace rgw::bplus::ondisk {
   }; /* FreeSpaceMap */
   WRITE_CLASS_ENCODER(FreeSpaceMap);
 
-  struct Page
+  struct Page : public cohort::lru::Object
   {
     uint32_t offset;
     uint16_t type;
@@ -152,7 +152,10 @@ namespace rgw::bplus::ondisk {
   };
 
   using PageHook = bi::member_hook<Page, Page::hook_type, &Page::page_hook>;
-  using PageCache = bi::avltree<Page, bi::compare<PageLT>, PageHook>;
+  using PageAVL = bi::avltree<Page, bi::compare<PageLT>, PageHook>;
+  using PageLRU = cohort::lru::LRU<std::mutex>;
+  using PageCache =
+    cohort::lru::TreeX<Page, PageAVL, PageLT, PageEQ, uint32_t, std::mutex>;
 
   struct Addr
   {
