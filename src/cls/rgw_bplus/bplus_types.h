@@ -264,15 +264,26 @@ namespace rgw::bplus::ondisk {
 
   struct KeyPage : public Page
   {
+    flat_map<uint16_t, KeyPrefix> key_prefixes;
+    flat_map<std::string, uint16_t> kp_reverse; // not serialized
     std::vector<KeyType> keys;
+
     void encode(buffer::list& bl) const {
       ENCODE_START(1, 1, bl);
+      encode(key_prefixes, bl);
       encode(keys, bl);
       ENCODE_FINISH(bl);
     }
 
     void decode(buffer::list::const_iterator& bl) {
       DECODE_START(1, bl);
+      decode(key_prefixes, bl);
+      /* prefix map is small, so keep a lookup table */
+      kp_reverse.reserve(key_prefixes.size());
+      for (const auto& it : key_prefixes) {
+	kp_reverse.insert(
+	  decltype(kp_reverse)::value_type(it.second.prefix, it.first));
+      }
       decode(keys, bl);
       DECODE_FINISH(bl);
     }
@@ -318,19 +329,20 @@ namespace rgw::bplus::ondisk {
     uint32_t struct_ver;
     uint64_t gen;
 
-    // XXX fence_key upper_bound
-    // XXX fence_key lower_bound
+    uint32_t fanout;
+    uint32_t size_max;
+    uint16_t prefix_min_len;
 
     FreeSpaceMap free_space;
-    flat_map<uint16_t, KeyPrefix> key_prefixes;
-    flat_map<std::string, uint16_t> kp_reverse; // not serialized
 
     void encode(buffer::list& bl) const {
       ENCODE_START(1, 1, bl);
       encode(struct_ver, bl);
       encode(gen, bl);
+      encode(fanout, bl);
+      encode(size_max, bl);
+      encode(prefix_min_len, bl);
       encode(free_space, bl);
-      encode(key_prefixes, bl);
       ENCODE_FINISH(bl);
     }
 
@@ -338,14 +350,10 @@ namespace rgw::bplus::ondisk {
       DECODE_START(1, bl);
       decode(struct_ver, bl);
       decode(gen, bl);
+      decode(fanout, bl);
+      decode(size_max, bl);
+      decode(prefix_min_len, bl);
       decode(free_space, bl);
-      decode(key_prefixes, bl);
-      /* prefix map is small, so keep a lookup table */
-      kp_reverse.reserve(key_prefixes.size());
-      for (const auto& it : key_prefixes) {
-	kp_reverse.insert(
-	  decltype(kp_reverse)::value_type(it.second.prefix, it.first));
-      }
       DECODE_FINISH(bl);
     }
   };
