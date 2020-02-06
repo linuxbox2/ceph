@@ -59,6 +59,8 @@ namespace rgw::bplus::ondisk {
 
     using tree_hook_type = bi::avl_set_member_hook<link_mode>;
 
+    PageCache pages;
+
   public:
     BTreeIO(const std::string& oid, BTreeCache* cache,
 	    cls_method_context_t _hctx)
@@ -92,6 +94,8 @@ namespace rgw::bplus::ondisk {
     } /* intrusive_ptr_release */
 
     void load();
+
+    int insert(const std::string& key, const std::string &val);
 
     void uncache_this();
 

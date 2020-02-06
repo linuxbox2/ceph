@@ -106,11 +106,10 @@ namespace rgw::bplus::ondisk {
     uint16_t refcnt;
     uint32_t linked_page_off; // indirect to a new page, or 0
 
-    typedef bi::link_mode<bi::safe_link> link_mode; /* XXX normal */
-    typedef bi::avl_set_member_hook<link_mode> hook_type;
+    using link_mode = bi::link_mode<bi::safe_link>; /* XXX normal */
+    using hook_type = bi::avl_set_member_hook<link_mode>;
 
     hook_type page_hook;
-  
   
     void encode(buffer::list& bl) const {
       ENCODE_START(1, 1, bl);
@@ -131,6 +130,29 @@ namespace rgw::bplus::ondisk {
     }
   }; /* Page */
   WRITE_CLASS_ENCODER(Page);
+
+  struct PageLT
+  {
+    bool operator()(const Page& lhs, const Page& rhs) const
+      { return (lhs.offset < rhs.offset); }
+    bool operator()(const uint32_t offset, const Page& page) const
+      { return offset < page.offset; }
+    bool operator()(const Page& page, const uint32_t offset) const
+      { return page.offset < offset; }
+  };
+
+  struct PageEQ
+  {
+    bool operator()(const Page& lhs, const Page& rhs) const
+      { return (lhs.offset == rhs.offset); }
+    bool operator()(const uint32_t offset, const Page& page) const
+      { return offset == page.offset; }
+    bool operator()(const Page& page, const uint32_t offset) const
+      { return page.offset == offset; }
+  };
+
+  using PageHook = bi::member_hook<Page, Page::hook_type, &Page::page_hook>;
+  using PageCache = bi::avltree<Page, bi::compare<PageLT>, PageHook>;
 
   struct Addr
   {

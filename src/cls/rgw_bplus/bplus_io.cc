@@ -25,8 +25,17 @@ namespace rgw::bplus::ondisk {
 
   } /* load (i.e., from primary storage) */
 
+  struct BtreeTraversal
+  {
+    vector<uint16_t> node_stack;
+    BtreeTraversal(uint16_t node) {
+      node_stack.push_back(node);
+    }
+  };
+
   int insert(const std::string& key, const std::string &val)
   {
+    BtreeTraversal btr(0);
   }
 
   void BTreeIO::uncache_this()
