@@ -104,7 +104,6 @@ namespace rgw::bplus::ondisk {
     uint32_t offset;
     uint16_t type;
     uint16_t refcnt;
-    uint32_t linked_page_off; // indirect to a new page, or 0
 
     using link_mode = bi::link_mode<bi::safe_link>; /* XXX normal */
     using hook_type = bi::avl_set_member_hook<link_mode>;
@@ -116,7 +115,6 @@ namespace rgw::bplus::ondisk {
       encode(offset, bl);
       encode(type, bl);
       encode(refcnt, bl);
-      encode(linked_page_off, bl);
       ENCODE_FINISH(bl);
     }
 
@@ -125,7 +123,6 @@ namespace rgw::bplus::ondisk {
       decode(offset, bl);
       decode(type, bl);
       decode(refcnt, bl);
-      decode(linked_page_off, bl);
       DECODE_FINISH(bl);
     }
   }; /* Page */
