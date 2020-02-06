@@ -62,6 +62,20 @@ namespace rgw::bplus::ondisk {
     PageLRU page_lru;
     PageCache page_cache;
 
+  private:
+    Page* get_page(const uint16_t page_no) {
+      uint32_t offset = Layout::page_start + (page_no * Layout::page_size);
+      PageCache::Latch lat;
+      // 1. search the cache
+      auto page = page_cache.find_latch(1, offset, lat, PageCache::FLAG_LOCK);
+      // 2. if !found, load from disk
+    }
+
+    Page* get_page(const std::string& key) {
+      /* XXXX */
+      return get_page(0);
+    }
+
   public:
     BTreeIO(const std::string& oid, BTreeCache* cache,
 	    cls_method_context_t _hctx)

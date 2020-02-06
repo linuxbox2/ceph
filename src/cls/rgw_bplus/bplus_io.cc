@@ -33,7 +33,7 @@ namespace rgw::bplus::ondisk {
     }
   };
 
-  int insert(const std::string& key, const std::string &val)
+  int BTreeIO::insert(const std::string& key, const std::string &val)
   {
     BtreeTraversal btr(0);
   }

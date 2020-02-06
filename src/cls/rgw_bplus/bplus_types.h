@@ -104,7 +104,6 @@ namespace rgw::bplus::ondisk {
     uint32_t offset;
     uint16_t type;
     uint16_t refcnt;
-
     using link_mode = bi::link_mode<bi::safe_link>; /* XXX normal */
     using hook_type = bi::avl_set_member_hook<link_mode>;
 
@@ -148,11 +147,18 @@ namespace rgw::bplus::ondisk {
       { return page.offset == offset; }
   };
 
+  class NoopLock
+  {
+  public:
+    void lock() {}
+    void unlock() {}
+  };
+
   using PageHook = bi::member_hook<Page, Page::hook_type, &Page::page_hook>;
   using PageAVL = bi::avltree<Page, bi::compare<PageLT>, PageHook>;
-  using PageLRU = cohort::lru::LRU<std::mutex>;
-  using PageCache =
-    cohort::lru::TreeX<Page, PageAVL, PageLT, PageEQ, uint32_t, std::mutex>;
+  using PageLRU = cohort::lru::LRU<NoopLock>;
+  using PageCache = cohort::lru::TreeX<Page, PageAVL, PageLT, PageEQ, uint32_t,
+				       NoopLock>;
 
   struct Addr
   {
@@ -360,7 +366,8 @@ namespace rgw::bplus::ondisk {
   {
     static constexpr uint32_t header_offset = 0;
     static constexpr uint32_t header_size = 4096;
-
+    static constexpr uint32_t page_start = 2 * header_size;
+    static constexpr uint16_t page_size = 4096;
   };
   
 } /* namespace */
