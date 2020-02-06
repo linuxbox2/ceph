@@ -99,16 +99,23 @@ namespace rgw::bplus::ondisk {
   }; /* FreeSpaceMap */
   WRITE_CLASS_ENCODER(FreeSpaceMap);
 
+  class BTreeIO;
+
   struct Page : public cohort::lru::Object
   {
+    BTreeIO* bt;
     uint32_t offset;
     uint16_t type;
     uint16_t refcnt;
+
     using link_mode = bi::link_mode<bi::safe_link>; /* XXX normal */
     using hook_type = bi::avl_set_member_hook<link_mode>;
 
     hook_type page_hook;
-  
+
+    Page(BTreeIO* _bt, uint32_t _offset) : bt(_bt), offset(_offset)
+      {}
+
     void encode(buffer::list& bl) const {
       ENCODE_START(1, 1, bl);
       encode(offset, bl);
@@ -270,6 +277,11 @@ namespace rgw::bplus::ondisk {
     flat_map<uint16_t, KeyPrefix> key_prefixes;
     flat_map<std::string, uint16_t> kp_reverse; // not serialized
     std::vector<KeyType> keys;
+
+    KeyPage(BTreeIO* bt, const uint32_t offset) : Page(bt, offset)
+      {}
+
+    bool reclaim() override;
 
     void encode(buffer::list& bl) const {
       ENCODE_START(1, 1, bl);

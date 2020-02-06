@@ -34,12 +34,37 @@
 namespace rgw::bplus::ondisk {
 
   class BTreeCache;
+  class BTreeIO;
 
   using link_mode = bi::link_mode<bi::safe_link>; /* XXX normal */
 
+  template<typename T>
+  class Factory : public cohort::lru::ObjectFactory
+  {
+  public:
+    BTreeIO* bt;
+    uint32_t offset;
+    uint32_t flags;
+
+    Factory() = delete;
+
+    Factory(BTreeIO* _bt, const uint32_t _offset, uint32_t _flags)
+      : bt(_bt), offset(_offset), flags(_flags) {}
+
+    void recycle (cohort::lru::Object* o) override {
+      /* re-use an existing object */
+      o->~Object(); // call lru::Object virtual dtor
+      // placement new!
+      new (o) T(bt, offset);
+    }
+
+    cohort::lru::Object* alloc() override {
+      return new T(bt, offset);
+    }
+  }; /* Factory */
+
   class BTreeIO
   {
-
     static constexpr uint32_t FLAG_NONE =   0x0000;
     static constexpr uint32_t FLAG_INAVL =  0x0001;
 
@@ -62,18 +87,24 @@ namespace rgw::bplus::ondisk {
     PageLRU page_lru;
     PageCache page_cache;
 
+    using ObjectFactory = cohort::lru::ObjectFactory;
+
   private:
-    Page* get_page(const uint16_t page_no) {
+    Page* get_page(const uint16_t page_no, ObjectFactory& fac) {
       uint32_t offset = Layout::page_start + (page_no * Layout::page_size);
       PageCache::Latch lat;
       // 1. search the cache
       auto page = page_cache.find_latch(1, offset, lat, PageCache::FLAG_LOCK);
-      // 2. if !found, load from disk
+      if (page) {
+	page_lru.ref(page, cohort::lru::FLAG_INITIAL);
+      } else {
+	// 2. need to insert into cache
+      }
+      return page;
     }
 
-    Page* get_page(const std::string& key) {
-      /* XXXX */
-      return get_page(0);
+    Page* get_page_for(const std::string& key, ObjectFactory& fac) {
+      return get_page(0, fac);
     }
 
   public:
@@ -118,7 +149,19 @@ namespace rgw::bplus::ondisk {
     void uncache_this();
 
     friend class BTreeCache;
+    friend class KeyPage;
   }; /* BTreeIO */
+
+  bool KeyPage::reclaim()
+  {
+    /* in the non-delete case, handle may still be in handle table */
+    if (page_hook.is_linked()) {
+      /* in this case, we are being called from a context which holds
+       * the partition lock */
+      bt->page_cache.remove(1, this, PageCache::FLAG_NONE);
+    }
+    return true;
+  } /* reclaim */
 
   class BTreeCache
   {
