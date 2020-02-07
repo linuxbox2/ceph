@@ -33,6 +33,8 @@
 namespace {
 
   using namespace rgw::bplus;
+  using namespace rgw::bplus::ondisk;
+
   using std::get;
   using std::string;
 
@@ -48,6 +50,8 @@ namespace {
   class TreeOps1 : public ::testing::Test {
   public:
     string oid{"tree1"};
+    MockHctx mh{oid};
+    cls_method_context_t hctx = &mh;
   };
 
 } /* namespace */
