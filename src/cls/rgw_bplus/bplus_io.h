@@ -103,7 +103,9 @@ namespace rgw::bplus::ondisk {
       return page;
     }
 
-    Page* get_page_for(const std::string& key, ObjectFactory& fac) {
+    Page* get_page_for(const std::string& key) {
+      uint32_t offset = Layout::page_start + (0 * Layout::page_size);
+      Factory<KeyPage> fac{this, offset, PageCache::FLAG_NONE};
       return get_page(0, fac);
     }
 
