@@ -47,6 +47,27 @@ namespace {
   public:
   };
 
+  class NameGen1 {
+  public:
+    char alpha{'a'};
+    uint32_t ix1{0};
+    uint32_t ix2{0};
+    std::string next() {
+      std::string name;
+      name += alpha;
+      name += "_lvl" + std::to_string(ix1) + "_file" + std::to_string(ix2);
+      if (++ix1 > 100) {
+	ix1 = 0;
+      }
+      if (++ix2 > 10) {
+	ix2 = 0;
+	if (++(++alpha) > 'z')
+	  alpha = 'a';
+      }
+      return name;
+    }
+  };
+
   class TreeOps1 : public ::testing::Test {
   public:
     string oid{"tree1"};
@@ -70,6 +91,14 @@ TEST_F(Bitmap1, test1) {
   ASSERT_EQ(bmap.test(63), true);
   bmap.clear(13);
   ASSERT_EQ(bmap.data[0], uint64_t(1) << 63);
+}
+
+TEST_F(TreeOps1, names1) {
+  NameGen1 ng;
+  for (int ix = 0; ix < 512; ++ix) {
+    std::cout << "name: " << ix << " "
+	      << ng.next() << std::endl;
+  }
 }
 
 TEST_F(TreeOps1, test1) {
