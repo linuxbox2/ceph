@@ -73,8 +73,8 @@ TEST_F(Bitmap1, test1) {
 }
 
 TEST_F(TreeOps1, test1) {
-
-
+  BTreeIO* bt = btree_cache.get_tree(oid, hctx);
+  ASSERT_NE(bt, nullptr);
 }
 
 int main(int argc, char **argv)
