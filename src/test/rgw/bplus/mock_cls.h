@@ -49,27 +49,27 @@ namespace rgw::bplus::ondisk {
   int cls_cxx_stat2(cls_method_context_t hctx, uint64_t *size,
 		    ceph::real_time *mtime);
 
-  int cls_cxx_read2(cls_method_context_t hctx, int ofs, int len,
-		    ceph::buffer::list *bl, uint32_t op_flags) {
+  static inline int cls_cxx_read2(cls_method_context_t hctx, int ofs, int len,
+				  ceph::buffer::list *bl, uint32_t op_flags) {
     using rgw::bplus::ondisk::MockHctx;
     MockHctx* mhctx = static_cast<MockHctx*>(hctx);
     return mhctx->read2(ofs, len, bl, op_flags);
   }
 
-  int cls_cxx_read(cls_method_context_t hctx, int ofs, int len,
-		  ceph::buffer::list *bl) {
+  static inline int cls_cxx_read(cls_method_context_t hctx, int ofs, int len,
+				ceph::buffer::list *bl) {
     return cls_cxx_read2(hctx, ofs, len, bl, 0);
   }
 
-  int cls_cxx_write2(cls_method_context_t hctx, int ofs, int len,
-		    ceph::buffer::list *bl, uint32_t op_flags) {
+  static inline int cls_cxx_write2(cls_method_context_t hctx, int ofs, int len,
+				  ceph::buffer::list *bl, uint32_t op_flags) {
     using rgw::bplus::ondisk::MockHctx;
     MockHctx* mhctx = static_cast<MockHctx*>(hctx);
     return mhctx->write2(ofs, len, bl, op_flags);    
   }
 
-  int cls_cxx_write(cls_method_context_t hctx, int ofs, int len,
-		    ceph::buffer::list *bl) {
+  static inline int cls_cxx_write(cls_method_context_t hctx, int ofs, int len,
+				  ceph::buffer::list *bl) {
     return cls_cxx_write2(hctx, ofs, len, bl, 0);
   }
 
@@ -80,11 +80,11 @@ namespace rgw::bplus::ondisk {
 
   int cls_cxx_truncate(cls_method_context_t hctx, int ofs);
 
-  int cls_cxx_write_zero(cls_method_context_t hctx, int ofs, int len) {
+  static inline int cls_cxx_write_zero(cls_method_context_t hctx, int ofs,
+				      int len) {
     using rgw::bplus::ondisk::MockHctx;
     MockHctx* mhctx = static_cast<MockHctx*>(hctx);
     return mhctx->write_zero(ofs, len);
   }
-
 
 #endif /* MOCK_CLS_H */

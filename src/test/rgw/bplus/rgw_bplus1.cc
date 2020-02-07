@@ -23,7 +23,10 @@
 #include <boost/program_options.hpp>
 #include "xxhash.h"
 
+#include "mock_cls.h" /* include before any header including objclass.h */
 #include "bplus_types.h"
+#include "bplus_io.h"
+
 
 #define dout_subsys ceph_subsys_rgw
 
@@ -42,6 +45,10 @@ namespace {
   public:
   };
 
+  class TreeOps1 : public ::testing::Test {
+  public:
+    string oid{"tree1"};
+  };
 
 } /* namespace */
 
@@ -61,6 +68,10 @@ TEST_F(Bitmap1, test1) {
   ASSERT_EQ(bmap.data[0], uint64_t(1) << 63);
 }
 
+TEST_F(TreeOps1, test1) {
+
+
+}
 
 int main(int argc, char **argv)
 {

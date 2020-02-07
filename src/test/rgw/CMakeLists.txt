@@ -21,7 +21,9 @@ add_executable(ceph_test_rgw_bplus1
   )
 target_include_directories(ceph_test_rgw_bplus1
   PUBLIC ${CMAKE_SOURCE_DIR}/src/cls/rgw_bplus
+  PUBLIC ${CMAKE_SOURCE_DIR}/src/test/rgw/bplus
   rgw_bplus)
+target_compile_definitions(ceph_test_rgw_bplus1 PRIVATE WITH_MOCK_CLS)
 target_link_libraries(ceph_test_rgw_bplus1
   librados
   ceph-common

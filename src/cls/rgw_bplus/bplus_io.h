@@ -29,7 +29,9 @@
 #include "common/ceph_timer.h"
 #include "common/likely.h"
 
+#ifndef MOCK_CLS_H
 #include "objclass/objclass.h"
+#endif
 
 namespace rgw::bplus::ondisk {
 
@@ -154,17 +156,6 @@ namespace rgw::bplus::ondisk {
     friend class KeyPage;
   }; /* BTreeIO */
 
-  bool KeyPage::reclaim()
-  {
-    /* in the non-delete case, handle may still be in handle table */
-    if (page_hook.is_linked()) {
-      /* in this case, we are being called from a context which holds
-       * the partition lock */
-      bt->page_cache.remove(1, this, PageCache::FLAG_NONE);
-    }
-    return true;
-  } /* reclaim */
-
   class BTreeCache
   {
   public:
@@ -174,6 +165,8 @@ namespace rgw::bplus::ondisk {
 
     using lock_guard = std::lock_guard<std::mutex>;
     using unique_lock = std::unique_lock<std::mutex>;
+
+    BTreeCache() {}
 
     BTreeIO* get_tree(const std::string& oid, cls_method_context_t hctx) {
       unique_lock guard(mtx);
@@ -223,6 +216,8 @@ namespace rgw::bplus::ondisk {
     friend class BTreeIO;
 
   }; /* BTreeCache */
+
+  extern BTreeCache btree_cache;
 
 } /* namespace */
 

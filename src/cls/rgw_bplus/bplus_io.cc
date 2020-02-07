@@ -11,6 +11,9 @@
  *
  */
 
+#if defined(WITH_MOCK_CLS)
+#include "mock_cls.h"
+#endif
 #include "bplus_io.h"
 
 namespace rgw::bplus::ondisk {
@@ -36,6 +39,7 @@ namespace rgw::bplus::ondisk {
   int BTreeIO::insert(const std::string& key, const std::string &val)
   {
     BtreeTraversal btr(0);
+    return 0;
   }
 
   void BTreeIO::uncache_this()
@@ -45,5 +49,18 @@ namespace rgw::bplus::ondisk {
     c.erase(BTreeIO::TreeQueue::s_iterator_to(*this));
     flags &= ~FLAG_INAVL;
   } /* intrusive_ptr_release */
+
+  bool KeyPage::reclaim()
+  {
+    /* in the non-delete case, handle may still be in handle table */
+    if (page_hook.is_linked()) {
+      /* in this case, we are being called from a context which holds
+       * the partition lock */
+      bt->page_cache.remove(1, this, PageCache::FLAG_NONE);
+    }
+    return true;
+  } /* KeyPage::reclaim */
+
+  BTreeCache btree_cache;
 
 } /* namespace */
