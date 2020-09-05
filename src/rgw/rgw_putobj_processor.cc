@@ -337,6 +337,9 @@ int MultipartObjectProcessor::process_first_chunk(bufferlist&& data,
   // then drain to wait for the result in case of EEXIST
   int r = writer.write_exclusive(data);
   if (r == -EEXIST) {
+    // save failed prefix
+    failed_prefixes.push_back(manifest.get_prefix());
+
     // randomize the oid prefix and reprepare the head/manifest
     std::string oid_rand(32, 0);
     gen_rand_alphanumeric(store->ctx(), oid_rand.data(), oid_rand.size());
@@ -462,6 +465,7 @@ int MultipartObjectProcessor::complete(size_t accounted_size,
   info.accounted_size = accounted_size;
   info.modified = real_clock::now();
   info.manifest = manifest;
+  info.failed_prefixes = std::move(failed_prefixes);
 
   bool compressed;
   r = rgw_compression_info_from_attrset(attrs, compressed, info.cs_info);
@@ -479,6 +483,11 @@ int MultipartObjectProcessor::complete(size_t accounted_size,
   rgw_raw_obj raw_meta_obj;
 
   store->obj_to_raw(bucket_info.placement_rule, meta_obj, &raw_meta_obj);
+
+  /* XXXX this is (I think) a blind-safe of an omap key which may contain
+   * data from prior uploads of the same partid (incl. failed_prefixes).
+   * Handing of the merge cases atomically could be a job for a CLS operation
+   * to write part meta */
 
   auto obj_ctx = store->svc.sysobj->init_obj_ctx();
   auto sysobj = obj_ctx.get_obj(raw_meta_obj);
