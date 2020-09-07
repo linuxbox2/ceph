@@ -325,6 +325,13 @@ struct cls_rgw_obj_key {
 };
 WRITE_CLASS_ENCODER(cls_rgw_obj_key)
 
+inline ostream& operator<<(ostream& out, const cls_rgw_obj_key &o) {
+  if (o.instance.empty()) {
+    return out << o.name;
+  } else {
+    return out << o.name << "[" << o.instance << "]";
+  }
+}
 
 #define RGW_BUCKET_DIRENT_FLAG_VER           0x1    /* a versioned object instance */
 #define RGW_BUCKET_DIRENT_FLAG_CURRENT       0x2    /* the last object instance of a versioned object */
