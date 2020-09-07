@@ -13,6 +13,7 @@
 #include "common/ceph_time.h"
 #include "common/Mutex.h"
 #include "common/Cond.h"
+#include "rgw/rgw_basic_types.h"
 
 // Forward declaration
 class BucketIndexAioManager;
@@ -572,6 +573,12 @@ int cls_rgw_lc_get_entry(librados::IoCtx& io_ctx, const string& oid, const std::
 int cls_rgw_lc_list(librados::IoCtx& io_ctx, const string& oid,
 		    const string& marker, uint32_t max_entries,
                     vector<cls_rgw_lc_entry>& entries);
+
+#if 0 /* XXXX fix */
+/* multipart */
+int cls_rgw_mp_upload_part_meta(librados::IoCtx& io_ctx, const std::string& oid, const std::string& part_key,
+  const RGWUploadPartInfo& info);
+#endif
 
 /* resharding */
 void cls_rgw_reshard_add(librados::ObjectWriteOperation& op, const cls_rgw_reshard_entry& entry);
