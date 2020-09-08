@@ -29,6 +29,7 @@ add_executable(unittest_rgw_period_history test_rgw_period_history.cc)
 add_ceph_unittest(unittest_rgw_period_history)
 target_link_libraries(unittest_rgw_period_history
   ${rgw_libs}
+  cls_rgw_client
   ${BOOST_CONTEXT_LIBS})
 
 # unitttest_rgw_compression
@@ -50,11 +51,8 @@ add_executable(unittest_rgw_reshard_wait test_rgw_reshard_wait.cc)
 add_ceph_unittest(unittest_rgw_reshard_wait)
 target_link_libraries(unittest_rgw_reshard_wait
   ${rgw_libs}
+  cls_rgw_client
   ${BOOST_CONTEXT_LIBS})
-
-set(test_rgw_a_src test_rgw_common.cc)
-add_library(test_rgw_a STATIC ${test_rgw_a_src})
-target_link_libraries(test_rgw_a ${rgw_libs})
 
 # ceph_test_rgw_manifest
 set(test_rgw_manifest_srcs test_rgw_manifest.cc)
@@ -63,6 +61,7 @@ add_executable(ceph_test_rgw_manifest
   )
 target_link_libraries(ceph_test_rgw_manifest
   test_rgw_a
+  ${rgw_libs}
   cls_rgw_client
   cls_lock_client
   cls_refcount_client
@@ -86,6 +85,7 @@ add_executable(ceph_test_rgw_obj
   )
 target_link_libraries(ceph_test_rgw_obj
   test_rgw_a
+  ${rgw_libs}
   cls_rgw_client
   cls_lock_client
   cls_refcount_client
@@ -132,6 +132,7 @@ add_executable(unittest_rgw_reshard
 add_ceph_unittest(unittest_rgw_reshard)
 target_link_libraries(unittest_rgw_reshard
   ${rgw_libs}
+  cls_rgw_client
   ${BOOST_CONTEXT_LIBS}
   )
 
@@ -145,7 +146,9 @@ target_link_libraries(unittest_rgw_putobj rgw_a ${UNITTEST_LIBS})
 #target_link_libraries(ceph_test_rgw_throttle ${rgw_libs}
 #  librados global ${UNITTEST_LIBS} ${BOOST_CONTEXT_LIBS})
 
-add_executable(unittest_rgw_iam_policy test_rgw_iam_policy.cc)
+add_executable(unittest_rgw_iam_policy
+  test_rgw_iam_policy.cc
+  )
 add_ceph_unittest(unittest_rgw_iam_policy)
 target_link_libraries(unittest_rgw_iam_policy
   ${rgw_libs}
@@ -206,8 +209,14 @@ target_link_libraries(unittest_rgw_url ${rgw_libs})
 add_executable(unittest_rgw_kms test_rgw_kms.cc)
 add_ceph_unittest(unittest_rgw_kms)
 
-target_link_libraries(unittest_rgw_kms ${rgw_libs})
+target_link_libraries(unittest_rgw_kms
+  ${rgw_libs}
+  cls_rgw_client
+  )
 
 add_executable(ceph_test_rgw_gc_log test_rgw_gc_log.cc $<TARGET_OBJECTS:unit-main>)
-target_link_libraries(ceph_test_rgw_gc_log ${rgw_libs} radostest-cxx)
+target_link_libraries(ceph_test_rgw_gc_log
+  ${rgw_libs}
+  cls_rgw_client
+  radostest-cxx)
 install(TARGETS ceph_test_rgw_gc_log DESTINATION ${CMAKE_INSTALL_BINDIR})

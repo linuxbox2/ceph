@@ -208,10 +208,10 @@ if(${WITH_RADOSGW})
     librados
     ${rgw_libs}
     global
+    cls_rgw_client
     cls_version_client
     cls_log_client
     cls_refcount_client
-    cls_rgw_client
     cls_user_client
     cls_lock_client
     ${BLKID_LIBRARIES}
@@ -239,10 +239,10 @@ if(${WITH_RADOSGW})
     librados
     ${rgw_libs}
     global
+    cls_rgw_client
     cls_version_client
     cls_log_client
     cls_refcount_client
-    cls_rgw_client
     cls_user_client
     cls_lock_client
     ${BLKID_LIBRARIES}
