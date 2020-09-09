@@ -484,7 +484,7 @@ int MultipartObjectProcessor::complete(size_t accounted_size,
 
   store->obj_to_raw(bucket_info.placement_rule, meta_obj, &raw_meta_obj);
 
-  /* XXXX this is (I think) a blind-safe of an omap key which may contain
+  /* XXXX this is (I think) a blind-save of an omap key which may contain
    * data from prior uploads of the same partid (incl. failed_prefixes).
    * Handing of the merge cases atomically could be a job for a CLS operation
    * to write part meta */
