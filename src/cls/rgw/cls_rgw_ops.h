@@ -1,3 +1,6 @@
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
+// vim: ts=8 sw=2 smarttab
+
 #ifndef CEPH_CLS_RGW_OPS_H
 #define CEPH_CLS_RGW_OPS_H
 
@@ -1237,6 +1240,7 @@ cls_rgw_lc_list_entries_ret(uint8_t compat_v = 3)
 WRITE_CLASS_ENCODER(cls_rgw_lc_list_entries_ret)
 
 struct cls_rgw_mp_upload_part_op {
+  std::string part_key;
   RGWUploadPartInfo info;
 
   cls_rgw_mp_upload_part_op() {}
