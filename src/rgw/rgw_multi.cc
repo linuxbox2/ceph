@@ -242,6 +242,27 @@ static inline void cleanup_mp_part(
   }
 } /* cleanup_part */
 
+void cleanup_multipart_reuploads(RGWRados* store, CephContext *cct,
+				 RGWObjectCtx *obj_ctx,
+				 RGWBucketInfo& bucket_info,
+				 RGWUploadPartInfo& obj_part,
+				 rgw_obj& meta_obj)
+{
+  /* cleanup obj_part.failed_prefixes arising from re-uploads
+   * of the current part (if any) */
+  cls_rgw_obj_chain chain;
+  list<rgw_obj_index_key> remove_objs;
+
+  for (const string& failed_prefix : obj_part.failed_prefixes)  {
+    /* cleanup_part relies on manifest obj iterator, so
+     * clone this one and back-form its prefix */
+    RGWObjManifest manifest(obj_part.manifest);
+    manifest.set_prefix(failed_prefix);
+    cleanup_mp_part(store, bucket_info, manifest, meta_obj, chain,
+		    remove_objs);
+  }
+} /* cleanup_multipart_reuploads */
+
 int abort_multipart_upload(RGWRados* store, CephContext *cct,
 			   RGWObjectCtx *obj_ctx, RGWBucketInfo& bucket_info,
 			   RGWMPObj& mp_obj)

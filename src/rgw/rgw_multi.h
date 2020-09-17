@@ -98,8 +98,15 @@ extern int list_multipart_parts(RGWRados *store, struct req_state *s,
                                 int *next_marker, bool *truncated,
                                 bool assume_unsorted = false);
 
-extern int abort_multipart_upload(RGWRados *store, CephContext *cct, RGWObjectCtx *obj_ctx,
-                                RGWBucketInfo& bucket_info, RGWMPObj& mp_obj);
+extern int abort_multipart_upload(RGWRados *store, CephContext *cct,
+				  RGWObjectCtx *obj_ctx,
+				  RGWBucketInfo& bucket_info, RGWMPObj& mp_obj);
+
+extern void cleanup_multipart_reuploads(RGWRados* store, CephContext *cct,
+					RGWObjectCtx *obj_ctx,
+					RGWBucketInfo& bucket_info,
+					RGWUploadPartInfo& obj_part,
+					rgw_obj& meta_obj);
 
 extern int list_bucket_multiparts(RGWRados *store, RGWBucketInfo& bucket_info,
 				  const string& prefix,
