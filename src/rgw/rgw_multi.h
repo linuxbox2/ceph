@@ -106,7 +106,8 @@ extern void cleanup_multipart_reuploads(RGWRados* store, CephContext *cct,
 					RGWObjectCtx *obj_ctx,
 					RGWBucketInfo& bucket_info,
 					RGWUploadPartInfo& obj_part,
-					rgw_obj& meta_obj);
+					rgw_obj& meta_obj,
+					const std::string& upload_id);
 
 extern int list_bucket_multiparts(RGWRados *store, RGWBucketInfo& bucket_info,
 				  const string& prefix,

@@ -246,10 +246,11 @@ void cleanup_multipart_reuploads(RGWRados* store, CephContext *cct,
 				 RGWObjectCtx *obj_ctx,
 				 RGWBucketInfo& bucket_info,
 				 RGWUploadPartInfo& obj_part,
-				 rgw_obj& meta_obj)
+				 rgw_obj& meta_obj,
+				 const std::string& upload_id)
 {
   /* cleanup obj_part.failed_prefixes arising from re-uploads
-   * of the current part (if any) */
+   * of the given part (if any) */
   cls_rgw_obj_chain chain;
   list<rgw_obj_index_key> remove_objs;
 
@@ -261,6 +262,14 @@ void cleanup_multipart_reuploads(RGWRados* store, CephContext *cct,
     cleanup_mp_part(store, bucket_info, manifest, meta_obj, chain,
 		    remove_objs);
   }
+  /* use upload id as tag and do it synchronously */
+  auto ret = store->send_chain_to_gc(chain, upload_id);
+  if (ret < 0) {
+    ldout(cct, 5) << __func__ << ": gc->send_chain() returned " << ret << dendl;
+    //Delete objects inline if send chain to gc fails
+    store->delete_objs_inline(chain, upload_id);
+  }
+  /* XXXX how to handle remove_objs?  we can't delete meta_obj */
 } /* cleanup_multipart_reuploads */
 
 int abort_multipart_upload(RGWRados* store, CephContext *cct,

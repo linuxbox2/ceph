@@ -6039,7 +6039,8 @@ void RGWCompleteMultipart::execute()
        * doesn't matter if this complete attempt succeeds or fails */
       cleanup_multipart_reuploads(store, s->cct,
 				  static_cast<RGWObjectCtx*>(s->obj_ctx),
-				  s->bucket_info, obj_part, meta_obj);
+				  s->bucket_info, obj_part, meta_obj,
+				  mp.get_upload_id());
 
       ofs += obj_part.size;
       accounted_size += obj_part.accounted_size;
