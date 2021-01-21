@@ -63,7 +63,7 @@ def generate_caps(type_):
         ),
         client=dict(
             mon='allow rw',
-            mgr='allow r',
+            mgr='allow rw', # allow to run librgw unit tests
             osd='allow rwx',
             mds='allow',
         ),
