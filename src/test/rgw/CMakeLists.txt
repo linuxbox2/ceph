@@ -215,6 +215,11 @@ install(TARGETS ceph_test_rgw_gc_log DESTINATION ${CMAKE_INSTALL_BINDIR})
 add_ceph_test(test-ceph-diff-sorted.sh
   ${CMAKE_CURRENT_SOURCE_DIR}/test-ceph-diff-sorted.sh)
 
+# unittest_rgw_inventory
+add_executable(unittest_rgw_inventory test_rgw_inventory.cc)
+add_ceph_unittest(unittest_rgw_inventory)
+target_link_libraries(unittest_rgw_inventory ${rgw_libs} ${EXPAT_LIBRARIES})
+
 # unittest_cls_fifo_legacy
 add_executable(unittest_cls_fifo_legacy test_cls_fifo_legacy.cc)
 target_link_libraries(unittest_cls_fifo_legacy radostest-cxx ${UNITTEST_LIBS}
