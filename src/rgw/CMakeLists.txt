@@ -74,6 +74,7 @@ set(librgw_common_srcs
   rgw_gc.cc
   rgw_gc_log.cc
   rgw_http_client.cc
+  rgw_inventory.cc
   rgw_keystone.cc
   rgw_ldap.cc
   rgw_lc.cc
