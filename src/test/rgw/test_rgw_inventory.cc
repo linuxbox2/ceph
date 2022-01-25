@@ -100,3 +100,15 @@ TEST(TestIdempotentParse, InvXML1)
   ASSERT_TRUE(inventory1 == inventory1_1);
 }
 
+TEST(TestIdempotentEncodeDecode, InvXML1)
+{
+  ceph::buffer::list bl1, bl2, bl3;
+  inventory1.encode(bl1);
+  inventory1_1.encode(bl2);
+  // equivalent serialized forms compare equal
+  ASSERT_EQ(bl1, bl2);
+  // deserialized form compares equal with original
+  rgw::inv::Configuration inventory1_3;
+  decode(inventory1_3, bl2);
+  ASSERT_EQ(inventory1, inventory1_3);
+}

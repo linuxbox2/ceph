@@ -156,17 +156,58 @@ namespace rgw { namespace inv {
     bool operator<(const Configuration &rhs) const;
     bool operator==(const Configuration &rhs) const;
 
+    void encode(bufferlist& bl) const {
+      ENCODE_START(1, 1, bl);
+      encode(id, bl);
+      encode(filter.prefix, bl);
+      encode(destination.format, bl);
+      encode(destination.account_id, bl);
+      encode(destination.bucket_arn, bl);
+      encode(destination.prefix, bl);
+      encode(destination.encryption.kms.key_id, bl);
+      encode(schedule.frequency, bl);
+      encode(versions, bl);
+      encode(optional_fields, bl);
+      ENCODE_FINISH(bl);
+    }
+
+    void decode(bufferlist::const_iterator& bl) {
+      DECODE_START(1, bl);
+      decode(id, bl);
+      decode(filter.prefix, bl);
+      decode(destination.format, bl);
+      decode(destination.account_id, bl);
+      decode(destination.bucket_arn, bl);
+      decode(destination.prefix, bl);
+      decode(destination.encryption.kms.key_id, bl);
+      decode(schedule.frequency, bl);
+      decode(versions, bl);
+      decode(optional_fields, bl);
+      DECODE_FINISH(bl);
+    }
+
     void dump_xml(Formatter* f) const;
     void decode_xml(XMLObj* obj);
   }; /* Configuration */
+  WRITE_CLASS_ENCODER(Configuration);
 
   class InventoryConfigurations
   {
   public:
     std::map<std::string, Configuration> id_mapping;
 
-    void dump_xml(Formatter* f) const;
-    void decode_xml(XMLObj* obj);
+    void encode(bufferlist& bl) const {
+      ENCODE_START(1, 1, bl);
+      encode(id_mapping, bl);
+      ENCODE_FINISH(bl);
+    }
+
+    void decode(bufferlist::const_iterator& bl) {
+      DECODE_START(1, bl);
+      decode(id_mapping, bl);
+      DECODE_FINISH(bl);
+    }
   };
+  WRITE_CLASS_ENCODER(InventoryConfigurations);
 
 }} /* namespace rgw::inv */
