@@ -97,8 +97,6 @@ void Configuration::decode_xml(XMLObj* obj)
       } // OptionalFields
     } // S3BucketDestination
   } // Destination
-
-  std::cout << "configuration decoded" << std::endl;
 }
 
 }} /* namespace rgw::inv */
