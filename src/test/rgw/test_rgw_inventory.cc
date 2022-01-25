@@ -13,6 +13,9 @@ namespace {
   rgw::inv::Configuration inventory1;
   rgw::inv::Configuration inventory1_1;
   rgw::inv::Configuration inventory1_2;
+  rgw::inv::Configuration inventory2;
+  rgw::inv::InventoryConfigurations attr1;
+  rgw::inv::InventoryConfigurations attr2;
 }
 
 static const char* inv_xml_1 =
@@ -29,6 +32,46 @@ R"(<?xml version="1.0" encoding="UTF-8"?>
          <AccountId>123456789012</AccountId>
          <Bucket>arn:aws:s3:::destination-bucket</Bucket>
          <Prefix>prefix1</Prefix>
+         <Encryption>
+            <SSE-KMS>
+               <KeyId>arn:aws:kms:us-west-2:111122223333:key/1234abcd-12ab-34cd-56ef-1234567890ab</KeyId>
+            </SSE-KMS>
+         </Encryption>
+      </S3BucketDestination>
+   </Destination>
+   <Schedule>
+      <Frequency>Daily</Frequency>
+   </Schedule>
+   <IncludedObjectVersions>All</IncludedObjectVersions>
+   <OptionalFields>
+      <Field>Size</Field>
+      <Field>LastModifiedDate</Field>
+      <Field>ETag</Field>
+      <Field>StorageClass</Field>
+      <Field>IsMultipartUploaded</Field>
+      <Field>ReplicationStatus</Field>
+      <Field>EncryptionStatus</Field>
+      <Field>ObjectLockRetainUntilDate</Field>
+      <Field>ObjectLockMode</Field>
+      <Field>ObjectLockLegalHoldStatus</Field>
+   </OptionalFields>
+</InventoryConfiguration>
+)";
+
+static const char* inv_xml_2 =
+R"(<?xml version="1.0" encoding="UTF-8"?>
+<InventoryConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+   <Id>report2</Id>
+   <IsEnabled>true</IsEnabled>
+   <Filter>
+      <Prefix>wango</Prefix>
+   </Filter>
+   <Destination>
+      <S3BucketDestination>
+         <Format>Parquet</Format>
+         <AccountId>123456789012</AccountId>
+         <Bucket>arn:aws:s3:::destination-bucket</Bucket>
+         <Prefix>tango</Prefix>
          <Encryption>
             <SSE-KMS>
                <KeyId>arn:aws:kms:us-west-2:111122223333:key/1234abcd-12ab-34cd-56ef-1234567890ab</KeyId>
@@ -111,4 +154,25 @@ TEST(TestIdempotentEncodeDecode, InvXML1)
   rgw::inv::Configuration inventory1_3;
   decode(inventory1_3, bl2);
   ASSERT_EQ(inventory1, inventory1_3);
+}
+
+TEST(TestCombined, InvXML2)
+{
+  // parse a disjoint inventory configuration
+  RGWXMLDecoder::XMLParser parser;
+  ASSERT_TRUE(parser.init());
+  ASSERT_TRUE(parser.parse(inv_xml_2, strlen(inv_xml_2), 1));
+  auto result = RGWXMLDecoder::decode_xml("InventoryConfiguration", inventory2,
+					  &parser, true);
+  ASSERT_TRUE(result);
+  // create a combined configuration set
+  attr1.emplace(std::move(std::string(inventory1.id)), std::move(inventory1));
+  attr1.emplace(std::move(std::string(inventory2.id)), std::move(inventory2));
+  // frob it through ceph encode/decode
+  ceph::buffer::list bl1;
+  attr1.encode(bl1);
+  decode(attr2, bl1); // does bl1 need to be reset, or something?
+		      // (apparently not)
+  // check for equality
+  ASSERT_EQ(attr1, attr2);
 }

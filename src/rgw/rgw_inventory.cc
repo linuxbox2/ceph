@@ -97,6 +97,16 @@ void Configuration::decode_xml(XMLObj* obj)
       } // OptionalFields
     } // S3BucketDestination
   } // Destination
+} /* Configuration::decode_xml(...) */
+
+void InventoryConfigurations::emplace(std::string&& key, Configuration&& config){
+  id_mapping.emplace(std::make_pair(key, config));
+}
+
+bool InventoryConfigurations::operator==(const InventoryConfigurations &rhs)
+  const
+{
+  return (id_mapping == rhs.id_mapping);
 }
 
 }} /* namespace rgw::inv */

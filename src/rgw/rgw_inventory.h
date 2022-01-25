@@ -196,6 +196,9 @@ namespace rgw { namespace inv {
   public:
     std::map<std::string, Configuration> id_mapping;
 
+    void emplace(std::string&& key, Configuration&& config);
+    bool operator==(const InventoryConfigurations &rhs) const;
+
     void encode(bufferlist& bl) const {
       ENCODE_START(1, 1, bl);
       encode(id_mapping, bl);
