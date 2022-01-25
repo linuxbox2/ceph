@@ -9,6 +9,12 @@
 #include <vector>
 #include <stdexcept>
 
+namespace {
+  rgw::inv::Configuration inventory1;
+  rgw::inv::Configuration inventory1_1;
+  rgw::inv::Configuration inventory1_2;
+}
+
 static const char* inv_xml_1 =
 R"(<?xml version="1.0" encoding="UTF-8"?>
 <InventoryConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
@@ -54,22 +60,21 @@ TEST(TestInventoryConfiguration, InvXML1)
   RGWXMLDecoder::XMLParser parser;
   ASSERT_TRUE(parser.init());
   ASSERT_TRUE(parser.parse(inv_xml_1, strlen(inv_xml_1), 1));
-  rgw::inv::Configuration inventory;
-  auto result = RGWXMLDecoder::decode_xml("InventoryConfiguration", inventory,
+  auto result = RGWXMLDecoder::decode_xml("InventoryConfiguration", inventory1,
 					  &parser, true);
   ASSERT_TRUE(result);
   // validate members
-  ASSERT_EQ(inventory.id, "report1");
-  ASSERT_EQ(inventory.filter.prefix, "filterPrefix");
-  ASSERT_EQ(inventory.destination.format, rgw::inv::Format::CSV);
-  ASSERT_EQ(inventory.destination.account_id, "123456789012");
-  ASSERT_EQ(inventory.destination.bucket_arn,
+  ASSERT_EQ(inventory1.id, "report1");
+  ASSERT_EQ(inventory1.filter.prefix, "filterPrefix");
+  ASSERT_EQ(inventory1.destination.format, rgw::inv::Format::CSV);
+  ASSERT_EQ(inventory1.destination.account_id, "123456789012");
+  ASSERT_EQ(inventory1.destination.bucket_arn,
 	    "arn:aws:s3:::destination-bucket");
-  ASSERT_EQ(inventory.destination.prefix, "prefix1");
-  ASSERT_EQ(inventory.destination.encryption.kms.key_id,
+  ASSERT_EQ(inventory1.destination.prefix, "prefix1");
+  ASSERT_EQ(inventory1.destination.encryption.kms.key_id,
 	    "arn:aws:kms:us-west-2:111122223333:key/1234abcd-12ab-34cd-56ef-1234567890ab");
-  ASSERT_EQ(inventory.schedule.frequency, rgw::inv::Frequency::Daily);
-  ASSERT_EQ(inventory.versions, rgw::inv::ObjectVersions::All);
+  ASSERT_EQ(inventory1.schedule.frequency, rgw::inv::Frequency::Daily);
+  ASSERT_EQ(inventory1.versions, rgw::inv::ObjectVersions::All);
   // check optional fields
   for (auto& field : rgw::inv::field_table) {
     // check the full sequence of defined field types, less FieldType::None and not-present
@@ -79,7 +84,19 @@ TEST(TestInventoryConfiguration, InvXML1)
 	(field.ord == rgw::inv::FieldType::IntelligentTieringAccessTier)) {
       continue;
     }
-    ASSERT_TRUE(inventory.optional_fields & rgw::inv::shift_field(field.ord));
+    ASSERT_TRUE(inventory1.optional_fields & rgw::inv::shift_field(field.ord));
   }
+}
+
+TEST(TestIdempotentParse, InvXML1)
+{
+  RGWXMLDecoder::XMLParser parser;
+  ASSERT_TRUE(parser.init());
+  ASSERT_TRUE(parser.parse(inv_xml_1, strlen(inv_xml_1), 1));
+  auto result = RGWXMLDecoder::decode_xml("InventoryConfiguration", inventory1_1,
+					  &parser, true);
+  ASSERT_TRUE(result);
+  // same doc serializes to same structure
+  ASSERT_TRUE(inventory1 == inventory1_1);
 }
 

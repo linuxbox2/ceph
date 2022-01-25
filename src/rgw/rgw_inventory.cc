@@ -1,6 +1,7 @@
 // -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
 // vim: ts=8 sw=2 smarttab ft=cpp
 
+#include <tuple>
 #include <iostream>
 #include "rgw_inventory.h"
 #include "simple_match.hpp"
@@ -11,7 +12,30 @@ namespace sm = simple_match;
 namespace smp = simple_match::placeholders;
 namespace xd = RGWXMLDecoder;
 
-void rgw::inv::Configuration::decode_xml(XMLObj* obj)
+
+bool Configuration::operator==(const Configuration &rhs) const
+{
+  return
+    std::tie(id, filter.prefix, destination.format, destination.account_id,
+	     destination.bucket_arn, destination.prefix, destination.encryption.kms.key_id,
+	     schedule.frequency, versions, optional_fields) ==
+    std::tie(rhs.id, rhs.filter.prefix, rhs.destination.format, rhs.destination.account_id,
+	     rhs.destination.bucket_arn, rhs.destination.prefix, rhs.destination.encryption.kms.key_id,
+	     rhs.schedule.frequency, rhs.versions, rhs.optional_fields);
+} /* operator== */
+
+bool Configuration::operator<(const Configuration &rhs) const
+{
+  return
+    std::tie(id, filter.prefix, destination.format, destination.account_id,
+	     destination.bucket_arn, destination.prefix, destination.encryption.kms.key_id,
+	     schedule.frequency, versions, optional_fields) <
+    std::tie(rhs.id, rhs.filter.prefix, rhs.destination.format, rhs.destination.account_id,
+	     rhs.destination.bucket_arn, rhs.destination.prefix, rhs.destination.encryption.kms.key_id,
+	     rhs.schedule.frequency, rhs.versions, rhs.optional_fields);
+} /* operator< */
+
+void Configuration::decode_xml(XMLObj* obj)
 {
   xd::decode_xml("Id", id, obj);
   // optional Filter

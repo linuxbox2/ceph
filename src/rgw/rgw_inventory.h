@@ -130,23 +130,34 @@ namespace rgw { namespace inv {
 			      // undefined
 	} kms;
       } encryption;
+
+      Destination() : format(Format::None)
+	{}
+
     } destination;
 
     class Schedule
     {
     public:
       Frequency frequency;
+      Schedule() : frequency(Frequency::None)
+	{}
+
     } schedule;
 
     ObjectVersions versions;
     uint32_t optional_fields; // bitmap
 
     Configuration() :
+      versions(ObjectVersions::None),
       optional_fields(uint32_t(FieldType::None))
       {}
 
-    void dump_xml(Formatter *f) const;
-    void decode_xml(XMLObj *obj);
+    bool operator<(const Configuration &rhs) const;
+    bool operator==(const Configuration &rhs) const;
+
+    void dump_xml(Formatter* f) const;
+    void decode_xml(XMLObj* obj);
   }; /* Configuration */
 
   class InventoryConfigurations
@@ -154,8 +165,8 @@ namespace rgw { namespace inv {
   public:
     std::map<std::string, Configuration> id_mapping;
 
-    void dump_xml(Formatter *f) const;
-    void decode_xml(XMLObj *obj);
+    void dump_xml(Formatter* f) const;
+    void decode_xml(XMLObj* obj);
   };
 
 }} /* namespace rgw::inv */
