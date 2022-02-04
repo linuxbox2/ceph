@@ -1489,6 +1489,36 @@ int RGWPutObjLegalHold_ObjStore::get_params(optional_yield y)
   return op_ret;
 }
 
+int RGWPutBucketInventory_ObjStore::get_params(optional_yield y)
+{
+  const auto max_size = s->cct->_conf->rgw_max_put_param_size;
+  std::tie(op_ret, data) = read_all_input(s, max_size, false);
+  return op_ret;
+}
+
+int RGWListBucketInventory_ObjStore::get_params(optional_yield y)
+{
+  continuation_token = s->info.args.get("ContinuationToken");
+  return op_ret;
+}
+
+int RGWGetBucketInventory_ObjStore::get_params(optional_yield y)
+{
+  id = s->info.args.get("id");
+  if (id.empty()) {
+    op_ret = -EINVAL; // XXX check
+  }
+  return op_ret;
+}
+
+int RGWDeleteBucketInventory_ObjStore::get_params(optional_yield y)
+{
+  id = s->info.args.get("id");
+  if (id.empty()) {
+    op_ret = -EINVAL; // XXX check
+  }
+  return op_ret;
+}
 
 static std::tuple<int, bufferlist> read_all_chunked_input(req_state *s, const uint64_t max_read)
 {

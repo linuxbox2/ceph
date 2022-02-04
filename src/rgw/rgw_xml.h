@@ -316,7 +316,8 @@ void RGWXMLDecoder::decode_xml(const char *name, T& val, T& default_val, XMLObj 
 }
 
 template<class T>
-static void encode_xml(const char *name, const T& val, ceph::Formatter *f)
+static inline void encode_xml(const char *name, const T& val,
+			      ceph::Formatter *f)
 {
   f->open_object_section(name);
   val.dump_xml(f);
@@ -324,7 +325,8 @@ static void encode_xml(const char *name, const T& val, ceph::Formatter *f)
 }
 
 template<class T>
-static void encode_xml(const char *name, const char *ns, const T& val, ceph::Formatter *f)
+static inline void encode_xml(const char *name, const char *ns, const T& val,
+			      ceph::Formatter *f)
 {
   f->open_object_section_in_ns(name, ns);
   val.dump_xml(f);
@@ -344,25 +346,30 @@ void encode_xml(const char *name, const bufferlist& bl, ceph::Formatter *f);
 void encode_xml(const char *name, long long unsigned val, ceph::Formatter *f);
 
 template<class T>
-static void do_encode_xml(const char *name, const std::list<T>& l, const char *entry_name, ceph::Formatter *f)
+static inline void do_encode_xml(const char *name, const std::list<T>& l,
+				 const char *entry_name, ceph::Formatter *f)
 {
   f->open_array_section(name);
-  for (typename std::list<T>::const_iterator iter = l.begin(); iter != l.end(); ++iter) {
+  for (typename std::list<T>::const_iterator iter = l.begin(); iter != l.end();
+       ++iter) {
     encode_xml(entry_name, *iter, f);
   }
   f->close_section();
 }
 
 template<class T>
-static void encode_xml(const char *name, const std::vector<T>& l, ceph::Formatter *f)
+static inline void encode_xml(const char *name, const std::vector<T>& l,
+			      ceph::Formatter *f)
 {
-  for (typename std::vector<T>::const_iterator iter = l.begin(); iter != l.end(); ++iter) {
+  for (typename std::vector<T>::const_iterator iter = l.begin();
+       iter != l.end(); ++iter) {
     encode_xml(name, *iter, f);
   }
 }
 
 template<class T>
-static void encode_xml(const char *name, const std::optional<T>& o, ceph::Formatter *f)
+static inline void encode_xml(const char *name, const std::optional<T>& o,
+			      ceph::Formatter *f)
 {
   if (!o) {
     return;

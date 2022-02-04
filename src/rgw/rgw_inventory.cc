@@ -3,6 +3,7 @@
 
 #include <tuple>
 #include <iostream>
+#include <boost/range/irange.hpp>
 #include "rgw_inventory.h"
 #include "simple_match.hpp"
 
@@ -98,6 +99,58 @@ void Configuration::decode_xml(XMLObj* obj)
     } // S3BucketDestination
   } // Destination
 } /* Configuration::decode_xml(...) */
+
+void Configuration::dump_xml(Formatter* f) const
+{
+  std::string sfmt{};
+  encode_xml("Id", id, f);
+  if (! filter.prefix.empty()) {
+    f->open_object_section("Filter");
+    encode_xml("Prefix", filter.prefix, f);
+    f->close_section();
+  } // optional prefix
+  f->open_object_section("Destination");
+  f->open_object_section("S3BucketDestination");
+  sm::match(destination.format,
+	    Format::CSV, [&]() { sfmt = "CSV"; },
+	    Format::ORC, [&]() { sfmt = "ORC"; },
+	    Format::Parquet, [&]() { sfmt = "Parquet"; });
+  f->dump_string("Format", sfmt);
+  encode_xml("AccountId", destination.account_id, f);
+  encode_xml("Bucket", destination.bucket_arn, f);
+  encode_xml("Prefix", destination.prefix, f);
+  if (! destination.encryption.kms.key_id.empty()) {
+    f->open_object_section("Encryption");
+    f->open_object_section("SSE-KMS");
+    encode_xml("KeyId", destination.encryption.kms.key_id, f);
+    f->close_section();
+    f->close_section();
+  } // optional encryption
+  f->close_section();
+  f->close_section(); // required destination
+  f->open_object_section("Schedule");
+  sm::match(schedule.frequency,
+	    Frequency::Daily, [&]() { sfmt = "Daily"; },
+	    Frequency::Weekly, [&]() { sfmt = "Weekly"; },
+	    smp::_, [&]() {sfmt = "UnknownFrequency"; });
+  f->dump_string("Frequency", sfmt);
+  f->close_section(); // required schedule
+    sm::match(versions,
+	      ObjectVersions::Current, [&]() { sfmt = "Current"; },
+	      ObjectVersions::All, [&]() {sfmt = "All"; },
+	      smp::_, [&]() {sfmt = "_"; });
+  f->dump_string("IncludedObjectVersions", sfmt);
+  if (optional_fields > 0) {
+    f->open_object_section("OptionalFields");
+    for (auto ord : boost::irange(1, int(FieldType::Last))) {
+      FieldType ft{FieldType(ord)};
+      if (optional_fields & shift_field(ft)) {
+	f->dump_string("Field", find_field(ft).name);
+      }
+    }
+    f->close_section();
+  } // optional fields
+} /* Configuration::dump_xml(...) */
 
 void InventoryConfigurations::emplace(std::string&& key, Configuration&& config){
   id_mapping.emplace(std::make_pair(key, config));

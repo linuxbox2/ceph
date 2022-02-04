@@ -780,7 +780,7 @@ static int rgw_iam_add_buckettags(const DoutPrefixProvider *dpp, struct req_stat
   return 0;
 }
 
-static int rgw_iam_add_buckettags(const DoutPrefixProvider *dpp, struct req_state* s) {
+static inline int rgw_iam_add_buckettags(const DoutPrefixProvider *dpp, struct req_state* s) {
   return rgw_iam_add_buckettags(dpp, s, s->bucket.get());
 }
 
@@ -940,8 +940,10 @@ void rgw_bucket_object_pre_exec(struct req_state *s)
 // The called function must return an integer, negative on error. In
 // general, they should just return op_ret.
 namespace {
-template<typename F>
-int retry_raced_bucket_write(const DoutPrefixProvider *dpp, rgw::sal::Bucket* b, const F& f) {
+template<typename F> /* XXX was getting an error binding the lambda to
+		      * const, also reference F--how big an issue is
+		      * taking F by value? */
+int retry_raced_bucket_write(const DoutPrefixProvider *dpp, rgw::sal::Bucket* b,  F f /* XXX fu2? */) {
   auto r = f();
   for (auto i = 0u; i < 15u && r == -ECANCELED; ++i) {
     r = b->try_refresh_info(dpp, nullptr);
@@ -1171,7 +1173,7 @@ void RGWPutBucketTags::execute(optional_yield y)
     ldpp_dout(this, 0) << "forward_request_to_master returned ret=" << op_ret << dendl;
   }
 
-  op_ret = retry_raced_bucket_write(this, s->bucket.get(), [this, y] {
+  op_ret = retry_raced_bucket_write(this, s->bucket.get(), [this, y] () mutable {
     rgw::sal::Attrs attrs = s->bucket->get_attrs();
     attrs[RGW_ATTR_TAGS] = tags_bl;
     return s->bucket->merge_and_store_attrs(this, attrs, y);
@@ -1202,7 +1204,7 @@ void RGWDeleteBucketTags::execute(optional_yield y)
     return;
   }
 
-  op_ret = retry_raced_bucket_write(this, s->bucket.get(), [this, y] {
+  op_ret = retry_raced_bucket_write(this, s->bucket.get(), [this, y] () mutable {
     rgw::sal::Attrs attrs = s->bucket->get_attrs();
     attrs.erase(RGW_ATTR_TAGS);
     op_ret = s->bucket->merge_and_store_attrs(this, attrs, y);
@@ -1257,7 +1259,7 @@ void RGWPutBucketReplication::execute(optional_yield y) {
     return;
   }
 
-  op_ret = retry_raced_bucket_write(this, s->bucket.get(), [this] {
+  op_ret = retry_raced_bucket_write(this, s->bucket.get(), [this] () {
     auto sync_policy = (s->bucket->get_info().sync_policy ? *s->bucket->get_info().sync_policy : rgw_sync_policy_info());
 
     for (auto& group : sync_policy_groups) {
@@ -8449,6 +8451,205 @@ void RGWGetObjLegalHold::execute(optional_yield y)
   }
   return;
 }
+
+/* inventory */
+
+void RGWPutBucketInventory::pre_exec()
+{
+  rgw_bucket_object_pre_exec(s);
+}
+
+int RGWPutBucketInventory::verify_permission(optional_yield y)
+{
+  auto [has_s3_existing_tag, has_s3_resource_tag] = rgw_check_policy_condition(this, s, false);
+  if (has_s3_resource_tag)
+    rgw_iam_add_buckettags(this, s);
+
+  return verify_bucket_owner_or_policy(s, rgw::IAM::s3PutBucketInventoryConfiguration);
+}
+
+void RGWPutBucketInventory::execute(optional_yield y)
+{
+  RGWXMLDecoder::XMLParser parser;
+  if (!parser.init()) {
+    ldpp_dout(this, 0) << "ERROR: failed to initialize parser" << dendl;
+    op_ret = -EINVAL;
+    return;
+  }
+  op_ret = get_params(y);
+  if (op_ret < 0) {
+    return;
+  }
+  if (!parser.parse(data.c_str(), data.length(), 1)) {
+    op_ret = -ERR_MALFORMED_XML;
+    return;
+  }
+
+  try {
+    RGWXMLDecoder::decode_xml("InventoryConfiguration", inventory_config, &parser, true);
+  } catch (RGWXMLDecoder::err& err) {
+    ldpp_dout(this, 5) << "unexpected xml:" << err << dendl;
+    op_ret = -ERR_MALFORMED_XML;
+    return;
+  }
+
+  op_ret = store->forward_request_to_master(this, s->user.get(), nullptr, data, nullptr, s->info, y);
+  if (op_ret < 0) {
+    ldpp_dout(this, 20) << __func__ << "forward_request_to_master returned ret=" << op_ret << dendl;
+    return;
+  }
+
+  /* merge new inventory configuration with stored set (if present),
+   * and write back */
+  auto bucket = s->bucket.get();
+  rgw::sal::Attrs attrs = bucket->get_attrs();
+  std::map<std::string, buffer::list>::iterator aiter = attrs.find(RGW_ATTR_INVENTORY);
+  if (aiter != attrs.end()) {
+    buffer::list::const_iterator iter{&aiter->second};
+    try {
+      inventory_attr.decode(iter);
+    } catch (const buffer::error& e) {
+      ldpp_dout(this, 0) << __func__ <<  "() decode stored inventory configurations failed"
+			 << dendl;
+      // XXX error here?  or try to recover and save the new
+      // configuration?
+      op_ret = -EINVAL;
+      return;
+    }
+  }
+
+  buffer::list inv_bl;
+  inventory_attr.emplace(std::move(std::string(inventory_config.id)), std::move(inventory_config));
+  inventory_attr.encode(inv_bl);
+  op_ret = retry_raced_bucket_write(this, s->bucket.get(), [this, y, attrs, inv_bl] () mutable {
+    attrs[RGW_ATTR_INVENTORY] = inv_bl;
+    return s->bucket->merge_and_store_attrs(this, attrs, y);
+  });
+
+  return;
+}
+
+void RGWListBucketInventory::pre_exec()
+{
+  rgw_bucket_object_pre_exec(s);
+}
+
+int RGWListBucketInventory::verify_permission(optional_yield y)
+{
+  auto [has_s3_existing_tag, has_s3_resource_tag] = rgw_check_policy_condition(this, s, false);
+  if (has_s3_resource_tag)
+    rgw_iam_add_buckettags(this, s);
+
+  return verify_bucket_owner_or_policy(s, rgw::IAM::s3ListBucketInventoryConfigurations);
+}
+
+void RGWListBucketInventory::execute(optional_yield y)
+{
+  op_ret = get_params(y);
+  if (op_ret < 0) {
+    return;
+  }
+  auto bucket = s->bucket.get();
+  auto attrs = bucket->get_attrs();
+  std::map<std::string, buffer::list>::iterator aiter
+    = attrs.find(RGW_ATTR_INVENTORY);
+  if (aiter != attrs.end()) {
+    buffer::list::const_iterator iter{&aiter->second};
+    try {
+      inventory_attr.decode(iter);
+    } catch (const buffer::error& e) {
+      ldpp_dout(this, 0) << __func__ <<  "(...) decode stored inventory configurations failed"
+			 << dendl;
+      op_ret = -EINVAL;
+      return;
+    }
+  }
+}
+
+void RGWGetBucketInventory::pre_exec()
+{
+  rgw_bucket_object_pre_exec(s);
+}
+
+int RGWGetBucketInventory::verify_permission(optional_yield y)
+{
+  auto [has_s3_existing_tag, has_s3_resource_tag] = rgw_check_policy_condition(this, s, false);
+  if (has_s3_resource_tag)
+    rgw_iam_add_buckettags(this, s);
+
+  return verify_bucket_owner_or_policy(s, rgw::IAM::s3GetBucketInventoryConfiguration);
+}
+
+void RGWGetBucketInventory::execute(optional_yield y)
+{
+  op_ret = get_params(y);
+  if (op_ret < 0) {
+    return;
+  }
+  auto bucket = s->bucket.get();
+  auto attrs = bucket->get_attrs();
+  std::map<std::string, buffer::list>::iterator aiter = attrs.find(RGW_ATTR_INVENTORY);
+  if (aiter != bucket->get_attrs().end()) {
+    buffer::list::const_iterator iter{&aiter->second};
+    try {
+      inventory_attr.decode(iter);
+    } catch (const buffer::error& e) {
+      ldpp_dout(this, 0) << __func__ <<  "(...) decode stored inventory configurations failed"
+			 << dendl;
+      op_ret = -EINVAL;
+      return;
+    }
+  }
+}
+
+void RGWDeleteBucketInventory::pre_exec()
+{
+  rgw_bucket_object_pre_exec(s);
+}
+
+int RGWDeleteBucketInventory::verify_permission(optional_yield y)
+{
+  auto [has_s3_existing_tag, has_s3_resource_tag] = rgw_check_policy_condition(this, s, false);
+  if (has_s3_resource_tag)
+    rgw_iam_add_buckettags(this, s);
+
+  return verify_bucket_owner_or_policy(s, rgw::IAM::s3DeleteBucketInventoryConfiguration);
+}
+
+void RGWDeleteBucketInventory::execute(optional_yield y)
+{
+  op_ret = get_params(y);
+  if (op_ret < 0) {
+    return;
+  }
+  /* update stored set (if present) and write back */
+  auto& bucket = s->bucket;
+  rgw::sal::Attrs attrs = bucket->get_attrs();
+  std::map<std::string, buffer::list>::iterator aiter = attrs.find(RGW_ATTR_INVENTORY);
+  if (aiter != attrs.end()) {
+    buffer::list::const_iterator iter{&aiter->second};
+    try {
+      inventory_attr.decode(iter);
+    } catch (const buffer::error& e) {
+      ldpp_dout(this, 0) << __func__ <<  "() decode stored inventory configurations failed"
+			 << dendl;
+      op_ret = -EINVAL;
+      return;
+    }
+  }
+
+  inventory_attr.id_mapping.erase(id);
+
+  buffer::list inv_bl;
+  inventory_attr.encode(inv_bl);
+  op_ret = retry_raced_bucket_write(this, s->bucket.get(), [this, y, attrs, inv_bl] () mutable {
+    attrs[RGW_ATTR_INVENTORY] = inv_bl;
+    return s->bucket->merge_and_store_attrs(this, attrs, y);
+  });
+
+  return;
+}
+// end inventory
 
 void RGWGetClusterStat::execute(optional_yield y)
 {

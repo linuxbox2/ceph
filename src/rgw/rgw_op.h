@@ -49,6 +49,7 @@
 #include "rgw_torrent.h"
 #include "rgw_tag.h"
 #include "rgw_object_lock.h"
+#include "rgw_inventory.h"
 #include "cls/rgw/cls_rgw_client.h"
 #include "rgw_public_access.h"
 #include "rgw_bucket_encryption.h"
@@ -2484,6 +2485,76 @@ public:
   uint32_t op_mask() override { return RGW_OP_TYPE_READ; }
 };
 
+/* inventory */
+class RGWPutBucketInventory : public RGWOp {
+protected:
+  buffer::list data;
+  rgw::inv::Configuration inventory_config;
+  rgw::inv::InventoryConfigurations inventory_attr;
+public:
+  RGWPutBucketInventory() = default;
+  ~RGWPutBucketInventory() {}
+  int verify_permission(optional_yield y) override;
+  void pre_exec() override;
+  void execute(optional_yield y) override;
+  virtual void send_response() override = 0;
+  virtual int get_params(optional_yield y) = 0;
+  const char* name() const override { return "put_bucket_inventory"; }
+  RGWOpType get_type() override { return RGW_OP_PUT_BUCKET_INVENTORY; }
+  uint32_t op_mask() override { return RGW_OP_TYPE_WRITE; }
+};
+
+class RGWListBucketInventory : public RGWOp {
+protected:
+  std::string continuation_token;
+  rgw::inv::InventoryConfigurations inventory_attr;
+public:
+  RGWListBucketInventory() = default;
+  ~RGWListBucketInventory() {}
+  int verify_permission(optional_yield y) override;
+  void pre_exec() override;
+  void execute(optional_yield y) override;
+  virtual void send_response() override = 0;
+  virtual int get_params(optional_yield y) = 0;
+  const char* name() const override {return "list_bucket_inventory"; }
+  RGWOpType get_type() override { return RGW_OP_LIST_BUCKET_INVENTORY; }
+  uint32_t op_mask() override { return RGW_OP_TYPE_READ; }
+};
+
+class RGWGetBucketInventory : public RGWOp {
+protected:
+  std::string id;
+  rgw::inv::InventoryConfigurations inventory_attr;
+public:
+  RGWGetBucketInventory() = default;
+  ~RGWGetBucketInventory() {}
+  int verify_permission(optional_yield y) override;
+  void pre_exec() override;
+  void execute(optional_yield y) override;
+  virtual void send_response() override = 0;
+  virtual int get_params(optional_yield y) = 0;
+  const char* name() const override {return "get_bucket_inventory"; }
+  RGWOpType get_type() override { return RGW_OP_DELETE_BUCKET_INVENTORY; }
+  uint32_t op_mask() override { return RGW_OP_TYPE_DELETE; }
+};
+
+class RGWDeleteBucketInventory : public RGWOp {
+protected:
+  std::string id;
+  rgw::inv::InventoryConfigurations inventory_attr;
+public:
+  RGWDeleteBucketInventory() = default;
+  ~RGWDeleteBucketInventory() {}
+  int verify_permission(optional_yield y) override;
+  void pre_exec() override;
+  void execute(optional_yield y) override;
+  virtual void send_response() override = 0;
+  virtual int get_params(optional_yield y) = 0;
+  const char* name() const override { return "put_bucket_inventory"; }
+  RGWOpType get_type() override { return RGW_OP_PUT_BUCKET_INVENTORY; }
+  uint32_t op_mask() override { return RGW_OP_TYPE_WRITE; }
+};
+// end inventory
 
 class RGWConfigBucketMetaSearch : public RGWOp {
 protected:

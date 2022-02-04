@@ -52,6 +52,7 @@ namespace rgw { namespace inv {
     ObjectLockLegalHoldStatus,
     IntelligentTieringAccessTier,
     BucketKeyStatus,
+    Last = BucketKeyStatus,
   };
 
   class Field {
@@ -63,7 +64,7 @@ namespace rgw { namespace inv {
       {}
   };
 
-  static constexpr std::array<Field, 13> field_table =
+  static constexpr std::array<Field, uint8_t(FieldType::Last)+1> field_table =
   {
     Field(FieldType::None, "None"),
     Field(FieldType::Size, "Size"),
@@ -91,15 +92,22 @@ namespace rgw { namespace inv {
     }
    }
 
-  static const Field& find_field(const std::string& fs) {
-    for (const auto& field : field_table) {
-      if (fs == field.name) {
-	return field_table[uint8_t(field.ord)];
-      }
-    }
-    // ok, so the None field
-    return field_table[0];
-  }
+   static inline const Field& find_field(const FieldType type) {
+     if (type <= FieldType::Last) {
+       return field_table[uint8_t(type)];
+     }
+     return field_table[0]; // FieldType::None
+   }
+
+   static inline const Field& find_field(const std::string& fs) {
+     for (const auto& field : field_table) {
+       if (fs == field.name) {
+	 return field_table[uint8_t(field.ord)];
+       }
+     }
+     // ok, so the None field
+     return field_table[0];
+   }
 
   class Configuration
   {

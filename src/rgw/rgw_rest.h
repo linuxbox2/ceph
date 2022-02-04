@@ -517,6 +517,34 @@ public:
   ~RGWGetObjLegalHold_ObjStore() = default;
 };
 
+class RGWPutBucketInventory_ObjStore : public RGWPutBucketInventory {
+public:
+  RGWPutBucketInventory_ObjStore() = default;
+  ~RGWPutBucketInventory_ObjStore() = default;
+  int get_params(optional_yield y) override;
+};
+
+class RGWGetBucketInventory_ObjStore : public RGWGetBucketInventory {
+public:
+  RGWGetBucketInventory_ObjStore() = default;
+  ~RGWGetBucketInventory_ObjStore() override = default;
+  int get_params(optional_yield y) override;
+};
+
+class RGWListBucketInventory_ObjStore : public RGWListBucketInventory {
+public:
+  RGWListBucketInventory_ObjStore() = default;
+  ~RGWListBucketInventory_ObjStore() override = default;
+  int get_params(optional_yield y) override;
+};
+
+class RGWDeleteBucketInventory_ObjStore : public RGWDeleteBucketInventory {
+public:
+  RGWDeleteBucketInventory_ObjStore() = default;
+  ~RGWDeleteBucketInventory_ObjStore() override = default;
+  int get_params(optional_yield y) override;
+};
+
 class RGWRESTOp : public RGWOp {
 protected:
   RGWRESTFlusher flusher;

@@ -4162,7 +4162,6 @@ void RGWGetBucketObjectLock_ObjStore_S3::send_response()
   rgw_flush_formatter_and_reset(s, s->formatter);
 }
 
-
 int RGWPutObjRetention_ObjStore_S3::get_params(optional_yield y)
 {
   const char *bypass_gov_header = s->info.env->get("HTTP_X_AMZ_BYPASS_GOVERNANCE_RETENTION");
@@ -4224,6 +4223,98 @@ void RGWGetObjLegalHold_ObjStore_S3::send_response()
   }
   encode_xml("LegalHold", obj_legal_hold, s->formatter);
   rgw_flush_formatter_and_reset(s, s->formatter);
+}
+
+void RGWPutBucketInventory_ObjStore_S3::send_response()
+{
+  if (op_ret) {
+    set_req_state_err(s, op_ret);
+  }
+  dump_errno(s);
+  end_header(s);
+}
+
+void RGWListBucketInventory_ObjStore_S3::send_response()
+{
+  if (op_ret) {
+    set_req_state_err(s, op_ret);
+  }
+  dump_errno(s);
+  end_header(s, this, "application/xml", CHUNKED_TRANSFER_ENCODING);
+  dump_start(s);
+
+  if (op_ret) {
+    return;
+  }
+
+  using idmap_iter = std::map<std::string,rgw::inv::Configuration>::iterator;
+
+  auto& f = s->formatter;
+  auto& id_mapping = inventory_attr.id_mapping;
+  idmap_iter inv_iter = (continuation_token.empty())
+    ? id_mapping.begin()
+    : id_mapping.find(continuation_token);
+
+  int ix{0};
+  std::string empty{};
+  std::string_view next_continuation_token{empty};
+
+  // Amazon doc doesn't show this one in XMLNS
+  f->open_object_section("ListInventoryConfigurationsResult");
+  if (inv_iter != id_mapping.end()) {
+    if (! continuation_token.empty()) {
+      f->dump_string("ContinuationToken", continuation_token);
+    }
+    for (; inv_iter != id_mapping.end() && ix < 99; ++inv_iter, ++ix) {
+      rgw::inv::Configuration& config = inv_iter->second;
+      encode_xml("InventoryConfiguration", config, f);
+      idmap_iter next_iter = inv_iter;
+      ++next_iter;
+      if (next_iter != id_mapping.end()) {
+	next_continuation_token = next_iter->first; // id
+      } else {
+	next_continuation_token = empty;
+      }
+    }
+    if (! next_continuation_token.empty()) {
+      f->dump_bool("IsTruncated", true);
+      f->dump_string("NextContinuationToken", next_continuation_token);
+    } else {
+      f->dump_bool("IsTruncated", false);
+    }
+  } // have configurations
+  f->close_section(); // XMLNS
+  rgw_flush_formatter_and_reset(s, f);
+}
+
+void RGWGetBucketInventory_ObjStore_S3::send_response()
+{
+  if (op_ret) {
+    set_req_state_err(s, op_ret);
+  }
+  dump_errno(s);
+  end_header(s, this, "application/xml");
+
+  auto citer = inventory_attr.id_mapping.find(id);
+  if (citer != inventory_attr.id_mapping.end()) {
+    auto& config = citer->second;
+    auto& f = s->formatter;
+    
+    dump_start(s);
+    f->open_object_section_in_ns("InventoryConfiguration", XMLNS_AWS_S3);
+    config.dump_xml(f);
+    f->close_section(); // XMLNS
+    rgw_flush_formatter_and_reset(s, f);
+  }
+}
+
+void RGWDeleteBucketInventory_ObjStore_S3::send_response()
+{
+  if (op_ret) {
+    set_req_state_err(s, op_ret);
+  }
+  dump_errno(s);
+  end_header(s);
 }
 
 void RGWGetBucketPolicyStatus_ObjStore_S3::send_response()
@@ -4396,6 +4487,11 @@ RGWOp *RGWHandler_REST_Bucket_S3::op_get()
     return new RGWGetBucketPublicAccessBlock_ObjStore_S3;
   } else if (is_bucket_encryption_op()) {
     return new RGWGetBucketEncryption_ObjStore_S3;
+  } else if (is_inventory_op()) {
+    if (s->info.args.exists("id")) {
+      return new RGWGetBucketInventory_ObjStore_S3;
+    }
+    return new RGWListBucketInventory_ObjStore_S3;
   }
   return get_obj_op(true);
 }
@@ -4445,12 +4541,13 @@ RGWOp *RGWHandler_REST_Bucket_S3::op_put()
         sync_policy_handler->is_legacy_config()) {
       return nullptr;
     }
-
     return new RGWPutBucketReplication_ObjStore_S3;
   } else if (is_block_public_access_op()) {
     return new RGWPutBucketPublicAccessBlock_ObjStore_S3;
   } else if (is_bucket_encryption_op()) {
     return new RGWPutBucketEncryption_ObjStore_S3;
+  } else if (is_inventory_op()) {
+    return new RGWPutBucketInventory_ObjStore_S3;
   }
   return new RGWCreateBucket_ObjStore_S3;
 }
@@ -4477,6 +4574,8 @@ RGWOp *RGWHandler_REST_Bucket_S3::op_delete()
     return new RGWDeleteBucketPublicAccessBlock;
   } else if (is_bucket_encryption_op()) {
     return new RGWDeleteBucketEncryption_ObjStore_S3;
+  } else if (is_inventory_op()) {
+    return new RGWDeleteBucketInventory_ObjStore_S3;
   }
 
   if (s->info.args.sub_resource_exists("website")) {
@@ -5520,6 +5619,10 @@ AWSGeneralAbstractor::get_auth_data_v4(const req_state* const s,
         case RGW_OP_PUT_BUCKET_OBJ_LOCK:
         case RGW_OP_PUT_OBJ_RETENTION:
         case RGW_OP_PUT_OBJ_LEGAL_HOLD:
+        case RGW_OP_PUT_BUCKET_INVENTORY:
+        case RGW_OP_LIST_BUCKET_INVENTORY:
+        case RGW_OP_GET_BUCKET_INVENTORY:
+        case RGW_OP_DELETE_BUCKET_INVENTORY:
         case RGW_STS_GET_SESSION_TOKEN:
         case RGW_STS_ASSUME_ROLE:
         case RGW_OP_PUT_BUCKET_PUBLIC_ACCESS_BLOCK:

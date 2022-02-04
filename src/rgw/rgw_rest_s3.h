@@ -564,6 +564,34 @@ public:
   void send_response() override;
 };
 
+class RGWPutBucketInventory_ObjStore_S3 : public RGWPutBucketInventory_ObjStore {
+public:
+  RGWPutBucketInventory_ObjStore_S3() {}
+  ~RGWPutBucketInventory_ObjStore_S3() override {}
+  void send_response() override;
+};
+
+class RGWListBucketInventory_ObjStore_S3 : public RGWListBucketInventory_ObjStore {
+public:
+  RGWListBucketInventory_ObjStore_S3() {}
+  ~RGWListBucketInventory_ObjStore_S3() {}
+  void send_response() override;
+};
+
+class RGWGetBucketInventory_ObjStore_S3 : public RGWGetBucketInventory_ObjStore {
+public:
+  RGWGetBucketInventory_ObjStore_S3() {}
+  ~RGWGetBucketInventory_ObjStore_S3() {}
+  void send_response() override;
+};
+
+class RGWDeleteBucketInventory_ObjStore_S3 : public RGWDeleteBucketInventory_ObjStore {
+public:
+  RGWDeleteBucketInventory_ObjStore_S3() {}
+  ~RGWDeleteBucketInventory_ObjStore_S3() override {}
+  void send_response() override;
+};
+
 class RGWGetObjLayout_ObjStore_S3 : public RGWGetObjLayout {
 public:
   RGWGetObjLayout_ObjStore_S3() {}
@@ -708,6 +736,9 @@ protected:
   }
   bool is_object_lock_op() const {
     return s->info.args.exists("object-lock");
+  }
+  bool is_inventory_op() const {
+    return s->info.args.exists("inventory");
   }
   bool is_notification_op() const {
     if (enable_pubsub) {
