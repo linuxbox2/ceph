@@ -2537,7 +2537,8 @@ int RadosLifecycle::list_entries(const std::string& oid, const std::string& mark
     return ret;
 
   for (auto& entry : cls_entries) {
-    entries.push_back(LCEntry(entry.bucket, entry.start_time, entry.status));
+    entries.push_back(
+      LCEntry(entry.bucket, entry.start_time, entry.status, entry.flags));
   }
 
   return ret;

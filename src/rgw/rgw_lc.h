@@ -20,6 +20,7 @@
 #include "cls/rgw/cls_rgw_types.h"
 #include "rgw_tag.h"
 #include "rgw_sal.h"
+#include "rgw_inventory.h"
 
 #include <atomic>
 #include <tuple>
@@ -535,8 +536,9 @@ public:
   void start_processor();
   void stop_processor();
   int set_bucket_config(rgw::sal::Bucket* bucket,
-                        const rgw::sal::Attrs& bucket_attrs,
-                        RGWLifecycleConfiguration *config);
+                        RGWLifecycleConfiguration* lifecycle = nullptr,
+			rgw::inv::InventoryConfigurations* inventory = nullptr,
+			optional_yield y = null_yield);
   int remove_bucket_config(rgw::sal::Bucket* bucket,
                            const rgw::sal::Attrs& bucket_attrs);
 
