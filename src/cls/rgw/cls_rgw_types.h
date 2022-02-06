@@ -1266,22 +1266,28 @@ WRITE_CLASS_ENCODER(cls_rgw_lc_obj_head)
 
 struct cls_rgw_lc_entry {
   std::string bucket;
+
+  static constexpr uint32_t FLAG_NONE =         0x0000;
+  static constexpr uint32_t FLAG_INVENTORY =    0x0001; // have inv. policy
+
   uint64_t start_time; // if in_progress
   uint32_t status;
+  uint32_t flags;
 
   cls_rgw_lc_entry()
-    : start_time(0), status(0) {}
+    : start_time(0), status(0), flags(0) {}
 
   cls_rgw_lc_entry(const cls_rgw_lc_entry& rhs) = default;
 
-  cls_rgw_lc_entry(const std::string& b, uint64_t t, uint32_t s)
-    : bucket(b), start_time(t), status(s) {};
+  cls_rgw_lc_entry(const std::string& b, uint64_t t, uint32_t s, uint32_t f)
+    : bucket(b), start_time(t), status(s), flags(f) {};
 
   void encode(bufferlist& bl) const {
-    ENCODE_START(1, 1, bl);
+    ENCODE_START(2, 2, bl);
     encode(bucket, bl);
     encode(start_time, bl);
     encode(status, bl);
+    encode(flags, bl);
     ENCODE_FINISH(bl);
   }
 

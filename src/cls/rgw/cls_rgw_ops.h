@@ -1055,7 +1055,7 @@ struct cls_rgw_lc_get_next_entry_ret {
     if (struct_v < 2) {
       std::pair<std::string, int> oe;
       decode(oe, bl);
-      entry = {oe.first, 0 /* start */, uint32_t(oe.second)};
+      entry = {oe.first, 0 /* start */, uint32_t(oe.second), 0 /* flags */};
     } else {
       decode(entry, bl);
     }
@@ -1138,7 +1138,7 @@ struct cls_rgw_lc_rm_entry_op {
     if (struct_v < 2) {
       std::pair<std::string, int> oe;
       decode(oe, bl);
-      entry = {oe.first, 0 /* start */, uint32_t(oe.second)};
+      entry = {oe.first, 0 /* start */, uint32_t(oe.second), 0 /* flags */};
     } else {
       decode(entry, bl);
     }
@@ -1162,7 +1162,7 @@ struct cls_rgw_lc_set_entry_op {
     if (struct_v < 2) {
       std::pair<std::string, int> oe;
       decode(oe, bl);
-      entry = {oe.first, 0 /* start */, uint32_t(oe.second)};
+      entry = {oe.first, 0 /* start */, uint32_t(oe.second), 0 /* flags */};
     } else {
       decode(entry, bl);
     }
@@ -1269,7 +1269,7 @@ cls_rgw_lc_list_entries_ret(uint8_t compat_v = 3)
       std::for_each(oes.begin(), oes.end(),
 		    [this](const std::pair<std::string, int>& oe)
 		      {entries.push_back({oe.first, 0 /* start */,
-					  uint32_t(oe.second)});});
+			   uint32_t(oe.second), 0});});
     } else {
       decode(entries, bl);
     }

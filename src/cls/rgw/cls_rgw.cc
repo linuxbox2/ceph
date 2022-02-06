@@ -4060,7 +4060,7 @@ static int rgw_cls_lc_list_entries(cls_method_context_t hctx, bufferlist *in,
       try {
 	iter = it->second.begin();
 	decode(oe, iter);
-	entry = {oe.first, 0 /* start */, uint32_t(oe.second)};
+	entry = {oe.first, 0 /* start */, uint32_t(oe.second), 0 /* flags */};
       } catch(buffer::error& err) {
 	CLS_LOG(
 	  1, "ERROR: rgw_cls_lc_list_entries(): failed to decode entry\n");
