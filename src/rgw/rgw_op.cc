@@ -5847,7 +5847,8 @@ void RGWDeleteLC::execute(optional_yield y)
     return;
   }
 
-  op_ret = store->get_rgwlc()->remove_bucket_config(s->bucket.get(), s->bucket_attrs);
+  op_ret = store->get_rgwlc()->remove_bucket_config(
+    s->bucket.get(), s->bucket_attrs, RGWLC::RBC_FLAG_LIFECYCLE);
   if (op_ret < 0) {
     return;
   }

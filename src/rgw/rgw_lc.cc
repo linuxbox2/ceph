@@ -2433,9 +2433,16 @@ int RGWLC::set_bucket_config(rgw::sal::Bucket* bucket,
 }
 
 int RGWLC::remove_bucket_config(rgw::sal::Bucket* bucket,
-                                const rgw::sal::Attrs& bucket_attrs)
+                                const rgw::sal::Attrs& bucket_attrs,
+				uint32_t flags)
 {
   rgw::sal::Attrs attrs = bucket_attrs;
+
+  uint32_t linked_policy{0};
+  for (auto& attr : { RGW_ATTR_LC, RGW_ATTR_INVENTORY }) {
+    ++linked_policy;
+  }
+
   attrs.erase(RGW_ATTR_LC);
   int ret = bucket->merge_and_store_attrs(this, attrs, null_yield);
 
