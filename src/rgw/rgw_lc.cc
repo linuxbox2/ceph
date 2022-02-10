@@ -2347,9 +2347,7 @@ static int guard_lc_modify(const DoutPrefixProvider *dpp,
 			   rgw::inv::InventoryConfigurations* inventory,
 			   const F& f) {
   CephContext *cct = store->ctx();
-
   string shard_id = get_lc_shard_name(bucket);
-
   string oid; 
   get_lc_oid(cct, shard_id, &oid);
 
@@ -2357,7 +2355,9 @@ static int guard_lc_modify(const DoutPrefixProvider *dpp,
   rgw::sal::Lifecycle::LCEntry entry;
   entry.bucket = shard_id;
   entry.status = lc_uninitial;
-  //entry.flags = (inventory) ? rgw::sal::LCEntry::FLAG_INVENTORY;
+  entry.flags = (inventory) ?
+    rgw::sal::Lifecycle::LCEntry::FLAG_INVENTORY :
+    rgw::sal::Lifecycle::LCEntry::FLAG_NONE;
 
   int max_lock_secs = cct->_conf->rgw_lc_lock_max_time;
 
@@ -2434,36 +2434,49 @@ int RGWLC::set_bucket_config(rgw::sal::Bucket* bucket,
 
 int RGWLC::remove_bucket_config(rgw::sal::Bucket* bucket,
                                 const rgw::sal::Attrs& bucket_attrs,
-				uint32_t flags)
+				uint32_t flags,
+				optional_yield y)
 {
-  rgw::sal::Attrs attrs = bucket_attrs;
-
   uint32_t linked_policy{0};
-  for (auto& attr : { RGW_ATTR_LC, RGW_ATTR_INVENTORY }) {
-    ++linked_policy;
-  }
-
-  attrs.erase(RGW_ATTR_LC);
-  int ret = bucket->merge_and_store_attrs(this, attrs, null_yield);
-
   rgw_bucket& b = bucket->get_key();
 
-  if (ret < 0) {
-    ldpp_dout(this, 0) << "RGWLC::RGWDeleteLC() failed to set attrs on bucket="
-        << b.name << " returned err=" << ret << dendl;
+  int ret = retry_raced_bucket_write(
+    this, bucket, [&] () mutable {
+      rgw::sal::Attrs attrs = bucket->get_attrs();
+      if (flags & RBC_FLAG_LIFECYCLE) {
+	attrs.erase(RGW_ATTR_LC);
+      }
+      if (flags & RBC_FLAG_INVENTORY) {
+	attrs.erase(RGW_ATTR_INVENTORY);
+      }
+      return bucket->merge_and_store_attrs(this, attrs, y);
+    });
+
+    if (ret < 0) {
+      ldpp_dout(this, 0) <<
+	"RGWLC::RGWDeleteLC() failed to set attrs on bucket="
+			 << b.name << " returned err=" << ret << dendl;
+      return ret;
+    }
+
+    rgw::sal::Attrs attrs = bucket->get_attrs();
+    for (auto& attr : { RGW_ATTR_LC, RGW_ATTR_INVENTORY }) {
+      if (attrs.find(attr) != attrs.end()) {
+      ++linked_policy;
+      }
+    }
+
+    if (! linked_policy) {
+      rgw::inv::InventoryConfigurations* inventory{nullptr};
+
+      ret = guard_lc_modify(this, store, sal_lc.get(), b, cookie, inventory,
+			    [&](rgw::sal::Lifecycle* sal_lc, const string& oid,
+				const rgw::sal::Lifecycle::LCEntry& entry) {
+			      return sal_lc->rm_entry(oid, entry);
+			    });
+    }
+
     return ret;
-  }
-
-  // TODO: fix inventory
-#warning fixme
-  rgw::inv::InventoryConfigurations* inventory{nullptr};
-  ret = guard_lc_modify(this, store, sal_lc.get(), b, cookie, inventory,
-			[&](rgw::sal::Lifecycle* sal_lc, const string& oid,
-			    const rgw::sal::Lifecycle::LCEntry& entry) {
-    return sal_lc->rm_entry(oid, entry);
-  });
-
-  return ret;
 } /* RGWLC::remove_bucket_config */
 
 RGWLC::~RGWLC()
@@ -2507,9 +2520,6 @@ int fix_lc_shard_entry(const DoutPrefixProvider *dpp,
     char cookie_buf[COOKIE_LEN + 1];
     gen_rand_alphanumeric(store->ctx(), cookie_buf, sizeof(cookie_buf) - 1);
     std::string cookie = cookie_buf;
-
-    // TODO: fix inventory
-#warning fixme
     rgw::inv::InventoryConfigurations* inventory{nullptr};
 
     ret = guard_lc_modify(

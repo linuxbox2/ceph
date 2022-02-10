@@ -547,7 +547,8 @@ public:
 
   int remove_bucket_config(rgw::sal::Bucket* bucket,
                            const rgw::sal::Attrs& bucket_attrs,
-			   uint32_t flags);
+			   uint32_t flags,
+			   optional_yield y = null_yield);
 
   CephContext *get_cct() const override { return cct; }
   rgw::sal::Lifecycle* get_lc() const { return sal_lc.get(); }
