@@ -1770,7 +1770,6 @@ static std::unique_ptr<WriteOutEngine> WriteOutEngine_Factory(
   default:
     break;
   };
-
   return nullptr;
 }
 /* end helpers */
