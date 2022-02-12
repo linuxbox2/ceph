@@ -1303,6 +1303,10 @@ public:
     uint32_t status{0};
     uint32_t flags{FLAG_NONE};
 
+    bool has_inventory() const {
+      return flags & FLAG_INVENTORY;
+    }
+
     LCEntry() = default;
     LCEntry(std::string& b, uint64_t t, uint32_t s, uint32_t f)
       : bucket(b), start_time(t), status(s), flags(f) {}

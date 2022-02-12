@@ -545,8 +545,10 @@ public:
   int list_lc_progress(std::string& marker, uint32_t max_entries,
 		       std::vector<rgw::sal::Lifecycle::LCEntry>&, int& index);
   int bucket_lc_prepare(int index, LCWorker* worker);
-  int bucket_lc_process(std::string& shard_id, LCWorker* worker, time_t stop_at,
-			bool once);
+  int bucket_process_inventory(const rgw::sal::Lifecycle::LCEntry& entry,
+			       LCWorker* worker);
+  int bucket_lc_process(const rgw::sal::Lifecycle::LCEntry& entry,
+			LCWorker* worker, time_t stop_at, bool once);
   int bucket_lc_post(int index, int max_lock_sec,
 		     rgw::sal::Lifecycle::LCEntry& entry, int& result, LCWorker* worker);
   bool going_down();

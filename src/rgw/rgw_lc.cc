@@ -1724,19 +1724,56 @@ int LCOpRule::process(rgw_bucket_dir_entry& o,
 
 }
 
-int RGWLC::bucket_lc_process(string& shard_id, LCWorker* worker,
-			     time_t stop_at, bool once)
+int RGWLC::bucket_process_inventory(const rgw::sal::Lifecycle::LCEntry& entry,
+				    LCWorker* worker)
+{
+  if (! entry.has_inventory()) {
+    return 0;
+  }
+
+  std::unique_ptr<rgw::sal::Bucket> bucket;
+  const std::string& shard_id = entry.bucket;
+  vector<std::string> result;
+  boost::split(result, shard_id, boost::is_any_of(":"));
+  const auto& [bucket_tenant, bucket_name, bucket_marker]
+    = std::tie(result[0], result[1], result[2]);
+
+  int ret = store->get_bucket(this, nullptr, bucket_tenant, bucket_name,
+			      &bucket, null_yield);
+  if (ret < 0) {
+    ldpp_dout(this, 0) << "RGWLC::bucket_process_inventory get_bucket for "
+		       << bucket_name << " failed" << dendl;
+    return ret;
+  }
+
+  ret = bucket->load_bucket(this, null_yield);
+  if (ret < 0) {
+    ldpp_dout(this, 0) << "RGWLC::bucket_process_inventory load_bucket for "
+		       << bucket_name << " failed" << dendl;
+    return ret;
+  }
+
+  // TODO:  implement
+
+
+  return 0;
+}
+
+int RGWLC::bucket_lc_process(const rgw::sal::Lifecycle::LCEntry& entry,
+			     LCWorker* worker, time_t stop_at, bool once)
 {
   RGWLifecycleConfiguration  config(cct);
   std::unique_ptr<rgw::sal::Bucket> bucket;
   string no_ns, list_versions;
   vector<rgw_bucket_dir_entry> objs;
+  const std::string& shard_id = entry.bucket;
   vector<std::string> result;
   boost::split(result, shard_id, boost::is_any_of(":"));
-  string bucket_tenant = result[0];
-  string bucket_name = result[1];
-  string bucket_marker = result[2];
-  int ret = store->get_bucket(this, nullptr, bucket_tenant, bucket_name, &bucket, null_yield);
+  const auto& [bucket_tenant, bucket_name, bucket_marker]
+    = std::tie(result[0], result[1], result[2]);
+
+  int ret = store->get_bucket(this, nullptr, bucket_tenant, bucket_name,
+			      &bucket, null_yield);
   if (ret < 0) {
     ldpp_dout(this, 0) << "LC:get_bucket for " << bucket_name
 		       << " failed" << dendl;
@@ -2119,7 +2156,8 @@ int RGWLC::process_bucket(int index, int max_lock_secs, LCWorker* worker,
 		     << dendl;
 
   lock.unlock();
-  ret = bucket_lc_process(entry.bucket, worker, thread_stop_at(), once);
+  (void) bucket_process_inventory(entry, worker);
+  ret = bucket_lc_process(entry, worker, thread_stop_at(), once);
   bucket_lc_post(index, max_lock_secs, entry, ret, worker);
 
   return ret;
@@ -2231,7 +2269,7 @@ int RGWLC::process(int index, int max_lock_secs, LCWorker* worker,
 	    << dendl;
 
     lock->unlock();
-    ret = bucket_lc_process(entry.bucket, worker, thread_stop_at(), once);
+    ret = bucket_lc_process(entry, worker, thread_stop_at(), once);
     bucket_lc_post(index, max_lock_secs, entry, ret, worker);
   } while(1 && !once);
 
