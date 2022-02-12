@@ -1734,6 +1734,10 @@ public:
   WriteOutEngine(const rgw::inv::Configuration& inv_cfg)
     : inv_cfg(inv_cfg)
     {}
+  bool versioned() {
+    using namespace rgw::inv;
+    return inv_cfg.versions == ObjectVersions::All;
+  }
 };
 
 class CSVEngine : public WriteOutEngine
@@ -1818,7 +1822,27 @@ int RGWLC::bucket_process_inventory(const rgw::sal::Lifecycle::LCEntry& entry,
     }
   }
 
-  for (auto& inv_iter : inventory_attr.id_mapping) {
+  using EngineVec = std::vector<unique_ptr<WriteOutEngine>>;
+
+  EngineVec inv_current;
+  EngineVec inv_all_versions;
+
+  for (auto& inv_elt : inventory_attr.id_mapping) {
+    auto& inv_cfg = inv_elt.second;
+    auto eng = WriteOutEngine_Factory(inv_cfg);
+    if (eng.get()) {
+      if (eng.get()->versioned()) {
+	inv_all_versions.push_back(std::move(eng));
+      } else {
+	inv_current.push_back(std::move(eng));
+      }
+    } else {
+      ldpp_dout(this, 0) << "RGWLC::bucket_process_inventory failed to deduce "
+			 << " WriteOutEngine for bucket " << bucket_name
+			 << " Format==" << to_string(inv_cfg.destination.format)
+			 << dendl;
+      return -ENOENT; // XXX careful
+    }
   }
 
   return 0;
