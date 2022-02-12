@@ -2399,6 +2399,7 @@ int RGWLC::set_bucket_config(rgw::sal::Bucket* bucket,
 			     optional_yield y)
 {
   uint32_t linked_policy{0};
+  rgw_bucket& b = bucket->get_key();
 
   int ret = retry_raced_bucket_write(
     this, bucket, [&] () mutable {
@@ -2418,11 +2419,17 @@ int RGWLC::set_bucket_config(rgw::sal::Bucket* bucket,
       return bucket->merge_and_store_attrs(this, attrs, y);
   });
 
+  if (ret < 0) {
+    ldpp_dout(this, 0) <<
+      "RGWLC::set_bucket_config() failed to set attrs on bucket="
+		       << b.name << " returned err=" << ret << dendl;
+    return ret;
+  }
+
   if (! linked_policy) {
     return 0;
   }
 
-  rgw_bucket& b = bucket->get_key();
   ret = guard_lc_modify(this, store, sal_lc.get(), b, cookie, inventory,
 			[&](rgw::sal::Lifecycle* sal_lc, const string& oid,
 			    const rgw::sal::Lifecycle::LCEntry& entry) {
@@ -2454,7 +2461,7 @@ int RGWLC::remove_bucket_config(rgw::sal::Bucket* bucket,
 
     if (ret < 0) {
       ldpp_dout(this, 0) <<
-	"RGWLC::RGWDeleteLC() failed to set attrs on bucket="
+	"RGWLC::remove_bucket_config() failed to set attrs on bucket="
 			 << b.name << " returned err=" << ret << dendl;
       return ret;
     }
