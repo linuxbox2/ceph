@@ -2475,7 +2475,6 @@ int RGWLC::remove_bucket_config(rgw::sal::Bucket* bucket,
 
     if (! linked_policy) {
       rgw::inv::InventoryConfigurations* inventory{nullptr};
-
       ret = guard_lc_modify(this, store, sal_lc.get(), b, cookie, inventory,
 			    [&](rgw::sal::Lifecycle* sal_lc, const string& oid,
 				const rgw::sal::Lifecycle::LCEntry& entry) {
