@@ -199,6 +199,23 @@ namespace rgw { namespace inv {
   }; /* Configuration */
   WRITE_CLASS_ENCODER(Configuration);
 
+  static inline std::string_view to_string(Format ft) {
+    switch (ft) {
+    case Format::CSV:
+      return "Format::CSV";
+      break;
+    case Format::Parquet:
+      return "Format::Parquet";
+      break;
+    case Format::ORC:
+      return "Format::ORC";
+      break;
+    default:
+      return "Unknown Format";
+      break;
+    }
+  }
+
   class InventoryConfigurations
   {
   public:

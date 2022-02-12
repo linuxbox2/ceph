@@ -1734,21 +1734,46 @@ public:
   WriteOutEngine(const rgw::inv::Configuration& inv_cfg)
     : inv_cfg(inv_cfg)
     {}
+  bool versioned() {
+    using namespace rgw::inv;
+    return inv_cfg.versions == ObjectVersions::All;
+  }
 };
 
 class CSVEngine : public WriteOutEngine
 {
-public:
+private:
   CSVEngine(const rgw::inv::Configuration& inv_cfg)
     : WriteOutEngine(inv_cfg)
     {}
+public:
+  static std::unique_ptr<WriteOutEngine> Factory(
+    const rgw::inv::Configuration& inv_cfg) {
+    using namespace rgw::inv;
+    if (inv_cfg.destination.format == Format::CSV) {
+      return std::unique_ptr<WriteOutEngine>(new CSVEngine(inv_cfg));
+    }
+    return nullptr;
+  }
 };
 
-#include "simple_match.hpp"
-
-static unique_ptr<WriteOutEngine*> WriteOutEngine_Factory(
+static std::unique_ptr<WriteOutEngine> WriteOutEngine_Factory(
   const rgw::inv::Configuration& inv_cfg) {
-
+  using namespace rgw::inv;
+  switch(inv_cfg.destination.format)
+  {
+  case Format::CSV:
+    return CSVEngine::Factory(inv_cfg);
+    break;
+  case Format::Parquet:
+    return nullptr; // TODO: implement
+    break;
+  case Format::ORC:
+    return nullptr; // TODO: implement
+    break;
+  default:
+    break;
+  };
   return nullptr;
 }
 /* end helpers */
@@ -1797,7 +1822,27 @@ int RGWLC::bucket_process_inventory(const rgw::sal::Lifecycle::LCEntry& entry,
     }
   }
 
-  for (auto& inv_iter : inventory_attr.id_mapping) {
+  using EngineVec = std::vector<unique_ptr<WriteOutEngine>>;
+
+  EngineVec inv_current;
+  EngineVec inv_all_versions;
+
+  for (auto& inv_elt : inventory_attr.id_mapping) {
+    auto& inv_cfg = inv_elt.second;
+    auto eng = WriteOutEngine_Factory(inv_cfg);
+    if (eng.get()) {
+      if (eng.get()->versioned()) {
+	inv_all_versions.push_back(std::move(eng));
+      } else {
+	inv_current.push_back(std::move(eng));
+      }
+    } else {
+      ldpp_dout(this, 0) << "RGWLC::bucket_process_inventory failed to deduce "
+			 << " WriteOutEngine for bucket " << bucket_name
+			 << " Format==" << to_string(inv_cfg.destination.format)
+			 << dendl;
+      return -ENOENT; // XXX careful
+    }
   }
 
   return 0;
