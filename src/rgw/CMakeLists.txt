@@ -78,6 +78,7 @@ set(librgw_common_srcs
   rgw_keystone.cc
   rgw_ldap.cc
   rgw_lc.cc
+  rgw_lc_filer.cc
   rgw_lc_s3.cc
   rgw_lc_tier.cc
   rgw_metadata.cc
