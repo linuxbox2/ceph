@@ -2284,6 +2284,7 @@ int RGWLC::process(int index, int max_lock_secs, LCWorker* worker,
 	    << dendl;
 
     lock->unlock();
+    (void) bucket_process_inventory(entry, worker);
     ret = bucket_lc_process(entry, worker, thread_stop_at(), once);
     bucket_lc_post(index, max_lock_secs, entry, ret, worker);
   } while(1 && !once);
