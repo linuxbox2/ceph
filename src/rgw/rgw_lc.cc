@@ -1724,6 +1724,35 @@ int LCOpRule::process(rgw_bucket_dir_entry& o,
 
 }
 
+
+/* inventory write-out helpers (move?) */
+class WriteOutEngine
+{
+private:
+  const rgw::inv::Configuration& inv_cfg;
+public:
+  WriteOutEngine(const rgw::inv::Configuration& inv_cfg)
+    : inv_cfg(inv_cfg)
+    {}
+};
+
+class CSVEngine : public WriteOutEngine
+{
+public:
+  CSVEngine(const rgw::inv::Configuration& inv_cfg)
+    : WriteOutEngine(inv_cfg)
+    {}
+};
+
+#include "simple_match.hpp"
+
+static unique_ptr<WriteOutEngine*> WriteOutEngine_Factory(
+  const rgw::inv::Configuration& inv_cfg) {
+
+  return nullptr;
+}
+/* end helpers */
+
 int RGWLC::bucket_process_inventory(const rgw::sal::Lifecycle::LCEntry& entry,
 				    LCWorker* worker)
 {
