@@ -1753,8 +1753,23 @@ int RGWLC::bucket_process_inventory(const rgw::sal::Lifecycle::LCEntry& entry,
     return ret;
   }
 
-  // TODO:  implement
+  rgw::sal::Attrs attrs = bucket->get_attrs();
+  rgw::inv::InventoryConfigurations inventory_attr;
+  std::map<std::string, buffer::list>::iterator aiter
+    = attrs.find(RGW_ATTR_INVENTORY);
+  if (aiter != attrs.end()) {
+    buffer::list::const_iterator iter{&aiter->second};
+    try {
+      inventory_attr.decode(iter);
+    } catch (const buffer::error& e) {
+      ldpp_dout(this, 0) << __func__ <<  "() decode stored inventory configurations failed"
+			 << dendl;
+      return -ENOENT; // XXX careful
+    }
+  }
 
+  for (auto& inv_iter : inventory_attr.id_mapping) {
+  }
 
   return 0;
 }
