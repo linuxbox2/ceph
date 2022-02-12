@@ -474,12 +474,33 @@ public:
 
   class LCWorker : public Thread
   {
+  public:
+    using lock_guard = std::lock_guard<std::mutex>;
+    using unique_lock = std::unique_lock<std::mutex>;
+
+    /* inventory processing */
+    class FileEngine {
+      static constexpr std::string_view tempbase = "/tmp/rgwlc";
+      int ix;
+      std::string work_dir;
+    public:
+      FileEngine(int ix)
+	: ix(ix),
+	  work_dir(fmt::format("{0}/wk{1}", tempbase, ix))
+	{}
+
+      bool check();
+      bool cleanup();
+    };
+
+  private:
     const DoutPrefixProvider *dpp;
     CephContext *cct;
     RGWLC *lc;
     int ix;
     std::mutex lock;
     std::condition_variable cond;
+    FileEngine file_engine;
     WorkPool* workpool{nullptr};
     /* save the target bucket names created as part of object transition
      * to cloud. This list is maintained for the duration of each RGWLC::process()
@@ -487,10 +508,6 @@ public:
     std::set<std::string> cloud_targets;
 
   public:
-
-    using lock_guard = std::lock_guard<std::mutex>;
-    using unique_lock = std::unique_lock<std::mutex>;
-
     LCWorker(const DoutPrefixProvider* dpp, CephContext *_cct, RGWLC *_lc,
 	     int ix);
     RGWLC* get_lc() { return lc; }

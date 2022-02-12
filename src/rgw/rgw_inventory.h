@@ -221,16 +221,4 @@ namespace rgw { namespace inv {
   };
   WRITE_CLASS_ENCODER(InventoryConfigurations);
 
-
-  /* inventory processing */
-    
-  class FileEngine {
-  public:
-    static constexpr std::string_view tempdir = "/tmp/rgwlc";
-
-    bool check();
-    bool cleanup();
-
-  };
-
 }} /* namespace rgw::inv */

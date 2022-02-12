@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <tuple>
 #include <functional>
+#include <filesystem>
 
 #include <boost/algorithm/string/split.hpp>
 #include <boost/algorithm/string.hpp>
@@ -865,9 +866,23 @@ public:
   }
 }; /* WorkPool */
 
+namespace fs = std::filesystem;
+
+bool RGWLC::LCWorker::FileEngine::check()
+{
+  fs::create_directory(fs::path(tempbase));
+  fs::create_directory(fs::path(work_dir));
+  return cleanup();
+}
+
+bool RGWLC::LCWorker::FileEngine::cleanup()
+{
+  return true;
+}
+
 RGWLC::LCWorker::LCWorker(const DoutPrefixProvider* dpp, CephContext *cct,
 			  RGWLC *lc, int ix)
-  : dpp(dpp), cct(cct), lc(lc), ix(ix)
+  : dpp(dpp), cct(cct), lc(lc), ix(ix), file_engine(ix)
 {
   auto wpw = cct->_conf.get_val<int64_t>("rgw_lc_max_wp_worker");
   workpool = new WorkPool(this, wpw, 512);
