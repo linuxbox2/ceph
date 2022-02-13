@@ -3,6 +3,7 @@
 
 #include <string.h>
 #include <iostream>
+#include <fstream>
 #include <map>
 #include <algorithm>
 #include <tuple>
@@ -1745,8 +1746,10 @@ public:
 class CSVEngine : public WriteOutEngine
 {
 private:
+  csv::DelimWriter<std::ostream, ',', '"', true> csv_writer;
+
   CSVEngine(const rgw::inv::Configuration& inv_cfg)
-    : WriteOutEngine(inv_cfg)
+    : WriteOutEngine(inv_cfg), csv_writer(std::cout)
     {}
 public:
   static std::unique_ptr<WriteOutEngine> Factory(
