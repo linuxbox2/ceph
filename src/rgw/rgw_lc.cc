@@ -9,6 +9,7 @@
 #include <tuple>
 #include <functional>
 #include <filesystem>
+#include <system_error>
 
 #include <boost/algorithm/string/split.hpp>
 #include <boost/algorithm/string.hpp>
@@ -871,9 +872,23 @@ namespace fs = std::filesystem;
 
 bool RGWLC::LCWorker::FileEngine::check()
 {
+  lock_guard lk(wdlock);
   fs::create_directory(fs::path(tempbase));
   fs::create_directory(fs::path(work_dir));
   return cleanup();
+}
+
+std::fstream RGWLC::LCWorker::FileEngine::get_handle(const std::string &fname)
+{
+  lock_guard lk(wdlock);
+  check();
+  fs::path p{work_dir};
+  p /= fname;
+  if (fs::exists(p)) {
+    // XXX hmm.  what we really want to do is permute a new name
+    throw std::system_error(EEXIST, std::generic_category(), "file exists");
+  }
+  return fstream(p);
 }
 
 bool RGWLC::LCWorker::FileEngine::cleanup()
@@ -1731,9 +1746,10 @@ class WriteOutEngine
 {
 private:
   const rgw::inv::Configuration& inv_cfg;
+  ceph::real_time ts;
 public:
   WriteOutEngine(const rgw::inv::Configuration& inv_cfg)
-    : inv_cfg(inv_cfg)
+    : inv_cfg(inv_cfg), ts(real_clock::now())
     {}
   bool versioned() {
     using namespace rgw::inv;

@@ -7,6 +7,7 @@
 #include <map>
 #include <string>
 #include <iostream>
+#include <filesystem>
 
 #include "common/debug.h"
 
@@ -483,6 +484,7 @@ public:
       static constexpr std::string_view tempbase = "/tmp/rgwlc";
       int ix;
       std::string work_dir;
+      std::mutex wdlock;
     public:
       FileEngine(int ix)
 	: ix(ix),
@@ -491,6 +493,7 @@ public:
 
       bool check();
       bool cleanup();
+      std::fstream get_handle(const std::string& fname);
     };
 
   private:
