@@ -1740,6 +1740,8 @@ public:
   }
 };
 
+#include "csv-parser/csv.hpp"
+
 class CSVEngine : public WriteOutEngine
 {
 private:
