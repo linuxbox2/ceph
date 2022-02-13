@@ -1757,6 +1757,11 @@ public:
     using namespace rgw::inv;
     return inv_cfg.versions == ObjectVersions::All;
   }
+  /* XXX wip */
+  std::string get_manifest_filename();
+  std::string get_manifest_s3name();
+  std::string get_inventory_filename();
+  std::string get_json_manifest();
 };
 
 #include "csv-parser/csv.hpp"
