@@ -1745,10 +1745,12 @@ int LCOpRule::process(rgw_bucket_dir_entry& o,
 class WriteOutEngine
 {
 private:
+  std::string_view bucket_name;
   const rgw::inv::Configuration& inv_cfg;
   ceph::real_time ts;
 public:
-  WriteOutEngine(const rgw::inv::Configuration& inv_cfg)
+  WriteOutEngine(const std::string& bucket_name,
+		 const rgw::inv::Configuration& inv_cfg)
     : inv_cfg(inv_cfg), ts(real_clock::now())
     {}
   bool versioned() {
@@ -1764,27 +1766,31 @@ class CSVEngine : public WriteOutEngine
 private:
   csv::DelimWriter<std::ostream, ',', '"', true> csv_writer;
 
-  CSVEngine(const rgw::inv::Configuration& inv_cfg)
-    : WriteOutEngine(inv_cfg), csv_writer(std::cout)
+  CSVEngine(const std::string& bucket_name,
+	    const rgw::inv::Configuration& inv_cfg)
+    : WriteOutEngine(bucket_name, inv_cfg), csv_writer(std::cout)
     {}
 public:
   static std::unique_ptr<WriteOutEngine> Factory(
+    const std::string& bucket_name,
     const rgw::inv::Configuration& inv_cfg) {
     using namespace rgw::inv;
     if (inv_cfg.destination.format == Format::CSV) {
-      return std::unique_ptr<WriteOutEngine>(new CSVEngine(inv_cfg));
+      return std::unique_ptr<WriteOutEngine>(
+	new CSVEngine(bucket_name, inv_cfg));
     }
     return nullptr;
   }
 };
 
 static std::unique_ptr<WriteOutEngine> WriteOutEngine_Factory(
+  const std::string& bucket_name,
   const rgw::inv::Configuration& inv_cfg) {
   using namespace rgw::inv;
   switch(inv_cfg.destination.format)
   {
   case Format::CSV:
-    return CSVEngine::Factory(inv_cfg);
+    return CSVEngine::Factory(bucket_name, inv_cfg);
     break;
   case Format::Parquet:
     return nullptr; // TODO: implement
@@ -1850,7 +1856,7 @@ int RGWLC::bucket_process_inventory(const rgw::sal::Lifecycle::LCEntry& entry,
 
   for (auto& inv_elt : inventory_attr.id_mapping) {
     auto& inv_cfg = inv_elt.second;
-    auto eng = WriteOutEngine_Factory(inv_cfg);
+    auto eng = WriteOutEngine_Factory(bucket_name, inv_cfg);
     if (eng.get()) {
       if (eng.get()->versioned()) {
 	inv_all_versions.push_back(std::move(eng));
