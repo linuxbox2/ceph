@@ -273,30 +273,6 @@ void RGWLC::finalize()
   delete[] obj_names;
 }
 
-bool RGWLC::if_already_run_today(time_t start_date)
-{
-  struct tm bdt;
-  time_t begin_of_day;
-  utime_t now = ceph_clock_now();
-  localtime_r(&start_date, &bdt);
-
-  if (cct->_conf->rgw_lc_debug_interval > 0) {
-    if (now - start_date < cct->_conf->rgw_lc_debug_interval)
-      return true;
-    else
-      return false;
-  }
-
-  bdt.tm_hour = 0;
-  bdt.tm_min = 0;
-  bdt.tm_sec = 0;
-  begin_of_day = mktime(&bdt);
-  if (now - begin_of_day < 24*60*60)
-    return true;
-  else
-    return false;
-}
-
 static inline std::ostream& operator<<(std::ostream &os, rgw::sal::Lifecycle::LCEntry& ent) {
   os << "<ent: bucket=";
   os << ent.bucket;
@@ -2137,9 +2113,9 @@ int RGWLC::process(int index, int max_lock_secs, LCWorker* worker,
 
   do {
     utime_t now = ceph_clock_now();
+    utime_t lock_for_s(max_lock_secs, 0);
 
-    utime_t time(max_lock_secs, 0);
-    ret = lock->try_lock(this, time, null_yield);
+    ret = lock->try_lock(this, lock_for_s, null_yield);
     if (ret == -EBUSY || ret == -EEXIST) {
       /* already locked by another lc processor */
       ldpp_dout(this, 0) << "RGWLC::process() failed to acquire lock on "
@@ -2165,13 +2141,17 @@ int RGWLC::process(int index, int max_lock_secs, LCWorker* worker,
       vector<rgw::sal::Lifecycle::LCEntry> entries;
       int ret = sal_lc->list_entries(lc_shard, head.marker, 1, entries);
       if (ret < 0) {
-	// XXX dout here?
-	return ret;
+	ldpp_dout(this, 0) << "RGWLC::process() sal_lc->list_entries(lc_shard, head.marker, 1, "
+			   << "entries) returned error ret==" << ret << dendl;
+	goto exit;
       }
       entry = entries.front();
       head.marker = entry.bucket;
       head.start_date = now;
     } else {
+      ldpp_dout(this, 0) << "RGWLC::process() head.marker !empty() at START for shard=="
+			 << lc_shard << " (prior processing cycle was interrupted)" << dendl;
+
       /* fetches the entry pointed to by head.bucket */
       ret = sal_lc->get_entry(lc_shard, head.marker, entry);
       if (ret < 0) {
@@ -2196,10 +2176,10 @@ int RGWLC::process(int index, int max_lock_secs, LCWorker* worker,
         }
       }
     } else {
-      // XXX entry.bucket.empty() used to be the termination
-      // condition for the processing loop--would goto exit
-      ldpp_dout(this, 0) << "RGWLC::process() entry.bucket.empty() == true"
+      ldpp_dout(this, 0) << "RGWLC::process() entry.bucket.empty() == true at START 1"
+			 << " (this is impossible, but stop now)"
                          << dendl;
+      goto exit;
     }
 
     /* When there are no more entries to process, entry will be
