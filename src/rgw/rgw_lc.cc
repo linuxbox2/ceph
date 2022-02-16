@@ -2123,9 +2123,10 @@ int RGWLC::process(int index, int max_lock_secs, LCWorker* worker,
 		   bool once = false)
 {
   int ret{0};
-  bool wrap_once{false};
-  string prior_cycle_marker{""};
   const auto& lc_shard = obj_names[index];
+
+  rgw::sal::Lifecycle::LCHead head{};
+  rgw::sal::Lifecycle::LCEntry entry, next_entry; //string = bucket_name:bucket_id, start_time, int = LC_BUCKET_STATUS
 
   ldpp_dout(this, 5) << "RGWLC::process(): ENTER: "
 	  << "index: " << index << " worker ix: " << worker->ix
@@ -2134,17 +2135,8 @@ int RGWLC::process(int index, int max_lock_secs, LCWorker* worker,
   rgw::sal::LCSerializer* lock =
     sal_lc->get_serializer(lc_index_lock_name, lc_shard, std::string());
 
-restart:
   do {
     utime_t now = ceph_clock_now();
-    //string = bucket_name:bucket_id, start_time, int = LC_BUCKET_STATUS
-    rgw::sal::Lifecycle::LCEntry entry;
-
-    /* XXXX why is this here? if we don't want to accept invalid
-     * values, we need to coerce a valid one, not bail all lc
-     * processing */
-    if (max_lock_secs <= 0)
-      return -EAGAIN;
 
     utime_t time(max_lock_secs, 0);
     ret = lock->try_lock(this, time, null_yield);
@@ -2159,8 +2151,7 @@ restart:
       return 0;
     }
 
-    rgw::sal::Lifecycle::LCHead head;
-
+    /* preamble: find an inital bucket/marker */
     ret = sal_lc->get_head(lc_shard, head);
     if (ret < 0) {
       ldpp_dout(this, 0) << "RGWLC::process() failed to get obj head "
@@ -2179,19 +2170,15 @@ restart:
       }
       entry = entries.front();
       head.marker = entry.bucket;
+      head.start_date = now;
     } else {
+      /* fetches the entry pointed to by head.bucket */
       ret = sal_lc->get_entry(lc_shard, head.marker, entry);
       if (ret < 0) {
 	ldpp_dout(this, 0) << "RGWLC::process() sal_lc->get_entry(lc_shard, head.marker, entry) "
 			   << "returned error ret==" << ret << dendl;
 	goto exit;
       }
-    }
-
-    /* remember the initial marker for this shard */
-    if (! wrap_once) {
-      prior_cycle_marker = head.marker;
-      wrap_once = true;
     }
 
     if (! entry.bucket.empty()) {
@@ -2233,7 +2220,17 @@ restart:
       goto exit;
     }
 
-    // head.marker = entry.bucket; // XXX redundant, I think
+    ret = sal_lc->get_next_entry(lc_shard, entry.bucket, next_entry);
+    if (ret < 0) {
+      ldpp_dout(this, 0) << "RGWLC::process() failed to get obj entry "
+          << lc_shard << dendl;
+      goto exit;
+    }
+
+    /* save the next position */
+    head.marker = next_entry.bucket;
+    head.start_date = now;
+
     ret = sal_lc->put_head(lc_shard,  head);
     if (ret < 0) {
       ldpp_dout(this, 0) << "RGWLC::process() failed to put head "
@@ -2248,34 +2245,14 @@ restart:
 
     lock->unlock();
     ret = bucket_lc_process(entry.bucket, worker, thread_stop_at(), once);
-
-    /* XXX check this--prepare was itself bogus */
     bucket_lc_post(index, max_lock_secs, entry, ret, worker);
 
-    ret = sal_lc->get_next_entry(lc_shard, head.marker, entry);
-    if (ret < 0) {
-      ldpp_dout(this, 0) << "RGWLC::process() failed to get obj entry "
-          << lc_shard << dendl;
-      goto exit;
-    }
-    head.marker = entry.bucket;
-
-    /* if we are continuing a shard that wasn't exhausted in a prior
-     * cycle and therefore wrapped around to the start of the shard,
-     * we should also stop when we reach the marker we started with,
-     * resetting head.marker for the next cycle (we'll process the
-     * entire shard if the lifecycle policy for the corresponding
-     * bucket is cleared while we're working, but I think we can live
-     * with that) */
-    if (wrap_once &&
-	head.marker == prior_cycle_marker) {
+    /* done with this shard */
+    if (head.marker.empty()) {
       ldpp_dout(this, 5) <<
-	"RGWLC::process() wraparound finished lc_shard="
+	"RGWLC::process() cycle finished lc_shard="
 			 << lc_shard
-			 << " starting marker="
-			 << prior_cycle_marker
 			 << dendl;
-      head.marker = "";
       ret = sal_lc->put_head(lc_shard,  head);
       if (ret < 0) {
 	ldpp_dout(this, 0) << "RGWLC::process() failed to put head "
@@ -2284,20 +2261,7 @@ restart:
       }
       goto exit;
     }
-
-    /* done with this shard */
-    if (entry.bucket.empty()) {
-	/* handle the special case where the prior cycle didn't finish
-	 * processing this shard */
-      if (!going_down()) {
-	ldpp_dout(this, 5) << "RGWLC::process() wraparound shard=" << lc_shard
-			   << " starting marker=" << prior_cycle_marker
-			   << dendl;
-	goto restart;
-      }
-      goto exit;
-    }
-  } while(1 && !once);
+  } while(1 && !once && !going_down());
 
   delete lock;
   return 0;
