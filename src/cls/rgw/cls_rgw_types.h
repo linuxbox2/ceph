@@ -566,6 +566,7 @@ struct rgw_cls_bi_entry {
     DECODE_FINISH(bl);
   }
 
+  bool operator==(const rgw_cls_bi_entry& rhs) const;
   void dump(ceph::Formatter *f) const;
   void decode_json(JSONObj *obj, cls_rgw_obj_key *effective_key = NULL);
   static void generate_test_instances(std::list<rgw_cls_bi_entry*>& o);

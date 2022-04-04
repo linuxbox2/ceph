@@ -1252,3 +1252,32 @@ TEST_F(cls_rgw, bi_log_trim)
     EXPECT_FALSE(truncated);
   }
 }
+
+TEST(cls_rgw_standalone, bi_entry_encode_decode)
+{
+  using ceph::encode;
+
+  rgw_cls_bi_entry bi_entry, out_bi_entry;
+  rgw_bucket_olh_entry olh_entry;
+
+  olh_entry.delete_marker = true;
+  olh_entry.epoch = 1234;
+  olh_entry.tag = "tag";
+  olh_entry.key.name = "key.name";
+  olh_entry.key.instance = "key.instance";
+  olh_entry.exists = true;
+  olh_entry.pending_removal = true;
+  bi_entry.type = BIIndexType::Plain;
+  bi_entry.idx = "idx";
+  encode(olh_entry, bi_entry.data);
+
+  buffer::list in_bl, out_bl;
+  encode(bi_entry, in_bl);
+
+  out_bl = in_bl;
+  // decode(out_bi_entry, out_bl);
+  // asserts
+  auto p = out_bl.cbegin();
+  ASSERT_NO_THROW(decode(out_bi_entry, p));
+  ASSERT_EQ(bi_entry, out_bi_entry); // yes, we have to write this
+}
