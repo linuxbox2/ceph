@@ -1348,8 +1348,10 @@ void rgw::keystone::TokenEnvelope::User::decode_json(JSONObj *obj)
 void rgw::keystone::TokenEnvelope::decode_v3(JSONObj* const root_obj)
 {
   std::string expires_iso8601;
+  std::string issued_iso8601;
 
   JSONDecoder::decode_json("user", user, root_obj, true);
+  JSONDecoder::decode_json("issued_at", issued_iso8601, root_obj, true);
   JSONDecoder::decode_json("expires_at", expires_iso8601, root_obj, true);
   JSONDecoder::decode_json("roles", roles, root_obj, true);
   JSONDecoder::decode_json("project", project, root_obj, true);
@@ -1360,6 +1362,13 @@ void rgw::keystone::TokenEnvelope::decode_v3(JSONObj* const root_obj)
   } else {
     token.expires = 0;
     throw JSONDecoder::err("Failed to parse ISO8601 expiration date"
+                           "from Keystone response.");
+  }
+  if (parse_iso8601(issued_iso8601.c_str(), &t)) {
+    token.issued = internal_timegm(&t);
+  } else {
+    token.issued = 0;
+    throw JSONDecoder::err("Failed to parse ISO8601 issue date"
                            "from Keystone response.");
   }
 }

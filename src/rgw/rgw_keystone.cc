@@ -228,6 +228,35 @@ std::string CephCtxConfig::get_admin_password() const noexcept  {
   return empty;
 }
 
+#define SMALL_TIME_SLOP 300
+#define BIG_TIME_SLOP 86400
+int Service::validate_admin_token(CephContext* const cct, TokenEnvelope& t)
+{
+  const uint64_t now = ceph_clock_now().sec();
+  int ret = ~0xffff;
+  if (t.token.id.empty()) {
+    ret |= 1;
+  }
+  if (t.get_expires() < t.get_issued() + SMALL_TIME_SLOP
+    || now - t.get_issued() > BIG_TIME_SLOP
+    || t.get_issued() - now  > BIG_TIME_SLOP) {
+    ret |= 2;
+  }
+  if (static_cast<uint64_t>(t.get_issued()) > now) {
+    t.token.expires -= (t.get_issued() - now);
+  }
+  if (t.get_expires() - now < SMALL_TIME_SLOP) {
+    ret |= 4;
+  }
+  if (t.get_user_name().empty()) {
+    ret |= 8;
+  }
+  if (!(ret & 0xffff)) {
+    ret = 0;
+  }
+  return ret;
+}
+
 int Service::get_admin_token(CephContext* const cct,
                              TokenCache& token_cache,
                              const Config& config,
@@ -313,6 +342,13 @@ int Service::issue_admin_token_request(CephContext* const cct,
 
   if (t.parse(cct, token_req.get_subject_token(), token_bl,
               keystone_version) != 0) {
+    return -EINVAL;
+  }
+
+  const auto admin_ret = validate_admin_token(cct, t);
+  if (admin_ret < 0) {
+    lderr(cct) << "Received invalid admin token flags=" << (admin_ret & 0xffff)
+             << " data=" << token_bl.c_str() << dendl;
     return -EINVAL;
   }
 
