@@ -106,7 +106,7 @@ protected:
     concat_url(secret_url, cct->_conf->rgw_crypt_vault_prefix);
     concat_url(secret_url, std::string(key_id));
 
-    RGWHTTPTransceiver secret_req(cct, "GET", secret_url, &secret_bl, "ValutSecretEngine");
+    RGWHTTPTransceiver secret_req(cct, "GET", secret_url, &secret_bl, "VaultSecretEngine");
 
     if (!vault_token.empty()){
       secret_req.append_header("X-Vault-Token", vault_token);

@@ -112,6 +112,7 @@ public:
                                bufferlist * const token_body_bl)
       : RGWHTTPTransceiver(cct, method, url, token_body_bl,
                            cct->_conf->rgw_keystone_verify_ssl,
+                           "Keystone",
                            { "X-Subject-Token" }) {
     }
 
