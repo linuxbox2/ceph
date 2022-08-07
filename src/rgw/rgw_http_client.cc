@@ -634,14 +634,26 @@ int RGWHTTPHeadersCollector::receive_header(void * const ptr, const size_t len)
 
   if (boost::string_ref::npos == sep_loc) {
     /* Wrongly formatted header? Just skip it. */
+    // Also!  Normal case!  Always call for crlf at end of headers.
     return 0;
   }
 
   header_name_t name(header_line.substr(0, sep_loc));
-  if ((cct->_conf->subsys.get_log_level(ceph_subsys_rgw) < 20) &&
-      (0 == relevant_headers.count(name))) {
+  bool interesting = relevant_headers.find(name) != relevant_headers.end();
+
+  if (!interesting) {
     /* Not interested in this particular header. */
-    return 0;
+
+    auto hdl { header_line.length() };
+    if (hdl <= 0 || header_line[hdl-1] != '\n') {
+    } else if (--hdl > 0 && header_line[hdl-1] != '\r') {
+    } else {
+      --hdl;
+    }
+    ldout(cct, 20) << stamp << ": Uninteresting header: " << name <<
+      " not in " << relevant_headers <<
+      " sep=" << header_line.substr(sep_loc, 1) <<
+      " rest of it: " << header_line.substr(sep_loc+1, hdl-(sep_loc+1)) << dendl;
   } else {
     const auto value_part = header_line.substr(sep_loc + 1);
 
@@ -649,14 +661,22 @@ int RGWHTTPHeadersCollector::receive_header(void * const ptr, const size_t len)
     const size_t val_loc_s = value_part.find_first_not_of(' ');
     const size_t val_loc_e = value_part.find_first_of("\r\n");
 
-    if (boost::string_ref::npos == val_loc_s ||
+    if ((cct->_conf->subsys.get_log_level(ceph_subsys_rgw) < 20)) {
+    } else if (boost::string_ref::npos == val_loc_s ||
 	boost::string_ref::npos == val_loc_e) {
       /* Empty value case. */
-      dout(20) << stamp << ": Got header: " << name << dendl;
+      ldout(cct, 20) << stamp << ": Got header: " << name << dendl;
     } else {
-      dout(20) << stamp << ": Got header: " << name
-	       << ": " << value_part.substr(val_loc_s, val_loc_e - val_loc_s)
-	       << dendl;
+      ldout(cct, 20) << stamp << ": Got header: " << name
+	       << ": " << value_part.substr(val_loc_s, val_loc_e - val_loc_s) << dendl;
+    }
+    if (std::string_view::npos == val_loc_s ||
+	std::string_view::npos == val_loc_e) {
+      /* Empty value case. */
+      found_headers.emplace(name, header_value_t());
+    } else {
+      found_headers.emplace(name, header_value_t(
+	  value_part.substr(val_loc_s, val_loc_e - val_loc_s)));
     }
   }
 
