@@ -391,12 +391,13 @@ struct rgw_bucket_dir_entry {
   std::string tag;
   uint16_t flags;
   uint64_t versioned_epoch;
+  std::string sub_ver; // for resharding to record version
 
   rgw_bucket_dir_entry() :
     exists(false), index_ver(0), flags(0), versioned_epoch(0) {}
 
   void encode(ceph::buffer::list &bl) const {
-    ENCODE_START(8, 3, bl);
+    ENCODE_START(9, 3, bl);
     encode(key.name, bl);
     encode(ver.epoch, bl);
     encode(exists, bl);
@@ -409,10 +410,11 @@ struct rgw_bucket_dir_entry {
     encode(key.instance, bl);
     encode(flags, bl);
     encode(versioned_epoch, bl);
+    encode(sub_ver, bl);
     ENCODE_FINISH(bl);
   }
   void decode(ceph::buffer::list::const_iterator &bl) {
-    DECODE_START_LEGACY_COMPAT_LEN(8, 3, 3, bl);
+    DECODE_START_LEGACY_COMPAT_LEN(9, 3, 3, bl);
     decode(key.name, bl);
     decode(ver.epoch, bl);
     decode(exists, bl);
@@ -438,6 +440,9 @@ struct rgw_bucket_dir_entry {
     }
     if (struct_v >= 8) {
       decode(versioned_epoch, bl);
+    }
+    if (struct_v >= 9) {
+      decode(sub_ver, bl);
     }
     DECODE_FINISH(bl);
   }
@@ -506,6 +511,7 @@ struct rgw_cls_bi_entry {
   static void generate_test_instances(std::list<rgw_cls_bi_entry*>& o);
   bool get_info(cls_rgw_obj_key *key, RGWObjCategory *category,
 		rgw_bucket_category_stats *accounted_stats);
+  std::string get_sub_ver();
 };
 WRITE_CLASS_ENCODER(rgw_cls_bi_entry)
 
@@ -560,11 +566,12 @@ struct rgw_bucket_olh_entry {
   std::string tag;
   bool exists;
   bool pending_removal;
+  std::string sub_ver;
 
   rgw_bucket_olh_entry() : delete_marker(false), epoch(0), exists(false), pending_removal(false) {}
 
   void encode(ceph::buffer::list &bl) const {
-    ENCODE_START(1, 1, bl);
+    ENCODE_START(2, 1, bl);
     encode(key, bl);
     encode(delete_marker, bl);
     encode(epoch, bl);
@@ -572,10 +579,11 @@ struct rgw_bucket_olh_entry {
     encode(tag, bl);
     encode(exists, bl);
     encode(pending_removal, bl);
+    encode(sub_ver, bl);
     ENCODE_FINISH(bl);
   }
   void decode(ceph::buffer::list::const_iterator &bl) {
-    DECODE_START(1, bl);
+    DECODE_START(2, bl);
     decode(key, bl);
     decode(delete_marker, bl);
     decode(epoch, bl);
@@ -583,6 +591,9 @@ struct rgw_bucket_olh_entry {
     decode(tag, bl);
     decode(exists, bl);
     decode(pending_removal, bl);
+    if (struct_v >= 2) {
+      decode(sub_ver, bl);
+    }
     DECODE_FINISH(bl);
   }
   void dump(ceph::Formatter *f) const;
