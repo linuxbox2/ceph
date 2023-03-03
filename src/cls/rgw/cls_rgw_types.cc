@@ -236,6 +236,7 @@ void rgw_bucket_dir_entry::generate_test_instances(list<rgw_bucket_dir_entry*>& 
     e->exists = true;
     e->meta = *m;
     e->tag = "tag";
+    e->sub_ver = "1234.5";
 
     o.push_back(e);
 
@@ -276,6 +277,7 @@ void rgw_bucket_dir_entry::dump(Formatter *f) const
   encode_json("flags", (int)flags , f);
   encode_json("pending_map", pending_map, f);
   encode_json("versioned_epoch", versioned_epoch , f);
+  encode_json("sub_ver", sub_ver, f);
 }
 
 void rgw_bucket_dir_entry::decode_json(JSONObj *obj) {
@@ -291,6 +293,7 @@ void rgw_bucket_dir_entry::decode_json(JSONObj *obj) {
   flags = (uint16_t)val;
   JSONDecoder::decode_json("pending_map", pending_map, obj);
   JSONDecoder::decode_json("versioned_epoch", versioned_epoch, obj);
+  JSONDecoder::decode_json("sub_ver", sub_ver, obj);
 }
 
 static void dump_bi_entry(bufferlist bl, BIIndexType index_type, Formatter *formatter)
@@ -429,6 +432,33 @@ void rgw_cls_bi_entry::generate_test_instances(list<rgw_cls_bi_entry*>& o)
   o.push_back(new rgw_cls_bi_entry);
 }
 
+string rgw_cls_bi_entry::get_sub_ver()
+{
+  string ret;
+  auto iter = data.cbegin();
+  using ceph::decode;
+  switch (type) {
+    case BIIndexType::Plain:
+    case BIIndexType::Instance:
+      {
+        rgw_bucket_dir_entry entry;
+        decode(entry, iter);
+        ret = entry.sub_ver;
+      }
+      break;
+    case BIIndexType::OLH:
+      {
+        rgw_bucket_olh_entry entry;
+        decode(entry, iter);
+        ret = entry.sub_ver;
+      }
+      break;
+    default:
+      break;
+  }
+  return ret;
+}
+
 void rgw_bucket_olh_entry::dump(Formatter *f) const
 {
   encode_json("key", key, f);
@@ -438,6 +468,7 @@ void rgw_bucket_olh_entry::dump(Formatter *f) const
   encode_json("tag", tag, f);
   encode_json("exists", exists, f);
   encode_json("pending_removal", pending_removal, f);
+  encode_json("sub_ver", sub_ver, f);
 }
 
 void rgw_bucket_olh_entry::decode_json(JSONObj *obj)
@@ -449,6 +480,7 @@ void rgw_bucket_olh_entry::decode_json(JSONObj *obj)
   JSONDecoder::decode_json("tag", tag, obj);
   JSONDecoder::decode_json("exists", exists, obj);
   JSONDecoder::decode_json("pending_removal", pending_removal, obj);
+  JSONDecoder::decode_json("sub_ver", sub_ver, obj);
 }
 
 void rgw_bucket_olh_entry::generate_test_instances(list<rgw_bucket_olh_entry*>& o)
