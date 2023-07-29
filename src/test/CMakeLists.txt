@@ -393,6 +393,24 @@ target_link_libraries(ceph_test_librgw_file_xattr
   )
 target_link_libraries(ceph_test_librgw_file_xattr spawn)
 
+# ceph_test_rgw_inventory_out (inventory file writeout)
+add_executable(ceph_test_rgw_inventory_out
+  rgw_inventory_out.cc)
+target_include_directories(ceph_test_rgw_inventory_out
+  PUBLIC "${LUA_INCLUDE_DIR}"
+  SYSTEM PRIVATE "${CMAKE_SOURCE_DIR}/src/rgw"
+  SYSTEM PRIVATE "${CMAKE_SOURCE_DIR}/src/rgw/driver/rados")
+target_link_libraries(ceph_test_rgw_inventory_out
+  rgw
+  librados
+  ceph-common
+  ${UNITTEST_LIBS}
+  ${EXTRALIBS}
+  ${LUA_LIBRARIES}
+  ${ALLOC_LIBS}
+  )
+target_link_libraries(ceph_test_rgw_inventory_out spawn)
+
 # ceph_test_rgw_token
 add_executable(ceph_test_rgw_token
   test_rgw_token.cc

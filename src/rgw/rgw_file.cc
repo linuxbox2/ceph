@@ -1422,7 +1422,7 @@ namespace rgw {
 
   fh_key RGWFileHandle::make_fhk(const std::string& name)
   {
-    std::string tenant = get_fs()->get_user()->user_id.to_str();
+    std::string tenant = get_fs()->get_user_info()->user_id.to_str();
     if (depth == 0) {
       /* S3 bucket -- assert mount-at-bucket case reaches here */
       return fh_key(name, name, tenant);
@@ -1526,7 +1526,7 @@ namespace rgw {
       return false;
 
     RGWRMdirCheck req(fs->get_context(),
-		      g_rgwlib->get_driver()->get_user(fs->get_user()->user_id),
+		      g_rgwlib->get_driver()->get_user(fs->get_user_info()->user_id),
 		      this);
     int rc = g_rgwlib->get_fe()->execute_req(&req);
     if (! rc) {
@@ -1582,7 +1582,7 @@ namespace rgw {
     }
 
     if (is_root()) {
-      RGWListBucketsRequest req(cct, g_rgwlib->get_driver()->get_user(fs->get_user()->user_id),
+      RGWListBucketsRequest req(cct, g_rgwlib->get_driver()->get_user(fs->get_user_info()->user_id),
 				this, rcb, cb_arg, offset);
       rc = g_rgwlib->get_fe()->execute_req(&req);
       if (! rc) {
@@ -1595,7 +1595,7 @@ namespace rgw {
 	*eof = req.eof();
       }
     } else {
-      RGWReaddirRequest req(cct, g_rgwlib->get_driver()->get_user(fs->get_user()->user_id),
+      RGWReaddirRequest req(cct, g_rgwlib->get_driver()->get_user(fs->get_user_info()->user_id),
 			    this, rcb, cb_arg, offset);
       rc = g_rgwlib->get_fe()->execute_req(&req);
       if (! rc) {
@@ -1667,7 +1667,7 @@ namespace rgw {
       std::string object_name = relative_object_name();
       f->write_req =
 	new RGWWriteRequest(g_rgwlib->get_driver(), penv,
-			    g_rgwlib->get_driver()->get_user(fs->get_user()->user_id),
+			    g_rgwlib->get_driver()->get_user(fs->get_user_info()->user_id),
 			    this, bucket_name(), object_name);
       rc = g_rgwlib->get_fe()->start_req(f->write_req);
       if (rc < 0) {
@@ -2152,7 +2152,7 @@ int rgw_statfs(struct rgw_fs *rgw_fs,
   struct rados_cluster_stat_t stats;
 
   RGWGetClusterStatReq req(fs->get_context(),
-			   g_rgwlib->get_driver()->get_user(fs->get_user()->user_id),
+			   g_rgwlib->get_driver()->get_user(fs->get_user_info()->user_id),
 			   stats);
   int rc = g_rgwlib->get_fe()->execute_req(&req);
   if (rc < 0) {
@@ -2652,7 +2652,7 @@ int rgw_readv(struct rgw_fs *rgw_fs,
   int rc = 0;
 
   buffer::list bl;
-  RGWGetObjRequest req(cct, fs->get_user(), rgw_fh->bucket_name(),
+  RGWGetObjRequest req(cct, fs->get_user_info(), rgw_fh->bucket_name(),
 		      rgw_fh->object_name(), uio->uio_offset, uio->uio_resid,
 		      bl);
   req.do_hexdump = false;
@@ -2717,7 +2717,7 @@ int rgw_writev(struct rgw_fs *rgw_fs, struct rgw_file_handle *fh,
   }
 
   std::string oname = rgw_fh->relative_object_name();
-  RGWPutObjRequest req(cct, g_rgwlib->get_driver()->get_user(fs->get_user()->user_id),
+  RGWPutObjRequest req(cct, g_rgwlib->get_driver()->get_user(fs->get_user_info()->user_id),
 		       rgw_fh->bucket_name(), oname, bl);
 
   int rc = g_rgwlib->get_fe()->execute_req(&req);

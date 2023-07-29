@@ -1310,7 +1310,9 @@ namespace rgw {
 
     uint64_t get_fsid() { return root_fh.state.dev; }
 
-    RGWUserInfo* get_user() { return &user->get_info(); }
+    rgw::sal::User* get_user() { return user.get(); }
+
+    RGWUserInfo* get_user_info() { return &user->get_info(); }
 
     void update_user(const DoutPrefixProvider *dpp) {
       (void) g_rgwlib->get_driver()->get_user_by_access_key(dpp, key.id, null_yield, &user);
