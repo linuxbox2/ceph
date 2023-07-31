@@ -113,8 +113,9 @@ set(librgw_common_srcs
   rgw_rest_s3.cc
   rgw_rest_pubsub.cc
   rgw_rest_zero.cc
-  rgw_s3select.cc
   rgw_role.cc
+  rgw_s3inventory.cc
+  rgw_s3select.cc
   rgw_sal.cc
   rgw_sal_filter.cc
   rgw_string.cc
