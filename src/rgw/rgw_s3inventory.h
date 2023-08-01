@@ -4,7 +4,11 @@
 #pragma once
 
 #include <cstdint>
+#include <memory>
 #include <string>
+#include <experimental/propagate_const>
+
+#include "rgw/rgw_sal.h"
 
 namespace rgw::inventory {
 
@@ -14,11 +18,15 @@ namespace rgw::inventory {
     orc,
     csv
   };
-    
-  
+
   class Engine {
+  private:
+    class EngineImpl;
+    std::experimental::propagate_const<
+      std::unique_ptr<EngineImpl>> pimpl;
   public:
-    void generate(output_format format);
+    Engine();
+    void generate(rgw::sal::Bucket* bucket, output_format format);
     
   }; /* Engine */
 	

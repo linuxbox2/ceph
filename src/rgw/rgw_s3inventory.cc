@@ -3,6 +3,8 @@
 
 #include "rgw_s3inventory.h"
 
+#include <filesystem>
+
 #include "arrow/status.h"
 #include "arrow/type.h"
 #include "arrow/io/api.h"
@@ -10,10 +12,30 @@
 #include "parquet/arrow/schema.h"
 #include "parquet/arrow/writer.h"
 
+#include "common/errno.h"
+#include "common/debug.h"
+
 
 namespace rgw::inventory {
 
-// placeholder
+  class Engine::EngineImpl
+  {
+  public:
+    EngineImpl()
+      {}
+
+    void generate(rgw::sal::Bucket* bucket, output_format format) {
+    } /* generate */
+
+  }; /* EngineImpl */
+
+  Engine::Engine() : pimpl(new Engine::EngineImpl())
+  {}
+
+  void Engine::generate(rgw::sal::Bucket* bucket, output_format format)
+  {
+    return pimpl->generate(bucket, format);
+  } /* generate */
 
 	
 } /* namespace rgw::inventory */
