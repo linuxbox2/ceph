@@ -9,6 +9,7 @@
 #include "arrow/type.h"
 #include "arrow/io/api.h"
 #include "arrow/io/file.h"
+#include "common/dout.h"
 #include "parquet/arrow/schema.h"
 #include "parquet/arrow/writer.h"
 
@@ -20,8 +21,9 @@ namespace rgw::inventory {
 
   class Engine::EngineImpl
   {
+    DoutPrefixProvider* dpp;
   public:
-    EngineImpl()
+    EngineImpl(DoutPrefixProvider* dpp) : dpp(dpp)
       {}
 
     void generate(rgw::sal::Bucket* bucket, output_format format) {
@@ -29,7 +31,7 @@ namespace rgw::inventory {
 
   }; /* EngineImpl */
 
-  Engine::Engine() : pimpl(new Engine::EngineImpl())
+  Engine::Engine(DoutPrefixProvider* dpp) : pimpl(new Engine::EngineImpl(dpp))
   {}
 
   void Engine::generate(rgw::sal::Bucket* bucket, output_format format)
