@@ -3,6 +3,8 @@
 
 #include "rgw_s3inventory.h"
 
+#include <arrow/result.h>
+#include <arrow/util/macros.h>
 #include <filesystem>
 #include <vector>
 
@@ -22,16 +24,47 @@
 
 namespace rgw::inventory {
 
+#define ASSERT_OK(expr) \
+  for (arrow::Status _st = arrow::internal::GenericToStatus((expr)); !_st.ok();) \
+    abort();
+
+  static inline arrow::Result<std::shared_ptr<arrow::Schema>> s3_inventory_schema()
+  {
+    /*
+      "type": "record",
+      "name": "inventory",
+      "namespace": "s3",
+      "fields": */
+    arrow::SchemaBuilder sb;
+    ASSERT_OK(sb.AddField(arrow::field("bucket", arrow::utf8(), false /* nullable */)));
+    ASSERT_OK(sb.AddField(arrow::field("key", arrow::utf8())));
+    ASSERT_OK(sb.AddField(arrow::field("version_id", arrow::utf8())));
+    ASSERT_OK(sb.AddField(arrow::field("is_latest", arrow::boolean())));
+    ASSERT_OK(sb.AddField(arrow::field("is_delete_marker", arrow::boolean())));
+    ASSERT_OK(sb.AddField(arrow::field("size", arrow::int64())));
+
+    // TODO: finish
+
+    return sb.Finish();
+  }
+
   class Engine::EngineImpl
   {
     DoutPrefixProvider* dpp;
     CephContext* cct;
     std::string base_work_path;
+    std::shared_ptr<arrow::Schema> schema;
   public:
-    EngineImpl(DoutPrefixProvider* dpp) : dpp(dpp), cct(dpp->get_cct()) {
-      base_work_path = cct->_conf.get_val<std::string>("rgw_inventory_work_path");
+    EngineImpl(DoutPrefixProvider* dpp)
+      : dpp(dpp), cct(dpp->get_cct())
+      {
+	auto _schema = s3_inventory_schema();
+	if (ARROW_PREDICT_TRUE(_schema.ok())) {
+	  schema = _schema.ValueOrDie();
+	}
 
-    }
+	base_work_path = cct->_conf.get_val<std::string>("rgw_inventory_work_path");
+      }
 
     int list_bucket(rgw::sal::Bucket* bucket,
 		    const fu2::unique_function<void(const rgw_bucket_dir_entry&) const>& func)
