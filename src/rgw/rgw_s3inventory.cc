@@ -9,7 +9,10 @@
 #include <filesystem>
 #include <vector>
 #include <atomic>
+#include <thread>
 #include <string_view>
+#include <chrono>
+#include <unistd.h>
 
 #include "arrow/status.h"
 #include "arrow/type.h"
@@ -60,6 +63,8 @@ namespace rgw::inventory {
     DoutPrefixProvider* dpp;
     CephContext* cct;
     arrow::MemoryPool* mempool;
+    pid_t pid;
+    std::thread::id tid;
 
     sf::path base_work_path;
     std::shared_ptr<arrow::Schema> schema;
@@ -118,7 +123,8 @@ namespace rgw::inventory {
 
   public:
     EngineImpl(DoutPrefixProvider* dpp)
-      : dpp(dpp), cct(dpp->get_cct()), mempool(arrow::default_memory_pool())
+      : dpp(dpp), cct(dpp->get_cct()), mempool(arrow::default_memory_pool()),
+	pid(::getpid()), tid(std::this_thread::get_id())
       {
 	auto _schema = s3_inventory_schema();
 	if (ARROW_PREDICT_TRUE(_schema.ok())) {
