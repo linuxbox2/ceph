@@ -3,6 +3,7 @@
 
 #include "rgw_s3inventory.h"
 
+#include <arrow/memory_pool.h>
 #include <arrow/result.h>
 #include <arrow/util/macros.h>
 #include <filesystem>
@@ -52,11 +53,13 @@ namespace rgw::inventory {
   {
     DoutPrefixProvider* dpp;
     CephContext* cct;
+    arrow::MemoryPool* mempool;
+
     std::string base_work_path;
     std::shared_ptr<arrow::Schema> schema;
   public:
     EngineImpl(DoutPrefixProvider* dpp)
-      : dpp(dpp), cct(dpp->get_cct())
+      : dpp(dpp), cct(dpp->get_cct()), mempool(arrow::default_memory_pool())
       {
 	auto _schema = s3_inventory_schema();
 	if (ARROW_PREDICT_TRUE(_schema.ok())) {
