@@ -8,6 +8,8 @@
 #include <arrow/util/macros.h>
 #include <filesystem>
 #include <vector>
+#include <atomic>
+#include <string_view>
 
 #include "arrow/status.h"
 #include "arrow/type.h"
@@ -25,7 +27,9 @@
 
 namespace rgw::inventory {
 
-#define ASSERT_OK(expr) \
+  namespace sf = std::filesystem;
+
+#define ASSERT_OK(expr)							\
   for (arrow::Status _st = arrow::internal::GenericToStatus((expr)); !_st.ok();) \
     abort();
 
@@ -51,23 +55,22 @@ namespace rgw::inventory {
 
   class Engine::EngineImpl
   {
+    static constexpr std::string_view work_path_prefix = "rgw-inventory-";
+
     DoutPrefixProvider* dpp;
     CephContext* cct;
     arrow::MemoryPool* mempool;
 
-    std::string base_work_path;
+    sf::path base_work_path;
     std::shared_ptr<arrow::Schema> schema;
-  public:
-    EngineImpl(DoutPrefixProvider* dpp)
-      : dpp(dpp), cct(dpp->get_cct()), mempool(arrow::default_memory_pool())
-      {
-	auto _schema = s3_inventory_schema();
-	if (ARROW_PREDICT_TRUE(_schema.ok())) {
-	  schema = _schema.ValueOrDie();
-	}
 
-	base_work_path = cct->_conf.get_val<std::string>("rgw_inventory_work_path");
-      }
+    void init_work_path() {
+      base_work_path = cct->_conf.get_val<std::string>("rgw_inventory_work_path");
+
+      /* clear out stale work */
+      sf::remove_all(base_work_path);
+      sf::create_directory(base_work_path);
+    }
 
     int list_bucket(rgw::sal::Bucket* bucket,
 		    const fu2::unique_function<void(const rgw_bucket_dir_entry&) const>& func)
@@ -112,6 +115,17 @@ namespace rgw::inventory {
 
 	return 0;
       } /* list_bucket */
+
+  public:
+    EngineImpl(DoutPrefixProvider* dpp)
+      : dpp(dpp), cct(dpp->get_cct()), mempool(arrow::default_memory_pool())
+      {
+	auto _schema = s3_inventory_schema();
+	if (ARROW_PREDICT_TRUE(_schema.ok())) {
+	  schema = _schema.ValueOrDie();
+	}
+	init_work_path();
+      }
 
     void generate(rgw::sal::Bucket* bucket, output_format format) {
     } /* generate */
