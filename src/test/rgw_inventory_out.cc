@@ -25,6 +25,7 @@
 #include "rgw/rgw_file_int.h"
 #include "rgw/rgw_lib.h"
 #include "rgw/rgw_sal.h"
+#include "rgw/rgw_s3inventory.h"
 
 #include "gtest/gtest.h"
 #include "common/ceph_argparse.h"
@@ -196,6 +197,16 @@ TEST(InvOut, Listdirs)
   ASSERT_EQ(count, nobjects);
 } /* Listdirs */
 
+namespace ri = rgw::inventory;
+
+TEST(InvOut, GEN1)
+{
+  int ret{0};
+  ri::Engine eng{dpp};
+  ret = eng.generate(bucket.get(), ri::output_format::parquet);
+  ASSERT_EQ(ret, 0);
+}
+
 /* TODO: finish */
 
 TEST(InvOut, CLEANUP) {
@@ -217,7 +228,6 @@ TEST(InvOut, CLEANUP) {
 
   librgw_shutdown(rgw_h);
 }
-
 
 int main(int argc, char *argv[])
 {

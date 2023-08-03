@@ -50,6 +50,8 @@ namespace rgw::inventory {
     ASSERT_OK(sb.AddField(arrow::field("is_latest", arrow::boolean())));
     ASSERT_OK(sb.AddField(arrow::field("is_delete_marker", arrow::boolean())));
     ASSERT_OK(sb.AddField(arrow::field("size", arrow::int64())));
+    ASSERT_OK(sb.AddField(arrow::field("last_modified_date",
+				       arrow::timestamp(arrow::TimeUnit::type::MILLI))));
 
     // TODO: finish
 
@@ -133,18 +135,26 @@ namespace rgw::inventory {
 	init_work_path();
       }
 
-    void generate(rgw::sal::Bucket* bucket, output_format format) {
+    int generate(rgw::sal::Bucket* bucket, output_format format) {
+      /* TODO: implement */
+      return 0;
     } /* generate */
 
   }; /* EngineImpl */
 
-  Engine::Engine(DoutPrefixProvider* dpp) : pimpl(new Engine::EngineImpl(dpp))
-  {}
-
-  void Engine::generate(rgw::sal::Bucket* bucket, output_format format)
+  int Engine::generate(rgw::sal::Bucket* bucket, output_format format)
   {
     return pimpl->generate(bucket, format);
   } /* generate */
 
+  Engine::Engine(DoutPrefixProvider* dpp) : pimpl(new Engine::EngineImpl(dpp))
+  {}
+
+  //Engine::Engine(Engine&&) = delete; // default; // delete?
+
+  Engine::~Engine()
+  {}
+
+  //Engine& Engine::operator=(Engine&&) = delete;// default; // delete?
 	
 } /* namespace rgw::inventory */

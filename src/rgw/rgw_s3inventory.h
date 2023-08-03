@@ -20,14 +20,16 @@ namespace rgw::inventory {
   };
 
   class Engine {
-  private:
+  public:
     class EngineImpl;
-    std::experimental::propagate_const<
-      std::unique_ptr<EngineImpl>> pimpl;
+    std::experimental::propagate_const<std::unique_ptr<EngineImpl>> pimpl;
   public:
     Engine(DoutPrefixProvider* dpp);
-    void generate(rgw::sal::Bucket* bucket, output_format format);
-    
+    int  generate(rgw::sal::Bucket* bucket, output_format format);
+
+    Engine(Engine&&) = delete;
+    Engine& operator=(Engine&&) = delete;
+    ~Engine();
   }; /* Engine */
 	
 } /* namespace rgw::inventory */
