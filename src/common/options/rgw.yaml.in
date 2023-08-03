@@ -3795,6 +3795,16 @@ options:
   flags:
   - startup
   with_legacy: true
+- name: rgw_inventory_work_path
+  type: str
+  level: advanced
+  desc: Work/staging directory when generating S3 inventory files
+  default: /var/lib/ceph/radosgw/inventory
+  services:
+  - rgw
+  flags:
+  - startup
+  with_legacy: true
 - name: rgw_d4n_port
   type: int
   level: advanced
