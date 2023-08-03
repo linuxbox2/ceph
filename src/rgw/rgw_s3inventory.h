@@ -24,7 +24,8 @@ namespace rgw::inventory {
     class EngineImpl;
     std::experimental::propagate_const<std::unique_ptr<EngineImpl>> pimpl;
   public:
-    Engine(DoutPrefixProvider* dpp);
+    Engine();
+    void initialize(DoutPrefixProvider* dpp);
     int  generate(rgw::sal::Bucket* bucket, output_format format);
 
     Engine(Engine&&) = delete;

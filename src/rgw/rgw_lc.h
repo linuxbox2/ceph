@@ -570,7 +570,7 @@ public:
 
   std::vector<std::unique_ptr<RGWLC::LCWorker>> workers;
 
-  RGWLC() : cct(nullptr), driver(nullptr), inv_engine(this) {}
+  RGWLC() : cct(nullptr), driver(nullptr) {}
   virtual ~RGWLC() override;
 
   void initialize(CephContext *_cct, rgw::sal::Driver* _driver);

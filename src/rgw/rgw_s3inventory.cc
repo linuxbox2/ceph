@@ -72,7 +72,8 @@ namespace rgw::inventory {
     std::shared_ptr<arrow::Schema> schema;
 
     void init_work_path() {
-      base_work_path = cct->_conf.get_val<std::string>("rgw_inventory_work_path");
+      auto work_path_s = cct->_conf.get_val<std::string>("rgw_inventory_work_path");
+      base_work_path = work_path_s;
 
       /* clear out stale work */
       sf::remove_all(base_work_path);
@@ -124,16 +125,20 @@ namespace rgw::inventory {
       } /* list_bucket */
 
   public:
-    EngineImpl(DoutPrefixProvider* dpp)
-      : dpp(dpp), cct(dpp->get_cct()), mempool(arrow::default_memory_pool()),
+    EngineImpl()
+      : dpp(nullptr), cct(nullptr), mempool(arrow::default_memory_pool()),
 	pid(::getpid()), tid(std::this_thread::get_id())
-      {
-	auto _schema = s3_inventory_schema();
-	if (ARROW_PREDICT_TRUE(_schema.ok())) {
-	  schema = _schema.ValueOrDie();
+      {}
+
+    void initialize(DoutPrefixProvider* _dpp) {
+      dpp = _dpp;
+      cct = dpp->get_cct();
+      auto _schema = s3_inventory_schema();
+      if (ARROW_PREDICT_TRUE(_schema.ok())) {
+	schema = _schema.ValueOrDie();
 	}
-	init_work_path();
-      }
+      init_work_path();
+    };
 
     int generate(rgw::sal::Bucket* bucket, output_format format) {
       /* TODO: implement */
@@ -147,8 +152,13 @@ namespace rgw::inventory {
     return pimpl->generate(bucket, format);
   } /* generate */
 
-  Engine::Engine(DoutPrefixProvider* dpp) : pimpl(new Engine::EngineImpl(dpp))
+  Engine::Engine() : pimpl(new Engine::EngineImpl())
   {}
+
+  void Engine::initialize(DoutPrefixProvider* dpp) 
+  {
+    pimpl->initialize(dpp);
+  }
 
   //Engine::Engine(Engine&&) = delete; // default; // delete?
 

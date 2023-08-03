@@ -202,8 +202,9 @@ namespace ri = rgw::inventory;
 TEST(InvOut, GEN1)
 {
   int ret{0};
-  ri::Engine eng{dpp};
-  ret = eng.generate(bucket.get(), ri::output_format::parquet);
+  ri::Engine engine{};
+  engine.initialize(dpp);
+  ret = engine.generate(bucket.get(), ri::output_format::parquet);
   ASSERT_EQ(ret, 0);
 }
 
