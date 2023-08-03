@@ -17,6 +17,7 @@
 #include "common/iso_8601.h"
 #include "common/Thread.h"
 #include "rgw_common.h"
+#include "rgw_s3inventory.h"
 #include "cls/rgw/cls_rgw_types.h"
 #include "rgw_tag.h"
 #include "rgw_sal.h"
@@ -520,6 +521,7 @@ class RGWLC : public DoutPrefixProvider {
   std::string *obj_names{nullptr};
   std::atomic<bool> down_flag = { false };
   std::string cookie;
+  rgw::inventory::Engine inv_engine;
 
 public:
 
@@ -568,7 +570,7 @@ public:
 
   std::vector<std::unique_ptr<RGWLC::LCWorker>> workers;
 
-  RGWLC() : cct(nullptr), driver(nullptr) {}
+  RGWLC() : cct(nullptr), driver(nullptr), inv_engine(this) {}
   virtual ~RGWLC() override;
 
   void initialize(CephContext *_cct, rgw::sal::Driver* _driver);
