@@ -22,6 +22,7 @@
 #include "parquet/arrow/schema.h"
 #include "parquet/arrow/writer.h"
 
+#include "common/ceph_time.h"
 #include "fmt/format.h"
 #include "include/function2.hpp"
 #include "common/errno.h"
@@ -32,7 +33,7 @@ namespace rgw::inventory {
 
   namespace sf = std::filesystem;
 
-#define ASSERT_OK(expr)							\
+#define ASSERT_OK(expr)	\
   for (arrow::Status _st = arrow::internal::GenericToStatus((expr)); !_st.ok();) \
     abort();
 
@@ -60,16 +61,43 @@ namespace rgw::inventory {
 
   class Engine::EngineImpl
   {
-    static constexpr std::string_view work_path_prefix = "rgw-inventory-";
+    static constexpr std::string_view work_dir_fmt = "rgw-inventory-{}-{}-{}";
 
     DoutPrefixProvider* dpp;
     CephContext* cct;
     arrow::MemoryPool* mempool;
     pid_t pid;
-    std::thread::id tid;
 
     sf::path base_work_path;
     std::shared_ptr<arrow::Schema> schema;
+
+    class WriteStrategy
+    {
+      EngineImpl* engine;
+    public:
+      WriteStrategy(EngineImpl* engine) : engine(engine)
+	{}
+      virtual std::unique_ptr<parquet::arrow::FileWriter> get_writer(const std::string& outfile_path) = 0; 
+    };
+
+    /* ORCWriteStrategy, CSVWriteStrategy */
+
+    class ParquetWriteStrategy : public WriteStrategy
+    {
+    public:
+      ParquetWriteStrategy(EngineImpl* engine) : WriteStrategy(engine)
+	{}
+      virtual std::unique_ptr<parquet::arrow::FileWriter> get_writer(const std::string& outfile_path) {
+	/* TODO: implement */
+	return nullptr;
+      }
+    };
+
+    inline std::string get_workdir(rgw::sal::Bucket* bucket) {
+      auto ts = ceph::real_clock::to_timespec(ceph::real_clock::now());
+      uint64_t ms = ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+      return fmt::format(work_dir_fmt, bucket->get_name(), pid, ms);
+    }
 
     void init_work_path() {
       auto work_path_s = cct->_conf.get_val<std::string>("rgw_inventory_work_path");
@@ -127,7 +155,7 @@ namespace rgw::inventory {
   public:
     EngineImpl()
       : dpp(nullptr), cct(nullptr), mempool(arrow::default_memory_pool()),
-	pid(::getpid()), tid(std::this_thread::get_id())
+	pid(::getpid())
       {}
 
     void initialize(DoutPrefixProvider* _dpp) {
@@ -142,6 +170,8 @@ namespace rgw::inventory {
 
     int generate(rgw::sal::Bucket* bucket, output_format format) {
       /* TODO: implement */
+      std::string workdir = get_workdir(bucket); // get a unique work-dir for this run
+
       return 0;
     } /* generate */
 
