@@ -77,8 +77,10 @@ namespace rgw::inventory {
     public:
       WriteStrategy(EngineImpl* engine) : engine(engine)
 	{}
-      virtual std::unique_ptr<parquet::arrow::FileWriter> get_writer(const std::string& outfile_path) = 0; 
-    };
+      virtual std::unique_ptr<parquet::arrow::FileWriter> get_writer(const std::string& outfile_path) = 0;
+      virtual ~WriteStrategy()
+	{}
+    }; /* WriteStrategy */
 
     /* ORCWriteStrategy, CSVWriteStrategy */
 
@@ -91,7 +93,24 @@ namespace rgw::inventory {
 	/* TODO: implement */
 	return nullptr;
       }
-    };
+    }; /* ParquetWriteStrategy */
+
+    std::unique_ptr<WriteStrategy> get_strategy(output_format format) {
+      switch (format) {
+      case output_format::parquet:
+	return std::unique_ptr<WriteStrategy>(new ParquetWriteStrategy{this});
+	break;
+      case output_format::orc:
+	/* XXX */
+	break;
+      case output_format::csv:
+	/* XXX */
+	break;
+      default:
+	break;
+      }
+      return nullptr;
+    } /* get_strategy */
 
     inline std::string get_workdir(rgw::sal::Bucket* bucket) {
       auto ts = ceph::real_clock::to_timespec(ceph::real_clock::now());
@@ -171,6 +190,7 @@ namespace rgw::inventory {
     int generate(rgw::sal::Bucket* bucket, output_format format) {
       /* TODO: implement */
       std::string workdir = get_workdir(bucket); // get a unique work-dir for this run
+      std::unique_ptr<WriteStrategy> strategy = get_strategy(format);
 
       return 0;
     } /* generate */
