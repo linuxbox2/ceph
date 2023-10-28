@@ -16,7 +16,6 @@
 #include <string>
 #include "include/function2.hpp"
 #include "zpp_bits.h"
-#include <python3.11/tupleobject.h>
 #include <stdint.h>
 #include <xxhash.h>
 
