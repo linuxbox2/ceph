@@ -12,3 +12,6 @@
  * Foundation.  See file COPYING.
  *
  */
+
+#include "rgw_pack.h"
+

@@ -12,3 +12,34 @@
  * Foundation.  See file COPYING.
  *
  */
+
+#include <string>
+#include "include/function2.hpp"
+#include "zpp_bits.h"
+#include <python3.11/tupleobject.h>
+#include <stdint.h>
+#include <xxhash.h>
+
+namespace rgw::pack {
+
+  class Pack
+  {
+    class Header
+    {
+      uint16_t struct_v;
+      uint32_t flags;
+      // TODO: implement
+    }; /* Header */
+
+    class ObjEntry
+    {
+      uint16_t struct_v;
+      std::string name;
+      std::string cksum; // XXX use mine?
+      uint32_t flags;
+      uint32_t size;
+    }; /* ObjEntry */
+
+  }; /* Pack */
+
+} /* namespace rgw::pack */
