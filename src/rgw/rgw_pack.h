@@ -21,24 +21,47 @@
 
 namespace rgw::pack {
 
+  class Header
+  {
+  public:
+    uint16_t struct_v;
+    uint32_t flags;
+    // TODO: implement
+  }; /* Header */
+
+  class ObjEntry
+  {
+  public:
+    uint16_t struct_v;
+    std::string name;
+    std::string cksum; // XXX use mine?
+    uint32_t flags;
+    uint32_t size;
+  }; /* ObjEntry */
+
+  /* type erasing i/o types */
+  template <typename IO>
   class Pack
   {
-    class Header
+    class PositionalIO
     {
-      uint16_t struct_v;
-      uint32_t flags;
-      // TODO: implement
-    }; /* Header */
+      IO& hdl;
+    public:
+      PositionalIO(IO& hdl) : hdl(hdl)
+      {}
 
-    class ObjEntry
-    {
-      uint16_t struct_v;
-      std::string name;
-      std::string cksum; // XXX use mine?
-      uint32_t flags;
-      uint32_t size;
-    }; /* ObjEntry */
+      ssize_t read(void* buf, size_t size, off_t off) {
+	return 0;
+      }
 
+      ssize_t write(void* buf, size_t size, off_t off) {
+	return 0;
+      }
+
+      void flush() {}
+    }; /* PositionalIO */
+
+    
   }; /* Pack */
 
 } /* namespace rgw::pack */
