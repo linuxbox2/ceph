@@ -12,3 +12,144 @@
  * Foundation.  See file COPYING.
  *
  */
+
+#include <cstdint>
+#include <errno.h>
+#include <iostream>
+#include <string>
+#include <filesystem>
+#include <sys/types.h>
+#include <stdint.h>
+
+#include "rgw_pack.h"
+#include "common/config.h"
+#include "common/ceph_argparse.h"
+#include "common/debug.h"
+#include "global/global_init.h"
+#include "include/ceph_assert.h"
+#include "include/str_list.h"
+
+#define dout_subsys ceph_subsys_rgw
+
+namespace {
+
+  using namespace rgw;
+  using std::get;
+
+  enum class archive_op : uint8_t
+    {
+      none = 0,
+      add,
+      list,
+      remove
+    };
+
+  archive_op op;
+  std::string file_path;
+  std::string archive_path;
+  bool verbose {false};
+}
+
+using namespace std;
+
+void usage()
+{
+  cout << "usage: radosgw-zpp-arc --op=<archive op> "
+       << "<archive_path> <file_path> [options...]"
+       << std::endl;
+  cout << "\t <archive op> := add | list | remove" << std::endl;
+  cout << "\n";
+  generic_client_usage();
+}
+
+int main(int argc, char **argv)
+{
+  auto args = argv_to_vec(argc, argv);
+  std::string val;
+  if (args.empty()) {
+    cerr << argv[0] << ": -h or --help for usage" << std::endl;
+    exit(1);
+  }
+  if (ceph_argparse_need_usage(args)) {
+    usage();
+    exit(0);
+  }
+
+  for (auto arg_iter = args.begin(); arg_iter != args.end();) {
+    if (ceph_argparse_witharg(args, arg_iter, &val, "--op",
+			      (char*) nullptr)) {
+      if (val == "add") {
+	op = archive_op::add;
+      } else if (val == "list") {
+	op = archive_op::list;
+      } else if (val == "remove") {
+	op = archive_op::remove;
+      }
+      continue;
+    } else if (ceph_argparse_flag(args, arg_iter, "--verbose",
+					    (char*) nullptr)) {
+      verbose = true;
+    } else {
+      if (archive_path.empty()) {
+          archive_path = *arg_iter;
+      } else {
+	if (file_path.empty()) {
+          file_path = *arg_iter;
+        }
+      }
+    }
+    ++arg_iter;
+  }
+
+  switch(op) {
+  case archive_op::add:
+    if (archive_path.empty()) {
+      {
+	cerr << "no archive_path provided" << std::endl;
+	exit(1);
+      }
+    }
+    if (file_path.empty()) {
+      {
+	cerr << "no file_path provided" << std::endl;
+	exit(1);
+      }
+    }
+    cout << argv[0] << " add " << file_path
+	 << " to archive "  << archive_path << std::endl;
+  break;
+  case archive_op::list:
+    if (archive_path.empty()) {
+      {
+	cerr << "no archive_path provided" << std::endl;
+	exit(1);
+      }
+    }
+    cout << argv[0] << " list archive " << archive_path
+	 << std::endl;
+    break;
+  case archive_op::remove:
+    if (archive_path.empty()) {
+      {
+	cerr << "no archive_path provided" << std::endl;
+	exit(1);
+      }
+    }
+    if (file_path.empty()) {
+      {
+	cerr << "no file_path provided" << std::endl;
+	exit(1);
+      }
+    }
+    cout << argv[0] << " remove " << file_path
+	 << " from archive " << archive_path
+	 << std::endl;
+    break;
+  default:
+    cerr << "unknown archive_op" << std::endl;
+    exit(1);
+    break;
+  }
+
+  return 0;
+}

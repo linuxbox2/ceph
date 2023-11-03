@@ -39,28 +39,22 @@ namespace rgw::pack {
     uint32_t size;
   }; /* ObjEntry */
 
+  /*
+  class PositionalIO
+  {
+  private:
+    PositionalIO() {}
+  public:
+    ssize_t read(void* buf, size_t size, off_t off);
+    ssize_t write(void* buf, size_t size, off_t off);
+    void flush();
+  }; // PositionalIO
+  */
+  
   /* type erasing i/o types */
   template <typename IO>
   class Pack
   {
-    class PositionalIO
-    {
-      IO& hdl;
-    public:
-      PositionalIO(IO& hdl) : hdl(hdl)
-      {}
-
-      ssize_t read(void* buf, size_t size, off_t off) {
-	return 0;
-      }
-
-      ssize_t write(void* buf, size_t size, off_t off) {
-	return 0;
-      }
-
-      void flush() {}
-    }; /* PositionalIO */
-
     
   }; /* Pack */
 

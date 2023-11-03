@@ -513,6 +513,13 @@ target_link_libraries(radosgw-token librados
   global ${ALLOC_LIBS})
 install(TARGETS radosgw-token DESTINATION bin)
 
+set(rgw_zpp_arc_srcs
+  rgw_zpp_arc.cc)
+add_executable(rgw-zpp-arc ${rgw_zpp_arc_srcs})
+target_link_libraries(rgw-zpp-arc librados
+  global)
+install(TARGETS rgw-zpp-arc DESTINATION bin)
+
 set(radosgw_object_expirer_srcs
   rgw_object_expirer.cc)
 add_executable(radosgw-object-expirer ${radosgw_object_expirer_srcs})
