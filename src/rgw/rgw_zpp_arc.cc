@@ -151,5 +151,8 @@ int main(int argc, char **argv)
     break;
   }
 
+  //rgw::pack::FileIO io{archive_path};
+  //rgw::pack::Pack<FileIO> pack;
+
   return 0;
 }
