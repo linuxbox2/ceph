@@ -22,6 +22,9 @@
 
 namespace rgw::pack {
 
+  static constexpr mode_t def_mode =
+    S_IRUSR|S_IWUSR|S_IRGRP|S_IWGRP|S_IROTH|S_IWOTH;
+
   PositionalIO make_positional(std::string& archive_path)
   {
     PositionalIO pio;
@@ -31,7 +34,7 @@ namespace rgw::pack {
 
   int PositionalIO::open(const std::string& archive_path)
   {
-    fd = ::open(archive_path.c_str(), O_RDWR|O_CREAT);
+    fd = ::open(archive_path.c_str(), O_RDWR|O_CREAT, def_mode);
     if (fd > 0) {
       flags |= FLAG_OPEN;
     } else {
