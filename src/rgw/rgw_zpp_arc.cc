@@ -16,12 +16,15 @@
 #include <cstdint>
 #include <errno.h>
 #include <iostream>
+#include <set>
 #include <string>
 #include <filesystem>
 #include <sys/types.h>
 #include <stdint.h>
 
 #include "rgw_pack.h"
+#include "pack/positional_io.h"
+
 #include "common/config.h"
 #include "common/ceph_argparse.h"
 #include "common/debug.h"
@@ -34,15 +37,19 @@
 namespace {
 
   using namespace rgw;
-  using std::get;
 
   enum class archive_op : uint8_t
     {
       none = 0,
       add,
       list,
+      get,
+      attrs_operate,
       remove
     };
+
+  std::set<archive_op> file_path_ops({archive_op::add, archive_op::get,
+      archive_op::attrs_operate, archive_op::remove});
 
   archive_op op;
   std::string file_path;
@@ -82,6 +89,8 @@ int main(int argc, char **argv)
 	op = archive_op::add;
       } else if (val == "list") {
 	op = archive_op::list;
+      }  else if (val == "get") {
+	op = archive_op::get;
       } else if (val == "remove") {
 	op = archive_op::remove;
       }
@@ -101,58 +110,58 @@ int main(int argc, char **argv)
     ++arg_iter;
   }
 
+  namespace rp = rgw::pack;
+
+  using PositionalIO = rp::PositionalIO;
+  using Pack = rp::Pack<rp::PositionalIO>;
+
+  if (archive_path.empty()) {
+    cerr << "no archive_path provided" << std::endl;
+    exit(1);
+  }
+
+  if (file_path_ops.contains(op)) {
+    if (file_path.empty()) {
+      cerr << "no file_path provided" << std::endl;
+      exit(1);
+    }
+  }
+
+  PositionalIO pio = rp::make_positional(archive_path);
+  Pack pack = Pack::make_pack(pio);
+
   switch(op) {
   case archive_op::add:
-    if (archive_path.empty()) {
-      {
-	cerr << "no archive_path provided" << std::endl;
-	exit(1);
-      }
-    }
-    if (file_path.empty()) {
-      {
-	cerr << "no file_path provided" << std::endl;
-	exit(1);
-      }
-    }
     cout << argv[0] << " add " << file_path
 	 << " to archive "  << archive_path << std::endl;
+    // do pack.add_object()
   break;
   case archive_op::list:
-    if (archive_path.empty()) {
-      {
-	cerr << "no archive_path provided" << std::endl;
-	exit(1);
-      }
-    }
     cout << argv[0] << " list archive " << archive_path
 	 << std::endl;
+    // do pack.list_objects()
     break;
-  case archive_op::remove:
-    if (archive_path.empty()) {
-      {
-	cerr << "no archive_path provided" << std::endl;
-	exit(1);
-      }
-    }
-    if (file_path.empty()) {
-      {
-	cerr << "no file_path provided" << std::endl;
-	exit(1);
-      }
-    }
+  case archive_op::get:
+    cout << argv[0] << " get " << file_path
+	 << " from archive "  << archive_path << std::endl;
+    // do pack.get_object()
+    break;
+
+  case archive_op::attrs_operate:
+    cout << argv[0] << " attrs_operate not implemented" << std::endl;
+    // do pack.attrs_operate()
+    break;
+    case archive_op::remove:
     cout << argv[0] << " remove " << file_path
 	 << " from archive " << archive_path
 	 << std::endl;
+    // do pack.remove_object()
     break;
   default:
     cerr << "unknown archive_op" << std::endl;
     exit(1);
     break;
   }
-
-  //rgw::pack::FileIO io{archive_path};
-  //rgw::pack::Pack<FileIO> pack;
 
   return 0;
 }

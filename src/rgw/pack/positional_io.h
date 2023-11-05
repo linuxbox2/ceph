@@ -13,6 +13,24 @@
  *
  */
 
-#include "rgw_pack.h"
-#include "zpp_bits.h" // XXX maybe we do want this in rgw_pack.h
+#pragma once
+
+#include "rgw/rgw_pack.h"
+#include <string>
+
+namespace rgw::pack {
+
+  PositionalIO make_positional(std::string& archive_path);
+
+#if 0
+  template<>
+  class Pack<PositionalIO>
+  {
+  public:
+    static Pack make_pack(PositionalIO& io);
+  };
+#endif
+
+} /* namespace rgw::pack */
+
 

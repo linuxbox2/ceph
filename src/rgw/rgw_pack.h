@@ -13,9 +13,12 @@
  *
  */
 
+#pragma once
+
 #include <string>
+#include <string_view>
+#include <type_traits>
 #include "include/function2.hpp"
-#include "zpp_bits.h"
 #include <stdint.h>
 #include <xxhash.h>
 
@@ -38,24 +41,45 @@ namespace rgw::pack {
     uint32_t flags;
     uint32_t size;
   }; /* ObjEntry */
-
-  /*
-  class PositionalIO
-  {
-  private:
-    PositionalIO() {}
-  public:
-    ssize_t read(void* buf, size_t size, off_t off);
-    ssize_t write(void* buf, size_t size, off_t off);
-    void flush();
-  }; // PositionalIO
-  */
   
   /* type erasing i/o types */
   template <typename IO>
   class Pack
   {
-    
+  private:
+    IO io;
+  public:
+
+    int add_object(const std::string_view name, void* cb /* add bytes and attrs */);
+    int get_object(const std::string_view name, void* cb /* return bytes and attrs */);
+    int list_objects(const std::string_view marker, void* namecb);
+    int attrs_operate(const std::string_view name); /* TODO RGW-like attrs CRUD op */
+    int remove_object(const std::string_view name);
+
+    static Pack make_pack(IO& /* & */ io);
   }; /* Pack */
+
+#include <unistd.h>
+#include <stdint.h>
+
+class PositionalIO
+{
+private:
+  int fd;
+  uint32_t flags;
+
+  public:
+  static constexpr uint32_t FLAG_NONE = 0x0000;
+  static constexpr uint32_t FLAG_OPEN = 0x0001;
+
+  PositionalIO() {}
+  ~PositionalIO();
+
+  int open(std::string& archive_path); // XXX remove from interface
+  ssize_t read(void* buf, size_t size, off_t off);
+  ssize_t write(void* buf, size_t size, off_t off);
+  void flush();
+  void close();
+}; /* PositionalIO */
 
 } /* namespace rgw::pack */

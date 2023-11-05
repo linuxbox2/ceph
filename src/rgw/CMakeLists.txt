@@ -88,6 +88,7 @@ set(librgw_common_srcs
   rgw_multipart_meta_filter.cc
   rgw_obj_manifest.cc
   rgw_pack.cc
+  pack/positional_io.cc
   rgw_period.cc
   rgw_realm.cc
   rgw_sync.cc
@@ -516,7 +517,9 @@ install(TARGETS radosgw-token DESTINATION bin)
 set(rgw_zpp_arc_srcs
   rgw_zpp_arc.cc)
 add_executable(rgw-zpp-arc ${rgw_zpp_arc_srcs})
-target_link_libraries(rgw-zpp-arc librados
+target_link_libraries(rgw-zpp-arc
+  ${rgw_libs}
+  librados
   global)
 install(TARGETS rgw-zpp-arc DESTINATION bin)
 
