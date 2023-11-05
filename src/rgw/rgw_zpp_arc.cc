@@ -14,12 +14,12 @@
  */
 
 #include <cstdint>
-#include <errno.h>
 #include <iostream>
 #include <set>
 #include <string>
-#include <filesystem>
+#include <system_error>
 #include <sys/types.h>
+#include <errno.h>
 #include <stdint.h>
 
 #include "rgw_pack.h"
@@ -127,40 +127,47 @@ int main(int argc, char **argv)
     }
   }
 
-  PositionalIO pio = rp::make_positional(archive_path);
-  Pack pack = Pack::make_pack(pio);
+  try {
 
-  switch(op) {
-  case archive_op::add:
-    cout << argv[0] << " add " << file_path
-	 << " to archive "  << archive_path << std::endl;
-    // do pack.add_object()
-  break;
-  case archive_op::list:
-    cout << argv[0] << " list archive " << archive_path
-	 << std::endl;
-    // do pack.list_objects()
-    break;
-  case archive_op::get:
-    cout << argv[0] << " get " << file_path
-	 << " from archive "  << archive_path << std::endl;
-    // do pack.get_object()
-    break;
+    PositionalIO pio = rp::make_positional(archive_path);
+    Pack pack = Pack::make_pack(pio);
 
-  case archive_op::attrs_operate:
-    cout << argv[0] << " attrs_operate not implemented" << std::endl;
-    // do pack.attrs_operate()
-    break;
+    switch (op) {
+    case archive_op::add:
+      cout << argv[0] << " add " << file_path << " to archive " << archive_path
+           << std::endl;
+      // do pack.add_object()
+      break;
+    case archive_op::list:
+      cout << argv[0] << " list archive " << archive_path << std::endl;
+      // do pack.list_objects()
+      break;
+    case archive_op::get:
+      cout << argv[0] << " get " << file_path << " from archive "
+           << archive_path << std::endl;
+      // do pack.get_object()
+      break;
+
+    case archive_op::attrs_operate:
+      cout << argv[0] << " attrs_operate not implemented" << std::endl;
+      // do pack.attrs_operate()
+      break;
     case archive_op::remove:
-    cout << argv[0] << " remove " << file_path
-	 << " from archive " << archive_path
-	 << std::endl;
-    // do pack.remove_object()
-    break;
-  default:
-    cerr << "unknown archive_op" << std::endl;
-    exit(1);
-    break;
+      cout << argv[0] << " remove " << file_path << " from archive "
+           << archive_path << std::endl;
+      // do pack.remove_object()
+      break;
+    default:
+      cerr << "unknown archive_op" << std::endl;
+      exit(1);
+      break;
+    }
+  } /* try */
+  catch (const std::system_error& e) {
+    std::cerr << "Caught system_error with code "
+      "[" << e.code() << "] meaning "
+      "[" << e.what() << "]"
+	      << std::endl;
   }
 
   return 0;

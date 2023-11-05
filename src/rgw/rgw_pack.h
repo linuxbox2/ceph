@@ -68,14 +68,14 @@ private:
   int fd;
   uint32_t flags;
 
-  public:
+public:
   static constexpr uint32_t FLAG_NONE = 0x0000;
   static constexpr uint32_t FLAG_OPEN = 0x0001;
 
   PositionalIO() {}
   ~PositionalIO();
 
-  int open(std::string& archive_path); // XXX remove from interface
+  int open(const std::string& archive_path);
   ssize_t read(void* buf, size_t len, off64_t off);
   ssize_t write(const void* buf, size_t len, off64_t off);
   void close();

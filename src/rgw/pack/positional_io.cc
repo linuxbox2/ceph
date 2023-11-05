@@ -14,20 +14,31 @@
  */
 
 #include "positional_io.h"
-#include <fcntl.h>
+#include <system_error>
+#include <filesystem>
 #include <unistd.h>
+#include <fcntl.h>
+#include "fmt/format.h"
 
 namespace rgw::pack {
 
   PositionalIO make_positional(std::string& archive_path)
   {
     PositionalIO pio;
+    int rc = pio.open(archive_path);
     return pio;
   } /* make_positional */
 
-  int PositionalIO::open(std::string& archive_path)
+  int PositionalIO::open(const std::string& archive_path)
   {
     fd = ::open(archive_path.c_str(), O_RDWR|O_CREAT);
+    if (fd > 0) {
+      flags |= FLAG_OPEN;
+    } else {
+      throw std::system_error(-fd, std::system_category(),
+			      fmt::format("open failed for {}",
+					  archive_path));
+    }
     return 0;
   } /* open */
 
@@ -44,6 +55,7 @@ namespace rgw::pack {
   void PositionalIO::close()
   {
     ::close(fd);
+    flags &= ~FLAG_OPEN;
   } /* close */
 
   PositionalIO::~PositionalIO() {
