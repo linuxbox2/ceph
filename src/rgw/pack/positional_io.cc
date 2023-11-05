@@ -15,13 +15,13 @@
 
 #include "positional_io.h"
 #include <fcntl.h>
+#include <unistd.h>
 
 namespace rgw::pack {
 
   PositionalIO make_positional(std::string& archive_path)
   {
     PositionalIO pio;
-
     return pio;
   } /* make_positional */
 
@@ -29,17 +29,28 @@ namespace rgw::pack {
   {
     fd = ::open(archive_path.c_str(), O_RDWR|O_CREAT);
     return 0;
-  }
+  } /* open */
 
+  ssize_t PositionalIO::read(void* buf, size_t len, off64_t off)
+  {
+    return ::pread(fd, buf, len, off);
+  } /* read */
+
+  ssize_t PositionalIO::write(const void* buf, size_t len, off_t off)
+  {
+    return ::pwrite(fd, buf, len, off);
+  } /* write */
+  
   void PositionalIO::close()
   {
-  }
+    ::close(fd);
+  } /* close */
 
   PositionalIO::~PositionalIO() {
     if (flags & FLAG_OPEN) {
       close();
     }
-  }
+  } /* ~PositionalIO */
 
   template<>
   Pack<PositionalIO> Pack<PositionalIO>::make_pack(PositionalIO& io)

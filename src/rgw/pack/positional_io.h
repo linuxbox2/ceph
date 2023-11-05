@@ -22,15 +22,6 @@ namespace rgw::pack {
 
   PositionalIO make_positional(std::string& archive_path);
 
-#if 0
-  template<>
-  class Pack<PositionalIO>
-  {
-  public:
-    static Pack make_pack(PositionalIO& io);
-  };
-#endif
-
 } /* namespace rgw::pack */
 
 

@@ -76,9 +76,8 @@ private:
   ~PositionalIO();
 
   int open(std::string& archive_path); // XXX remove from interface
-  ssize_t read(void* buf, size_t size, off_t off);
-  ssize_t write(void* buf, size_t size, off_t off);
-  void flush();
+  ssize_t read(void* buf, size_t len, off64_t off);
+  ssize_t write(const void* buf, size_t len, off64_t off);
   void close();
 }; /* PositionalIO */
 
