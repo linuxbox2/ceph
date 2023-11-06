@@ -137,6 +137,16 @@ int main(int argc, char **argv)
       cout << argv[0] << " add " << file_path << " to archive " << archive_path
            << std::endl;
       // do pack.add_object()
+      {
+	/* XXXX fake call */
+	pack.add_object("blunderbus", [&](Pack::AddObj& ao) -> uint8_t {
+	  ao.add_bytes(ao.get_pos(), static_cast<const char*>("my data 0"),
+		       sizeof("my data 0"),
+		       Pack::AB_OK);
+	  return Pack::AB_EOF; // end of byte sequence
+	});
+
+      }
       break;
     case archive_op::list:
       cout << argv[0] << " list archive " << archive_path << std::endl;
@@ -147,7 +157,6 @@ int main(int argc, char **argv)
            << archive_path << std::endl;
       // do pack.get_object()
       break;
-
     case archive_op::attrs_operate:
       cout << argv[0] << " attrs_operate not implemented" << std::endl;
       // do pack.attrs_operate()

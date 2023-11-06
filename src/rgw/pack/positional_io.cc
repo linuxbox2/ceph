@@ -15,6 +15,7 @@
 
 #include "positional_io.h"
 #include <system_error>
+#include <type_traits>
 #include <filesystem>
 #include <unistd.h>
 #include <fcntl.h>

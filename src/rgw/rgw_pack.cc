@@ -14,5 +14,29 @@
  */
 
 #include "rgw_pack.h"
+#include <iostream>
 #include "zpp_bits.h" // XXX maybe we do want this in rgw_pack.h
+#include "fmt/format.h"
 
+namespace rgw::pack {
+
+  template<typename IO>
+  void Pack<IO>::AddObj::add_bytes(off64_t off, const void* buf, size_t len, uint8_t flags)
+  {
+    std::cout <<
+      fmt::format("Pack<IO>::AddObj::add_bytes off={} buf={} len={} flags={}",
+		  off, uint64_t(buf), len, flags) << std::endl;
+  }
+#if 1
+  template<typename IO>
+  int Pack<IO>::add_object(
+    const std::string_view name, Pack<IO>::add_obj_cb_t cb)
+  {
+    std::cout  << "Pack<IO>::add_object(name=\""
+	       << name << "\""
+	       << std::endl;
+    // TODO: finish
+    return 0; // do it
+  }
+#endif
+} /* namespace rgw::pack */
