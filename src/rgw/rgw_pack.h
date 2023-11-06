@@ -73,19 +73,12 @@ namespace rgw::pack {
       const fu2::unique_function<uint8_t(AddObj& af) const>;
 
     int add_object(const std::string_view name, add_obj_cb_t cb);
-#if 0
-    {
-      // XXXX kill this
-      std::cout << "dammit!" << std::endl;
-      return 666;
-    }
-#endif
     int get_object(const std::string_view name, void* cb /* return bytes and attrs */);
     int list_objects(const std::string_view marker, void* namecb);
     int attrs_operate(const std::string_view name); /* TODO RGW-like attrs CRUD op */
     int remove_object(const std::string_view name);
 
-    static Pack make_pack(IO& /* & */ io);
+    static Pack make_pack(IO&io);
   }; /* Pack */
 
 #include <unistd.h>

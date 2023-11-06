@@ -29,7 +29,7 @@ namespace rgw::pack {
   PositionalIO make_positional(std::string& archive_path)
   {
     PositionalIO pio;
-    int rc = pio.open(archive_path);
+    (void) pio.open(archive_path);
     return pio;
   } /* make_positional */
 

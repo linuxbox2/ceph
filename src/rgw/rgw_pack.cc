@@ -27,7 +27,7 @@ namespace rgw::pack {
       fmt::format("Pack<IO>::AddObj::add_bytes off={} buf={} len={} flags={}",
 		  off, uint64_t(buf), len, flags) << std::endl;
   }
-#if 1
+
   template<typename IO>
   int Pack<IO>::add_object(
     const std::string_view name, Pack<IO>::add_obj_cb_t cb)
@@ -38,5 +38,7 @@ namespace rgw::pack {
     // TODO: finish
     return 0; // do it
   }
-#endif
+
+  /* explicit instantiations (may need #define adjustments (e.g., CLS) */
+  template class Pack<PositionalIO>;
 } /* namespace rgw::pack */
