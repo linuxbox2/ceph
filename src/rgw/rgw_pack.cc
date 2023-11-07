@@ -32,7 +32,7 @@ namespace rgw::pack {
   int Pack<IO>::add_object(
     const std::string_view name, Pack<IO>::add_obj_cb_t cb)
   {
-    std::cout  << "Pack<IO>::add_object(name=\""
+    std::cout  << "Pack<IO>::add_object name=\""
 	       << name << "\""
 	       << std::endl;
     // TODO: finish

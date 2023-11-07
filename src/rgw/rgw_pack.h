@@ -15,6 +15,7 @@
 
 #pragma once
 
+#include <cstdint>
 #include <string>
 #include <string_view>
 #include <iostream> // XXX kill
@@ -23,6 +24,7 @@
 #include "include/function2.hpp"
 #include <stdint.h>
 #include <xxhash.h>
+#include <unistd.h>
 
 namespace rgw::pack {
 
@@ -79,28 +81,29 @@ namespace rgw::pack {
     int remove_object(const std::string_view name);
 
     static Pack make_pack(IO&io);
+
   }; /* Pack */
 
-#include <unistd.h>
-#include <stdint.h>
+  class PositionalIO {
+  private:
+    int fd;
+    uint32_t flags;
 
-class PositionalIO
-{
-private:
-  int fd;
-  uint32_t flags;
+    static constexpr uint32_t FLAG_NONE = 0x0000;
+    static constexpr uint32_t FLAG_OPEN = 0x0001;
+    static constexpr uint32_t FLAG_HEADER = 0x0002;
 
-public:
-  static constexpr uint32_t FLAG_NONE = 0x0000;
-  static constexpr uint32_t FLAG_OPEN = 0x0001;
+    PositionalIO() {}
 
-  PositionalIO() {}
-  ~PositionalIO();
+    template <typename> friend class Pack;
+    friend PositionalIO make_positional(std::string &);
 
-  int open(const std::string& archive_path);
-  ssize_t read(void* buf, size_t len, off64_t off);
-  ssize_t write(const void* buf, size_t len, off64_t off);
-  void close();
-}; /* PositionalIO */
+  public:
+    int open(const std::string &archive_path);
+    ssize_t read(void *buf, size_t len, off64_t off);
+    ssize_t write(const void *buf, size_t len, off64_t off);
+    void close();
+    ~PositionalIO();
+  }; /* PositionalIO */
 
 } /* namespace rgw::pack */
