@@ -52,21 +52,25 @@ namespace rgw::pack {
   {
   private:
     IO io;
-  public:
 
-    static constexpr uint8_t AB_OK =  0x00;
-    static constexpr uint8_t AB_EOF = 0x01;
+    int read_header();
+
+  public:
+    static constexpr uint32_t FLAG_NONE =   0x0000;
+    static constexpr uint32_t FLAG_HEADER = 0x0001;
 
     class AddObj
     {
     private:
       Pack& pack;
       off64_t pos{0};
-    public:
-      AddObj(Pack& pack) : pack(pack) {}
 
     public:
+      static constexpr uint8_t AB_OK =  0x00;
+      static constexpr uint8_t AB_EOF = 0x01;
+
       off64_t get_pos() const { return pos; }
+      AddObj(Pack& pack) : pack(pack) {}
       void add_bytes(off64_t off, const void* buf, size_t len, uint8_t flags);
       void add_attr(std::string_view name, std::string_view data);
     }; /* AddObj */

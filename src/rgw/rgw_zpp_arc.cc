@@ -138,12 +138,14 @@ int main(int argc, char **argv)
            << std::endl;
       // do pack.add_object()
       {
-	/* XXXX fake call */
-	pack.add_object("blunderbus", [&](Pack::AddObj& ao) -> uint8_t {
+	using AddObj = Pack::AddObj;
+
+        /* XXXX fake call */
+	pack.add_object("blunderbus", [&](AddObj& ao) -> uint8_t {
 	  ao.add_bytes(ao.get_pos(), static_cast<const char*>("my data 0"),
 		       sizeof("my data 0"),
-		       Pack::AB_OK);
-	  return Pack::AB_EOF; // end of byte sequence
+		       AddObj::AB_OK);
+	  return AddObj::AB_EOF; // end of byte sequence
 	});
 
       }
