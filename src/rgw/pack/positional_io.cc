@@ -55,7 +55,12 @@ namespace rgw::pack {
   {
     return ::pwrite(fd, buf, len, off);
   } /* write */
-  
+
+  void PositionalIO::flush()
+  {
+    ::fsync(fd);
+  }
+
   void PositionalIO::close()
   {
     ::close(fd);

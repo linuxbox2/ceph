@@ -14,6 +14,7 @@
  */
 
 #include "rgw_pack.h"
+#include <cstdint>
 #include <iostream>
 #include "zpp_bits.h" // XXX maybe we do want this in rgw_pack.h
 #include "fmt/format.h"
@@ -39,7 +40,7 @@ namespace rgw::pack {
 
   template<typename IO>
   int Pack<IO>::add_object(
-    const std::string_view name, Pack<IO>::add_obj_cb_t cb)
+    const std::string_view name, Pack<IO>::add_obj_cb_t cb, uint32_t ao_flags)
   {
     std::cout  << "Pack<IO>::add_object name=\""
 	       << name << "\""
@@ -47,6 +48,9 @@ namespace rgw::pack {
 
 
     // TODO: finish
+    if (ao_flags & FLAG_FLUSH) {
+      io.flush();
+    }
     return 0; // do it
   }
 

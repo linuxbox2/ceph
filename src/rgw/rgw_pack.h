@@ -15,6 +15,7 @@
 
 #pragma once
 
+#include <cstdint>
 #include <string>
 #include <string_view>
 #include <type_traits>
@@ -85,7 +86,8 @@ namespace rgw::pack {
     static constexpr uint32_t FLAG_NONE =   0x0000;
     static constexpr uint32_t FLAG_HEADER = 0x0001;
     static constexpr uint32_t FLAG_CREATE = 0x0002;
-    static constexpr uint32_t FLAG_HDIRTY = 0x0003;
+    static constexpr uint32_t FLAG_HDIRTY = 0x0004;
+    static constexpr uint32_t FLAG_FLUSH  = 0x0008;
 
     class AddObj
     {
@@ -106,8 +108,10 @@ namespace rgw::pack {
     using add_obj_cb_t =
       const fu2::unique_function<uint8_t(AddObj& af) const>;
 
-    int add_object(const std::string_view name, add_obj_cb_t cb);
-    int get_object(const std::string_view name, void* cb /* return bytes and attrs */);
+    int add_object(const std::string_view name, add_obj_cb_t cb,
+		   uint32_t ao_flags = FLAG_NONE);
+    int get_object(const std::string_view name,
+		   void* cb /* return bytes and attrs */);
     int list_objects(const std::string_view marker, void* namecb);
     int attrs_operate(const std::string_view name); /* TODO RGW-like attrs CRUD op */
     int remove_object(const std::string_view name);
@@ -137,6 +141,7 @@ namespace rgw::pack {
     int open(const std::string &archive_path);
     ssize_t read(void *buf, size_t len, off64_t off);
     ssize_t write(const void *buf, size_t len, off64_t off);
+    void flush();
     void close();
     ~PositionalIO();
   }; /* PositionalIO */
