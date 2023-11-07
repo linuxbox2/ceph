@@ -71,8 +71,7 @@ namespace rgw::pack {
   template<>
   Pack<PositionalIO> Pack<PositionalIO>::make_pack(PositionalIO& io)
   {
-    Pack<PositionalIO> pack;
-    pack.io = io;
+    Pack<PositionalIO> pack(io);
     return pack;
   } /* make_pack */
 

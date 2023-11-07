@@ -15,36 +15,59 @@
 
 #pragma once
 
-#include <cstdint>
 #include <string>
 #include <string_view>
-#include <iostream> // XXX kill
-#include <sys/types.h>
 #include <type_traits>
-#include "include/function2.hpp"
+#include <sys/types.h>
 #include <stdint.h>
-#include <xxhash.h>
 #include <unistd.h>
+#include "include/function2.hpp"
+#include <boost/container/flat_map.hpp>
+#include <xxhash.h>
 
 namespace rgw::pack {
 
-  class Header
+  /* TODO: struct version */
+
+  struct Header
   {
   public:
-    uint16_t struct_v;
-    uint32_t flags;
+    static constexpr uint32_t magic = 0x845fed;
+
+    uint32_t hmagic{0};
+    uint16_t obj_count{0};
+    uint32_t flags{0};
+    uint32_t obj_entry_off{128};
+    uint32_t toc_off{0};
+    uint32_t new_entry_off{0};
+
     // TODO: implement
   }; /* Header */
 
-  class ObjEntry
+  struct ObjEntry
   {
-  public:
-    uint16_t struct_v;
-    std::string name;
+    std::string name; // XXX zap
     std::string cksum; // XXX use mine?
     uint32_t flags;
     uint32_t size;
+    uint32_t next_obj_entry;
   }; /* ObjEntry */
+
+  struct TOCEntry
+  {
+    static constexpr uint16_t FLAG_NONE     = 0x00;
+    static constexpr uint16_t FLAG_DELETED  = 0x01;
+
+    std::string name;
+    uint32_t obj_entry_off{0};
+    uint16_t flags;
+  }; /* TOCentry */
+
+  class TableOfContents
+  {
+    using bcfm = boost::container::flat_map<std::string, std::string>;
+    // TODO: something
+  }; /* TableOfContents */
   
   /* type erasing i/o types */
   template <typename IO>
@@ -52,12 +75,17 @@ namespace rgw::pack {
   {
   private:
     IO io;
+    Header hdr;
+    uint32_t flags;
 
+    Pack(IO& io);
     int read_header();
 
   public:
     static constexpr uint32_t FLAG_NONE =   0x0000;
     static constexpr uint32_t FLAG_HEADER = 0x0001;
+    static constexpr uint32_t FLAG_CREATE = 0x0002;
+    static constexpr uint32_t FLAG_HDIRTY = 0x0003;
 
     class AddObj
     {
@@ -95,7 +123,6 @@ namespace rgw::pack {
 
     static constexpr uint32_t FLAG_NONE = 0x0000;
     static constexpr uint32_t FLAG_OPEN = 0x0001;
-    static constexpr uint32_t FLAG_HEADER = 0x0002;
 
     PositionalIO() {}
 
@@ -103,6 +130,10 @@ namespace rgw::pack {
     friend PositionalIO make_positional(std::string &);
 
   public:
+    uint32_t get_flags() const {
+      return flags;
+    }
+
     int open(const std::string &archive_path);
     ssize_t read(void *buf, size_t len, off64_t off);
     ssize_t write(const void *buf, size_t len, off64_t off);

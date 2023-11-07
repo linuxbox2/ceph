@@ -21,12 +21,21 @@
 namespace rgw::pack {
 
   template<typename IO>
+  Pack<IO>::Pack(IO& io) : io(io)
+  {
+    /* assert: no-header */
+    if (io.get_flags() & FLAG_CREATE) {
+      // TODO: implement
+    }
+  }
+
+  template<typename IO>
   void Pack<IO>::AddObj::add_bytes(off64_t off, const void* buf, size_t len, uint8_t flags)
   {
     std::cout <<
       fmt::format("Pack<IO>::AddObj::add_bytes off={} buf={} len={} flags={}",
 		  off, uint64_t(buf), len, flags) << std::endl;
-  }
+  } /* add_bytes*/
 
   template<typename IO>
   int Pack<IO>::add_object(
@@ -35,6 +44,8 @@ namespace rgw::pack {
     std::cout  << "Pack<IO>::add_object name=\""
 	       << name << "\""
 	       << std::endl;
+
+
     // TODO: finish
     return 0; // do it
   }
