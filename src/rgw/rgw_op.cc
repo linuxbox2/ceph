@@ -4720,7 +4720,8 @@ void RGWPostObj::execute(optional_yield y)
         break;
       }
 
-      hash.Update((const unsigned char *)data.c_str(), data.length());
+      /* use segmented Digest::Update */
+      ceph::crypto::update<MD5>(hash, data);
       op_ret = filter->process(std::move(data), ofs);
       if (op_ret < 0) {
         return;
@@ -7876,7 +7877,7 @@ int RGWBulkUploadOp::handle_file(const std::string_view path,
       op_ret = len;
       return op_ret;
     } else if (len > 0) {
-      hash.Update((const unsigned char *)data.c_str(), data.length());
+      ceph::crypto::update<MD5>(hash, data);
       op_ret = filter->process(std::move(data), ofs);
       if (op_ret < 0) {
         ldpp_dout(this, 20) << "filter->process() returned ret=" << op_ret << dendl;
