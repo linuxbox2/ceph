@@ -48,6 +48,9 @@ namespace rgw { namespace cksum {
       blake3,
   };
 
+  static constexpr uint16_t FLAG_NONE =      0x0000;
+  static constexpr uint16_t FLAG_AWS_CKSUM = 0x0001;
+
   class Desc
   {
   public:
@@ -55,17 +58,24 @@ namespace rgw { namespace cksum {
     const char* name;
     const uint16_t digest_size;
     const uint16_t armored_size;
+    const uint16_t flags;
 
     constexpr uint16_t to_armored_size(uint16_t sz) {
       return sz / 3 * 4 + 4;
     }
 
-    constexpr Desc(Type _type, const char* _name, uint16_t _size)
+    constexpr Desc(Type _type, const char* _name, uint16_t _size,
+		   uint16_t _flags)
       : type(_type), name(_name),
 	digest_size(_size),
-	armored_size(to_armored_size(digest_size))
+	armored_size(to_armored_size(digest_size)),
+	flags(_flags)
       {}
-  };
+
+    constexpr bool aws() const {
+      return (flags & FLAG_AWS_CKSUM);
+    }
+  }; /* Desc */
 
   namespace  ba = boost::algorithm;
 
@@ -73,14 +83,14 @@ namespace rgw { namespace cksum {
   public:
     static constexpr std::array<Desc, 8> checksums =
     {
-      Desc(Type::none, "none", 0),
-      Desc(Type::crc32, "crc32", 4),
-      Desc(Type::crc32c, "crc32c", 4),
-      Desc(Type::xxh3, "xxh3", 8),
-      Desc(Type::sha1, "sha1", 20),
-      Desc(Type::sha256, "sha256", 32),
-      Desc(Type::sha512, "sha512", 64),
-      Desc(Type::blake3, "blake3", 32),
+      Desc(Type::none, "none", 0, FLAG_NONE),
+      Desc(Type::crc32, "crc32", 4, FLAG_AWS_CKSUM),
+      Desc(Type::crc32c, "crc32c", 4, FLAG_AWS_CKSUM),
+      Desc(Type::xxh3, "xxh3", 8, FLAG_NONE),
+      Desc(Type::sha1, "sha1", 20, FLAG_AWS_CKSUM),
+      Desc(Type::sha256, "sha256", 32, FLAG_AWS_CKSUM),
+      Desc(Type::sha512, "sha512", 64, FLAG_NONE),
+      Desc(Type::blake3, "blake3", 32, FLAG_NONE),
     };
 
     static constexpr uint16_t max_digest_size = 64;
@@ -90,6 +100,24 @@ namespace rgw { namespace cksum {
     value_type digest;
 
     Cksum(Type _type = Type::none) : type(_type) {}
+
+    static const char* type_string(const Type type) {
+      return (Cksum::checksums[uint16_t(type)]).name;
+    }
+
+    std::string aws_name() {
+      return fmt::format("x-amz-checksum-{}", type_string(type));
+    }
+
+    std::string rgw_name() {
+      return fmt::format("x-rgw-checksum-{}", type_string(type));
+    }
+
+    std::string header_name() {
+      return ((Cksum::checksums[uint16_t(type)]).aws()) ?
+	aws_name() :
+	rgw_name();
+    }
 
     std::string hex() {
       std::string hs;
@@ -138,11 +166,6 @@ namespace rgw { namespace cksum {
 	return ck.type;
     }
     return Type::none;
-  }
-
-  static inline const char* to_string(const Type type)
-  {
-    return (Cksum::checksums[uint16_t(type)]).name;
   }
 
   class Digest {
