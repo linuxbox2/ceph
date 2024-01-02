@@ -157,6 +157,9 @@ using ceph::crypto::MD5;
 #define RGW_ATTR_UNIX_KEY1      RGW_ATTR_PREFIX "unix-key1"
 #define RGW_ATTR_UNIX1          RGW_ATTR_PREFIX "unix1"
 
+/* Content Checksums */
+#define RGW_ATTR_AMZ_CKSUM      RGW_ATTR_PREFIX "x-amz-content-checksum"
+
 #define RGW_ATTR_CRYPT_PREFIX   RGW_ATTR_PREFIX "crypt."
 #define RGW_ATTR_CRYPT_MODE     RGW_ATTR_CRYPT_PREFIX "mode"
 #define RGW_ATTR_CRYPT_KEYMD5   RGW_ATTR_CRYPT_PREFIX "keymd5"
