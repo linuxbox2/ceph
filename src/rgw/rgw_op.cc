@@ -4493,6 +4493,13 @@ void RGWPutObj::execute(optional_yield y)
   bl.append(etag);
   emplace_attr(RGW_ATTR_ETAG, std::move(bl));
 
+  if (cksum.digest()) {
+    buffer::list cksum_bl;
+    auto ck = cksum.finalize();
+    cksum_bl.append(ck.to_string());
+    emplace_attr(RGW_ATTR_CKSUM, std::move(cksum_bl));
+  }
+
   populate_with_generic_attrs(s, attrs);
   op_ret = rgw_get_request_metadata(this, s->cct, s->info, attrs);
   if (op_ret < 0) {
