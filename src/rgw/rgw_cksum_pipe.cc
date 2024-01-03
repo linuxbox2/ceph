@@ -43,10 +43,10 @@ namespace rgw::putobj {
 	if (algo) {
 	  return algo;
 	}
-	return algo;
       }
       return nullptr;
     };
+
     const auto algo = match();
     if (algo) {
       std::string ck_key
