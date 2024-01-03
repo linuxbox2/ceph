@@ -15,7 +15,8 @@
 
 #pragma once
 
-#include<utility>
+#include <utility>
+#include <tuple>
 #include "rgw_cksum.h"
 #include "rgw_putobj.h"
 
@@ -36,10 +37,14 @@ namespace rgw::putobj {
     cksum::Type _type;
     cksum::Digest* _digest;
     cksum::DigestVariant dv;
+    cksum::Cksum _cksum;
     cksum_hdr_t cksum_hdr;
     State _state;
 
   public:
+
+    using VerifyResult = std::tuple<bool, const cksum::Cksum&>;
+
     static std::unique_ptr<RGWPutObj_Cksum> Factory(
       rgw::sal::DataProcessor* next, const RGWEnv&);
 
@@ -50,18 +55,27 @@ namespace rgw::putobj {
 
     cksum::Type type() { return _type; }
     cksum::Digest* digest() const { return _digest; }
+    const cksum::Cksum& cksum() { return _cksum; };
     State state() const { return _state; }
 
     const cksum_hdr_t& header() const {
       return cksum_hdr;
     }
 
-    cksum::Cksum finalize() {
-      auto cksum = finalize_digest(_digest, _type);
+    const cksum::Cksum& finalize() {
+      _cksum = finalize_digest(_digest, _type);
       _state = State::FINAL;
-      return cksum;
+      return _cksum;
     }
-    
+
+    VerifyResult verify() {
+      if (_state != State::DIGEST) [[likely]] {
+	(void) finalize();
+      }
+      return VerifyResult((! cksum_hdr.first) &&
+			  (cksum_hdr.second ==_cksum.to_base64().c_str()), _cksum);
+    }
+
     int process(bufferlist &&data, uint64_t logical_offset) override;
 
   }; /* RGWPutObj_Cksum */

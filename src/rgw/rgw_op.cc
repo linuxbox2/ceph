@@ -4503,17 +4503,13 @@ void RGWPutObj::execute(optional_yield y)
   emplace_attr(RGW_ATTR_ETAG, std::move(bl));
 
   if (cksum_filter) {
-    auto cksum = cksum_filter->finalize();
-#if 0
-    /* XXXX get hader in correct format, and verify */
-    auto digest = cksum_filter->digest();
-    if (cksum.digest()) {
+    auto cksum_verify = cksum_filter->verify(); // valid or no supplied cksum
+    if (std::get<0>(cksum_verify)) {
+      auto& cksum = get<1>(cksum_verify);
       buffer::list cksum_bl;
-      auto ck = cksum.finalize();
-      cksum_bl.append(ck.to_string());
+      cksum_bl.append(cksum.to_string());
       emplace_attr(RGW_ATTR_CKSUM, std::move(cksum_bl));
     }
-#endif
   }
 
   populate_with_generic_attrs(s, attrs);
