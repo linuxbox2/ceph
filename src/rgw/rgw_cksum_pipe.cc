@@ -36,27 +36,23 @@ namespace rgw::putobj {
     rgw::sal::DataProcessor* next, const RGWEnv& env)
   {
     /* look for matching headers */
-    auto match = [&env] () -> const char* {
-      for (const auto hdr : {"HTTP_X_AMZ_SDK_CHECKSUM_ALGORITHM",
-			     "HTTP_X_AMZ_CHECKSUM_ALGORITHM"}) {
-	auto algo = env.get(hdr);
-	if (algo) {
-	  return algo;
+    auto match = [&env] () -> const cksum_hdr_t {
+      for (const auto hk : {"HTTP_X_AMZ_SDK_CHECKSUM_ALGORITHM",
+			    "HTTP_X_AMZ_CHECKSUM_ALGORITHM"}) {
+	auto hv = env.get(hk);
+	if (hv) {
+	  return cksum_hdr_t(hk, hv);
 	}
       }
-      return nullptr;
+      return cksum_hdr_t(nullptr, nullptr);
     };
 
-    const auto algo = match();
-    if (algo) {
-      std::string ck_key
-	= fmt::format("HTTP_X_AMZ_CHECKSUM_{}",
-		      boost::to_upper_copy<std::string>(algo));
-      auto hdr = cksum_hdr_t{ck_key.c_str(), env.get(ck_key.c_str())};
+    auto algo_header = match();
+    if (algo_header.second) {
       return  std::make_unique<RGWPutObj_Cksum>(
           next,
 	  rgw::cksum::Type::sha256,
-	  std::move(hdr));
+	  std::move(algo_header));
     }
     throw rgw::io::Exception(ERR_BAD_DIGEST, std::system_category());
   }
