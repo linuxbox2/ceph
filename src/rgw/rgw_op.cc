@@ -4502,15 +4502,19 @@ void RGWPutObj::execute(optional_yield y)
   bl.append(etag);
   emplace_attr(RGW_ATTR_ETAG, std::move(bl));
 
+  if (cksum_filter) {
+    auto cksum = cksum_filter->finalize();
 #if 0
-  /* XXXX need to do the equivalent w/the putobj processor */
-  if (cksum.digest()) {
-    buffer::list cksum_bl;
-    auto ck = cksum.finalize();
-    cksum_bl.append(ck.to_string());
-    emplace_attr(RGW_ATTR_CKSUM, std::move(cksum_bl));
-  }
+    /* XXXX get hader in correct format, and verify */
+    auto digest = cksum_filter->digest();
+    if (cksum.digest()) {
+      buffer::list cksum_bl;
+      auto ck = cksum.finalize();
+      cksum_bl.append(ck.to_string());
+      emplace_attr(RGW_ATTR_CKSUM, std::move(cksum_bl));
+    }
 #endif
+  }
 
   populate_with_generic_attrs(s, attrs);
   op_ret = rgw_get_request_metadata(this, s->cct, s->info, attrs);

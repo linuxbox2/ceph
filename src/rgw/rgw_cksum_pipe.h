@@ -52,6 +52,10 @@ namespace rgw::putobj {
     cksum::Digest* digest() const { return _digest; }
     State state() const { return _state; }
 
+    const cksum_hdr_t& header() const {
+      return cksum_hdr;
+    }
+
     cksum::Cksum finalize() {
       auto cksum = finalize_digest(_digest, _type);
       _state = State::FINAL;
