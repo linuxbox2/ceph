@@ -13,13 +13,16 @@
 
 #pragma once
 
+#include <boost/algorithm/string/predicate.hpp>
 #include <cstdint>
 #include <stdint.h>
 #include <string>
+#include <string_view>
 #include <array>
 #include <iterator>
 #include <boost/variant.hpp>
 #include <boost/blank.hpp>
+#include <boost/algorithm/string.hpp>
 #include "fmt/format.h"
 #include "common/ceph_crypto.h"
 #include "rgw_crc_digest.h"
@@ -156,10 +159,10 @@ namespace rgw { namespace cksum {
   }; /* Cksum */
   WRITE_CLASS_ENCODER(Cksum);
 
-  static inline Type parse_cksum_type(const std::string& name)
+  static inline Type parse_cksum_type(const char* name)
   {
     for (const auto& ck : Cksum::checksums) {
-      if (ck.name == name)
+      if (boost::iequals(ck.name, name))
 	return ck.type;
     }
     return Type::none;
