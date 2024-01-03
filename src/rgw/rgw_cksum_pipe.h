@@ -35,8 +35,8 @@ namespace rgw::putobj {
     };
     
     cksum::Type _type;
-    cksum::Digest* _digest;
     cksum::DigestVariant dv;
+    cksum::Digest* _digest;
     cksum::Cksum _cksum;
     cksum_hdr_t cksum_hdr;
     State _state;

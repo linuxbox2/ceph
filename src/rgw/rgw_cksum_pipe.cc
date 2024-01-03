@@ -28,8 +28,9 @@ namespace rgw::putobj {
 				   rgw::cksum::Type _type,
 				   cksum_hdr_t&& _hdr)
     : Pipe(next),
-      dv(rgw::cksum::digest_factory(_type)), cksum_hdr(_hdr),
-      _state(State::START)
+      dv(rgw::cksum::digest_factory(_type)),
+      _digest(cksum::get_digest(dv)), cksum_hdr(_hdr),
+      _state(State::DIGEST)
   {}
 
   std::unique_ptr<RGWPutObj_Cksum> RGWPutObj_Cksum::Factory(
@@ -54,6 +55,7 @@ namespace rgw::putobj {
 	  rgw::cksum::Type::sha256,
 	  std::move(algo_header));
     }
+    /* XXXX this is terminating radosgw */
     throw rgw::io::Exception(ERR_BAD_DIGEST, std::system_category());
   }
 
