@@ -97,6 +97,7 @@ set(librgw_common_srcs
   rgw_bucket.cc
   rgw_bucket_layout.cc
   rgw_cache.cc
+  rgw_cksum_pipe.cc
   rgw_common.cc
   rgw_compression.cc
   rgw_cors.cc

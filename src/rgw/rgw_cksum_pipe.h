@@ -1,0 +1,65 @@
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
+// vim: ts=8 sw=2 smarttab ft=cpp
+
+/*
+ * Ceph - scalable distributed file system
+ *
+ * Copyright contributors to the Ceph project
+ *
+ * This is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License version 2.1, as published by the Free Software
+ * Foundation.  See file COPYING.
+ *
+ */
+
+#pragma once
+
+#include<utility>
+#include "rgw_cksum.h"
+#include "rgw_putobj.h"
+
+namespace rgw::putobj {
+
+  namespace cksum = rgw::cksum;
+  using cksum_hdr_t = std::pair<const char*, const char*>;
+  
+  // PutObj filter for streaming checksums
+  class RGWPutObj_Cksum : public rgw::putobj::Pipe {
+
+    enum class State : uint16_t {
+      START,
+      DIGEST,
+      FINAL
+    };
+    
+    cksum::Type _type;
+    cksum::Digest* _digest;
+    cksum::DigestVariant dv;
+    cksum_hdr_t cksum_hdr;
+    State _state;
+
+  public:
+    static std::unique_ptr<RGWPutObj_Cksum> Factory(
+      rgw::sal::DataProcessor* next, const RGWEnv&);
+
+    RGWPutObj_Cksum(rgw::sal::DataProcessor* next, rgw::cksum::Type _type,
+		    cksum_hdr_t&& _hdr);
+    RGWPutObj_Cksum(RGWPutObj_Cksum& rhs) = delete;
+    ~RGWPutObj_Cksum();
+
+    cksum::Type type() { return _type; }
+    cksum::Digest* digest() const { return _digest; }
+    State state() const { return _state; }
+
+    cksum::Cksum finalize() {
+      auto cksum = finalize_digest(_digest, _type);
+      _state = State::FINAL;
+      return cksum;
+    }
+    
+    int process(bufferlist &&data, uint64_t logical_offset) override;
+
+  }; /* RGWPutObj_Cksum */
+
+} // namespace rgw::putobj
