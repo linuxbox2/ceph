@@ -36,7 +36,18 @@ namespace rgw::putobj {
     rgw::sal::DataProcessor* next, const RGWEnv& env)
   {
     /* look for matching headers */
-    const auto algo = env.get("HTTP_X_AMZ_CHECKSUM_ALGORITHM");
+    auto match = [&env] () -> const char* {
+      for (const auto hdr : {"HTTP_X_AMZ_SDK_CHECKSUM_ALGORITHM",
+			     "HTTP_X_AMZ_CHECKSUM_ALGORITHM"}) {
+	auto algo = env.get(hdr);
+	if (algo) {
+	  return algo;
+	}
+	return algo;
+      }
+      return nullptr;
+    };
+    const auto algo = match();
     if (algo) {
       std::string ck_key
 	= fmt::format("HTTP_X_AMZ_CHECKSUM_{}",
