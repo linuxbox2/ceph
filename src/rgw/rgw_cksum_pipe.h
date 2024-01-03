@@ -68,12 +68,14 @@ namespace rgw::putobj {
       return _cksum;
     }
 
-    VerifyResult verify() {
-      if (_state != State::DIGEST) [[likely]] {
+    VerifyResult verify(const RGWEnv& env) {
+      if (_state == State::DIGEST) [[likely]] {
 	(void) finalize();
       }
-      return VerifyResult((! cksum_hdr.first) &&
-			  (cksum_hdr.second ==_cksum.to_base64().c_str()), _cksum);
+      auto hk = fmt::format("X_AMZ_CHECKSUM_{}", cksum_hdr.second);
+      auto hv = env.get(hk.c_str());
+      auto cv = _cksum.to_base64();
+      return VerifyResult((! cksum_hdr.first) || (hv == cv), _cksum);
     }
 
     int process(bufferlist &&data, uint64_t logical_offset) override;
