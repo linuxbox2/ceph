@@ -119,7 +119,7 @@ namespace rgw { namespace cksum {
 	rgw_name();
     }
 
-    std::string hex() {
+    std::string hex() const {
       std::string hs;
       const auto& ckd = checksums[uint16_t(type)];
       hs.reserve(ckd.digest_size * 2 + 1);
@@ -128,11 +128,11 @@ namespace rgw { namespace cksum {
       return hs;
     }
 
-    std::string to_base64() {
+    std::string to_base64() const {
       return rgw::to_base64(hex());
     }
 
-    std::string to_string()  {
+    std::string to_string() const  {
       std::string hs;
       const auto& ckd = checksums[uint16_t(type)];
       return fmt::format("{{{}}}{}", ckd.name, to_base64());
