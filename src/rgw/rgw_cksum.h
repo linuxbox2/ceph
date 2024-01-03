@@ -182,6 +182,10 @@ namespace rgw { namespace cksum {
   {
     T d;
   public:
+    TDigest() {}
+    TDigest(TDigest&& rhs) noexcept
+      : d(std::move(rhs.d))
+    {}
     void Restart() override { d.Restart(); }
     void Update(const unsigned char* data, uint64_t len) override {
       d.Update(data, len);
@@ -270,46 +274,6 @@ namespace rgw { namespace cksum {
     }
     return cksum;
   }
-
-#if 1
-  class Workflow
-  {
-
-    enum class State : uint16_t {
-      START,
-      DIGEST,
-      FINALIZED
-    };
-
-    Type _type;
-    DigestVariant dv;
-    Digest* _digest;
-    State _state;
-
-  public:
-    Workflow() :
-      _type(Type::none),
-      _digest(nullptr)
-    {}
-
-    Type type() { return _type; }
-    Digest* digest() const { return _digest; }
-    State state() const { return _state; }
-
-    Cksum finalize() {
-      auto cksum = finalize_digest(_digest, _type);
-      _state = State::DIGEST;
-      return cksum;
-    }
-
-    ~Workflow() {
-      if ((_state > State::START) &&
-	  (_state < State::FINALIZED))
-	finalize();
-    }
-
-  }; /* Workflow */
-#endif
 }} /* namespace */
 
 #endif /* RGW_CKSUM_H */

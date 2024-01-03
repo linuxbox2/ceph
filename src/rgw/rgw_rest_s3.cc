@@ -491,7 +491,7 @@ int RGWGetObj_ObjStore_S3::send_response_data(bufferlist& bl, off_t bl_ofs,
     if (checksum_mode) {
       if (auto i = attrs.find("RGW_ATTR_AMZ_CHECKSUM"); i != attrs.end()) {
 	try {
-	  rgw::cksum::Cksum chksum;
+	  rgw::cksum::Cksum cksum;
 	  decode(cksum, i->second);
 	  dump_header(s, cksum.header_name(), cksum.to_base64());
 	}  catch (buffer::error& err) {

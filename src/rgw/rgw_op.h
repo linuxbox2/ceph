@@ -54,7 +54,6 @@
 #include "rgw_public_access.h"
 #include "rgw_bucket_encryption.h"
 #include "rgw_tracer.h"
-#include "rgw_cksum.h"
 
 #include "services/svc_sys_obj.h"
 #include "services/svc_tier_rados.h"
@@ -356,7 +355,6 @@ protected:
   utime_t gc_invalidate_time;
   bool is_slo;
   std::string lo_etag;
-  rgw::cksum::Cksum cksum;
   bool rgwx_stat; /* extended rgw stat operation */
   std::string version_id;
   rgw_zone_set_entry dst_zone_trace;
@@ -1225,9 +1223,6 @@ protected:
   RGWObjectRetention *obj_retention;
   RGWObjectLegalHold *obj_legal_hold;
 
-  // content checksum
-  rgw::cksum::Workflow cksum;
-
 public:
   RGWPutObj() : ofs(0),
                 supplied_md5_b64(NULL),
@@ -1307,7 +1302,6 @@ protected:
   RGWAccessControlPolicy policy;
   std::map<std::string, bufferlist> attrs;
   boost::optional<ceph::real_time> delete_at;
-  rgw::cksum::Workflow cksum;
 
   /* Must be called after get_data() or the result is undefined. */
   virtual std::string get_current_filename() const = 0;
@@ -2146,14 +2140,6 @@ inline int rgw_get_request_metadata(const DoutPrefixProvider *dpp,
       "x-amz-server-side-encryption-customer-key",
       "x-amz-server-side-encryption-customer-key-md5",
       "x-amz-storage-class",
-      /* XXX imtz, sort of; ensure this doesn't impair ident */
-#if 0
-      "x-amz-checksum-algorithm",
-      "x-amz-checksum-sha256",
-      "x-amz-checksum-sha1",
-      "x-amz-checksum-crc32c",
-      "x-amz-checksum-crc32",
-#endif
   };
 
   size_t valid_meta_count = 0;
