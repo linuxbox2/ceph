@@ -4508,11 +4508,21 @@ void RGWPutObj::execute(optional_yield y)
 
   if (cksum_filter) {
     auto cksum_verify = cksum_filter->verify(); // valid or no supplied cksum
+    auto& cksum = get<1>(cksum_verify);
     if (std::get<0>(cksum_verify)) {
-      auto& cksum = get<1>(cksum_verify);
       buffer::list cksum_bl;
       cksum_bl.append(cksum.to_string());
       emplace_attr(RGW_ATTR_CKSUM, std::move(cksum_bl));
+    } else {
+      /* content checksum mismatch */
+      const auto& hdr = cksum_filter->header();
+      ldpp_dout(this, 4)
+	<< fmt::format("{} content checksum mismatch", hdr.first)
+	<< fmt::format(" calculated {} != expected {}",
+		       cksum.to_base64(), hdr.second)
+	<< dendl;
+      op_ret = -ERR_BAD_DIGEST;
+      return;
     }
   }
 
