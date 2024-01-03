@@ -4503,7 +4503,8 @@ void RGWPutObj::execute(optional_yield y)
   emplace_attr(RGW_ATTR_ETAG, std::move(bl));
 
   if (cksum_filter) {
-    auto cksum_verify = cksum_filter->verify(); // valid or no supplied cksum
+    auto cksum_verify =
+      cksum_filter->verify(*s->info.env); // valid or no supplied cksum
     auto& cksum = get<1>(cksum_verify);
     if (std::get<0>(cksum_verify)) {
       buffer::list cksum_bl;
