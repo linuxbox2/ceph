@@ -280,7 +280,7 @@ TEST(RGWCksum, DigestBL)
   std::string lacrimae = dolor + dolor;
 
   ceph::buffer::list dolor_bl;
-  for (const auto& ix : {1, 2}) {
+  for ([[maybe_unused]] const auto& ix : {1, 2}) {
     dolor_bl.push_back(
       buffer::create_static(dolor.length(),
 			    const_cast<char*>(dolor.data())));

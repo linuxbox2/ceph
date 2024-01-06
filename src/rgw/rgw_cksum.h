@@ -274,6 +274,14 @@ namespace rgw { namespace cksum {
     }
     return cksum;
   }
+
+    std::string to_string(const Type type) {
+      std::string hs;
+      const auto& ckd = Cksum::checksums[uint16_t(type)];
+      return ckd.name;
+    }
+
+
 }} /* namespace */
 
 #endif /* RGW_CKSUM_H */
