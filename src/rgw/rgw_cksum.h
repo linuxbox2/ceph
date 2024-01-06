@@ -11,8 +11,7 @@
  *
  */
 
-#ifndef RGW_CKSUM_H
-#define RGW_CKSUM_H
+#pragma once
 
 #include <cstdint>
 #include <stdint.h>
@@ -31,8 +30,6 @@
 
 #include "include/buffer.h"
 #include "include/encoding.h"
-
-#pragma once
 
 namespace rgw { namespace cksum {
 
@@ -275,13 +272,10 @@ namespace rgw { namespace cksum {
     return cksum;
   }
 
-    std::string to_string(const Type type) {
-      std::string hs;
-      const auto& ckd = Cksum::checksums[uint16_t(type)];
-      return ckd.name;
-    }
-
+  static inline std::string to_string(const Type type) {
+    std::string hs;
+    const auto& ckd = Cksum::checksums[uint16_t(type)];
+    return ckd.name;
+  }
 
 }} /* namespace */
-
-#endif /* RGW_CKSUM_H */
