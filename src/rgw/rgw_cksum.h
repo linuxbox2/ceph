@@ -25,6 +25,7 @@
 #include <boost/algorithm/string.hpp>
 #include "fmt/format.h"
 #include "common/ceph_crypto.h"
+#include "common/armor.h"
 #include "rgw_crc_digest.h"
 #include "rgw_xxh_digest.h"
 #include <boost/algorithm/hex.hpp>
@@ -117,6 +118,17 @@ namespace rgw { namespace cksum {
       return ((Cksum::checksums[uint16_t(type)]).aws()) ?
 	aws_name() :
 	rgw_name();
+    }
+
+    std::string to_armor() const {
+      std::string hs;
+      const auto& ckd = checksums[uint16_t(type)];
+      hs.resize(ckd.armored_size + 1);
+      memset(hs.data(), 0, hs.length());
+      ceph_armor((char*) hs.data(), (char*) hs.data() + ckd.armored_size,
+		 (char*) digest.begin(), (char*) digest.begin() +
+		 ckd.digest_size);
+      return hs;
     }
 
     std::string hex() const {

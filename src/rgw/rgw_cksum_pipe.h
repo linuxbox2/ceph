@@ -17,6 +17,7 @@
 
 #include <utility>
 #include <tuple>
+#include <cstring>
 #include "rgw_cksum.h"
 #include "rgw_putobj.h"
 
@@ -79,9 +80,10 @@ namespace rgw::putobj {
 	(void) finalize();
       }
       auto hv = expected(env);
-      auto cv = _cksum.to_base64();
+      auto cv = _cksum.to_armor();
       return VerifyResult(cksum_hdr.first &&
-			  hv && (hv == cv), _cksum);
+			  hv && !std::strcmp(hv, cv.c_str()),
+			  _cksum);
     }
 
     int process(bufferlist &&data, uint64_t logical_offset) override;
