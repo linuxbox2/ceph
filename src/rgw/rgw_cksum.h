@@ -123,7 +123,7 @@ namespace rgw { namespace cksum {
     std::string to_armor() const {
       std::string hs;
       const auto& ckd = checksums[uint16_t(type)];
-      hs.resize(ckd.armored_size + 1);
+      hs.resize(ckd.armored_size);
       memset(hs.data(), 0, hs.length());
       ceph_armor((char*) hs.data(), (char*) hs.data() + ckd.armored_size,
 		 (char*) digest.begin(), (char*) digest.begin() +

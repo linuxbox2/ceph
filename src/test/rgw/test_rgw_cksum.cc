@@ -79,6 +79,8 @@ TEST(RGWCksum, DigestCRC32)
   ASSERT_EQ(cksum.hex(), "98b2c5bd");
   /* compare w/known value https://www.base64encode.org/ */
   ASSERT_EQ(cksum.to_base64(), "OThiMmM1YmQ=");
+  /* compare with aws-sdk-cpp encoded value */
+  ASSERT_EQ(cksum.to_armor(), "mLLFvQ==");
 }
 
 TEST(RGWCksum, DigestCRC32c)
@@ -96,6 +98,8 @@ TEST(RGWCksum, DigestCRC32c)
   ASSERT_EQ(cksum.hex(), "95dc2e4b");
   /* compare w/known value https://www.base64encode.org/ */
   ASSERT_EQ(cksum.to_base64(), "OTVkYzJlNGI=");
+  /* compare with aws-sdk-cpp encoded value */
+  ASSERT_EQ(cksum.to_armor(), "ldwuSw==");
 }
 
 TEST(RGWCksum, DigestXXH3)
@@ -160,6 +164,8 @@ TEST(RGWCksum, DigestSha1)
       /* compare w/known value https://www.base64encode.org/ */
       ASSERT_EQ(cksum.to_base64(),
 		"Y2QzNmIzNzA3NThhMjU5YjM0ODQ1MDg0YTZjYzM4NDczY2I5NWUyNw==");
+      /* compare with aws-sdk-cpp encoded value */
+      ASSERT_EQ(cksum.to_armor(), "zTazcHWKJZs0hFCEpsw4Rzy5Xic=");
     }
   }
 }
@@ -193,6 +199,8 @@ TEST(RGWCksum, DigestSha256)
       /* compare w/known value https://www.base64encode.org/ */
       ASSERT_EQ(cksum.to_base64(),
 		"MmQ4YzJmNmQ5NzhjYTIxNzEyYjVmNmRlMzZjOWQzMWZhOGU5NmE0ZmE1ZDhmZjhiMDE4OGRmYjllN2MxNzFiYg==");
+      /* compare with aws-sdk-cpp encoded value */
+      ASSERT_EQ(cksum.to_armor(), "LYwvbZeMohcStfbeNsnTH6jpak+l2P+LAYjfuefBcbs=");
     }
   }
 }
