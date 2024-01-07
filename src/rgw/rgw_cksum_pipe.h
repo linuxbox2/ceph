@@ -72,10 +72,11 @@ namespace rgw::putobj {
       if (_state == State::DIGEST) [[likely]] {
 	(void) finalize();
       }
-      auto hk = fmt::format("X_AMZ_CHECKSUM_{}", cksum_hdr.second);
+      auto hk = fmt::format("HTTP_X_AMZ_CHECKSUM_{}", cksum_hdr.second);
       auto hv = env.get(hk.c_str());
       auto cv = _cksum.to_base64();
-      return VerifyResult((! cksum_hdr.first) || (hv == cv), _cksum);
+      return VerifyResult(cksum_hdr.first &&
+			  hv && (hv == cv), _cksum);
     }
 
     int process(bufferlist &&data, uint64_t logical_offset) override;
