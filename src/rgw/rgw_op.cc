@@ -4519,7 +4519,7 @@ void RGWPutObj::execute(optional_yield y)
       const auto& hdr = cksum_filter->header();
       ldpp_dout(this, 4)
 	<< fmt::format("{} content checksum mismatch", hdr.second)
-	<< fmt::format("\n\tcalculated={} != expected={}",
+	<< fmt::format("\n\tcalculated={} != \n\texpected={}",
 		       cksum.to_base64(),
 		       cksum_filter->expected(*s->info.env))
 	<< dendl;
