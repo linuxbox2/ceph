@@ -68,12 +68,17 @@ namespace rgw::putobj {
       return _cksum;
     }
 
+    const char* expected(const RGWEnv& env) {
+      auto hk = fmt::format("HTTP_X_AMZ_CHECKSUM_{}", cksum_hdr.second);
+      auto hv = env.get(hk.c_str());
+      return hv;
+    }
+
     VerifyResult verify(const RGWEnv& env) {
       if (_state == State::DIGEST) [[likely]] {
 	(void) finalize();
       }
-      auto hk = fmt::format("HTTP_X_AMZ_CHECKSUM_{}", cksum_hdr.second);
-      auto hv = env.get(hk.c_str());
+      auto hv = expected(env);
       auto cv = _cksum.to_base64();
       return VerifyResult(cksum_hdr.first &&
 			  hv && (hv == cv), _cksum);
