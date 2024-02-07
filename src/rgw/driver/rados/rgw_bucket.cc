@@ -1328,6 +1328,7 @@ static int bucket_stats(rgw::sal::Driver* driver,
   formatter->dump_int("index_generation", bucket->get_info().layout.current_index.gen);
   formatter->dump_int("num_shards",
 		      bucket->get_info().layout.current_index.layout.normal.num_shards);
+  formatter->dump_unsigned("reshard_gen", bucket->get_info().layout.current_index.layout.normal.reshard_gen);
   formatter->dump_bool("object_lock_enabled", bucket_info.obj_lock_enabled());
   formatter->dump_bool("mfa_enabled", bucket_info.mfa_enabled());
   ::encode_json("owner", bucket->get_info().owner, formatter);
@@ -1352,6 +1353,7 @@ static int bucket_stats(rgw::sal::Driver* driver,
     }
   }
 
+  formatter->dump_int("read_tracker", bucket_info.objv_tracker.read_version.ver);
   // TODO: bucket CORS
   // TODO: bucket LC
   formatter->close_section();

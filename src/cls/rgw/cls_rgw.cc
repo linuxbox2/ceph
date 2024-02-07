@@ -4554,7 +4554,7 @@ static int rgw_set_bucket_resharding(cls_method_context_t hctx, bufferlist *in, 
     return rc;
   }
 
-  header.new_instance.set_status(op.entry.reshard_status);
+  header.new_instance.set_status(op.entry.reshard_status, op.entry.gen);
 
   return write_bucket_header(hctx, &header);
 }

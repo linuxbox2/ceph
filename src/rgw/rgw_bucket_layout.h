@@ -55,6 +55,7 @@ struct bucket_index_normal_layout {
   uint32_t num_shards = 1;
 
   BucketHashType hash_type = BucketHashType::Mod;
+  uint64_t reshard_gen;
 
   friend std::ostream& operator<<(std::ostream& out, const bucket_index_normal_layout& l) {
     out << "num_shards=" << l.num_shards << ", hash_type=" << to_string(l.hash_type);

@@ -259,10 +259,10 @@ RGWBucketReshard::RGWBucketReshard(rgw::sal::RadosStore* _store,
 static int set_resharding_status(const DoutPrefixProvider *dpp,
 				 rgw::sal::RadosStore* store,
 				 const RGWBucketInfo& bucket_info,
-                                 cls_rgw_reshard_status status)
+                                 cls_rgw_reshard_status status, uint64_t reshard_gen)
 {
   cls_rgw_bucket_instance_entry instance_entry;
-  instance_entry.set_status(status);
+  instance_entry.set_status(status, reshard_gen);
 
   int ret = store->getRados()->bucket_set_reshard(dpp, bucket_info, instance_entry);
   if (ret < 0) {
@@ -335,6 +335,7 @@ static int init_target_layout(rgw::sal::RadosStore* store,
   rgw::bucket_index_layout_generation target;
   target.layout.type = rgw::BucketIndexType::Normal;
   target.layout.normal.num_shards = new_num_shards;
+  target.layout.normal.reshard_gen = 0;
   target.gen = current.gen + 1;
 
   if (bucket_info.reshard_status == cls_rgw_reshard_status::IN_PROGRESS) {
@@ -375,6 +376,9 @@ static int init_target_layout(rgw::sal::RadosStore* store,
     // update resharding state
     bucket_info.layout.target_index = target;
     bucket_info.layout.resharding = rgw::BucketReshardState::InProgress;
+
+    // add the reshard generation
+    bucket_info.layout.current_index.layout.normal.reshard_gen += 1;
 
     if (ret = fault.check("set_target_layout");
         ret == 0) { // no fault injected, write the bucket instance metadata
@@ -516,8 +520,10 @@ static int init_reshard(rgw::sal::RadosStore* store,
 
   if (ret = fault.check("block_writes");
       ret == 0) { // no fault injected, block writes to the current index shards
+    // setting the new_gen, so as to clean old datas when reshard failed
     ret = set_resharding_status(dpp, store, bucket_info,
-                                cls_rgw_reshard_status::IN_PROGRESS);
+                                cls_rgw_reshard_status::IN_PROGRESS,
+                                bucket_info.layout.current_index.layout.normal.reshard_gen);
   }
 
   if (ret < 0) {
@@ -538,7 +544,8 @@ static int cancel_reshard(rgw::sal::RadosStore* store,
 {
   // unblock writes to the current index shard objects
   int ret = set_resharding_status(dpp, store, bucket_info,
-                                  cls_rgw_reshard_status::NOT_RESHARDING);
+                                  cls_rgw_reshard_status::NOT_RESHARDING,
+                                  bucket_info.layout.current_index.layout.normal.reshard_gen);
   if (ret < 0) {
     ldpp_dout(dpp, 1) << "WARNING: " << __func__ << " failed to unblock "
         "writes to current index objects: " << cpp_strerror(ret) << dendl;
@@ -637,7 +644,8 @@ static int commit_reshard(rgw::sal::RadosStore* store,
 
     // unblock writes to the current index shard objects
     int ret2 = set_resharding_status(dpp, store, bucket_info,
-                                     cls_rgw_reshard_status::NOT_RESHARDING);
+                                     cls_rgw_reshard_status::NOT_RESHARDING,
+                                     bucket_info.layout.current_index.layout.normal.reshard_gen);
     if (ret2 < 0) {
       ldpp_dout(dpp, 1) << "WARNING: " << __func__ << " failed to unblock "
           "writes to current index objects: " << cpp_strerror(ret2) << dendl;
