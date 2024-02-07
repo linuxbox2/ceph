@@ -896,6 +896,7 @@ void cls_rgw_reshard_entry::generate_test_instances(list<cls_rgw_reshard_entry*>
 void cls_rgw_bucket_instance_entry::dump(Formatter *f) const
 {
   encode_json("reshard_status", to_string(reshard_status), f);
+  encode_json("gen", gen, f);
 }
 
 void cls_rgw_bucket_instance_entry::generate_test_instances(

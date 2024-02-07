@@ -2515,6 +2515,7 @@ void RGWBucketInfo::dump(Formatter *f) const
   encode_json("quota", quota, f);
   encode_json("num_shards", layout.current_index.layout.normal.num_shards, f);
   encode_json("bi_shard_hash_type", (uint32_t)layout.current_index.layout.normal.hash_type, f);
+  encode_json("reshard_gen", layout.current_index.layout.normal.reshard_gen, f);
   encode_json("requester_pays", requester_pays, f);
   encode_json("has_website", has_website, f);
   if (has_website) {
@@ -2566,7 +2567,7 @@ void RGWBucketInfo::decode_json(JSONObj *obj) {
   int rs;
   JSONDecoder::decode_json("reshard_status", rs, obj);
   reshard_status = (cls_rgw_reshard_status)rs;
-
+  JSONDecoder::decode_json("reshard_gen", layout.current_index.layout.normal.reshard_gen, obj);
   rgw_sync_policy_info sp;
   JSONDecoder::decode_json("sync_policy", sp, obj);
   if (!sp.empty()) {
