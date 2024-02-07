@@ -45,5 +45,32 @@ fi
 
 ./mvnw clean package
 ./mvnw test -Dtest=PutObjects
+sleep 10
+./mvnw clean package
+./mvnw test -Dtest=PutObjects
+sleep 10
+./mvnw clean package
+./mvnw test -Dtest=PutObjects
+sleep 10
+./mvnw clean package
+./mvnw test -Dtest=PutObjects
+sleep 10
+./mvnw clean package
+./mvnw test -Dtest=PutObjects
+sleep 10
+./mvnw clean package
+./mvnw test -Dtest=PutObjects
+sleep 10
+./mvnw clean package
+./mvnw test -Dtest=PutObjects
+sleep 10
+./mvnw clean package
+./mvnw test -Dtest=PutObjects
+sleep 10
+./mvnw clean package
+./mvnw test -Dtest=PutObjects
+sleep 10
+./mvnw clean package
+./mvnw test -Dtest=PutObjects
 
 exit
