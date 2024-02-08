@@ -54,13 +54,15 @@ CLS_NAME(rgw)
 #define BI_BUCKET_LOG_INDEX           1
 #define BI_BUCKET_OBJ_INSTANCE_INDEX  2
 #define BI_BUCKET_OLH_DATA_INDEX      3
+#define BI_BUCKET_RESHARD_LOG_INDEX   4
 
-#define BI_BUCKET_LAST_INDEX          4
+#define BI_BUCKET_LAST_INDEX          5
 
 static std::string bucket_index_prefixes[] = { "", /* special handling for the objs list index */
 					       "0_",     /* bucket log index */
 					       "1000_",  /* obj instance index */
 					       "1001_",  /* olh data index */
+                 "2001_",   /* reshard log index */
 
 					       /* this must be the last index */
 					       "9999_",};
@@ -131,6 +133,45 @@ static void get_index_ver_key(cls_method_context_t hctx, uint64_t index_ver, str
            (unsigned long long)cls_current_version(hctx),
            cls_current_subop_num(hctx));
   *key = buf;
+}
+
+static void bi_reshard_log_prefix(string& key)
+{
+  key = BI_PREFIX_CHAR;
+  key.append(bucket_index_prefixes[BI_BUCKET_RESHARD_LOG_INDEX]);
+}
+
+// 0x802001_gen_indexver.clsver.subop, distinct every entry
+static void bi_reshard_log_key(cls_method_context_t hctx, uint64_t& gen, string& key, uint64_t index_ver)
+{
+  bi_reshard_log_prefix(key);
+  char buf[32];
+  snprintf(buf, sizeof(buf), "%llu_", (unsigned long long)gen);
+  key.append(buf);
+  string id;
+  get_index_ver_key(hctx, index_ver, &id);
+  key.append(id);
+}
+
+static int reshard_log_index_operation(cls_method_context_t hctx, cls_rgw_obj_key key, string idx,
+                                       uint64_t gen, uint64_t index_ver, string sub_ver , RGWModifyOp op)
+{
+  ceph::real_time rt = ceph::real_clock::now();
+  string reshard_log_idx;
+  assert(gen >= 1);
+  bi_reshard_log_key(hctx, gen, reshard_log_idx, index_ver);
+
+  struct rgw_reshard_log_entry reshard_log_entry;
+  reshard_log_entry.id = reshard_log_idx;
+  reshard_log_entry.key = key;
+  reshard_log_entry.idx = idx;
+  reshard_log_entry.timestamp = rt;
+  reshard_log_entry.sub_ver_traced = sub_ver;
+  reshard_log_entry.op_type = op;
+
+  bufferlist log_bl;
+  encode(reshard_log_entry, log_bl);
+  return cls_cxx_map_set_val(hctx, reshard_log_idx, &log_bl);
 }
 
 static void bi_log_prefix(string& key)
