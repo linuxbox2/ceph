@@ -602,6 +602,47 @@ struct rgw_bucket_olh_entry {
 };
 WRITE_CLASS_ENCODER(rgw_bucket_olh_entry)
 
+// log written with index in reshard logrecord state
+struct rgw_reshard_log_entry {
+  std::string id;
+  cls_rgw_obj_key key;
+  std::string idx; // whole name of an omap key
+  ceph::real_time timestamp;
+  std::string sub_ver_traced; // sub_ver of index op this log traced
+  RGWModifyOp op_type;
+
+  rgw_reshard_log_entry() {}
+
+  void encode(ceph::buffer::list &bl) const {
+    ENCODE_START(1, 1, bl);
+    encode(id, bl);
+    encode(key, bl);
+    encode(idx, bl);
+    encode(timestamp, bl);
+    encode(sub_ver_traced, bl);
+    uint8_t c = (uint8_t)(op_type);
+    encode(c, bl);
+    ENCODE_FINISH(bl);
+  }
+
+  void decode(ceph::buffer::list::const_iterator &bl) {
+    DECODE_START(1, bl);
+    decode(id, bl);
+    decode(key, bl);
+    decode(idx, bl);
+    decode(timestamp, bl);
+    decode(sub_ver_traced, bl);
+    uint8_t c;
+    decode(c, bl);
+    op_type = (RGWModifyOp)c;
+    DECODE_FINISH(bl);
+  }
+  void dump(Formatter *f) const;
+  void decode_json(JSONObj *obj);
+  static void generate_test_instances(std::list<rgw_reshard_log_entry*>& o);
+};
+WRITE_CLASS_ENCODER(rgw_reshard_log_entry)
+
 struct rgw_bi_log_entry {
   std::string id;
   std::string object;

@@ -551,6 +551,95 @@ void rgw_bucket_olh_log_entry::decode_json(JSONObj *obj)
   JSONDecoder::decode_json("key", key, obj);
   JSONDecoder::decode_json("delete_marker", delete_marker, obj);
 }
+
+void rgw_reshard_log_entry::dump(Formatter *f) const {
+  f->dump_string("op_id", id);
+  switch (op_type) {
+    case CLS_RGW_OP_ADD:
+      f->dump_string("op_type", "write");
+      break;
+    case CLS_RGW_OP_DEL:
+      f->dump_string("op_type", "del");
+      break;
+    case CLS_RGW_OP_CANCEL:
+      f->dump_string("op_type", "cancel");
+      break;
+    case CLS_RGW_OP_UNKNOWN:
+      f->dump_string("op_type", "unknown");
+      break;
+    case CLS_RGW_OP_LINK_OLH:
+      f->dump_string("op_type", "link_olh");
+      break;
+    case CLS_RGW_OP_LINK_OLH_DM:
+      f->dump_string("op_type", "link_olh_del");
+      break;
+    case CLS_RGW_OP_UNLINK_INSTANCE:
+      f->dump_string("op_type", "unlink_instance");
+      break;
+    case CLS_RGW_OP_SYNCSTOP:
+      f->dump_string("op_type", "syncstop");
+      break;
+    case CLS_RGW_OP_RESYNC:
+      f->dump_string("op_type", "resync");
+      break;
+    default:
+      f->dump_string("op_type", "invalid");
+      break;
+  }
+
+  utime_t ut(timestamp);
+  encode_json("timestamp", ut, f);
+  f->open_object_section("key");
+  key.dump(f);
+  f->close_section();
+  f->dump_string("idx", idx);
+  f->dump_string("sub_ver_traced", sub_ver_traced);
+}
+
+void rgw_reshard_log_entry::decode_json(JSONObj *obj) {
+  JSONDecoder::decode_json("op_id", id, obj);
+  string op_str;
+  JSONDecoder::decode_json("op_type", op_str, obj);
+  if (op_str == "write") {
+    op_type = CLS_RGW_OP_ADD;
+  } else if (op_str == "del") {
+    op_type = CLS_RGW_OP_DEL;
+  } else if (op_str == "cancel") {
+    op_type = CLS_RGW_OP_CANCEL;
+  } else if (op_str == "unknown") {
+    op_type = CLS_RGW_OP_UNKNOWN;
+  } else if (op_str == "link_olh") {
+    op_type = CLS_RGW_OP_LINK_OLH;
+  } else if (op_str == "link_olh_del") {
+    op_type = CLS_RGW_OP_LINK_OLH_DM;
+  } else if (op_str == "unlink_instance") {
+    op_type = CLS_RGW_OP_UNLINK_INSTANCE;
+  } else if (op_str == "syncstop") {
+    op_type = CLS_RGW_OP_SYNCSTOP;
+  } else if (op_str == "resync") {
+    op_type = CLS_RGW_OP_RESYNC;
+  } else {
+    op_type = CLS_RGW_OP_UNKNOWN;
+  }
+  utime_t ut;
+  JSONDecoder::decode_json("timestamp", ut, obj);
+  timestamp = ut.to_real_time();
+  JSONDecoder::decode_json("key", key, obj);
+  JSONDecoder::decode_json("idx", idx, obj);
+  JSONDecoder::decode_json("sub_ver_traced", sub_ver_traced, obj);
+}
+
+void rgw_reshard_log_entry::generate_test_instances(list<rgw_reshard_log_entry*>& ls)
+{
+  ls.push_back(new rgw_reshard_log_entry);
+  ls.push_back(new rgw_reshard_log_entry);
+  ls.back()->id = "midf";
+  ls.back()->idx = "1234";
+  ls.back()->timestamp = ceph::real_clock::from_ceph_timespec({ceph_le32(2), ceph_le32(3)});
+  ls.back()->op_type = CLS_RGW_OP_DEL;
+  ls.back()->sub_ver_traced = "1234.5";
+}
+
 void rgw_bi_log_entry::decode_json(JSONObj *obj)
 {
   JSONDecoder::decode_json("op_id", id, obj);

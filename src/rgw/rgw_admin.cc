@@ -1197,6 +1197,7 @@ static void show_reshard_status(
   for (const auto& entry : status) {
     formatter->open_object_section("entry");
     formatter->dump_string("reshard_status", to_string(entry.reshard_status));
+    formatter->dump_unsigned("reshard_gen", entry.gen);
     formatter->close_section();
   }
   formatter->close_section();
