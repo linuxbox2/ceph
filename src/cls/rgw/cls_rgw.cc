@@ -773,6 +773,19 @@ int rgw_bucket_update_stats(cls_method_context_t hctx, bufferlist *in, bufferlis
     }
   }
 
+  for (auto& s : op.dec_stats) {
+    auto& dest = header.stats[s.first];
+    if (op.absolute) {
+      CLS_LOG(0, "ERROR: %s: there can not be decribed stats when setting absolutly", __func__);
+      return -EINVAL;
+    } else {
+      dest.total_size -= s.second.total_size;
+      dest.total_size_rounded -= s.second.total_size_rounded;
+      dest.num_entries -= s.second.num_entries;
+      dest.actual_size -= s.second.actual_size;
+    }
+  }
+
   return write_bucket_header(hctx, &header);
 }
 
