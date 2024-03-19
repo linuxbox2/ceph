@@ -1664,7 +1664,7 @@ public:
     }
     if (is_resharding) {
       ret = reshard_log_index_operation(hctx, key, olh_data_idx, gen, index_ver,
-                                        olh_data_entry.sub_ver, CLS_RGW_OP_UNLINK_INSTANCE);
+                                        olh_data_entry.sub_ver, CLS_RGW_OP_LINK_OLH);
       if (ret < 0) {
         CLS_LOG(0, "ERROR: reshard_log_index_operation() key=%s ret=%d", olh_data_idx.c_str(), ret);
         return ret;

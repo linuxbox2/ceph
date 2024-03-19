@@ -495,7 +495,8 @@ static int init_target_layout(rgw::sal::RadosStore* store,
 
     // add the reshard generation
     bucket_info.layout.current_index.layout.normal.reshard_gen += 1;
-
+    // update the judge time meanwhile
+    bucket_info.judge_reshard_lock_time = ceph::real_clock::now();
     if (ret = fault.check("set_target_layout");
         ret == 0) { // no fault injected, write the bucket instance metadata
       ret = store->getRados()->put_bucket_instance_info(bucket_info, false,

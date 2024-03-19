@@ -2296,6 +2296,7 @@ void RGWBucketInfo::encode(bufferlist& bl) const {
     encode(*sync_policy, bl);
   }
   encode(layout, bl);
+
   if (user) {
     encode(user->ns, bl);
   } else {
@@ -2303,11 +2304,13 @@ void RGWBucketInfo::encode(bufferlist& bl) const {
   }
   ceph::versioned_variant::encode(owner, bl); // v24
 
+  encode(judge_reshard_lock_time, bl);
   ENCODE_FINISH(bl);
 }
 
 void RGWBucketInfo::decode(bufferlist::const_iterator& bl) {
   rgw_user user;
+
   DECODE_START_LEGACY_COMPAT_LEN_32(24, 4, 4, bl);
   decode(bucket, bl);
   if (struct_v >= 2) {
@@ -2389,6 +2392,9 @@ void RGWBucketInfo::decode(bufferlist::const_iterator& bl) {
     ceph::versioned_variant::decode(owner, bl);
   } else {
     owner = std::move(user); // user was decoded piecewise above
+  }
+  if (struct_v >= 24) {
+    decode(judge_reshard_lock_time, bl);
   }
 
   if (layout.logs.empty() &&
@@ -2527,6 +2533,8 @@ void RGWBucketInfo::dump(Formatter *f) const
   encode_json("mdsearch_config", mdsearch_config, f);
   encode_json("reshard_status", (int)reshard_status, f);
   encode_json("new_bucket_instance_id", new_bucket_instance_id, f);
+  utime_t jt(judge_reshard_lock_time);
+  encode_json("judge_reshard_lock_time", jt, f);
   if (!empty_sync_policy()) {
     encode_json("sync_policy", *sync_policy, f);
   }
@@ -2568,6 +2576,8 @@ void RGWBucketInfo::decode_json(JSONObj *obj) {
   JSONDecoder::decode_json("reshard_status", rs, obj);
   reshard_status = (cls_rgw_reshard_status)rs;
   JSONDecoder::decode_json("reshard_gen", layout.current_index.layout.normal.reshard_gen, obj);
+  JSONDecoder::decode_json("judge_reshard_lock_time", ut, obj);
+  judge_reshard_lock_time = ut.to_real_time();
   rgw_sync_policy_info sp;
   JSONDecoder::decode_json("sync_policy", sp, obj);
   if (!sp.empty()) {
