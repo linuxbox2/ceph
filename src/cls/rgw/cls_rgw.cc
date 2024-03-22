@@ -156,7 +156,7 @@ static void bi_reshard_log_prefix(string& key)
 }
 
 // 0x802001_gen_indexver.clsver.subop, distinct every entry
-static void bi_reshard_log_key(cls_method_context_t hctx, uint64_t& gen, string& key, uint64_t index_ver)
+static void bi_reshard_log_key(cls_method_context_t hctx, uint64_t gen, string& key, uint64_t index_ver)
 {
   bi_reshard_log_prefix(key);
   char buf[32];
@@ -167,8 +167,8 @@ static void bi_reshard_log_key(cls_method_context_t hctx, uint64_t& gen, string&
   key.append(id);
 }
 
-static int reshard_log_index_operation(cls_method_context_t hctx, cls_rgw_obj_key key, string idx,
-                                       uint64_t gen, uint64_t index_ver, string sub_ver , RGWModifyOp op)
+static int reshard_log_index_operation(cls_method_context_t hctx, const cls_rgw_obj_key& key, const string& idx,
+                                       uint64_t gen, uint64_t index_ver, string& sub_ver , RGWModifyOp op)
 {
   ceph::real_time rt = ceph::real_clock::now();
   string reshard_log_idx;
@@ -2926,34 +2926,6 @@ static int rgw_bi_get_vals_op(cls_method_context_t hctx, bufferlist *in, bufferl
     entry.type = bi_type(iter->first);
     entry.data = iter->second;
 
-    auto biter = entry.data.cbegin();
-
-    switch (entry.type) {
-      case BIIndexType::Plain:
-      case BIIndexType::Instance: {
-        rgw_bucket_dir_entry e;
-        try {
-          decode(e, biter);
-        } catch (ceph::buffer::error& err) {
-          CLS_LOG(0, "ERROR: %s: failed to decode buffer", __func__);
-          return -EIO;
-        }
-        break;
-      }
-      case BIIndexType::OLH: {
-        rgw_bucket_olh_entry e;
-        try {
-          decode(e, biter);
-        } catch (ceph::buffer::error& err) {
-          CLS_LOG(0, "ERROR: %s: failed to decode buffer (size=%d)", __func__, entry.data.length());
-          return -EIO;
-        }
-        break;
-      }
-      default:
-        CLS_LOG(0, "%s: invalid entry type: %d", __func__, int(entry.type));
-        return -EINVAL;
-    }
     CLS_LOG(20, "%s: entry.idx=%s", __func__, escape_str(entry.idx).c_str());
 
     op_ret.entries.emplace(iter->first, entry);
@@ -3000,13 +2972,6 @@ static int rgw_bi_process_log_put_op(cls_method_context_t hctx, bufferlist *in, 
     return -EINVAL;
   }
 
-  struct rgw_bucket_dir_header header;
-  int rc = read_bucket_header(hctx, &header);
-  if (rc < 0) {
-    CLS_LOG(1, "ERROR: rgw_bucket_complete_op(): failed to read header\n");
-    return -EINVAL;
-  }
-
   rgw_cls_bi_process_log_entry& ori_entry = op.entry;
   if (ori_entry.exists) {
 
@@ -3023,7 +2988,7 @@ static int rgw_bi_process_log_put_op(cls_method_context_t hctx, bufferlist *in, 
     }
   }
 
-  return write_bucket_header(hctx, &header);
+  return 0;
 }
 
 /* The plain entries in the bucket index are divided into two regions

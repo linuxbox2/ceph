@@ -2690,7 +2690,7 @@ options:
   type: uint
   level: dev
   desc: maximum number of log entries listed in one loop
-  default: 100
+  default: 500
   services:
   - rgw
 - name: rgw_reshard_progress_judge_interval

@@ -1329,7 +1329,7 @@ static int bucket_stats(rgw::sal::Driver* driver,
   formatter->dump_int("index_generation", bucket->get_info().layout.current_index.gen);
   formatter->dump_int("num_shards",
 		      bucket->get_info().layout.current_index.layout.normal.num_shards);
-  formatter->dump_stream("reshard_status") << bucket->get_info().reshard_status;
+  formatter->dump_string("reshard_status", to_string(bucket->get_info().layout.resharding));
   formatter->dump_unsigned("reshard_gen", bucket->get_info().layout.current_index.layout.normal.reshard_gen);
   logrecord_ut.gmtime(formatter->dump_stream("judge_reshard_lock_time"));
   formatter->dump_bool("object_lock_enabled", bucket_info.obj_lock_enabled());
