@@ -1731,13 +1731,13 @@ struct cls_rgw_set_bucket_resharding_op  {
   cls_rgw_bucket_instance_entry entry;
 
   void encode(ceph::buffer::list& bl) const {
-    ENCODE_START(1, 1, bl);
+    ENCODE_START(2, 2, bl);
     encode(entry, bl);
     ENCODE_FINISH(bl);
   }
 
   void decode(ceph::buffer::list::const_iterator& bl) {
-    DECODE_START(1, bl);
+    DECODE_START(2, bl);
     decode(entry, bl);
     DECODE_FINISH(bl);
   }
