@@ -379,7 +379,7 @@ int cls_rgw_bi_list(librados::IoCtx& io_ctx, const std::string& oid,
                    const std::string& name, const std::string& marker, uint32_t max,
                    std::list<rgw_cls_bi_entry> *entries, bool *is_truncated);
 int cls_rgw_reshard_log_list(librados::IoCtx& io_ctx, const std::string oid,
-                             const std::string& marker, uint32_t max,
+                             const std::string& marker, uint32_t max, uint64_t gen,
                              std::list<rgw_reshard_log_entry> *entries, bool *is_truncated);
 
 void cls_rgw_bucket_link_olh(librados::ObjectWriteOperation& op,
@@ -509,6 +509,23 @@ public:
     CLSRGWConcurrentIO(io_ctx, _bucket_objs, max_aio),
     start_marker_mgr(_start_marker_mgr), end_marker_mgr(_end_marker_mgr) {}
   virtual ~CLSRGWIssueBILogTrim() override {}
+};
+
+class CLSRGWIssueReshardLogTrim : public CLSRGWConcurrentIO {
+protected:
+  int issue_op(int shard_id, const std::string& oid) override;
+  // Trim until -ENODATA is returned.
+  int valid_ret_code() override { return -ENODATA; }
+  bool need_multiple_rounds() override { return true; }
+  void add_object(int shard, const std::string& oid) override { objs_container[shard] = oid; }
+  void reset_container(std::map<int, std::string>& objs) override {
+    objs_container.swap(objs);
+    iter = objs_container.begin();
+    objs.clear();
+  }
+public:
+  CLSRGWIssueReshardLogTrim(librados::IoCtx& io_ctx, std::map<int, std::string>& _bucket_objs, uint32_t max_aio) :
+      CLSRGWConcurrentIO(io_ctx, _bucket_objs, max_aio) {}
 };
 
 /**
