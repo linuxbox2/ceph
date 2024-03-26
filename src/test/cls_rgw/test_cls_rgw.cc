@@ -1354,7 +1354,7 @@ static int reshardlog_list(librados::IoCtx& ioctx, const std::string& oid,
                            list<rgw_reshard_log_entry> *entries, bool *is_truncated)
 {
   int retcode = 0;
-  int ret = cls_rgw_reshard_log_list(ioctx, oid, "", 100, entries, is_truncated);
+  int ret = cls_rgw_reshard_log_list(ioctx, oid, "", 100, 0, entries, is_truncated);
   if (ret < 0) {
     return ret;
   }

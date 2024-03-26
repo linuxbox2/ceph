@@ -156,14 +156,15 @@ static void bi_reshard_log_prefix(string& key)
 }
 
 // 0x802001_gen_indexver.clsver.subop, distinct every entry
-static void bi_reshard_log_key(cls_method_context_t hctx, uint64_t gen, string& key, uint64_t index_ver)
+static void bi_reshard_log_key(cls_method_context_t hctx, uint64_t gen, string& key, string& id, uint64_t index_ver)
 {
   bi_reshard_log_prefix(key);
   char buf[32];
   snprintf(buf, sizeof(buf), "%llu_", (unsigned long long)gen);
-  key.append(buf);
-  string id;
-  get_index_ver_key(hctx, index_ver, &id);
+  id.append(buf);
+  string ivk;
+  get_index_ver_key(hctx, index_ver, &ivk);
+  id.append(ivk);
   key.append(id);
 }
 
@@ -173,15 +174,14 @@ static int reshard_log_index_operation(cls_method_context_t hctx, const cls_rgw_
   ceph::real_time rt = ceph::real_clock::now();
   string reshard_log_idx;
   assert(gen >= 1);
-  bi_reshard_log_key(hctx, gen, reshard_log_idx, index_ver);
 
   struct rgw_reshard_log_entry reshard_log_entry;
-  reshard_log_entry.id = reshard_log_idx;
   reshard_log_entry.key = key;
   reshard_log_entry.idx = idx;
   reshard_log_entry.timestamp = rt;
   reshard_log_entry.sub_ver_traced = sub_ver;
   reshard_log_entry.op_type = op;
+  bi_reshard_log_key(hctx, gen, reshard_log_idx, reshard_log_entry.id, index_ver);
 
   bufferlist log_bl;
   encode(reshard_log_entry, log_bl);
@@ -3835,53 +3835,32 @@ int reshard_log_record_decode(bufferlist& bl, rgw_reshard_log_entry& e)
 }
 
 static int reshard_log_list_entries(cls_method_context_t hctx, const string& marker,
-			   uint32_t max, list<rgw_reshard_log_entry>& entries, bool *truncated)
+                                    bool purge, uint64_t gen, uint32_t max,
+                                    list<rgw_reshard_log_entry>& entries, bool *truncated)
 {
   string start_key, end_key;
   start_key = BI_PREFIX_CHAR;
   start_key.append(bucket_index_prefixes[BI_BUCKET_RESHARD_LOG_INDEX]);
 
-  // start_key should begin with the newest gen
-  struct rgw_bucket_dir_header header;
-  int rc = read_bucket_header(hctx, &header);
-  if (rc < 0) {
-    CLS_LOG(1, "ERROR: %s(): failed to read header\n", __func__);
-    return rc;
+  // when purging reshard log, all generaions will be deleted, so it is not needed to joint gen or marker
+  if (!purge) {
+    if (marker.empty()) { // first time in list
+      char buf[32];
+      snprintf(buf, sizeof(buf), "%llu_", (unsigned long long)gen);
+      start_key.append(buf);
+    } else {
+      start_key.append(marker);
+    }
   }
-  char buf[32];
-
-  // with the newest gen
-  snprintf(buf, sizeof(buf), "%llu_", (unsigned long long)header.get_gen());
-  start_key.append(buf);
 
   end_key = BI_PREFIX_CHAR;
   end_key.append(bucket_index_prefixes[BI_BUCKET_RESHARD_LOG_INDEX + 1]);
 
-  if (bi_entry_gt(marker, start_key)) {
-    start_key = marker;
-  }
-
   map<string, bufferlist> keys;
-  int ret;
-
-  bufferlist k;
-  ret = cls_cxx_map_get_val(hctx, start_key, &k);
-  if (ret < 0 && ret != -ENOENT) {
+  int ret = cls_cxx_map_get_vals(hctx, start_key, string(), max, &keys, truncated);
+  CLS_LOG(20, "%s(): start_key=%s keys.size()=%d", __func__, escape_str(start_key).c_str(), (int)keys.size());
+  if (ret < 0) {
     return ret;
-  }
-  bool found_first = (ret == 0);
-  if (found_first) {
-    --max;
-  }
-  if (max > 0) {
-    ret = cls_cxx_map_get_vals(hctx, start_key, string(), max, &keys, truncated);
-    CLS_LOG(20, "%s(): start_key=%s keys.size()=%d", __func__, escape_str(start_key).c_str(), (int)keys.size());
-    if (ret < 0) {
-      return ret;
-    }
-  }
-  if (found_first) {
-    keys[start_key] = std::move(k);
   }
 
   map<string, bufferlist>::iterator iter;
@@ -3920,11 +3899,51 @@ static int rgw_reshard_log_list_op(cls_method_context_t hctx, bufferlist *in, bu
   }
 
   cls_rgw_reshard_log_list_ret op_ret;
-  int ret = reshard_log_list_entries(hctx, op.marker, op.max, op_ret.entries, &op_ret.is_truncated);
+  int ret = reshard_log_list_entries(hctx, op.marker, false, op.gen, op.max, op_ret.entries,
+                                     &op_ret.is_truncated);
   if (ret < 0)
     return ret;
 
   encode(op_ret, *out);
+
+  return 0;
+}
+
+static int reshard_log_remove_entry(cls_method_context_t hctx, rgw_reshard_log_entry& entry)
+{
+  string key;
+  bi_reshard_log_prefix(key);
+  key.append(entry.id);
+  return cls_cxx_map_remove_key(hctx, key);
+}
+
+static int reshard_log_list_trim_entries(cls_method_context_t hctx,
+                                         list<rgw_reshard_log_entry>& entries, bool *truncated)
+{
+#define MAX_TRIM_ENTRIES 1000 /* max entries to trim in a single operation */
+  int ret = reshard_log_list_entries(hctx, string(), true, 0, MAX_TRIM_ENTRIES, entries, truncated);
+  return ret;
+}
+
+static int rgw_reshard_log_trim_op(cls_method_context_t hctx, bufferlist *in, bufferlist *out)
+{
+  list<rgw_reshard_log_entry> entries;
+  bool truncated;
+  int ret = reshard_log_list_trim_entries(hctx, entries, &truncated);
+  if (ret < 0)
+    return ret;
+
+  if (entries.empty())
+    return -ENODATA;
+
+  list<rgw_reshard_log_entry>::iterator iter;
+  for (iter = entries.begin(); iter != entries.end(); ++iter) {
+    rgw_reshard_log_entry& entry = *iter;
+
+    ret = reshard_log_remove_entry(hctx, entry);
+    if (ret < 0)
+      return ret;
+  }
 
   return 0;
 }
@@ -5068,6 +5087,7 @@ CLS_INIT(rgw)
   cls_method_handle_t h_rgw_bi_process_log_put_op;
   cls_method_handle_t h_rgw_bi_list_op;
   cls_method_handle_t h_rgw_reshard_log_list_op;
+  cls_method_handle_t h_rgw_reshard_log_trim_op;
   cls_method_handle_t h_rgw_bi_log_list_op;
   cls_method_handle_t h_rgw_bi_log_trim_op;
   cls_method_handle_t h_rgw_bi_log_resync_op;
@@ -5126,6 +5146,7 @@ CLS_INIT(rgw)
   cls_register_cxx_method(h_class, RGW_BI_PROCESS_LOG_PUT, CLS_METHOD_RD | CLS_METHOD_WR, rgw_bi_process_log_put_op, &h_rgw_bi_process_log_put_op);
   cls_register_cxx_method(h_class, RGW_BI_LIST, CLS_METHOD_RD, rgw_bi_list_op, &h_rgw_bi_list_op);
   cls_register_cxx_method(h_class, RGW_RESHARD_LOG_LIST, CLS_METHOD_RD, rgw_reshard_log_list_op, &h_rgw_reshard_log_list_op);
+  cls_register_cxx_method(h_class, RGW_RESHARD_LOG_TRIM, CLS_METHOD_RD | CLS_METHOD_WR, rgw_reshard_log_trim_op, &h_rgw_reshard_log_trim_op);
 
   cls_register_cxx_method(h_class, RGW_BI_LOG_LIST, CLS_METHOD_RD, rgw_bi_log_list, &h_rgw_bi_log_list_op);
   cls_register_cxx_method(h_class, RGW_BI_LOG_TRIM, CLS_METHOD_RD | CLS_METHOD_WR, rgw_bi_log_trim, &h_rgw_bi_log_trim_op);

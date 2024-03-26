@@ -893,6 +893,7 @@ WRITE_CLASS_ENCODER(rgw_cls_bi_list_ret)
 struct cls_rgw_reshard_log_list_op {
   std::string marker;
   uint32_t max;
+  uint64_t gen;
 
   cls_rgw_reshard_log_list_op() : max(0) {}
 
@@ -900,6 +901,7 @@ struct cls_rgw_reshard_log_list_op {
     ENCODE_START(1, 1, bl);
     encode(marker, bl);
     encode(max, bl);
+    encode(gen, bl);
     ENCODE_FINISH(bl);
   }
 
@@ -907,11 +909,10 @@ struct cls_rgw_reshard_log_list_op {
     DECODE_START(1, bl);
     decode(marker, bl);
     decode(max, bl);
+    decode(gen, bl);
     DECODE_FINISH(bl);
   }
 
-  void dump(Formatter *f) const;
-  static void generate_test_instances(std::list<cls_rgw_reshard_log_list_op*>& ls);
 };
 WRITE_CLASS_ENCODER(cls_rgw_reshard_log_list_op)
 
@@ -935,8 +936,6 @@ struct cls_rgw_reshard_log_list_ret {
     DECODE_FINISH(bl);
   }
 
-  void dump(Formatter *f) const;
-  static void generate_test_instances(std::list<cls_rgw_reshard_log_list_ret*>& ls);
 };
 WRITE_CLASS_ENCODER(cls_rgw_reshard_log_list_ret)
 

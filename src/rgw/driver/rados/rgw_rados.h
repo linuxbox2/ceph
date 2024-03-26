@@ -1532,8 +1532,9 @@ public:
               std::list<rgw_cls_bi_entry> *entries, bool *is_truncated, optional_yield y);
   int bi_remove(const DoutPrefixProvider *dpp, BucketShard& bs);
 
-  int reshard_log_list(BucketShard& bs, const std::string& marker, uint32_t max,
+  int reshard_log_list(BucketShard& bs, const std::string& marker, uint32_t max, uint64_t gen,
                        std::list<rgw_reshard_log_entry> *entries, bool *is_truncated, optional_yield y);
+  int trim_reshard_log_entries(const DoutPrefixProvider *dpp, RGWBucketInfo& bucket_info, optional_yield y);
 
   int cls_obj_usage_log_add(const DoutPrefixProvider *dpp, const std::string& oid, rgw_usage_log_info& info, optional_yield y);
   int cls_obj_usage_log_read(const DoutPrefixProvider *dpp, const std::string& oid, const std::string& user, const std::string& bucket, uint64_t start_epoch,

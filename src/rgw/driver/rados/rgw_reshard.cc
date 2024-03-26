@@ -1232,8 +1232,9 @@ int RGWBucketReshard::reshard_in_progress_state(const rgw::bucket_index_layout_g
       entries.clear();
 
       // getting the log written with index
-      ret = store->getRados()->reshard_log_list(src_bs, marker, max_entries, &log_entries,
-                                                &is_truncated, y);
+      ret = store->getRados()->reshard_log_list(src_bs, marker, max_entries,
+                                                current.layout.normal.reshard_gen,
+                                                &log_entries, &is_truncated, y);
       if (ret == -ENOENT) {
         ldpp_dout(dpp, 1) << "WARNING: " << __func__ << " failed to find shard "
             << i << ", skipping" << dendl;
