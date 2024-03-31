@@ -443,6 +443,31 @@ int cls_rgw_bi_get(librados::IoCtx& io_ctx, const string oid,
   return 0;
 }
 
+int cls_rgw_bi_get_vals(librados::IoCtx& io_ctx, const std::string oid,
+                        std::set<std::string> log_entries_wanted,
+                        std::map<std::string, rgw_cls_bi_entry> *entries)
+{
+  bufferlist in, out;
+  struct rgw_cls_bi_get_vals_op call;
+  call.log_entries_wanted = log_entries_wanted;
+  encode(call, in);
+  int r = io_ctx.exec(oid, RGW_CLASS, RGW_BI_GET_VALS, in, out);
+  if (r < 0)
+    return r;
+
+  struct rgw_cls_bi_get_vals_ret op_ret;
+  auto iter = out.cbegin();
+  try {
+    decode(op_ret, iter);
+  } catch (ceph::buffer::error& err) {
+    return -EIO;
+  }
+
+  entries->swap(op_ret.entries);
+
+  return 0;
+}
+
 int cls_rgw_bi_put(librados::IoCtx& io_ctx, const string oid, const rgw_cls_bi_entry& entry)
 {
   bufferlist in, out;
@@ -465,6 +490,16 @@ void cls_rgw_bi_put(ObjectWriteOperation& op, const string oid, const rgw_cls_bi
   op.exec(RGW_CLASS, RGW_BI_PUT, in);
 }
 
+void cls_rgw_bi_process_log_put(ObjectWriteOperation& op, const std::string oid,
+                                rgw_cls_bi_process_log_entry& entry)
+{
+  bufferlist in, out;
+  struct rgw_cls_bi_process_log_put_op call;
+  call.entry = entry;
+  encode(call, in);
+  op.exec(RGW_CLASS, RGW_BI_PROCESS_LOG_PUT, in);
+}
+
 /* nb: any entries passed in are replaced with the results of the cls
  * call, so caller does not need to clear entries between calls
  */
@@ -483,6 +518,33 @@ int cls_rgw_bi_list(librados::IoCtx& io_ctx, const std::string& oid,
     return r;
 
   rgw_cls_bi_list_ret op_ret;
+  auto iter = out.cbegin();
+  try {
+    decode(op_ret, iter);
+  } catch (ceph::buffer::error& err) {
+    return -EIO;
+  }
+
+  entries->swap(op_ret.entries);
+  *is_truncated = op_ret.is_truncated;
+
+  return 0;
+}
+
+int cls_rgw_reshard_log_list(librados::IoCtx& io_ctx, const std::string oid,
+                             const std::string& marker, uint32_t max,
+                             std::list<rgw_reshard_log_entry> *entries, bool *is_truncated)
+{
+  bufferlist in, out;
+  struct cls_rgw_reshard_log_list_op call;
+  call.marker = marker;
+  call.max = max;
+  encode(call, in);
+  int r = io_ctx.exec(oid, RGW_CLASS, RGW_RESHARD_LOG_LIST, in, out);
+  if (r < 0)
+    return r;
+
+  struct cls_rgw_reshard_log_list_ret op_ret;
   auto iter = out.cbegin();
   try {
     decode(op_ret, iter);

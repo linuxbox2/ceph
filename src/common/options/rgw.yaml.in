@@ -2695,6 +2695,13 @@ options:
   with_legacy: true
   services:
   - rgw
+- name: rgw_reshard_log_max_list_entries
+  type: uint
+  level: dev
+  desc: maximum number of log entries listed in one loop
+  default: 100
+  services:
+  - rgw
 - name: rgw_debug_inject_set_olh_err
   type: uint
   level: dev

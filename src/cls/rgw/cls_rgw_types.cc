@@ -459,6 +459,22 @@ string rgw_cls_bi_entry::get_sub_ver()
   return ret;
 }
 
+void rgw_cls_bi_process_log_entry::dump(Formatter *f) const
+{
+  encode_json("idx", idx, f);
+  encode_json("exists", exists, f);
+  f->open_object_section("bi_entry");
+  bi_entry.dump(f);
+  f->close_section();
+}
+
+void rgw_cls_bi_process_log_entry::decode_json(JSONObj *obj)
+{
+  JSONDecoder::decode_json("idx", idx, obj);
+  JSONDecoder::decode_json("exists", exists, obj);
+  JSONDecoder::decode_json("bi_entry", bi_entry, obj);
+}
+
 void rgw_bucket_olh_entry::dump(Formatter *f) const
 {
   encode_json("key", key, f);
@@ -1027,6 +1043,9 @@ std::ostream& operator<<(std::ostream& out, cls_rgw_reshard_status status) {
   switch (status) {
   case cls_rgw_reshard_status::NOT_RESHARDING:
     out << "NOT_RESHARDING";
+    break;
+  case cls_rgw_reshard_status::IN_LOGRECORD:
+    out << "IN_LOGRECORD";
     break;
   case cls_rgw_reshard_status::IN_PROGRESS:
     out << "IN_PROGRESS";

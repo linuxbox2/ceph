@@ -727,6 +727,42 @@ struct rgw_cls_bi_get_ret {
 };
 WRITE_CLASS_ENCODER(rgw_cls_bi_get_ret)
 
+struct rgw_cls_bi_get_vals_op {
+  std::set<std::string> log_entries_wanted;
+
+  void encode(ceph::buffer::list& bl) const {
+    ENCODE_START(1, 1, bl);
+    encode(log_entries_wanted, bl);
+    ENCODE_FINISH(bl);
+  }
+
+  void decode(ceph::buffer::list::const_iterator& bl) {
+    DECODE_START(1, bl);
+    decode(log_entries_wanted, bl);
+    DECODE_FINISH(bl);
+  }
+};
+WRITE_CLASS_ENCODER(rgw_cls_bi_get_vals_op)
+
+struct rgw_cls_bi_get_vals_ret {
+  std::map<std::string, rgw_cls_bi_entry> entries;
+
+  rgw_cls_bi_get_vals_ret() {}
+
+  void encode(ceph::buffer::list& bl) const {
+    ENCODE_START(1, 1, bl);
+    encode(entries, bl);
+    ENCODE_FINISH(bl);
+  }
+
+  void decode(ceph::buffer::list::const_iterator& bl) {
+    DECODE_START(1, bl);
+    decode(entries, bl);
+    DECODE_FINISH(bl);
+  }
+};
+WRITE_CLASS_ENCODER(rgw_cls_bi_get_vals_ret)
+
 struct rgw_cls_bi_put_op {
   rgw_cls_bi_entry entry;
 
@@ -755,6 +791,25 @@ struct rgw_cls_bi_put_op {
   }
 };
 WRITE_CLASS_ENCODER(rgw_cls_bi_put_op)
+
+struct rgw_cls_bi_process_log_put_op {
+  rgw_cls_bi_process_log_entry entry;
+
+  rgw_cls_bi_process_log_put_op() {}
+
+  void encode(ceph::buffer::list& bl) const {
+    ENCODE_START(1, 1, bl);
+    encode(entry, bl);
+    ENCODE_FINISH(bl);
+  }
+
+  void decode(ceph::buffer::list::const_iterator& bl) {
+    DECODE_START(1, bl);
+    decode(entry, bl);
+    DECODE_FINISH(bl);
+  }
+};
+WRITE_CLASS_ENCODER(rgw_cls_bi_process_log_put_op)
 
 struct rgw_cls_bi_list_op {
   uint32_t max;
@@ -830,6 +885,56 @@ struct rgw_cls_bi_list_ret {
   }
 };
 WRITE_CLASS_ENCODER(rgw_cls_bi_list_ret)
+
+struct cls_rgw_reshard_log_list_op {
+  std::string marker;
+  uint32_t max;
+
+  cls_rgw_reshard_log_list_op() : max(0) {}
+
+  void encode(ceph::buffer::list& bl) const {
+    ENCODE_START(1, 1, bl);
+    encode(marker, bl);
+    encode(max, bl);
+    ENCODE_FINISH(bl);
+  }
+
+  void decode(ceph::buffer::list::const_iterator& bl) {
+    DECODE_START(1, bl);
+    decode(marker, bl);
+    decode(max, bl);
+    DECODE_FINISH(bl);
+  }
+
+  void dump(Formatter *f) const;
+  static void generate_test_instances(std::list<cls_rgw_reshard_log_list_op*>& ls);
+};
+WRITE_CLASS_ENCODER(cls_rgw_reshard_log_list_op)
+
+struct cls_rgw_reshard_log_list_ret {
+  std::list<rgw_reshard_log_entry> entries;
+  bool is_truncated;
+
+  cls_rgw_reshard_log_list_ret() : is_truncated(false) {}
+
+  void encode(ceph::buffer::list& bl) const {
+    ENCODE_START(1, 1, bl);
+    encode(entries, bl);
+    encode(is_truncated, bl);
+    ENCODE_FINISH(bl);
+  }
+
+  void decode(ceph::buffer::list::const_iterator& bl) {
+    DECODE_START(1, bl);
+    decode(entries, bl);
+    decode(is_truncated, bl);
+    DECODE_FINISH(bl);
+  }
+
+  void dump(Formatter *f) const;
+  static void generate_test_instances(std::list<cls_rgw_reshard_log_list_ret*>& ls);
+};
+WRITE_CLASS_ENCODER(cls_rgw_reshard_log_list_ret)
 
 struct rgw_cls_usage_log_read_op {
   uint64_t start_epoch;
