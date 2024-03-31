@@ -9111,6 +9111,17 @@ int RGWRados::bi_get(const DoutPrefixProvider *dpp, const RGWBucketInfo& bucket_
   return cls_rgw_bi_get(ref.ioctx, ref.obj.oid, index_type, key, entry);
 }
 
+int RGWRados::bi_get_vals(BucketShard& bs, set<string> log_entries_wanted,
+                          map<string, rgw_cls_bi_entry> *entries, optional_yield y)
+{
+  auto& ref = bs.bucket_obj;
+  int ret = cls_rgw_bi_get_vals(ref.ioctx, ref.obj.oid, log_entries_wanted, entries);
+  if (ret < 0)
+    return ret;
+
+  return 0;
+}
+
 void RGWRados::bi_put(ObjectWriteOperation& op, BucketShard& bs, rgw_cls_bi_entry& entry, optional_yield y)
 {
   auto& ref = bs.bucket_obj;
@@ -9144,6 +9155,14 @@ int RGWRados::bi_put(const DoutPrefixProvider *dpp, rgw_bucket& bucket, rgw_obj&
   }
 
   return bi_put(bs, entry, y);
+}
+
+void RGWRados::bi_process_log_put(ObjectWriteOperation& op, BucketShard& bs,
+                                  rgw_cls_bi_process_log_entry& entry,
+                                  optional_yield y)
+{
+  auto& ref = bs.bucket_obj;
+  cls_rgw_bi_process_log_put(op, ref.obj.oid, entry);
 }
 
 int RGWRados::bi_list(const DoutPrefixProvider *dpp, rgw_bucket& bucket,
@@ -9207,6 +9226,18 @@ int RGWRados::bi_remove(const DoutPrefixProvider *dpp, BucketShard& bs)
     ldpp_dout(dpp, 5) << "bs.index_ctx.remove(" << bs.bucket_obj << ") returned ret=" << ret << dendl;
     return ret;
   }
+
+  return 0;
+}
+
+int RGWRados::reshard_log_list(BucketShard& bs, const string& marker, uint32_t max,
+                               list<rgw_reshard_log_entry> *entries,
+                               bool *is_truncated, optional_yield y)
+{
+  auto& ref = bs.bucket_obj;
+  int ret = cls_rgw_reshard_log_list(ref.ioctx, ref.obj.oid, marker, max, entries, is_truncated);
+  if (ret < 0)
+    return ret;
 
   return 0;
 }

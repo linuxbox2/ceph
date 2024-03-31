@@ -515,6 +515,40 @@ struct rgw_cls_bi_entry {
 };
 WRITE_CLASS_ENCODER(rgw_cls_bi_entry)
 
+// constructed base on index entry read in processing reshard log
+struct rgw_cls_bi_process_log_entry {
+  std::string idx; // whole name of an omap key
+  bool exists;
+  rgw_cls_bi_entry bi_entry;
+
+  rgw_cls_bi_process_log_entry() : exists(false) {}
+  rgw_cls_bi_process_log_entry(std::string idx) : idx(idx), exists(false) {
+    bi_entry.idx = idx;
+  }
+  rgw_cls_bi_process_log_entry(std::string idx, bool exists, rgw_cls_bi_entry bi_entry) :
+    idx(idx), exists(exists), bi_entry(bi_entry) {}
+
+  void encode(ceph::buffer::list& bl) const {
+    ENCODE_START(1, 1, bl);
+    encode(idx, bl);
+    encode(exists, bl);
+    encode(bi_entry, bl);
+    ENCODE_FINISH(bl);
+  }
+
+  void decode(ceph::buffer::list::const_iterator& bl) {
+    DECODE_START(1, bl);
+    decode(idx, bl);
+    decode(exists, bl);
+    decode(bi_entry, bl);
+    DECODE_FINISH(bl);
+  }
+
+  void dump(Formatter *f) const;
+  void decode_json(JSONObj *obj);
+};
+WRITE_CLASS_ENCODER(rgw_cls_bi_process_log_entry)
+
 enum OLHLogOp {
   CLS_RGW_OLH_OP_UNKNOWN         = 0,
   CLS_RGW_OLH_OP_LINK_OLH        = 1,

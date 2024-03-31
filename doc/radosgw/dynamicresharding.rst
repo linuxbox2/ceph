@@ -52,6 +52,8 @@ Configuration
 .. confval:: rgw_reshard_thread_interval
 .. confval:: rgw_reshard_num_logs
 
+- ``rgw_reshard_log_max_list_entries``: maximum number of log entries listed in one loop, default: 100
+
 Admin commands
 ==============
 
