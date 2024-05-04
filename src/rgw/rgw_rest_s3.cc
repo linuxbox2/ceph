@@ -3696,7 +3696,9 @@ int RGWGetObjAttrs_ObjStore_S3::get_params(optional_yield y)
   }
 
   hdr = env->get_optional("HTTP_X_AMZ_OBJECT_ATTRIBUTES");
-  requested_attributes = recognize_attrs(*hdr);
+  if (hdr) {
+    requested_attributes = recognize_attrs(*hdr);
+  }
 
   /* XXX skipping SSE-C params for now */
 
