@@ -1608,6 +1608,7 @@ protected:
   int marker;
   int max_parts;
   uint16_t requested_attributes;
+  std::unique_ptr<rgw::sal::MultipartUpload> upload;
 #if 0
   /* used to decrypt attributes for objects stored with SSE-C */
   x-amz-server-side-encryption-customer-algorithm

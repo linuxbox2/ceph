@@ -3672,6 +3672,7 @@ int RGWGetObjAttrs_ObjStore_S3::get_params(optional_yield y)
   if (hdr) {
     expected_bucket_owner = *hdr;
   }
+
   hdr = env->get_optional("HTTP_X_AMZ_MAX_PARTS");
   if (hdr) {
     max_parts = strict_strtol(hdr->c_str(), 10, &err);
@@ -3682,6 +3683,7 @@ int RGWGetObjAttrs_ObjStore_S3::get_params(optional_yield y)
       return -ERR_INVALID_PART;
     }
   }
+
   hdr = env->get_optional("HTTP_X_AMZ_PART_NUMBER_MARKER");
   if (hdr) {
     marker = strict_strtol(hdr->c_str(), 10, &err);
@@ -3728,17 +3730,33 @@ void RGWGetObjAttrs_ObjStore_S3::send_response()
       }
       s->formatter->dump_string("Etag", lo_etag);
     }
+
     if (requested_attributes & as_flag(ReqAttributes::Checksum)) {
-  /*
-   <Checksum>
-      <ChecksumCRC32>string</ChecksumCRC32>
-      <ChecksumCRC32C>string</ChecksumCRC32C>
-      <ChecksumSHA1>string</ChecksumSHA1>
-      <ChecksumSHA256>string</ChecksumSHA256>
-   </Checksum>
-  */
-    }
+      /*
+	<Checksum>
+	<ChecksumCRC32>string</ChecksumCRC32>
+	<ChecksumCRC32C>string</ChecksumCRC32C>
+	<ChecksumSHA1>string</ChecksumSHA1>
+	<ChecksumSHA256>string</ChecksumSHA256>
+	</Checksum>
+      */
+    } /* Checksum */
+
     if (requested_attributes & as_flag(ReqAttributes::ObjectParts)) {
+      bool truncated = false;
+      int marker = 0;
+
+      assert(multipart_parts_count);
+
+      int again_count{0};
+    again:
+      /* XXXX optional_yield */
+      op_ret = upload->list_parts(this, s->cct, *multipart_parts_count, marker,
+				  &marker, &truncated, null_yield);
+      if (op_ret < 0) {
+	return;
+      }
+
     /*
    <ObjectParts>
       <IsTruncated>boolean</IsTruncated>
@@ -3757,17 +3775,31 @@ void RGWGetObjAttrs_ObjStore_S3::send_response()
       <PartsCount>integer</PartsCount>
    </ObjectParts>
     */
-    }
+
+      if (truncated) {
+	ldpp_dout(this, 20)
+	  << fmt::format(
+	       "WARNING: {} upload->list_parts {} {} truncated, again_count={}!",
+	       __func__, multipart_parts_count, marker, again_count)
+	  << dendl;
+	truncated = false;
+	++again_count;
+	goto again;
+      } /* truncated */
+    } /* ObjectParts */
+
     if (requested_attributes & as_flag(ReqAttributes::ObjectSize)) {
       s->formatter->dump_int("ObjectSize", s->obj_size);
     }
+
     if (requested_attributes & as_flag(ReqAttributes::StorageClass)) {
     /*
    <StorageClass>string</StorageClass>
     */
     }
     s->formatter->close_section();
-  }
+  } /* op_ret == 0 */
+
   rgw_flush_formatter_and_reset(s, s->formatter);
 } /* RGWGetObjAttrs_ObjStore_S3::send_response */
 

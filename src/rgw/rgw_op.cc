@@ -5882,7 +5882,7 @@ void RGWGetObjAttrs::pre_exec()
 void RGWGetObjAttrs::execute(optional_yield y)
 {
   RGWGetObj::execute(y);
-  /* XXXX now we need logic from list parts */
+  upload = s->bucket->get_multipart_upload(s->object->get_name());
 }
 
 int RGWGetLC::verify_permission(optional_yield y)
