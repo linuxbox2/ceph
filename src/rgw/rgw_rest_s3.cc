@@ -8,6 +8,7 @@
 #include <string_view>
 
 #include "common/ceph_crypto.h"
+#include "common/dout.h"
 #include "common/split.h"
 #include "common/Formatter.h"
 #include "common/utf8.h"
@@ -3749,15 +3750,13 @@ void RGWGetObjAttrs_ObjStore_S3::send_response()
       int marker = 0;
 
       assert(multipart_parts_count);
+      ldpp_dout(this, 16) <<
+	fmt::format("{} attr flags={} parts_count={}", __func__,
+		    requested_attributes, *multipart_parts_count)
+			  << dendl;
+		       
 
-      int again_count{0};
-    again:
-      /* XXXX optional_yield */
-      op_ret = upload->list_parts(this, s->cct, *multipart_parts_count, marker,
-				  &marker, &truncated, null_yield);
-      if (op_ret < 0) {
-	return;
-      }
+      /* TODO: iterate over manifest parts */
 
     /*
    <ObjectParts>
@@ -3778,16 +3777,7 @@ void RGWGetObjAttrs_ObjStore_S3::send_response()
    </ObjectParts>
     */
 
-      if (truncated) {
-	ldpp_dout(this, 20)
-	  << fmt::format(
-	       "WARNING: {} upload->list_parts {} {} truncated, again_count={}!",
-	       __func__, multipart_parts_count, marker, again_count)
-	  << dendl;
-	truncated = false;
-	++again_count;
-	goto again;
-      } /* truncated */
+
     } /* ObjectParts */
 
     if (requested_attributes & as_flag(ReqAttributes::ObjectSize)) {
