@@ -15,6 +15,7 @@
 
 #pragma once
 
+#include <cstdint>
 #include <optional>
 #include <boost/intrusive_ptr.hpp>
 #include <boost/smart_ptr/intrusive_ref_counter.hpp>
@@ -26,6 +27,7 @@
 #include "rgw_notify_event_type.h"
 #include "rgw_req_context.h"
 #include "include/random.h"
+#include "include/function2.hpp"
 
 // FIXME: following subclass dependencies
 #include "driver/rados/rgw_user.h"
@@ -1232,6 +1234,31 @@ class Object {
     /** Dump driver-specific object layout info in JSON */
     virtual int dump_obj_layout(const DoutPrefixProvider *dpp, optional_yield y, Formatter* f) = 0;
 
+    /** multipart helpers */
+    virtual bool is_multipart(void) = 0;
+    virtual int get_part_count() = 0;
+
+  /* A transfer data type describing metadata specific to one part of a completed multipart upload
+   * object, following the GetObjectAttributes response syntax for ObjectParts here:
+   * https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetObjectAttributes.html */
+    class Part
+    {
+    public:
+      int part_number;
+      uint32_t part_size;
+      rgw::cksum::Cksum cksum;
+    }; /* Part */
+
+  /* callback function/object used by list_parts */
+  using list_parts_each_t =
+    const fu2::unique_function<int(const Part&) const>;
+
+    /** If multipart, enumerate (a range [marker..marker+[min(max_parts, parts_count-1)] of) parts of the object */
+    virtual int list_parts(const DoutPrefixProvider* dpp, CephContext* cct,
+			   int max_parts, int marker, int* next_marker,
+			   bool* truncated, list_parts_each_t each_func,
+			   optional_yield y) = 0;
+
     /** Get the cached attributes for this object */
     virtual Attrs& get_attrs(void) = 0;
     /** Get the (const) cached attributes for this object */
@@ -1407,7 +1434,7 @@ public:
   virtual int init(const DoutPrefixProvider* dpp, optional_yield y, ACLOwner& owner, rgw_placement_rule& dest_placement, rgw::sal::Attrs& attrs) = 0;
   /** List all the parts of this upload, filling the parts cache */
   virtual int list_parts(const DoutPrefixProvider* dpp, CephContext* cct,
-			 int num_parts, int marker,
+			 int max_parts, int marker,
 			 int* next_marker, bool* truncated, optional_yield y,
 			 bool assume_unsorted = false) = 0;
   /** Abort this upload */
