@@ -1234,12 +1234,8 @@ class Object {
     /** Dump driver-specific object layout info in JSON */
     virtual int dump_obj_layout(const DoutPrefixProvider *dpp, optional_yield y, Formatter* f) = 0;
 
-    /** multipart helpers */
-    virtual bool is_multipart(void) = 0;
-    virtual int get_part_count() = 0;
-
   /* A transfer data type describing metadata specific to one part of a completed multipart upload
-   * object, following the GetObjectAttributes response syntax for ObjectParts here:
+   * object, following the GetObjectAttributes response syntax for Object::Parts here:
    * https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetObjectAttributes.html */
     class Part
     {
@@ -1249,9 +1245,9 @@ class Object {
       rgw::cksum::Cksum cksum;
     }; /* Part */
 
-  /* callback function/object used by list_parts */
-  using list_parts_each_t =
-    const fu2::unique_function<int(const Part&) const>;
+    /* callback function/object used by list_parts */
+    using list_parts_each_t =
+      const fu2::unique_function<int(const Part&) const>;
 
     /** If multipart, enumerate (a range [marker..marker+[min(max_parts, parts_count-1)] of) parts of the object */
     virtual int list_parts(const DoutPrefixProvider* dpp, CephContext* cct,

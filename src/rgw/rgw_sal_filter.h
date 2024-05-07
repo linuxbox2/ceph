@@ -784,6 +784,12 @@ public:
   virtual int dump_obj_layout(const DoutPrefixProvider *dpp, optional_yield y,
 			      Formatter* f) override;
 
+    /** If multipart, enumerate (a range [marker..marker+[min(max_parts, parts_count-1)] of) parts of the object */
+    virtual int list_parts(const DoutPrefixProvider* dpp, CephContext* cct,
+			   int max_parts, int marker, int* next_marker,
+			   bool* truncated, list_parts_each_t each_func,
+			   optional_yield y) override;
+
   virtual Attrs& get_attrs(void) override { return next->get_attrs(); };
   virtual const Attrs& get_attrs(void) const override { return next->get_attrs(); };
   virtual int set_attrs(Attrs a) override { return next->set_attrs(a); };

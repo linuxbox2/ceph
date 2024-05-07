@@ -13,6 +13,7 @@
  *
  */
 
+#include <asm-generic/errno.h>
 #include <errno.h>
 #include <stdlib.h>
 #include <system_error>
@@ -492,6 +493,14 @@ namespace rgw::sal {
   std::unique_ptr<LuaManager> DBStore::get_lua_manager(const std::string& luarocks_path)
   {
     return std::make_unique<DBLuaManager>(this);
+  }
+
+  int DBObject::list_parts(const DoutPrefixProvider* dpp, CephContext* cct,
+			   int max_parts, int marker, int* next_marker,
+			   bool* truncated, list_parts_each_t each_func,
+			   optional_yield y)
+  {
+    return -EOPNOTSUPP;
   }
 
   int DBObject::get_obj_state(const DoutPrefixProvider* dpp, RGWObjState **pstate, optional_yield y, bool follow_olh)
