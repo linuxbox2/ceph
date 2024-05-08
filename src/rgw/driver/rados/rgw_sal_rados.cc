@@ -28,6 +28,7 @@
 #include "common/Clock.h"
 #include "common/errno.h"
 
+#include "rgw_obj_manifest.h"
 #include "rgw_sal.h"
 #include "rgw_sal_rados.h"
 #include "rgw_bucket.h"
@@ -2243,7 +2244,57 @@ int RadosObject::list_parts(const DoutPrefixProvider* dpp, CephContext* cct,
 			   bool* truncated, list_parts_each_t each_func,
 			   optional_yield y)
 {
-  return -EOPNOTSUPP;
+  int ret{0};
+
+  /* require an object with a manifest, so call to get_obj_state() must precede this */
+  if (! manifest) {
+    return -EINVAL;
+  }
+
+  RGWObjManifest::obj_iterator end = manifest->obj_end(dpp);
+  if (end.get_cur_part_id() == 0) { // not multipart
+    ldpp_dout(dpp, 20) << __func__ << " object does not have a multipart manifest"
+		       << dendl;
+    return 0;
+  }
+
+  auto end_part_id = end.get_cur_part_id();
+  auto parts_count = (end_part_id == 1) ? 1 : end_part_id - 1;
+  if (marker > (parts_count - 1)) {
+    return 0;
+  }
+
+  ldpp_dout(dpp, 20)
+    << fmt::format("{} seeking to part #{} in the object manifest", __func__, marker)
+    << dendl;
+
+  RGWObjManifest::obj_iterator part_iter = manifest->obj_find_part(dpp, marker);
+  if (part_iter == end) {
+    ldpp_dout(dpp, 20)
+      << fmt::format("{} failed to find part #{} in the object manifest", __func__, marker)
+      << dendl;
+    return 0;
+  }
+
+  RGWObjectCtx& obj_ctx = get_ctx();
+  RGWBucketInfo& bucket_info = get_bucket()->get_info();
+
+  for (; part_iter != manifest->obj_end(dpp); ++part_iter) {
+    /* get_part_obj_state alters the passed manifest** to point to a part
+     * manifest, which we don't want to leak out here */
+    RGWObjManifest* obj_m = manifest;
+    RGWObjState* astate;
+    bool part_prefetch = false;
+    ret = RGWRados::get_part_obj_state(dpp, y, store->getRados(), bucket_info, &obj_ctx,
+				       obj_m, part_iter.get_cur_part_id(), &parts_count,
+				       part_prefetch, &astate, &obj_m);
+
+    /* XXX handle errors */
+    /* XXX call the callback, update next_marker */
+
+  } /* each part */
+
+  return ret;
 }
 
 int RadosObject::get_obj_state(const DoutPrefixProvider* dpp, RGWObjState **pstate, optional_yield y, bool follow_olh)

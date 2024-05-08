@@ -6626,13 +6626,13 @@ int RGWRados::set_attrs(const DoutPrefixProvider *dpp, RGWObjectCtx* octx, RGWBu
   }
 
   return 0;
-}
+} /* RGWRados::set_attrs() */
 
-static int get_part_obj_state(const DoutPrefixProvider* dpp, optional_yield y,
-                              RGWRados* store, RGWBucketInfo& bucket_info,
-                              RGWObjectCtx* rctx, RGWObjManifest* manifest,
-                              int part_num, int* parts_count, bool prefetch,
-                              RGWObjState** pstate, RGWObjManifest** pmanifest)
+int RGWRados::get_part_obj_state(const DoutPrefixProvider* dpp, optional_yield y,
+				 RGWRados* store, RGWBucketInfo& bucket_info,
+				 RGWObjectCtx* rctx, RGWObjManifest* manifest,
+				 int part_num, int* parts_count, bool prefetch,
+				 RGWObjState** pstate, RGWObjManifest** pmanifest)
 {
   if (!manifest) {
     return -ERR_INVALID_PART;
@@ -6644,6 +6644,9 @@ static int get_part_obj_state(const DoutPrefixProvider* dpp, optional_yield y,
     return -ERR_INVALID_PART;
   }
   if (parts_count) {
+    /* XXXX should this be:
+     * (cur_part_id == 1) ? 1 : cur_part_id - 1;
+     * ? */
     *parts_count = end.get_cur_part_id() - 1;
   }
   ldpp_dout(dpp, 20) << "seeking to part #" << part_num
