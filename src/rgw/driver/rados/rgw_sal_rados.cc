@@ -2289,13 +2289,37 @@ int RadosObject::list_parts(const DoutPrefixProvider* dpp, CephContext* cct,
 				       obj_m, part_iter.get_cur_part_id(), &parts_count,
 				       part_prefetch, &astate, &obj_m);
 
-    /* XXX handle errors */
-    /* XXX call the callback, update next_marker */
+    if (ret < 0) {
+      ldpp_dout(dpp, 4)
+	<< fmt::format("{} get_part_obj_state() failed ret={}",
+		       __func__, ret)
+      << dendl;
+      break;
+    }
 
+    Object::Part obj_part;
+    obj_part.part_number = part_iter.get_cur_part_id();
+    obj_part.part_size = obj_m->get_obj_size();
+    if (auto iter = astate->attrset.find(RGW_ATTR_CKSUM);
+	iter != astate->attrset.end()) {
+
+          try {
+	    rgw::cksum::Cksum part_cksum;
+	    auto ck_iter = iter->second.cbegin();
+	    part_cksum.decode(ck_iter);
+	    obj_part.cksum = std::move(part_cksum);
+	  } catch (buffer::error& err) {
+	    ldpp_dout(dpp, 4)
+	      << fmt::format("WARN: {} could not decode stored cksum, caught buffer::error",
+			     __func__) << dendl;
+	  }
+    }
+    each_func(obj_part);
+    *next_marker = ++marker;
   } /* each part */
 
   return ret;
-}
+} /* RadosObject::list_parts */
 
 int RadosObject::get_obj_state(const DoutPrefixProvider* dpp, RGWObjState **pstate, optional_yield y, bool follow_olh)
 {
