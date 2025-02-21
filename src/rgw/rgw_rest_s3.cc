@@ -2795,6 +2795,7 @@ void RGWPutObj_ObjStore_S3::send_response()
       dump_header_if_nonempty(s, "x-amz-version-id", version_id);
       dump_header_if_nonempty(s, "x-amz-expiration", expires);
       if (cksum && cksum->aws()) {
+	dump_header(s, "x-amz-checksum-type", "FULL_OBJECT");
 	dump_header(s, cksum->header_name(), cksum->to_armor());
       }
       for (auto &it : crypt_http_responses)
@@ -2803,7 +2804,8 @@ void RGWPutObj_ObjStore_S3::send_response()
       dump_errno(s);
       dump_header_if_nonempty(s, "x-amz-version-id", version_id);
       dump_header_if_nonempty(s, "x-amz-expiration", expires);
-      if (cksum) {
+      if (cksum && cksum->aws()) {
+	dump_header(s, "x-amz-checksum-type", "FULL_OBJECT");
 	dump_header(s, cksum->header_name(), cksum->to_armor());
       }
       end_header(s, this, to_mime_type(s->format));
@@ -3923,12 +3925,19 @@ void RGWGetObjAttrs_ObjStore_S3::send_response()
 	  rgw::cksum::Cksum cksum;
 	  auto bliter = iter->second.cbegin();
 	  cksum.decode(bliter);
-          if (multipart_parts_count && multipart_parts_count > 0) {
+	  auto cksum_type = rgw::cksum::get_checksum_type(cksum,
+			    (multipart_parts_count && multipart_parts_count > 0) /* is_multipart */);
+	  if (std::get<0>(cksum_type) == rgw::cksum::Cksum::FLAG_COMPOSITE) {
+	    /* cksum was computed with a digest algorithm, or predates the 2025
+	       update that introduced CRC combining */
 	    s->formatter->dump_string(cksum.element_name(),
-		fmt::format("{}-{}", cksum.to_armor(), *multipart_parts_count));
+				      fmt::format("{}-{}", cksum.to_armor(),
+						  *multipart_parts_count));
 	  } else {
+	    /* a full object checksum, if multipart, because the checksum is CRC family */
 	    s->formatter->dump_string(cksum.element_name(), cksum.to_armor());
 	  }
+	  s->formatter->dump_string("ChecksumType", std::get<1>(cksum_type));
 	} catch (buffer::error& err) {
 	  ldpp_dout(this, 0)
 	    << "ERROR: could not decode stored cksum, caught buffer::error" << dendl;
@@ -3970,6 +3979,7 @@ void RGWGetObjAttrs_ObjStore_S3::send_response()
 	      s->formatter->dump_int("PartNumber", part.part_number);
 	      s->formatter->dump_unsigned("Size", part.part_size);
 	      if (part.cksum.type != rgw::cksum::Type::none) {
+		/* parts always have a non-digest checksum */
 		s->formatter->dump_string(part.cksum.element_name(), part.cksum.to_armor());
 	      }
 	      s->formatter->close_section(); /* Part */
@@ -4449,6 +4459,10 @@ void RGWCompleteMultipart_ObjStore_S3::send_response()
     set_req_state_err(s, op_ret);
   dump_errno(s);
   dump_header_if_nonempty(s, "x-amz-version-id", version_id);
+  if (cksum) {
+    dump_header(s, "x-amz-checksum-type",
+		cksum->crc() ? "FULL_OBJECT" : "COMPOSITE");
+   }
   end_header(s, this, to_mime_type(s->format));
   if (op_ret == 0) {
     dump_start(s);

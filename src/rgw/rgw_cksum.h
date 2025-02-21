@@ -17,12 +17,14 @@
 #include <boost/algorithm/string/predicate.hpp>
 #include <cstdint>
 #include <cstring>
+#include <memory>
 #include <optional>
 #include <stdint.h>
 #include <string>
 #include <string_view>
 #include <array>
 #include <iterator>
+#include <tuple>
 #include <boost/algorithm/string.hpp>
 #include "fmt/format.h"
 #include "common/armor.h"
@@ -48,8 +50,9 @@ namespace rgw { namespace cksum {
       crc64nvme,
   };
 
-  static constexpr uint16_t FLAG_NONE =      0x0000;
-  static constexpr uint16_t FLAG_AWS_CKSUM = 0x0001;
+  static constexpr uint16_t FLAG_NONE =       0x0000;
+  static constexpr uint16_t FLAG_AWS_CKSUM =  0x0001;
+  static constexpr uint16_t FLAG_CRC =        0x0002;
 
   class Desc
   {
@@ -84,30 +87,53 @@ namespace rgw { namespace cksum {
     static constexpr std::array<Desc, 9> checksums =
     {
       Desc(Type::none, "none", 0, FLAG_NONE),
-      Desc(Type::crc32, "crc32", 4, FLAG_AWS_CKSUM),
-      Desc(Type::crc32c, "crc32c", 4, FLAG_AWS_CKSUM),
+      Desc(Type::crc32, "crc32", 4, FLAG_AWS_CKSUM|FLAG_CRC),
+      Desc(Type::crc32c, "crc32c", 4, FLAG_AWS_CKSUM|FLAG_CRC),
       Desc(Type::xxh3, "xxh3", 8, FLAG_NONE),
       Desc(Type::sha1, "sha1", 20, FLAG_AWS_CKSUM),
       Desc(Type::sha256, "sha256", 32, FLAG_AWS_CKSUM),
       Desc(Type::sha512, "sha512", 64, FLAG_NONE),
       Desc(Type::blake3, "blake3", 32, FLAG_NONE),
-      Desc(Type::crc64nvme, "crc64nvme", 8, FLAG_AWS_CKSUM),
+      Desc(Type::crc64nvme, "crc64nvme", 8, FLAG_AWS_CKSUM|FLAG_CRC),
     };
 
     static constexpr uint16_t max_digest_size = 64;
     using value_type = std::array<unsigned char, max_digest_size>;
 
+    static constexpr uint16_t FLAG_NONE =       0x0000;
+    static constexpr uint16_t FLAG_V2        =  0x0001; // struct_v >= 2
+    static constexpr uint16_t FLAG_COMPOSITE =  0x0004;
+
     Type type;
     value_type digest;
+    uint16_t flags;
 
-    Cksum(Type _type = Type::none) : type(_type) {}
-    Cksum(Type _type, const char* _armored_text)
-      : type(_type) {
+    enum class CtorStyle : uint8_t
+    {
+      raw = 0,
+      from_armored,
+    };
+
+    Cksum(Type _type = Type::none)
+      : type(_type), flags(FLAG_V2)
+    {}
+
+    Cksum(Type _type, const char* _data, CtorStyle style)
+      : type(_type), flags(FLAG_V2)
+    {
       const auto& ckd = checksums[uint16_t(type)];
+      switch (style) {
+      case CtorStyle::from_armored:
       (void) ceph_unarmor((char*) digest.begin(),
 			  (char*) digest.begin() + ckd.digest_size,
-			  _armored_text,
-			  _armored_text + std::strlen(_armored_text));
+			  _data,
+			  _data + std::strlen(_data));
+      break;
+      case CtorStyle::raw:
+      default:
+	memcpy((char*) digest.data(), (char*) _data, ckd.digest_size);
+	break;
+      };
     }
 
     const char* type_string() const {
@@ -116,6 +142,18 @@ namespace rgw { namespace cksum {
 
     const bool aws() const {
       return (Cksum::checksums[uint16_t(type)]).aws();
+    }
+
+    const bool crc() const {
+      return (Cksum::checksums[uint16_t(type)]).flags & FLAG_CRC;
+    }
+
+    const bool v2() const {
+      return flags & FLAG_V2;
+    }
+
+    const bool composite() const {
+      return flags & FLAG_COMPOSITE;
     }
 
     std::string aws_name() const {
@@ -169,12 +207,44 @@ namespace rgw { namespace cksum {
       return fmt::format("{{{}}}{}", ckd.name, to_base64());
     }
 
+
+    using crc_type = std::variant<uint32_t, uint64_t>;
+
+    std::optional<crc_type> get_crc() const {
+      std::optional<crc_type> res;
+      const auto& ckd = checksums[uint16_t(type)];
+      if (!crc()) {
+	goto out;
+      }
+      switch(ckd.digest_size) {
+      case 4:
+	{
+	  uint32_t crc;
+	  memcpy(&crc, (char*) digest.data(), sizeof(crc));
+	  res = crc;
+	}
+	break;
+      case 8:
+	{
+	  uint64_t crc;
+	  memcpy(&crc, (char*) digest.data(), sizeof(crc));
+	  res = crc;
+	}
+	break;
+      default:
+	break;
+      }
+    out:
+      return res;
+    }
+
     void encode(buffer::list& bl) const {
       const auto& ckd = checksums[uint16_t(type)];
-      ENCODE_START(1, 1, bl);
+      ENCODE_START(2, 1, bl);
       encode(uint16_t(type), bl);
       encode(ckd.digest_size, bl);
       bl.append((char*)digest.data(), ckd.digest_size);
+      encode(flags, bl);
       ENCODE_FINISH(bl);
     }
 
@@ -185,6 +255,11 @@ namespace rgw { namespace cksum {
       type = cksum::Type(tt);
       decode(tt, p); /* <= max_digest_size */
       p.copy(tt, (char*)digest.data());
+      if (struct_v < 2) {
+	flags = 0;
+      } else {
+	decode(flags, p);
+      }
       DECODE_FINISH(p);
     }
   }; /* Cksum */
@@ -224,5 +299,46 @@ namespace rgw { namespace cksum {
     return hdr_name == "x-amz-checksum-algorithm" ||
       parse_cksum_type_hdr(hdr_name) != Type::none;
   } /* is_cksum_hdr */
+
+  std::optional<Cksum>
+  combine_crc_cksum(const Cksum& ck1, const Cksum& ck2, uintmax_t len2);
+
+  /* wrap combine/digest checksums */
+  class Combiner
+  {
+    cksum::Type type;
+  public:
+    Combiner(cksum::Type t)
+      : type(t) {}
+
+    cksum::Type get_type() const { return type; }
+
+    virtual void append(const Cksum& cksum, uint64_t part_size) = 0;
+    virtual Cksum final() = 0;
+  }; /* abstract Combiner */
+
+  /* choose type-correct Combiner */
+  std::unique_ptr<Combiner*> CombinerFactory(cksum::Type t);
+
+  using ChecksumTypeResult = std::tuple<uint16_t, const char*>;
+
+  static inline ChecksumTypeResult
+  get_checksum_type(const Cksum& cksum, bool is_multipart) {
+    /* non-multipart checksum */
+    if (! is_multipart) {
+      return ChecksumTypeResult(Cksum::FLAG_NONE, "FULL_OBJECT");
+    }
+    /* multipart cksum */
+    if (cksum.v2()) [[likely]] {
+      if (! cksum.composite()) {
+	return ChecksumTypeResult(Cksum::FLAG_NONE, "FULL_OBJECT");
+      }
+      /* composite */
+      /* fall through */
+    }
+    /* cksum predates the 2025 update that introduced CRC combining,
+     * so it's a "composite" checksum regardless of the algorithm */
+    return ChecksumTypeResult(Cksum::FLAG_COMPOSITE, "COMPOSITE");
+  } /* get_checksum_type */
 
 }} /* namespace */
