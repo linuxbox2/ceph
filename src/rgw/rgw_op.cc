@@ -6950,10 +6950,21 @@ void RGWCompleteMultipart::execute(optional_yield y)
 		    "INFO: client supplied checksum {}: {} ",
 		    hdr_cksum.header_name(), supplied_cksum);
 
+    /* in late 2024, we observed some minio SDK clients assert a checksum that
+     * was a cryptographically valid *digest*, but omitted the part count;
+     *
+     * in addition, from 2025, AWS specifies that multipart uploads using CRC
+     * checksums may (CRC32, CRC32c) or must (CRC64NVME) be computed as full
+     * object checksums [1], so perhaps should not suffix a part count.
+     *
+     * for the present, it appears safe to accept both forms regardless of the
+     * checksum algorithm.
+     *
+     * [1] https://docs.aws.amazon.com/AmazonS3/latest/userguide/checking-object-integrity.html
+     */
+
     if (! (supplied_cksum.empty()) &&
 	(supplied_cksum != armored_cksum)) {
-      /* some minio SDK clients assert a checksum that is cryptographically
-       * valid but omits the part count */
       auto parts_suffix = fmt::format("-{}", parts->parts.size());
       auto suffix_len = armored_cksum->size() - parts_suffix.size();
       if (armored_cksum->compare(0, suffix_len, supplied_cksum) != 0) {
