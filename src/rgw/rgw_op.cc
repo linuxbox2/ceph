@@ -6746,9 +6746,6 @@ try_sum_part_cksums(const DoutPrefixProvider *dpp,
 
   auto cksum_combiner = rgw::cksum::CombinerFactory(cksum_type);
 
-  rgw::cksum::DigestVariant dv = rgw::cksum::digest_factory(cksum_type);
-  rgw::cksum::Digest* digest = rgw::cksum::get_digest(dv);
-
   /* returns the parts (currently?) in cache */
   auto parts_ix{0};
   auto& parts_map = upload->get_parts();
@@ -6786,17 +6783,12 @@ try_sum_part_cksums(const DoutPrefixProvider *dpp,
      * "-<num-parts>.  See
      * https://docs.aws.amazon.com/AmazonS3/latest/userguide/checking-object-integrity.html#large-object-checksums
      */
-    auto ckr = part_cksum->raw();
-    digest->Update((unsigned char *)ckr.data(), ckr.length());
-
     (*cksum_combiner)->append(*part_cksum, part.second->get_size());
 
   } /* all-parts */
 
   /* we cannot verify this checksum, only compute it */
-  out_cksum = rgw::cksum::finalize_digest(digest, cksum_type);
-
-  auto out_cksum_2 = (*cksum_combiner)->final();
+  out_cksum = (*cksum_combiner)->final();
 
   ldpp_dout_fmt(dpp, 16,
 		"INFO: {} combined checksum {} {}-{}",
