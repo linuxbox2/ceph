@@ -4460,8 +4460,9 @@ void RGWCompleteMultipart_ObjStore_S3::send_response()
   dump_errno(s);
   dump_header_if_nonempty(s, "x-amz-version-id", version_id);
   if (cksum) {
-    dump_header(s, "x-amz-checksum-type",
-		cksum->crc() ? "FULL_OBJECT" : "COMPOSITE");
+    auto cksum_type
+      = rgw::cksum::get_checksum_type(*cksum, true /* is_multipart */);
+    dump_header(s, "x-amz-checksum-type", std::get<1>(cksum_type));
    }
   end_header(s, this, to_mime_type(s->format));
   if (op_ret == 0) {
