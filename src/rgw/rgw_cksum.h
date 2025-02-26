@@ -318,10 +318,12 @@ namespace rgw { namespace cksum {
   }; /* abstract Combiner */
 
   /* choose type-correct Combiner */
-  std::unique_ptr<Combiner*> CombinerFactory(cksum::Type t);
+  std::unique_ptr<Combiner*> CombinerFactory(cksum::Type t, uint16_t flags);
 
   using ChecksumTypeResult = std::tuple<uint16_t, const char*>;
 
+    /* XXXX fix to recognize user-provided checksum type */
+    
   static inline ChecksumTypeResult
   get_checksum_type(const Cksum& cksum, bool is_multipart) {
     /* non-multipart checksum */

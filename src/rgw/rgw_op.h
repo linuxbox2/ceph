@@ -1914,6 +1914,7 @@ protected:
   std::optional<RGWObjectLegalHold> obj_legal_hold = std::nullopt;
   rgw::sal::Attrs attrs;
   rgw::cksum::Type cksum_algo{rgw::cksum::Type::none};
+  // bool aws_cksum_composite{true};
 
 public:
   RGWInitMultipart() {}

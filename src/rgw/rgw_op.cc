@@ -6718,6 +6718,7 @@ try_sum_part_cksums(const DoutPrefixProvider *dpp,
   auto num_parts = int(parts->parts.size());
 
   rgw::cksum::Type& cksum_type = upload->cksum_type;
+  uint16_t cksum_flags = upload->cksum_flags;
 
   int again_count{0};
  again:
@@ -6744,7 +6745,7 @@ try_sum_part_cksums(const DoutPrefixProvider *dpp,
     return 0;
   }
 
-  auto cksum_combiner = rgw::cksum::CombinerFactory(cksum_type);
+  auto cksum_combiner = rgw::cksum::CombinerFactory(cksum_type, cksum_flags);
 
   /* returns the parts (currently?) in cache */
   auto parts_ix{0};

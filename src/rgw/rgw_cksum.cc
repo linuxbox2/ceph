@@ -140,7 +140,7 @@ namespace rgw::cksum {
     }
   }; /* CRCCombine */
 
-  std::unique_ptr<Combiner*> CombinerFactory(cksum::Type t)
+  std::unique_ptr<Combiner*> CombinerFactory(cksum::Type t, uint16_t flags)
   {
     switch(t) {
     case cksum::Type::crc32:
