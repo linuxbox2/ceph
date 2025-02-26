@@ -749,29 +749,38 @@ TEST(RGWCksum, LongA)
 {
   auto t = cksum::Type::crc64nvme;
 
-  std::string long_a;
-  for (int ix = 0; ix < 1024; ++ix) {
-    long_a.push_back('A');
-  }
+  std::string a{"A"};
+  std::string b{"B"};
+  std::string c{"C"};
+
+  for (const auto input_str : {&a, &b, &c}) {
   
-  /* digest 1 */
-  DigestVariant dv1 = rgw::cksum::digest_factory(t);
-  Digest *digest1 = get_digest(dv1);
-  ASSERT_NE(digest1, nullptr);
-
-  digest1->Update((const unsigned char *)long_a.c_str(), long_a.length());
-
-  auto cksum1 = rgw::cksum::finalize_digest(digest1, t);
-  if (verbose) {
-    std::cout << "crc64nvme checksum long_a: " << cksum1.to_armor()
-	      << std::endl;
-  }
+    std::string long_a;
+    for (int ix = 0; ix < (5 * 1024 * 1024); ++ix) {
+      long_a += *input_str;
+    }
   
-  uint64_t crc1 = rgw::digest::byteswap(std::get<uint64_t>(*cksum1.get_crc()));
+    /* digest 1 */
+    DigestVariant dv1 = rgw::cksum::digest_factory(t);
+    Digest *digest1 = get_digest(dv1);
+    ASSERT_NE(digest1, nullptr);
 
-  uint64_t crc2 = spdk_crc64_nvme((const unsigned char *)long_a.c_str(),
-				  long_a.length(), 0ULL);
-  ASSERT_EQ(crc1, crc2);
+    digest1->Update((const unsigned char *)long_a.c_str(), long_a.length());
+
+    auto cksum1 = rgw::cksum::finalize_digest(digest1, t);
+    if (verbose) {
+      std::cout << "crc64nvme checksum long_a str: "
+		<< *input_str << " "
+		<< cksum1.to_armor()
+		<< std::endl;
+    }
+  
+    uint64_t crc1 = rgw::digest::byteswap(std::get<uint64_t>(*cksum1.get_crc()));
+
+    uint64_t crc2 = spdk_crc64_nvme((const unsigned char *)long_a.c_str(),
+				    long_a.length(), 0ULL);
+    ASSERT_EQ(crc1, crc2);
+  }
 }
 
 int main(int argc, char *argv[])
