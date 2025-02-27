@@ -745,7 +745,23 @@ TEST(RGWCksum, CtorUnarmor)
 
 } /* namespace */
 
-TEST(RGWCksum, LongA)
+class CksumFixtureCombiner
+{
+  //static rgw::cksum::Type::crc64nvme t;
+
+  static std::string long_a;
+  static std::string long_b;
+  static std::string long_c;
+
+  static void SetUpTestSuite() {
+  }
+
+  static void TearDownTestSuite() {
+  }
+};
+
+
+TEST(RGWCksum, Combiner1)
 {
   auto t = cksum::Type::crc64nvme;
 
