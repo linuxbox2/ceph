@@ -4350,6 +4350,7 @@ void RGWPutObj::execute(optional_yield y)
     }
 
     multipart_cksum_type = upload->cksum_type;
+    multipart_cksum_flags = upload->cksum_flags;
 
     /* upload will go out of scope, so copy the dest placement for later use */
     s->dest_placement = *pdest_placement;
@@ -4481,7 +4482,10 @@ void RGWPutObj::execute(optional_yield y)
     /* optional streaming checksum */
     try {
       cksum_filter =
-	rgw::putobj::RGWPutObj_Cksum::Factory(filter, *s->info.env, multipart_cksum_type);
+	rgw::putobj::RGWPutObj_Cksum::Factory(
+               filter, *s->info.env,
+	       multipart_cksum_type,
+	       multipart_cksum_flags);
     } catch (const rgw::io::Exception& e) {
       op_ret = -e.code().value();
       return;
@@ -4856,7 +4860,8 @@ void RGWPostObj::execute(optional_yield y)
     try {
       cksum_filter =
 	rgw::putobj::RGWPutObj_Cksum::Factory(
-	  filter, *s->info.env, rgw::cksum::Type::none /* no override */);
+               filter, *s->info.env, rgw::cksum::Type::none /* no override */,
+	       rgw::cksum::Cksum::FLAG_NONE);
     } catch (const rgw::io::Exception& e) {
       op_ret = -e.code().value();
       return;
@@ -6655,11 +6660,14 @@ void RGWInitMultipart::execute(optional_yield y)
   std::unique_ptr<rgw::sal::MultipartUpload> upload;
   upload = s->bucket->get_multipart_upload(s->object->get_name(),
 				       upload_id);
+
+  /* apparently, we are assured of upload */
   upload->obj_legal_hold = obj_legal_hold;
   upload->obj_retention = obj_retention;
   upload->cksum_type = cksum_algo;
-  op_ret = upload->init(this, s->yield, s->owner, s->dest_placement, attrs);
+  upload->cksum_flags = (aws_cksum_composite) ? rgw::cksum::Cksum::FLAG_COMPOSITE : rgw::cksum::FLAG_NONE;
 
+  op_ret = upload->init(this, s->yield, s->owner, s->dest_placement, attrs);
   if (op_ret == 0) {
     upload_id = upload->get_upload_id();
   }

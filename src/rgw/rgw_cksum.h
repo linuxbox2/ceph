@@ -300,6 +300,19 @@ namespace rgw { namespace cksum {
       parse_cksum_type_hdr(hdr_name) != Type::none;
   } /* is_cksum_hdr */
 
+  static inline bool
+  permitted_cksum_algo_and_type(Type type, bool composite) {
+    const auto& ckd = Cksum::checksums[uint16_t(type)];
+    if (composite) {
+      if (type == Type::crc64nvme) {
+	return false;
+      }
+      return true;
+    }
+    /* FULL_OBJECT */
+    return (ckd.flags & cksum::FLAG_CRC);
+  }
+
   std::optional<Cksum>
   combine_crc_cksum(const Cksum& ck1, const Cksum& ck2, uintmax_t len2);
 

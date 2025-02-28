@@ -130,6 +130,7 @@ namespace rgw::putobj {
     cksum::DigestVariant dv;
     cksum::Digest* _digest;
     cksum::Cksum _cksum;
+    uint16_t flags;
     cksum_hdr_t cksum_hdr;
 
   public:
@@ -138,10 +139,10 @@ namespace rgw::putobj {
 
     static std::unique_ptr<RGWPutObj_Cksum> Factory(
       rgw::sal::DataProcessor* next, const RGWEnv&,
-      rgw::cksum::Type override_type);
+      rgw::cksum::Type override_type, uint16_t cksum_flags);
 
     RGWPutObj_Cksum(rgw::sal::DataProcessor* next, rgw::cksum::Type _type,
-		    cksum_hdr_t&& _hdr);
+		    uint16_t _flags, cksum_hdr_t&& _hdr);
     RGWPutObj_Cksum(RGWPutObj_Cksum& rhs) = delete;
     ~RGWPutObj_Cksum() {}
 
@@ -155,6 +156,7 @@ namespace rgw::putobj {
 
     const cksum::Cksum& finalize() {
       _cksum = finalize_digest(_digest, _type);
+      _cksum.flags = flags; // n.b., this may clear the COMPOSITE flag
       return _cksum;
     }
 

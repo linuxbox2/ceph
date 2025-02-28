@@ -745,15 +745,35 @@ TEST(RGWCksum, CtorUnarmor)
 
 } /* namespace */
 
-class CksumFixtureCombiner
+class CksumCombinerFixture : public testing::Test
 {
-  //static rgw::cksum::Type::crc64nvme t;
+  static rgw::cksum::Type t;
 
-  static std::string long_a;
+  static std::string long_a; // 5M string "AAAA...."
   static std::string long_b;
   static std::string long_c;
 
   static void SetUpTestSuite() {
+
+    using std::get;
+    using ST = std::tuple<std::string&, std::string&>;
+
+    t = rgw::cksum::Type::crc64nvme;
+
+    /* generate unique strings that match ones we use in
+     * a checksum test matrix in s3-tests */
+    std::string a{"A"};
+    std::string b{"B"};
+    std::string c{"C"};
+
+    for (const auto& elt : {ST(a, long_a),
+			    ST(b, long_b),
+			    ST(c, long_c)}) {
+
+      for (int ix = 0; ix < (5 * 1024 * 1024); ++ix) {
+	get<1>(elt) += get<0>(elt);
+      }
+    }
   }
 
   static void TearDownTestSuite() {
@@ -765,38 +785,7 @@ TEST(RGWCksum, Combiner1)
 {
   auto t = cksum::Type::crc64nvme;
 
-  std::string a{"A"};
-  std::string b{"B"};
-  std::string c{"C"};
 
-  for (const auto input_str : {&a, &b, &c}) {
-  
-    std::string long_a;
-    for (int ix = 0; ix < (5 * 1024 * 1024); ++ix) {
-      long_a += *input_str;
-    }
-  
-    /* digest 1 */
-    DigestVariant dv1 = rgw::cksum::digest_factory(t);
-    Digest *digest1 = get_digest(dv1);
-    ASSERT_NE(digest1, nullptr);
-
-    digest1->Update((const unsigned char *)long_a.c_str(), long_a.length());
-
-    auto cksum1 = rgw::cksum::finalize_digest(digest1, t);
-    if (verbose) {
-      std::cout << "crc64nvme checksum long_a str: "
-		<< *input_str << " "
-		<< cksum1.to_armor()
-		<< std::endl;
-    }
-  
-    uint64_t crc1 = rgw::digest::byteswap(std::get<uint64_t>(*cksum1.get_crc()));
-
-    uint64_t crc2 = spdk_crc64_nvme((const unsigned char *)long_a.c_str(),
-				    long_a.length(), 0ULL);
-    ASSERT_EQ(crc1, crc2);
-  }
 }
 
 int main(int argc, char *argv[])
