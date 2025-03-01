@@ -6665,7 +6665,7 @@ void RGWInitMultipart::execute(optional_yield y)
   upload->obj_legal_hold = obj_legal_hold;
   upload->obj_retention = obj_retention;
   upload->cksum_type = cksum_algo;
-  upload->cksum_flags = (aws_cksum_composite) ? rgw::cksum::Cksum::FLAG_COMPOSITE : rgw::cksum::FLAG_NONE;
+  upload->cksum_flags = cksum_flags;
 
   op_ret = upload->init(this, s->yield, s->owner, s->dest_placement, attrs);
   if (op_ret == 0) {

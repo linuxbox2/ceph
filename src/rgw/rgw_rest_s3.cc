@@ -3925,8 +3925,9 @@ void RGWGetObjAttrs_ObjStore_S3::send_response()
 	  rgw::cksum::Cksum cksum;
 	  auto bliter = iter->second.cbegin();
 	  cksum.decode(bliter);
-	  auto cksum_type = rgw::cksum::get_checksum_type(cksum,
-			    (multipart_parts_count && multipart_parts_count > 0) /* is_multipart */);
+	  auto cksum_type =
+	    rgw::cksum::get_checksum_type(cksum,
+	      (multipart_parts_count && multipart_parts_count > 0) /* is_multipart */);
 	  if (std::get<0>(cksum_type) == rgw::cksum::Cksum::FLAG_COMPOSITE) {
 	    /* cksum was computed with a digest algorithm, or predates the 2025
 	       update that introduced CRC combining */
@@ -4398,25 +4399,16 @@ int RGWInitMultipart_ObjStore_S3::get_params(optional_yield y)
   auto checksum_type_hdr =
     s->info.env->get_optional("HTTP_X_AMZ_CHECKSUM_TYPE");
 
-  /* if the client doesn't specify a checksum type, we'll assume
-   * it's digest */
-  aws_cksum_composite =
-    (checksum_type_hdr &&
-     !boost::algorithm::iequals(*checksum_type_hdr, "full_object"));
+  /* composite or "full object" */
+  cksum_flags = putobj::parse_cksum_flags(checksum_type_hdr);
+  cksum_algo = putobj::multipart_cksum_algo(*(s->info.env));
 
-  auto algo_hdr = rgw::putobj::cksum_algorithm_hdr(*(s->info.env));
-  if (algo_hdr.second) {
-    cksum_algo = rgw::cksum::parse_cksum_type(algo_hdr.second);
-
-    if (! cksum::permitted_cksum_algo_and_type(cksum_algo,
-					       aws_cksum_composite)) {
-      ldpp_dout_fmt(this, 5,
-		    "ERROR: {} checksum type {} not compatible with checksum algorithm {}",
-		    __func__,
-		    (aws_cksum_composite) ? "COMPOSITE (default)" : "FULL_OBJECT",
-		    algo_hdr.second);
-      return -ERR_INVALID_REQUEST;
-    }
+  auto aok = cksum::permitted_cksum_algo_and_type(cksum_algo, cksum_flags);
+  if (! std::get<0>(aok)) {
+    ldpp_dout_fmt(this, 5,
+		  "ERROR: {} checksum type {} not compatible with checksum algorithm {}",
+		  __func__, std::get<1>(aok), std::get<2>(aok));
+    return -ERR_INVALID_REQUEST;
   }
 
   return 0;

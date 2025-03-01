@@ -81,6 +81,18 @@ namespace rgw::putobj {
     return cksum_hdr_t(nullptr, nullptr);
   } /* cksum_algorithm_hdr */
 
+  static inline cksum::Type
+  multipart_cksum_algo(const RGWEnv& env) {
+    /* AWS has shifted to "strong" integrity checking by default,
+     * we may define policy in future */
+    cksum::Type cksum_algo{cksum::Type::none};
+    auto algo_hdr = rgw::putobj::cksum_algorithm_hdr(env);
+    if (algo_hdr.second) {
+      cksum_algo = rgw::cksum::parse_cksum_type(algo_hdr.second);
+    }
+    return cksum_algo;
+  }
+
   using GetHeaderCksumResult = std::pair<cksum::Cksum, std::string_view>;
 
   static inline GetHeaderCksumResult get_hdr_cksum(const RGWEnv& env) {
@@ -123,14 +135,28 @@ namespace rgw::putobj {
     return GetHeaderCksumResult(cksum::Cksum(cksum_type), "");
   } /* find_hdr_cksum */
 
+  static inline uint16_t
+  parse_cksum_flags(boost::optional<const std::string &> type_hdr)  {
+    uint16_t cksum_flags{0};
+    if (type_hdr) {
+      if (boost::algorithm::iequals(*type_hdr, "full_object")) {
+	cksum_flags |= cksum::Cksum::FLAG_FULL_OBJECT;
+      }
+      if (boost::algorithm::iequals(*type_hdr, "composite")) {
+	cksum_flags |= cksum::Cksum::FLAG_COMPOSITE;
+      }
+    }
+    return cksum_flags;
+  } /* parse_cksum_flags */
+
   // PutObj filter for streaming checksums
   class RGWPutObj_Cksum : public rgw::putobj::Pipe {
 
     cksum::Type _type;
+    uint16_t flags;
     cksum::DigestVariant dv;
     cksum::Digest* _digest;
     cksum::Cksum _cksum;
-    uint16_t flags;
     cksum_hdr_t cksum_hdr;
 
   public:

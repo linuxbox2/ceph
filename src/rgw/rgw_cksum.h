@@ -100,9 +100,10 @@ namespace rgw { namespace cksum {
     static constexpr uint16_t max_digest_size = 64;
     using value_type = std::array<unsigned char, max_digest_size>;
 
-    static constexpr uint16_t FLAG_NONE =       0x0000;
-    static constexpr uint16_t FLAG_V2        =  0x0001; // struct_v >= 2
-    static constexpr uint16_t FLAG_COMPOSITE =  0x0004;
+    static constexpr uint16_t FLAG_NONE =           0x0000;
+    static constexpr uint16_t FLAG_V2 =             0x0001; // struct_v >= 2
+    static constexpr uint16_t FLAG_COMPOSITE =      0x0002;
+    static constexpr uint16_t FLAG_FULL_OBJECT =    0x0004;
 
     Type type;
     value_type digest;
@@ -153,7 +154,7 @@ namespace rgw { namespace cksum {
     }
 
     const bool composite() const {
-      return flags & FLAG_COMPOSITE;
+      return ! (flags & FLAG_FULL_OBJECT);
     }
 
     std::string aws_name() const {
@@ -202,7 +203,6 @@ namespace rgw { namespace cksum {
     }
 
     std::string to_string() const  {
-      std::string hs;
       const auto& ckd = checksums[uint16_t(type)];
       return fmt::format("{{{}}}{}", ckd.name, to_base64());
     }
@@ -267,8 +267,8 @@ namespace rgw { namespace cksum {
 
   static inline const std::optional<rgw::cksum::Cksum> no_cksum{std::nullopt};
 
+  /* XXX would like std::string view */
   static inline std::string to_string(const Type type) {
-    std::string hs;
     const auto& ckd = Cksum::checksums[uint16_t(type)];
     return ckd.name;
   }
@@ -300,17 +300,23 @@ namespace rgw { namespace cksum {
       parse_cksum_type_hdr(hdr_name) != Type::none;
   } /* is_cksum_hdr */
 
-  static inline bool
-  permitted_cksum_algo_and_type(Type type, bool composite) {
-    const auto& ckd = Cksum::checksums[uint16_t(type)];
-    if (composite) {
+
+  using PermittedCksumResult
+  = std::tuple<bool, const std::string, const char*>;
+
+  static inline PermittedCksumResult
+  permitted_cksum_algo_and_type(Type type, uint16_t cksum_flags) {
+    if (cksum_flags & Cksum::FLAG_COMPOSITE) {
       if (type == Type::crc64nvme) {
-	return false;
+	return PermittedCksumResult(false, to_string(type), "COMPOSITE");
       }
-      return true;
+      return PermittedCksumResult(true, to_string(type), "COMPOSITE");
     }
     /* FULL_OBJECT */
-    return (ckd.flags & cksum::FLAG_CRC);
+    const auto& ckd = Cksum::checksums[uint16_t(type)];
+    return
+      PermittedCksumResult(
+	(ckd.flags & cksum::FLAG_CRC), to_string(type), "FULL_OBJECT");
   }
 
   std::optional<Cksum>
@@ -328,6 +334,7 @@ namespace rgw { namespace cksum {
 
     virtual void append(const Cksum& cksum, uint64_t part_size) = 0;
     virtual Cksum final() = 0;
+    virtual ~Combiner() {}
   }; /* abstract Combiner */
 
   /* choose type-correct Combiner */
@@ -335,8 +342,6 @@ namespace rgw { namespace cksum {
 
   using ChecksumTypeResult = std::tuple<uint16_t, const char*>;
 
-    /* XXXX fix to recognize user-provided checksum type */
-    
   static inline ChecksumTypeResult
   get_checksum_type(const Cksum& cksum, bool is_multipart) {
     /* non-multipart checksum */
