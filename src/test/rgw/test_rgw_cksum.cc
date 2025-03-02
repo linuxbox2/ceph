@@ -828,7 +828,7 @@ TEST(RGWCksum, Combiner1)
   if (verbose) {
   /* pretty-print armored cksum */
   std::string cksum_flags =
-    (flags & Cksum::FLAG_COMPOSITE) ? "COMPOSITE" : "FULL_OBJECT";
+    (! get<0>(cksums).crc()) ? "COMPOSITE" : "FULL_OBJECT";
   std::cout << "\ncomposite cksum (delorem) "
 	    << "\n\tcksum-type " << to_string(t)
 	    << "\n\tflags "
@@ -914,8 +914,6 @@ std::string CksumCombinerFixture::long_b;
 std::string CksumCombinerFixture::long_c;
 std::vector<cksum::Type> CksumCombinerFixture::cksum_types;
 
-#if 0
-
 /* TODO: multipart test matrix using fixture */
 TEST_F(CksumCombinerFixture, Test1) {
 
@@ -931,9 +929,17 @@ TEST_F(CksumCombinerFixture, Test1) {
     ASSERT_TRUE(cmbnr);
     ASSERT_EQ(t, (*cmbnr)->get_type());
 
-    for (auto ix = 0; ix < 4; ++ix) {
-      (*cmbnr)->append(get<0>(cksums), (5 * 1024 * 1024));
-    }
+    auto lena = CksumCombinerFixture::long_a.length();
+    auto lenb = CksumCombinerFixture::long_b.length();
+    auto lenc = CksumCombinerFixture::long_c.length();
+
+    ASSERT_EQ(lena, lenb);
+    ASSERT_EQ(lenb, lenc);
+    ASSERT_EQ(lenc, (5*1024*1024));
+
+    (*cmbnr)->append(get<0>(cksums), lena);
+    (*cmbnr)->append(get<1>(cksums), lena);
+    (*cmbnr)->append(get<2>(cksums), lena);
 
     /* depending on the checksum type and flags, cksum4 is
      * either equivalent to cksum3, or, a composite digest
@@ -950,7 +956,7 @@ TEST_F(CksumCombinerFixture, Test1) {
   }
   /* pretty-print armored cksum */
   std::string cksum_flags =
-    get<0>(cksums).composite() ? "COMPOSITE" : "FULL_OBJECT";
+    (! get<0>(cksums).crc()) ? "COMPOSITE" : "FULL_OBJECT";
   std::cout << "\ncomposite cksum (long_a+long_b_long_c) "
 	    << "\n\tcksum-type " << to_string(t)
 	    << "\n\tflags "
@@ -960,7 +966,6 @@ TEST_F(CksumCombinerFixture, Test1) {
   }
 } /* CksumCombinerFixture, Test1 */
 
-#endif
 
 int main(int argc, char *argv[])
 {
