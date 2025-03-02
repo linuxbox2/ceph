@@ -282,6 +282,22 @@ namespace rgw { namespace cksum {
     return Type::none;
   } /* parse_cksum_type */
 
+  static inline uint16_t cksum_flags_of(Type t) {
+    switch(t) {
+    case cksum::Type::none:
+      return Cksum::FLAG_NONE;
+      break;
+    case cksum::Type::crc64nvme:
+    case cksum::Type::crc32:
+    case cksum::Type::crc32c:
+      return Cksum::FLAG_FULL_OBJECT;
+      break;
+    default:
+      break;
+    };
+    return Cksum::FLAG_COMPOSITE;
+  } /* cksum_flags_of */
+
   static inline Type parse_cksum_type_hdr(const std::string_view hdr_name) {
     auto pos = hdr_name.find("x-amz-checksum-", 0);
     if (pos == std::string::npos) {

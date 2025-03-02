@@ -136,7 +136,7 @@ namespace rgw::putobj {
   } /* find_hdr_cksum */
 
   static inline uint16_t
-  parse_cksum_flags(boost::optional<const std::string &> type_hdr)  {
+  parse_cksum_flags(cksum::Type t, boost::optional<const std::string &> type_hdr)  {
     uint16_t cksum_flags{0};
     if (type_hdr) {
       if (boost::algorithm::iequals(*type_hdr, "full_object")) {
@@ -145,6 +145,10 @@ namespace rgw::putobj {
       if (boost::algorithm::iequals(*type_hdr, "composite")) {
 	cksum_flags |= cksum::Cksum::FLAG_COMPOSITE;
       }
+    } else {
+      /* if the client sent a checksum algorithm header but not a "type" header,
+       * we can select the matching type */
+      cksum_flags |= cksum_flags_of(t);
     }
     return cksum_flags;
   } /* parse_cksum_flags */

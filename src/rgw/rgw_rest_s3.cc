@@ -4400,8 +4400,8 @@ int RGWInitMultipart_ObjStore_S3::get_params(optional_yield y)
     s->info.env->get_optional("HTTP_X_AMZ_CHECKSUM_TYPE");
 
   /* composite or "full object" */
-  cksum_flags = putobj::parse_cksum_flags(checksum_type_hdr);
   cksum_algo = putobj::multipart_cksum_algo(*(s->info.env));
+  cksum_flags = putobj::parse_cksum_flags(cksum_algo, checksum_type_hdr);
 
   auto aok = cksum::permitted_cksum_algo_and_type(cksum_algo, cksum_flags);
   if (! std::get<0>(aok)) {
