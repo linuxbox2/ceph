@@ -563,14 +563,19 @@ TEST(RGWCksum, CRC64NVME_COMBINE3)
   auto cksum_crc4 =
     rgw::digest::byteswap(std::get<uint64_t>(*cksum4->get_crc()));
 
+  auto armor3 = cksum3.to_armor();
+  auto armor4 = cksum4->to_armor();
+
   if (verbose) {
     std::cout << "\ncrc1/dolor spdk: " << spdk_crc1
 	      << " cksum_crc1: " << cksum_crc1
 	      << "\ncrc2/lorem spdk: " << spdk_crc2
-      	      << " cksum_crc2: " << cksum_crc2
+	      << " cksum_crc2: " << cksum_crc2
 	      << "\ncrc3/dolorem spdk: " << spdk_crc3
-      	      << " cksum_crc3: " << cksum_crc3
+	      << " cksum_crc3: " << cksum_crc3
+	      << " cksum_crc3 armored: " << armor3
 	      << "\ncrc4/crc1+crc2: " << cksum_crc4
+	      << " crc4 armored: " << armor4
 	      << std::endl;
   }
 
@@ -746,42 +751,6 @@ TEST(RGWCksum, CtorUnarmor)
 
 } /* namespace */
 
-class CksumCombinerFixture : public testing::Test
-{
-  static rgw::cksum::Type t;
-
-  static std::string long_a; // 5M string "AAAA...."
-  static std::string long_b;
-  static std::string long_c;
-
-  static void SetUpTestSuite() {
-
-    using std::get;
-    using ST = std::tuple<std::string&, std::string&>;
-
-    t = rgw::cksum::Type::crc64nvme;
-
-    /* generate unique strings that match ones we use in
-     * a checksum test matrix in s3-tests */
-    std::string a{"A"};
-    std::string b{"B"};
-    std::string c{"C"};
-
-    for (const auto& elt : {ST(a, long_a),
-			    ST(b, long_b),
-			    ST(c, long_c)}) {
-
-      for (int ix = 0; ix < (5 * 1024 * 1024); ++ix) {
-	get<1>(elt) += get<0>(elt);
-      }
-    }
-  }
-
-  static void TearDownTestSuite() {
-  }
-};
-
-/* XXXX oops, return at least 2 checksums */
 using cksum_3tuple
     = std::tuple<rgw::cksum::Cksum, rgw::cksum::Cksum, rgw::cksum::Cksum>;
 
@@ -795,7 +764,7 @@ mpu_checksum_helper(cksum::Type t, uint16_t flags)
   Digest* digest2 = get_digest(dv2);
 
   DigestVariant dv3 = rgw::cksum::digest_factory(t);
-  Digest* digest3 = get_digest(dv2);
+  Digest* digest3 = get_digest(dv3);
 
   /* dolor */
   digest1->Update((const unsigned char *)dolor.c_str(), dolor.length());
@@ -820,6 +789,20 @@ TEST(RGWCksum, Combiner1)
   uint16_t flags = rgw::cksum::Cksum::FLAG_NONE;
 
   auto cksums = mpu_checksum_helper(t, flags);
+  auto& [cksum1, cksum2, cksum3] = cksums;
+
+  auto armor1 = cksum1.to_armor();
+  auto armor2 = cksum2.to_armor();
+  auto armor3 = cksum3.to_armor();
+
+  if (verbose) {
+    std::cout << "\ncksums: cksum type: " << to_string(t)
+	      << "\narmor1: " << armor1
+	      << "\narmor2: " << armor2
+	      << "\narmor3: " << armor3
+	      << std::endl;
+  }
+
   auto cmbnr = rgw::cksum::CombinerFactory(t, flags);
 
   ASSERT_TRUE(cmbnr);
@@ -835,12 +818,14 @@ TEST(RGWCksum, Combiner1)
 
   /* if cksums(0) is !composite, then cksums(2) is
    * == cksums(0) + cksums(1) and also == cksum4 */
-  if (! get<0>(cksums).composite()) {
+  bool crc = get<0>(cksums).crc();
+  if (crc) {
     ASSERT_EQ(get<2>(cksums).to_armor(), cksum4.to_armor());
   } else {
     /* all we can do is assert match against an external
      * reference */
   }
+  if (verbose) {
   /* pretty-print armored cksum */
   std::string cksum_flags =
     (flags & Cksum::FLAG_COMPOSITE) ? "COMPOSITE" : "FULL_OBJECT";
@@ -850,7 +835,132 @@ TEST(RGWCksum, Combiner1)
 	    << cksum_flags
 	    << "\n\tarmored cksum " << cksum4.to_armor()
 	    << std::endl;
-}
+  }
+} /* Combiner1 */
+
+using cksum_4tuple
+    = std::tuple<rgw::cksum::Cksum, rgw::cksum::Cksum, rgw::cksum::Cksum,
+		 rgw::cksum::Cksum>;
+
+class CksumCombinerFixture : public testing::Test
+{
+public:
+
+  static std::string long_a; // 5M string "AAAA...."
+  static std::string long_b;
+  static std::string long_c;
+
+  static std::vector<cksum::Type> cksum_types;
+
+  static void SetUpTestSuite() {
+
+    using std::get;
+    using ST = std::tuple<std::string&, std::string&>;
+
+
+    /* generate unique strings that match ones we use in
+     * a checksum test matrix in s3-tests */
+    std::string a{"A"};
+    std::string b{"B"};
+    std::string c{"C"};
+
+    for (const auto& elt : {ST(a, long_a),
+			    ST(b, long_b),
+			    ST(c, long_c)}) {
+
+      for (int ix = 0; ix < (5 * 1024 * 1024); ++ix) {
+	get<1>(elt) += get<0>(elt);
+      }
+    }
+
+    /* generate check types */
+    for (uint16_t ix = 1; ix <= uint16_t(cksum::Type::crc64nvme); ++ix) {
+      cksum_types.push_back(cksum::Type(ix));
+    }
+  } /* SetUpTestSuite */
+
+  static cksum_4tuple mpu_checksums(cksum::Type t) {
+
+    DigestVariant dva = rgw::cksum::digest_factory(t);
+    Digest *digesta = get_digest(dva);
+    digesta->Update((const unsigned char *)long_a.c_str(), long_a.length());
+    auto cksum1 = rgw::cksum::finalize_digest(digesta, t);
+
+    DigestVariant dvb = rgw::cksum::digest_factory(t);
+    Digest *digestb = get_digest(dvb);
+    digestb->Update((const unsigned char *)long_b.c_str(), long_b.length());
+    auto cksum2 = rgw::cksum::finalize_digest(digestb, t);
+
+    DigestVariant dvc = rgw::cksum::digest_factory(t);
+    Digest *digestc = get_digest(dvc);
+    digestc->Update((const unsigned char *)long_c.c_str(), long_c.length());
+    auto cksum3 = rgw::cksum::finalize_digest(digestc, t);
+
+    std::string long_d = long_a + long_b + long_c;
+    DigestVariant dvd = rgw::cksum::digest_factory(t);
+    Digest *digestd = get_digest(dvd);
+    digestd->Update((const unsigned char *)long_d.c_str(), long_d.length());
+    auto cksum4 = rgw::cksum::finalize_digest(digestd, t);
+
+    return cksum_4tuple(cksum1, cksum2, cksum3, cksum4);
+  }
+
+  static void TearDownTestSuite() {
+  }
+}; /* CksumCombinerfixture */
+
+std::string CksumCombinerFixture::long_a;
+std::string CksumCombinerFixture::long_b;
+std::string CksumCombinerFixture::long_c;
+std::vector<cksum::Type> CksumCombinerFixture::cksum_types;
+
+#if 0
+
+/* TODO: multipart test matrix using fixture */
+TEST_F(CksumCombinerFixture, Test1) {
+
+  for (const auto t : CksumCombinerFixture::cksum_types) {
+    using std::get;
+
+    auto cksums = CksumCombinerFixture::mpu_checksums(t);
+
+    auto cksum1 = get<0>(cksums);
+    auto flags = cksum1.flags;
+    auto cmbnr = rgw::cksum::CombinerFactory(t, flags);
+
+    ASSERT_TRUE(cmbnr);
+    ASSERT_EQ(t, (*cmbnr)->get_type());
+
+    for (auto ix = 0; ix < 4; ++ix) {
+      (*cmbnr)->append(get<0>(cksums), (5 * 1024 * 1024));
+    }
+
+    /* depending on the checksum type and flags, cksum4 is
+     * either equivalent to cksum3, or, a composite digest
+     * of cksum1 and cksum2 */
+    auto cksum4 = (*cmbnr)->final();
+
+    /* if cksums(0) is !composite, then cksums(3) is
+     * == SUM(cksums(0)..cksums(2)) and also == cksum4 */
+    if (get<0>(cksums).crc()) {
+      ASSERT_EQ(get<3>(cksums).to_armor(), cksum4.to_armor());
+  } else {
+    /* all we can do is assert match against an external
+     * reference */
+  }
+  /* pretty-print armored cksum */
+  std::string cksum_flags =
+    get<0>(cksums).composite() ? "COMPOSITE" : "FULL_OBJECT";
+  std::cout << "\ncomposite cksum (long_a+long_b_long_c) "
+	    << "\n\tcksum-type " << to_string(t)
+	    << "\n\tflags "
+	    << cksum_flags
+	    << "\n\tarmored cksum " << cksum4.to_armor()
+	    << std::endl;
+  }
+} /* CksumCombinerFixture, Test1 */
+
+#endif
 
 int main(int argc, char *argv[])
 {
