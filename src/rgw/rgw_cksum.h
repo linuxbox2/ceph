@@ -306,6 +306,9 @@ namespace rgw { namespace cksum {
 
   static inline PermittedCksumResult
   permitted_cksum_algo_and_type(Type type, uint16_t cksum_flags) {
+    if (type == Type::none) {
+      return PermittedCksumResult(true, "", "");
+    }
     if (cksum_flags & Cksum::FLAG_COMPOSITE) {
       if (type == Type::crc64nvme) {
 	return PermittedCksumResult(false, to_string(type), "COMPOSITE");
@@ -338,7 +341,8 @@ namespace rgw { namespace cksum {
   }; /* abstract Combiner */
 
   /* choose type-correct Combiner */
-  std::unique_ptr<Combiner*> CombinerFactory(cksum::Type t, uint16_t flags);
+  std::unique_ptr<Combiner*>
+  CombinerFactory(cksum::Type t, uint16_t flags);
 
   using ChecksumTypeResult = std::tuple<uint16_t, const char*>;
 
