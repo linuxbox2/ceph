@@ -18,6 +18,7 @@
 #include <iostream>
 #include <fstream>
 #include <string>
+#include <utility>
 
 #include "gtest/gtest.h"
 
@@ -780,12 +781,75 @@ class CksumCombinerFixture : public testing::Test
   }
 };
 
+/* XXXX oops, return at least 2 checksums */
+using cksum_3tuple
+    = std::tuple<rgw::cksum::Cksum, rgw::cksum::Cksum, rgw::cksum::Cksum>;
+
+cksum_3tuple
+mpu_checksum_helper(cksum::Type t, uint16_t flags)
+{
+  DigestVariant dv1 = rgw::cksum::digest_factory(t);
+  Digest* digest1 = get_digest(dv1);
+
+  DigestVariant dv2 = rgw::cksum::digest_factory(t);
+  Digest* digest2 = get_digest(dv2);
+
+  DigestVariant dv3 = rgw::cksum::digest_factory(t);
+  Digest* digest3 = get_digest(dv2);
+
+  /* dolor */
+  digest1->Update((const unsigned char *)dolor.c_str(), dolor.length());
+  auto cksum1 = rgw::cksum::finalize_digest(digest1, t);
+
+  /* lorem */
+  digest2->Update((const unsigned char *)lorem.c_str(), lorem.length());
+  auto cksum2 = rgw::cksum::finalize_digest(digest2, t);
+
+  /* dolorem */
+  digest3->Update((const unsigned char *)dolorem.c_str(), dolorem.length());
+  auto cksum3 = rgw::cksum::finalize_digest(digest3, t);
+
+  return cksum_3tuple(cksum1, cksum2, cksum3);
+}
 
 TEST(RGWCksum, Combiner1)
 {
+  using std::get;
+
   auto t = cksum::Type::crc64nvme;
+  uint16_t flags = rgw::cksum::Cksum::FLAG_NONE;
 
+  auto cksums = mpu_checksum_helper(t, flags);
+  auto cmbnr = rgw::cksum::CombinerFactory(t, flags);
 
+  ASSERT_TRUE(cmbnr);
+  ASSERT_EQ(t, (*cmbnr)->get_type());
+
+  (*cmbnr)->append(get<0>(cksums), dolor.length());
+  (*cmbnr)->append(get<1>(cksums), lorem.length());
+
+  /* depending on the checksum type and flags, cksum4 is
+   * either equivalent to cksum3, or, a composite digest
+   * of cksum1 and cksum2 */
+  auto cksum4 = (*cmbnr)->final();
+
+  /* if cksums(0) is !composite, then cksums(2) is
+   * == cksums(0) + cksums(1) and also == cksum4 */
+  if (! get<0>(cksums).composite()) {
+    ASSERT_EQ(get<2>(cksums).to_armor(), cksum4.to_armor());
+  } else {
+    /* all we can do is assert match against an external
+     * reference */
+  }
+  /* pretty-print armored cksum */
+  std::string cksum_flags =
+    (flags & Cksum::FLAG_COMPOSITE) ? "COMPOSITE" : "FULL_OBJECT";
+  std::cout << "\ncomposite cksum (delorem) "
+	    << "\n\tcksum-type " << to_string(t)
+	    << "\n\tflags "
+	    << cksum_flags
+	    << "\n\tarmored cksum " << cksum4.to_armor()
+	    << std::endl;
 }
 
 int main(int argc, char *argv[])
