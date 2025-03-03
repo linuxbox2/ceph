@@ -109,7 +109,8 @@ namespace rgw::cksum {
     }
     virtual Cksum final() {
       auto cksum = finalize_digest(digest, get_type());
-      cksum.flags |= Cksum::FLAG_COMPOSITE;
+      cksum.flags |= (Cksum::FLAG_COMBINED|
+		      Cksum::FLAG_COMPOSITE);
       return cksum;
     }
   }; /* Digest */
@@ -136,6 +137,8 @@ namespace rgw::cksum {
       }
     }
     virtual Cksum final() {
+      cksum.flags |= (Cksum::FLAG_COMBINED|
+		      Cksum::FLAG_FULL_OBJECT);
       return cksum;
     }
   }; /* CRCCombine */

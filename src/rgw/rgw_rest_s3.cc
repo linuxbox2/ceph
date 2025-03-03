@@ -506,12 +506,32 @@ int RGWGetObj_ObjStore_S3::send_response_data(bufferlist& bl, off_t bl_ofs,
 	try {
 	  rgw::cksum::Cksum cksum;
 	  decode(cksum, i->second);
-	  if (multipart_parts_count && multipart_parts_count > 0) {
-	    dump_header(s, cksum.header_name(),
-			fmt::format("{}-{}", cksum.to_armor(), *multipart_parts_count));
+	  auto cksum_type =
+	    rgw::cksum::get_checksum_type(cksum,
+	      (multipart_parts_count && multipart_parts_count > 0) /* is_multipart */);
+	  if (std::get<0>(cksum_type) == rgw::cksum::Cksum::FLAG_COMPOSITE) {
+	    /* cksum was computed with a digest algorithm, or predates the 2025
+	       update that introduced CRC combining */
+	    ldpp_dout_fmt(this, 16,
+			  "INFO: {} ChecksumMode==ENABLED element-name {} value {}-{}",
+			  __func__, cksum.element_name(), cksum.to_armor(),
+			  *multipart_parts_count);
+
+            s->formatter->dump_string(cksum.element_name(),
+				      fmt::format("{}-{}", cksum.to_armor(),
+						  *multipart_parts_count));
 	  } else {
-	    dump_header(s, cksum.header_name(), cksum.to_armor());
+	    /* a full object checksum, if multipart, because the checksum is CRC family */
+	    auto elt_name = cksum.element_name();
+	    auto armored_cksum = cksum.to_armor();
+
+	    ldpp_dout_fmt(this, 16,
+			  "INFO: {} ChecksumMode==ENABLED element-name {} value {}",
+			  __func__, cksum.element_name(), cksum.to_armor());
+
+	    s->formatter->dump_string(elt_name, armored_cksum);
 	  }
+	  s->formatter->dump_string("ChecksumType", std::get<1>(cksum_type));
 	}  catch (buffer::error& err) {
 	  ldpp_dout(this, 0) << "ERROR: failed to decode rgw::cksum::Cksum"
 			     << dendl;

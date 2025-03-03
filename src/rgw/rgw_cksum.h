@@ -104,6 +104,7 @@ namespace rgw { namespace cksum {
     static constexpr uint16_t FLAG_V2 =             0x0001; // struct_v >= 2
     static constexpr uint16_t FLAG_COMPOSITE =      0x0002;
     static constexpr uint16_t FLAG_FULL_OBJECT =    0x0004;
+    static constexpr uint16_t FLAG_COMBINED =       0x0008;
 
     Type type;
     value_type digest;
@@ -154,7 +155,17 @@ namespace rgw { namespace cksum {
     }
 
     const bool composite() const {
-      return ! (flags & FLAG_FULL_OBJECT);
+      /* treating COMPOSITE and FULL_OBJECT as flags has issues,
+       * as does not doing it;  note that we cannot rely on crc()
+       * to mean !COMPOSITE/FULL_OBJECT, as CRC32 and CRC32C
+       * were deployed as digest checksums in 2023 (so we must be
+       * prepared to find them on disk) and per AWS can still be
+       * constructed as digests.
+       *
+       * invariant: FLAG_COMPOSITE is a property of /combined checksums/;
+       * it propogates through encode/decode, but we expect only
+       * logical combination/Combiner to set it */
+      return (flags & (FLAG_COMBINED|FLAG_COMPOSITE));
     }
 
     std::string aws_name() const {

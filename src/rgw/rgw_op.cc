@@ -6665,6 +6665,9 @@ void RGWInitMultipart::execute(optional_yield y)
   upload->obj_legal_hold = obj_legal_hold;
   upload->obj_retention = obj_retention;
   upload->cksum_type = cksum_algo;
+  /* cksum_flags have been validated against algorithm, so, e.g., if
+   * FLAG_COMPOSITE is set, the algorithm can be used with a composite/
+   * digest checksum (e.g., it's not CRC64NVME) */
   upload->cksum_flags = cksum_flags;
 
   op_ret = upload->init(this, s->yield, s->owner, s->dest_placement, attrs);
@@ -6674,7 +6677,7 @@ void RGWInitMultipart::execute(optional_yield y)
   s->trace->SetAttribute(tracing::rgw::UPLOAD_ID, upload_id);
   multipart_trace->UpdateName(tracing::rgw::MULTIPART + upload_id);
 
-}
+} /* RGWInitMultipart::execute() */
 
 int RGWCompleteMultipart::verify_permission(optional_yield y)
 {
@@ -6704,6 +6707,7 @@ try_sum_part_cksums(const DoutPrefixProvider *dpp,
 		    rgw::sal::MultipartUpload* upload,
 		    RGWMultiCompleteUpload* parts,
 		    std::optional<rgw::cksum::Cksum>& out_cksum,
+		    std::optional<std::string>& armored_cksum,
 		    optional_yield y)
 {
   /* 1. need checksum-algorithm header (if invalid, fail)
@@ -6778,12 +6782,12 @@ try_sum_part_cksums(const DoutPrefixProvider *dpp,
     if ((part_cksum->type != cksum_type)) {
       /* if parts have inconsistent checksum, fail now */
 
-    ldpp_dout_fmt(dpp, 14,
-		  "ERROR: multipart part checksum type mismatch\n\tcomplete "
-		  "multipart header={} part={}",
-		  to_string(part_cksum->type), to_string(cksum_type));
+      ldpp_dout_fmt(dpp, 14,
+		    "ERROR: multipart part checksum type mismatch\n\tcomplete "
+		    "multipart header={} part={}",
+		    to_string(part_cksum->type), to_string(cksum_type));
 
-    op_ret = -ERR_INVALID_REQUEST;
+      op_ret = -ERR_INVALID_REQUEST;
       return op_ret;
     }
 
@@ -6799,11 +6803,20 @@ try_sum_part_cksums(const DoutPrefixProvider *dpp,
   /* we cannot verify this checksum, only compute it */
   out_cksum = (*cksum_combiner)->final();
 
+  armored_cksum = [&]() -> std::string {
+    std::string armor = out_cksum->to_armor();
+    if (! out_cksum->composite()) {
+      armor += std::format("-{}", num_parts);
+    }
+    return armor;
+  }();
+
   ldpp_dout_fmt(dpp, 16,
-		"INFO: {} combined checksum {} {}-{}",
+		"INFO: {} combined checksum {} {}",
 		__func__,
 		out_cksum->type_string(),
-		out_cksum->to_armor(), num_parts);
+		out_cksum->to_armor(),
+		*armored_cksum);
 
   return op_ret;
 } /* try_sum_part_chksums */
@@ -6920,7 +6933,8 @@ void RGWCompleteMultipart::execute(optional_yield y)
 
   /* checksum computation */
   if (upload->cksum_type != rgw::cksum::Type::none) {
-    op_ret = try_sum_part_cksums(this, s->cct, upload.get(), parts, cksum, y);
+    op_ret = try_sum_part_cksums(this, s->cct, upload.get(), parts, cksum,
+				 armored_cksum, y);
     if (op_ret < 0) {
       ldpp_dout(this, 16) << "ERROR: try_sum_part_cksums failed, obj="
 			  << meta_obj << " ret=" << op_ret << dendl;
@@ -6940,9 +6954,6 @@ void RGWCompleteMultipart::execute(optional_yield y)
   auto& target_attrs = meta_obj->get_attrs();
 
   if (cksum) {
-    armored_cksum =
-      fmt::format("{}-{}", cksum->to_armor(), parts->parts.size());
-
     /* validate computed checksum against supplied checksum, if present */
     auto [hdr_cksum, supplied_cksum] =
       rgw::putobj::find_hdr_cksum(*(s->info.env));
