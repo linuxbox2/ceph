@@ -957,11 +957,14 @@ TEST_F(CksumCombinerFixture, Test1) {
   /* pretty-print armored cksum */
   std::string cksum_flags =
     (! get<0>(cksums).crc()) ? "COMPOSITE" : "FULL_OBJECT";
-  std::cout << "\ncomposite cksum (long_a+long_b_long_c) "
+  std::cout << "\ncomposite cksum (long_a+long_b+long_c) "
 	    << "\n\tcksum-type " << to_string(t)
+	    << "\n\tarmored cksum1 " << get<0>(cksums).to_armor()
+	    << "\n\tarmored cksum2 " << get<1>(cksums).to_armor()
+	    << "\n\tarmored cksum3 " << get<2>(cksums).to_armor()
 	    << "\n\tflags "
 	    << cksum_flags
-	    << "\n\tarmored cksum " << cksum4.to_armor()
+	    << "\n\tarmored cksum4 (composite) " << cksum4.to_armor()
 	    << std::endl;
   }
 } /* CksumCombinerFixture, Test1 */
