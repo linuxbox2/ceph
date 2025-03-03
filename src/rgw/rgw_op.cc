@@ -6805,7 +6805,7 @@ try_sum_part_cksums(const DoutPrefixProvider *dpp,
 
   armored_cksum = [&]() -> std::string {
     std::string armor = out_cksum->to_armor();
-    if (! out_cksum->composite()) {
+    if (out_cksum->composite()) {
       armor += std::format("-{}", num_parts);
     }
     return armor;

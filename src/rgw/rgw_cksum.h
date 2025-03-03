@@ -165,7 +165,9 @@ namespace rgw { namespace cksum {
        * invariant: FLAG_COMPOSITE is a property of /combined checksums/;
        * it propogates through encode/decode, but we expect only
        * logical combination/Combiner to set it */
-      return (flags & (FLAG_COMBINED|FLAG_COMPOSITE));
+      return (flags
+	      & FLAG_COMBINED
+	      & FLAG_COMPOSITE);
     }
 
     std::string aws_name() const {
