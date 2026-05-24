@@ -15,8 +15,10 @@
 
 #pragma once
 
+#include "rgw_sal.h"
 #include "rgw_sal_filter.h"
 #include "rgw_sal_store.h"
+#include <cstdint>
 #include <memory>
 #include "common/dout.h"
 #include "bucket_cache.h"
@@ -27,6 +29,7 @@ namespace rgw { namespace sal {
 class POSIXDriver;
 class POSIXBucket;
 class POSIXObject;
+class POSIXFastIOObject;
 
 using BucketCache = file::listing::BucketCache<POSIXDriver, POSIXBucket>;
 
@@ -41,6 +44,7 @@ struct ObjectType {
     VERSIONED = 3,
     MULTIPART = 4,
     SYMLINK = 5,
+    SHADOW = 6, /* XXX needed? */
   };
   uint32_t type{UNKNOWN};
 
@@ -162,6 +166,11 @@ public:
   virtual int close() override;
   virtual int stat(const DoutPrefixProvider *dpp, bool force = false) override;
   virtual int remove(const DoutPrefixProvider* dpp, optional_yield y, bool delete_children) override;
+
+  /* XXX positional sync read and write calls taking offset and length, void* source/target */
+  int64_t write(int64_t ofs, int64_t len, void* buffer, const DoutPrefixProvider* dpp, optional_yield y);
+  int64_t read(int64_t ofs, int64_t len, void* buffer, const DoutPrefixProvider* dpp, optional_yield y);
+
   virtual int write(int64_t ofs, bufferlist& bl, const DoutPrefixProvider* dpp, optional_yield y) override;
   virtual int read(int64_t ofs, int64_t end, bufferlist& bl, const DoutPrefixProvider* dpp, optional_yield y) override;
   virtual int copy(const DoutPrefixProvider *dpp, optional_yield y, Directory* dst_dir, const std::string& name) override;
@@ -176,6 +185,21 @@ public:
 
 class Directory : public FSEnt {
 protected:
+  /* In this version of the shadow pattern, the shadow bucket is a container
+   * for objects on which FastIOObject (transactional) i/o is staged.
+   * 
+   * A posix FastIO open on a new or existing object causes a new
+   * posix file to be created to receive write and conditional read
+   * i/o.  As in other shadow scenarios, FastIO objects are finalized
+   * and atomically promoted (renamed) into parent locations as
+   * ordinary objects (following applicable ovewrite/versioned rules)
+   * on successful close.  A form of gc may be required to clean up
+   * abandoned FastIO objects under some conditions (e.g., unplanned
+   * restart with uncommitted FastIO transactions open). */
+  std::mutex shadow_mtx;
+  std::unique_ptr<POSIXBucket> shadow;
+
+  using lock_guard = std::lock_guard<std::mutex>;
 
 public:
   Directory(std::string _name, Directory* _parent, CephContext* _ctx) : FSEnt(_name, _parent, _ctx)
@@ -185,8 +209,9 @@ public:
   Directory(const Directory& _d) : FSEnt(_d) {}
   virtual ~Directory() { close(); }
 
-  virtual ObjectType get_type() override { return ObjectType::DIRECTORY; };
+  POSIXBucket* get_shadow();
 
+  virtual ObjectType get_type() override { return ObjectType::DIRECTORY; };
   virtual bool file_exists(std::string& name);
 
   virtual int create(const DoutPrefixProvider *dpp, bool* existed = nullptr, bool temp_file = false) override;
@@ -213,7 +238,10 @@ public:
   virtual int fill_cache(const DoutPrefixProvider* dpp, optional_yield y, fill_cache_cb_t& cb) override;
 
   int get_ent(const DoutPrefixProvider *dpp, optional_yield y, const std::string& name, const std::string& version, std::unique_ptr<FSEnt>& ent);
-};
+
+  friend class POSIXObject;
+
+  }; /* Directory */
 
 class Symlink: public File {
   std::unique_ptr<FSEnt> target;
@@ -495,6 +523,8 @@ public:
     cct = _cct;
   }
 
+  bool have_fastio() const override { return true; }
+  
   virtual int initialize(CephContext *cct, const DoutPrefixProvider *dpp);
   virtual const std::string get_name() const override { return "posix"; }
   virtual std::string get_cluster_id(const DoutPrefixProvider* dpp,  optional_yield y) override { return "PLACEHOLDER"; };
@@ -974,6 +1004,8 @@ private:
   std::map<std::string, int64_t> parts;
 
 public:
+  using int_set = interval_set<uint64_t, boost::container::flat_map, false>;
+
   struct POSIXReadOp : ReadOp {
     POSIXObject* source;
 
@@ -1049,7 +1081,7 @@ public:
 			 int max_parts, int marker, int* next_marker,
 			 bool* truncated, list_parts_each_t&& each_func,
 			 optional_yield y) override;
-
+  FastIOResult get_fastio_handle() override;
   bool is_sync_completed(const DoutPrefixProvider* dpp, optional_yield y,
                          const ceph::real_time& obj_mtime) override;
   virtual int load_obj_state(const DoutPrefixProvider* dpp, optional_yield y, bool follow_olh = true) override;
@@ -1124,14 +1156,35 @@ public:
   int make_ent(ObjectType type);
   bool versioned() { return bucket->versioned(); }
 
-protected:
+  class POSIXFastIOObject : public FastIOObject {
+  private:
+    std::unique_ptr<POSIXObject> object;
+    std::optional<std::unique_ptr<FSEnt>> source;
+    std::unique_ptr<FSEnt> target;
+    int_set ovl_offsets;
+
+    friend class POSIXObject;
+
+  protected:
+    POSIXFastIOObject() {}
+  public:
+    virtual int64_t pread(int64_t ofs, int64_t len, uint32_t flags) override;
+    virtual int64_t pwrite(int64_t ofs, int64_t len, uint32_t flags) override;
+    virtual int commit(uint32_t flags) override;
+    virtual int close(uint32_t flags) override;
+
+    virtual ~POSIXFastIOObject() override {}
+  }; /* POSIXFastioobject */
+
+  protected:
   int read(int64_t ofs, int64_t end, bufferlist& bl, const DoutPrefixProvider* dpp, optional_yield y);
   int generate_attrs(const DoutPrefixProvider* dpp, optional_yield y);
 private:
   int generate_mp_etag(const DoutPrefixProvider* dpp, optional_yield y);
   int generate_etag(const DoutPrefixProvider* dpp, optional_yield y);
-  int get_cur_version(const DoutPrefixProvider *dpp, rgw_obj_key &key);
-};
+  int get_cur_version(const DoutPrefixProvider* dpp, rgw_obj_key& key);
+
+}; /* POSIXObject */
 
 struct POSIXMPObj {
   std::string oid;

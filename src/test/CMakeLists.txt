@@ -368,6 +368,7 @@ target_include_directories(ceph_test_librgw_file_nfsns
   PUBLIC "${LUA_INCLUDE_DIR}"
   SYSTEM PRIVATE "${CMAKE_SOURCE_DIR}/src/rgw"
   SYSTEM PRIVATE "${CMAKE_SOURCE_DIR}/src/rgw/driver/rados")
+target_compile_definitions(ceph_test_librgw_file_nfsns PUBLIC LMDB_SAFE_NO_CPP_UTILITIES)
 target_link_libraries(ceph_test_librgw_file_nfsns
   rgw
   librados
@@ -402,6 +403,7 @@ target_include_directories(ceph_test_librgw_file_marker
   PUBLIC "${LUA_INCLUDE_DIR}"
   SYSTEM PRIVATE "${CMAKE_SOURCE_DIR}/src/rgw"
   SYSTEM PRIVATE "${CMAKE_SOURCE_DIR}/src/rgw/driver/rados")
+target_compile_definitions(ceph_test_librgw_file_marker PUBLIC LMDB_SAFE_NO_CPP_UTILITIES)
 target_link_libraries(ceph_test_librgw_file_marker
   rgw
   librados
@@ -414,7 +416,7 @@ target_link_libraries(ceph_test_librgw_file_marker
   target_link_libraries(ceph_test_librgw_file_marker Boost::context)
 install(TARGETS ceph_test_librgw_file_marker DESTINATION ${CMAKE_INSTALL_BINDIR})
 
-# ceph_test_librgw_file_chunsim ; fsal-rgw dirent lifetime workload
+# ceph_test_librgw_file_chunksim ; fsal-rgw dirent lifetime workload
 add_executable(ceph_test_librgw_file_chunksim
   librgw_file_chunksim.cc
   )
@@ -422,6 +424,7 @@ target_include_directories(ceph_test_librgw_file_chunksim
   PUBLIC "${LUA_INCLUDE_DIR}"
   SYSTEM PRIVATE "${CMAKE_SOURCE_DIR}/src/rgw"
   SYSTEM PRIVATE "${CMAKE_SOURCE_DIR}/src/rgw/driver/rados")
+target_compile_definitions(ceph_test_librgw_file_chunksim PUBLIC LMDB_SAFE_NO_CPP_UTILITIES)
 target_link_libraries(ceph_test_librgw_file_chunksim
   rgw
   librados
@@ -441,6 +444,7 @@ target_include_directories(ceph_test_librgw_file_xattr
   PUBLIC "${LUA_INCLUDE_DIR}"
   SYSTEM PRIVATE "${CMAKE_SOURCE_DIR}/src/rgw"
   SYSTEM PRIVATE "${CMAKE_SOURCE_DIR}/src/rgw/driver/rados")
+target_compile_definitions(ceph_test_librgw_file_xattr PUBLIC LMDB_SAFE_NO_CPP_UTILITIES)
 target_link_libraries(ceph_test_librgw_file_xattr
   rgw
   librados

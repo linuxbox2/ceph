@@ -18,6 +18,8 @@
 #include <sys/stat.h>
 #include <sys/xattr.h>
 #include <unistd.h>
+#include <cstdint>
+#include <mutex>
 #include "rgw_multi.h"
 #include "include/scope_guard.h"
 #include "common/Clock.h" // for ceph_clock_now()
@@ -37,6 +39,7 @@ const std::string ATTR_PREFIX = "user.X-RGW-";
 const std::string mp_ns = "multipart";
 const std::string MP_OBJ_PART_PFX = "part-";
 const std::string MP_OBJ_HEAD_NAME = MP_OBJ_PART_PFX + "00000";
+const std::string shadow_ns = "shadow";
 
 struct POSIXOwner {
   rgw_user user;
@@ -460,6 +463,7 @@ int FSEnt::fill_cache(const DoutPrefixProvider *dpp, optional_yield y, fill_cach
     case ObjectType::UNKNOWN:
     case ObjectType::FILE:
     case ObjectType::SYMLINK:
+    case ObjectType::SHADOW:
       return -EINVAL;
   }
 
@@ -593,8 +597,7 @@ int File::write(int64_t ofs, bufferlist& bl, const DoutPrefixProvider* dpp,
     return ret;
   }
 
-
-  ret = lseek(fd, ofs, SEEK_SET);
+  ret = lseek(fd, ofs, SEEK_SET); /* XXX just use pwrite(2)? */
   if (ret < 0) {
     ret = errno;
     ldpp_dout(dpp, 0) << "ERROR: could not seek object " << get_name() << " to "
@@ -618,10 +621,70 @@ int File::write(int64_t ofs, bufferlist& bl, const DoutPrefixProvider* dpp,
   return 0;
 }
 
+int64_t File::write(int64_t ofs, int64_t len, void* buffer, const DoutPrefixProvider* dpp,
+                    optional_yield y)
+{
+  int64_t ret, nwr{0};
+
+  ret = fchmod(fd, S_IRUSR|S_IWUSR); /* XXXX why chmod here (and above)? */
+  if(ret < 0) {
+    ldpp_dout(dpp, 0) << "ERROR: could not change permissions on object " << get_name() << ": "
+                  << cpp_strerror(ret) << dendl;
+    return ret;
+  }
+
+  char* curp = static_cast<char*>(buffer);
+  while (len > 0) {
+    ret = ::pwrite(fd, curp, len, ofs);
+    if (ret < 0) {
+      ret = errno;
+      ldpp_dout(dpp, 0) << "ERROR: could not write object " << get_name() << ": "
+	<< cpp_strerror(ret) << dendl;
+      return -ret;
+    }
+
+    curp += ret;
+    ofs += ret;
+    len -= ret;
+    nwr += ret;
+  }
+
+  return nwr;
+}
+
+int64_t File::read(int64_t ofs, int64_t len, void* buffer, const DoutPrefixProvider* dpp,
+                   optional_yield y)
+{
+  int64_t ret, nread{0};
+
+  char* curp = static_cast<char*>(buffer);
+  while (len > 0) {
+    ret = ::pread(fd, curp, len, ofs);
+    if (ret == 0) [[unlikely]] {
+      /* ofs at or beyond eof, see pread(2) */
+      goto out;
+    }
+    if (ret < 0) {
+      ret = errno;
+      ldpp_dout(dpp, 0) << "ERROR: could not write object " << get_name() << ": "
+	<< cpp_strerror(ret) << dendl;
+      return -ret;
+    }
+
+    curp += ret;
+    ofs += ret;
+    len -= ret;
+    nread += ret;
+  }
+
+ out:
+  return nread;
+}
+
 int File::read(int64_t ofs, int64_t left, bufferlist& bl,
 		      const DoutPrefixProvider* dpp, optional_yield y)
 {
-  int64_t len = std::min(left, READ_SIZE);
+  int64_t len = std::min(left, READ_SIZE); /* XXXX can caller always correct for READ_SIZE? */
   ssize_t ret;
 
   ret = lseek(fd, ofs, SEEK_SET);
@@ -753,6 +816,18 @@ int File::link_temp_file(const DoutPrefixProvider *dpp, optional_yield y, std::s
   }
 
   return 0;
+}
+
+POSIXBucket* Directory::get_shadow()
+{
+  if (! shadow) {
+    lock_guard{shadow_mtx};
+    if (!shadow) {
+      // XXX allocate one
+      std::optional<std::string> ns{shadow_ns};
+    }
+  } /* ! shadow */
+
 }
 
 bool Directory::file_exists(std::string& name)
@@ -3097,6 +3172,42 @@ int POSIXObject::list_parts(const DoutPrefixProvider* dpp, CephContext* cct,
 			    optional_yield y)
 {
   return -EOPNOTSUPP;
+}
+
+Object::FastIOResult POSIXObject::get_fastio_handle()
+{
+  const auto& dir = ent->get_parent();
+  const auto& shadow = dir->get_shadow();
+
+  std::unique_ptr<POSIXFastIOObject> hdl{new POSIXFastIOObject()};
+  // TODO: finish :)
+  return FastIOResult {0, std::move(hdl)};
+}
+
+int64_t POSIXObject::POSIXFastIOObject::pread(int64_t ofs, int64_t len, uint32_t flags)
+{
+  int64_t nread{0};
+
+  return nread;
+}
+
+int64_t POSIXObject::POSIXFastIOObject::pwrite(int64_t ofs, int64_t len, uint32_t flags)
+{
+  int64_t nwr{0};
+
+  return nwr;
+}
+
+int POSIXObject::POSIXFastIOObject::commit(uint32_t flags)
+{
+  /* TODO: implement */
+  return 0;
+}
+
+int POSIXObject::POSIXFastIOObject::close(uint32_t flags)
+{
+  /* TODO: implement */
+  return 0;
 }
 
 bool POSIXObject::is_sync_completed(const DoutPrefixProvider* dpp, optional_yield y,

@@ -141,6 +141,8 @@ public:
   FilterDriver(Driver* _next) : next(_next) {}
   virtual ~FilterDriver() = default;
 
+  bool have_fastio() const override { return next->have_fastio(); }
+
   virtual int initialize(CephContext *cct, const DoutPrefixProvider *dpp) override;
   virtual const std::string get_name() const override;
   virtual std::string get_cluster_id(const DoutPrefixProvider* dpp,
@@ -795,6 +797,11 @@ public:
   virtual void set_compressed() override { return next->set_compressed(); }
   virtual bool is_compressed() override { return next->is_compressed(); }
   virtual bool is_delete_marker() override { return next->is_delete_marker(); }
+
+  FastIOResult get_fastio_handle() override {
+    return next->get_fastio_handle();
+  }
+
   bool is_sync_completed(const DoutPrefixProvider* dpp, optional_yield y,
                          const ceph::real_time& obj_mtime) override {
     return next->is_sync_completed(dpp, y, obj_mtime);

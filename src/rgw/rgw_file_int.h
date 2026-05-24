@@ -3,10 +3,12 @@
 
 #pragma once
 
+#include "rgw_sal.h"
 #include "include/rados/rgw_file.h"
 
 /* internal header */
 #include <cstdint>
+#include <memory>
 #include <string.h>
 #include <string_view>
 #include <sys/stat.h>
@@ -222,9 +224,26 @@ namespace rgw {
     } state;
 
     struct file {
-      RGWWriteRequest* write_req;
+      std::unique_ptr<rgw::sal::Object> sal_object;
+      std::unique_ptr<sal::Object::FastIOObject> fastio_hdl;
+      RGWWriteRequest *write_req;
+
       file() : write_req(nullptr) {}
       ~file();
+
+      /* XXX compiler required these to put a unique_ptr in one arm of std::variant */
+      file &operator=(const file &) {
+	ceph_assert(true); // not reached
+        return *this;
+      }
+
+      file(const file& rhs) {
+	ceph_assert(true); // not reached
+      }
+
+      file(file &&rhs) {
+	ceph_assert(true); // not reached
+      }
     };
 
     // coverity[missing_lock:SUPPRESS]
@@ -388,11 +407,13 @@ namespace rgw {
 	  fh.fh_type = RGW_FS_TYPE_DIRECTORY;
 	  variant_type = directory();
         } else if(flags & FLAG_SYMBOLIC_LINK) {
-	  fh.fh_type = RGW_FS_TYPE_SYMBOLIC_LINK;
-          variant_type = file();
+          fh.fh_type = RGW_FS_TYPE_SYMBOLIC_LINK;
+	  /* XXXX fixme */
+          //variant_type = file();
         } else {
-	  fh.fh_type = RGW_FS_TYPE_FILE;
-	  variant_type = file();
+          fh.fh_type = RGW_FS_TYPE_FILE;
+	  /* XXXX fixme */
+	  //variant_type = file();
 	}
       }
 
@@ -653,17 +674,7 @@ namespace rgw {
     bool stateless_open() const { return flags & FLAG_STATELESS_OPEN; }
     bool has_children() const;
 
-    int open(uint32_t gsh_flags) {
-      lock_guard guard(mtx);
-      if (! is_open()) {
-	if (gsh_flags & RGW_OPEN_FLAG_V3) {
-	  flags |= FLAG_STATELESS_OPEN;
-	}
-	flags |= FLAG_OPEN;
-	return 0;
-      }
-      return -EPERM;
-    }
+    int open(uint32_t gsh_flags);
 
     typedef std::variant<uint64_t*, const char*> readdir_offset;
 
@@ -2168,6 +2179,73 @@ public:
   void send_response() override {}
 
 }; /* RGWDeleteObjRequest */
+
+/* XXXX here am i */
+
+class RGWOpenRequest : public RGWLibRequest,
+		       public RGWOpen /* RGWOp */
+{
+public:
+  const std::string& bucket_name;
+  const std::string& obj_name;
+  uint64_t _size;
+  uint32_t flags;
+
+  static constexpr uint32_t FLAG_NONE = 0x000;
+
+  /* TODO: check args */
+  RGWOpenRequest(CephContext* _cct, std::unique_ptr<rgw::sal::User> _user,
+		 const std::string& _bname, const std::string& _oname,
+		 uint32_t _flags)
+    : RGWLibRequest(_cct, std::move(_user)), bucket_name(_bname), obj_name(_oname),
+      _size(0), flags(_flags) {
+    op = this;
+  }
+
+  const char* name() const override { return "stat_obj"; }
+  RGWOpType get_type() override { return RGW_OP_STAT_OBJ; }
+
+
+  /* getters */
+  /* TODO: FastIOObject handle? bucket? parent? */
+
+  bool only_bucket() override { return false; }
+
+  int op_init() override {
+    // assign driver, s, and dialect_handler
+    // framework promises to call op_init after parent init
+    RGWOp::init(RGWHandler::driver, get_state(), this);
+    op = this; // assign self as op: REQUIRED
+    return 0;
+  }
+
+  int header_init() override {
+
+    req_state* state = get_state();
+    state->info.method = "NFS"; /* XXX is this ok? */
+    state->op = OP_UNKNOWN; /* XXX is this ok?  OPEN not a http_op */
+
+    /* XXX derp derp derp */
+    state->relative_uri = make_uri(bucket_name, obj_name);
+    state->info.request_uri = state->relative_uri; // XXX
+    state->info.effective_uri = state->relative_uri;
+    state->info.request_params = "";
+    state->info.domain = ""; /* XXX ? */
+
+    return 0;
+  }
+
+  void send_response_data(ceph::buffer::list& _bl) override {
+    /* NOP */
+  }
+
+  void execute(optional_yield y) override {
+    RGWOpen::execute(y);
+    /* TODO: capture handles ! */
+    //_size = get_state()->obj_size;
+  }
+
+}; /* RGWOpenRequest */
 
 class RGWStatObjRequest : public RGWLibRequest,
 			  public RGWGetObj /* RGWOp */

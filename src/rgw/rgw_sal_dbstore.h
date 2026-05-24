@@ -578,6 +578,11 @@ protected:
 
       bool is_sync_completed(const DoutPrefixProvider* dpp, optional_yield y,
                              const ceph::real_time& obj_mtime) override;
+
+      FastIOResult get_fastio_handle() override {
+	return FastIOResult{-ENOTSUP, nullptr};
+      }
+
       virtual int load_obj_state(const DoutPrefixProvider* dpp, optional_yield y, bool follow_olh = true) override;
       virtual int get_obj_attrs(optional_yield y, const DoutPrefixProvider* dpp) override;
       virtual int modify_obj_attrs(const char* attr_name, bufferlist& attr_val, optional_yield y, const DoutPrefixProvider* dpp,

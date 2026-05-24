@@ -6,6 +6,8 @@
 #include <cstdlib>
 #include <system_error>
 #include <span>
+#include <unistd.h>
+#include "common/async/yield_context.h"
 #include <sstream>
 #include <string_view>
 
@@ -2903,6 +2905,51 @@ int RGWGetObj::init_common()
   return 0;
 }
 
+int RGWOpen::verify_permission(optional_yield y) {
+  /* XXXX permission to open an object for NFS access, based on rule for
+   * GetObj, or PutObj if the requested mode includes write permission */
+  uint64_t action = 0;
+  if (write_open) {
+    /* WRITE or READ-WRITE open */
+    RGWObjTags obj_tags;    
+    rgw_add_grant_to_iam_environment(s->env, s);
+    rgw_add_to_iam_environment(s->env, "s3:x-amz-acl", s->canned_acl);
+
+    for (const auto& kv: obj_tags.get_tags()) {
+      rgw_add_to_iam_environment(s->env, "s3:RequestObjectTag/"+kv.first, kv.second);
+    }
+
+    // add server-side encryption headers
+    rgw_iam_add_crypt_attrs(s->env, s->info.crypt_attribute_map);
+
+    // Add bucket tags for authorization
+    auto [has_s3_existing_tag, has_s3_resource_tag] = rgw_check_policy_condition(this, s, false);
+    if (has_s3_resource_tag)
+      rgw_iam_add_buckettags(this, s);
+
+    if (!verify_bucket_permission(this, s, ARN(s->object->get_obj()),
+				  rgw::IAM::s3PutObject)) {
+      return -EACCES;
+    }
+  } else { /* READ open */
+    auto [has_s3_existing_tag, has_s3_resource_tag] =
+      rgw_check_policy_condition(this, s);
+    if (has_s3_existing_tag || has_s3_resource_tag)
+      rgw_iam_add_objtags(this, s, has_s3_existing_tag, has_s3_resource_tag);
+    action = s->object_key.instance.empty() ? rgw::IAM::s3GetObject :
+      rgw::IAM::s3GetObjectVersion;
+    if (!verify_object_permission(this, s, action)) {
+      s->err.message = fmt::format("missing {} permission", rgw::IAM::action_bit_string(action));
+      return -EACCES;
+    }
+  } /* ! write_open */
+  return 0;  
+} /* RGWOpen::verify_permission */  
+
+void RGWOpen::execute(optional_yield y) {
+  /* TODO: implement */
+} /* RGWOpen::execute */
+
 int RGWListBuckets::verify_permission(optional_yield y)
 {
   rgw::Partition partition = rgw::Partition::aws;
@@ -4436,7 +4483,7 @@ int RGWPutObj::verify_permission(optional_yield y)
     }
 
     rgw_iam_remove_objtags(this, s, cs_object.get(), has_s3_existing_tag, has_s3_resource_tag);
-  }
+  } /* have copy_source* */
 
   rgw_add_grant_to_iam_environment(s->env, s);
 

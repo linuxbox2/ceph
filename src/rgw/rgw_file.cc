@@ -1763,6 +1763,57 @@ namespace rgw {
     return rc;
   } /* RGWFileHandle::write_finish */
 
+  int RGWFileHandle::open(uint32_t gsh_flags) {
+
+    if (!is_file()) {
+      /* XXXX I don't think we open directories? */
+      return -EINVAL;
+    }
+
+    auto* fs = get_fs();
+    CephContext *cct = static_cast<CephContext *>(fs->get_fs()->rgw);
+
+    lock_guard guard(mtx);
+
+    auto* driver = g_rgwlib->get_driver(); /* XXXX need to link driver to fs */
+    if (driver->have_fastio()) {
+      auto& bucket_name = parent->get_name();
+      auto& object_name = get_name();
+
+      file* f = get_if<file>(&variant_type);
+      if (!f) {
+        return -EISDIR;
+      }
+
+      RGWOpenRequest req(
+                         cct, g_rgwlib->get_driver()->get_user(fs->get_user()->user_id),
+                         bucket_name, object_name, 0 /* flags */);
+
+      int rc = g_rgwlib->get_fe()->execute_req(&req);
+      if (!rc) {
+        /* XXX and now what? */
+      } else {
+        req_state* state = req.get_state();
+        /* Object needs a bucket from this point */
+        state->object->set_bucket(state->bucket.get());
+        auto f_result = state->object->get_fastio_handle();
+        if (get<0>(f_result)) {
+          f->sal_object = state->object->clone();
+          f->fastio_hdl = std::move(get<1>(f_result));
+        }
+      }
+    } /* have fastio */
+
+    if (! is_open()) {
+      if (gsh_flags & RGW_OPEN_FLAG_V3) {
+	flags |= FLAG_STATELESS_OPEN;
+      }
+      flags |= FLAG_OPEN;
+	return 0;
+    }
+    return -EPERM;
+  } /* RGWFileHandle::open */
+
   int RGWFileHandle::close()
   {
     lock_guard guard(mtx);
