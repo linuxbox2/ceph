@@ -197,7 +197,7 @@ protected:
    * abandoned FastIO objects under some conditions (e.g., unplanned
    * restart with uncommitted FastIO transactions open). */
   std::mutex shadow_mtx;
-  std::unique_ptr<POSIXBucket> shadow;
+  std::unique_ptr<Directory> shadow;
 
   using lock_guard = std::lock_guard<std::mutex>;
 
@@ -209,7 +209,7 @@ public:
   Directory(const Directory& _d) : FSEnt(_d) {}
   virtual ~Directory() { close(); }
 
-  POSIXBucket* get_shadow();
+  Directory* get_shadow(const DoutPrefixProvider *dpp, bool create=true);
 
   virtual ObjectType get_type() override { return ObjectType::DIRECTORY; };
   virtual bool file_exists(std::string& name);
@@ -313,6 +313,15 @@ public:
   }
   virtual int fill_cache(const DoutPrefixProvider* dpp, optional_yield y, fill_cache_cb_t& cb) override;
 };
+
+class ShadowDirectory : public Directory {
+protected:
+public:
+  ShadowDirectory(std::string _name, Directory* _parent, CephContext* _ctx) : Directory(_name, _parent, _ctx)
+    {}
+
+  virtual ObjectType get_type() override { return ObjectType::SHADOW; };
+}; /* ShadowDirectory */
 
 class VersionedDirectory : public Directory {
 protected:
@@ -1081,7 +1090,7 @@ public:
 			 int max_parts, int marker, int* next_marker,
 			 bool* truncated, list_parts_each_t&& each_func,
 			 optional_yield y) override;
-  FastIOResult get_fastio_handle() override;
+  FastIOResult get_fastio_handle(const DoutPrefixProvider* dpp) override;
   bool is_sync_completed(const DoutPrefixProvider* dpp, optional_yield y,
                          const ceph::real_time& obj_mtime) override;
   virtual int load_obj_state(const DoutPrefixProvider* dpp, optional_yield y, bool follow_olh = true) override;
@@ -1158,9 +1167,9 @@ public:
 
   class POSIXFastIOObject : public FastIOObject {
   private:
-    std::unique_ptr<POSIXObject> object;
+    std::unique_ptr<Object> object;
     std::optional<std::unique_ptr<FSEnt>> source;
-    std::unique_ptr<FSEnt> target;
+    std::unique_ptr<File> target;
     int_set ovl_offsets;
 
     friend class POSIXObject;

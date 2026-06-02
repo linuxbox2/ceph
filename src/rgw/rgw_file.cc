@@ -1771,7 +1771,8 @@ namespace rgw {
     }
 
     auto* fs = get_fs();
-    CephContext *cct = static_cast<CephContext *>(fs->get_fs()->rgw);
+    CephContext* cct = static_cast<CephContext*>(fs->get_fs()->rgw);
+    const DoutPrefix dp(cct, dout_subsys, "rgw open: ");
 
     lock_guard guard(mtx);
 
@@ -1796,7 +1797,7 @@ namespace rgw {
         req_state* state = req.get_state();
         /* Object needs a bucket from this point */
         state->object->set_bucket(state->bucket.get());
-        auto f_result = state->object->get_fastio_handle();
+        auto f_result = state->object->get_fastio_handle(&dp);
         if (get<0>(f_result)) {
           f->sal_object = state->object->clone();
           f->fastio_hdl = std::move(get<1>(f_result));

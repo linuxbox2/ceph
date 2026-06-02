@@ -818,16 +818,24 @@ int File::link_temp_file(const DoutPrefixProvider *dpp, optional_yield y, std::s
   return 0;
 }
 
-POSIXBucket* Directory::get_shadow()
+Directory* Directory::get_shadow(const DoutPrefixProvider *dpp, bool create)
 {
+  int ret{0};
   if (! shadow) {
-    lock_guard{shadow_mtx};
+    lock_guard guard{shadow_mtx};
     if (!shadow) {
       // XXX allocate one
       std::optional<std::string> ns{shadow_ns};
+      std::unique_ptr<Directory> shadow_dir =
+          std::make_unique<ShadowDirectory>(bucket_fname("", ns), this, ctx);
+      ret = shadow_dir->stat(dpp, true /* force */);
+      if (ret == -ENOENT && create) {
+        bool existed{false};
+        ret = shadow->create(dpp, &existed, false /* temp_file? */);
+      }
     }
   } /* ! shadow */
-
+  return shadow.get();
 }
 
 bool Directory::file_exists(std::string& name)
@@ -3174,15 +3182,25 @@ int POSIXObject::list_parts(const DoutPrefixProvider* dpp, CephContext* cct,
   return -EOPNOTSUPP;
 }
 
-Object::FastIOResult POSIXObject::get_fastio_handle()
+Object::FastIOResult POSIXObject::get_fastio_handle(const DoutPrefixProvider* dpp)
 {
+  int ret{0};
   const auto& dir = ent->get_parent();
-  const auto& shadow = dir->get_shadow();
+  const auto& shadow = dir->get_shadow(dpp, true /* create */);
 
   std::unique_ptr<POSIXFastIOObject> hdl{new POSIXFastIOObject()};
+  hdl->object = clone();
+
   // TODO: finish :)
+  /* XXX we need handles to a source and target--for now just a target FSEnt
+   * open for writing */
+  std::string target_fname = gen_rand_instance_name();
+
+  hdl->target = std::make_unique<File>(target_fname, dir, driver->ctx());
+  ret = hdl->target->open(dpp);
+
   return FastIOResult {0, std::move(hdl)};
-}
+} /* get_fastio_handle */
 
 int64_t POSIXObject::POSIXFastIOObject::pread(int64_t ofs, int64_t len, uint32_t flags)
 {

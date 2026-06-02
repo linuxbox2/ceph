@@ -605,7 +605,7 @@ class RadosObject : public StoreObject {
     bool is_sync_completed(const DoutPrefixProvider *dpp, optional_yield y,
                            const ceph::real_time &obj_mtime) override;
 
-    FastIOResult get_fastio_handle() override {
+    FastIOResult get_fastio_handle(const DoutPrefixProvider* dpp) override {
       return FastIOResult{-ENOTSUP, nullptr};
     }
 

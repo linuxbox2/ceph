@@ -1297,7 +1297,7 @@ public:
 
     /** Get a fastio view on an object or object prototype */
     using FastIOResult = std::tuple<int, std::unique_ptr<FastIOObject>>;
-    virtual FastIOResult get_fastio_handle() = 0;
+    virtual FastIOResult get_fastio_handle(const DoutPrefixProvider* dpp) = 0;
 
     /** Load the object state for this object. */
     virtual int load_obj_state(const DoutPrefixProvider* dpp, optional_yield y, bool follow_olh = true) = 0;

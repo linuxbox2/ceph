@@ -798,8 +798,8 @@ public:
   virtual bool is_compressed() override { return next->is_compressed(); }
   virtual bool is_delete_marker() override { return next->is_delete_marker(); }
 
-  FastIOResult get_fastio_handle() override {
-    return next->get_fastio_handle();
+  FastIOResult get_fastio_handle(const DoutPrefixProvider* dpp) override {
+    return next->get_fastio_handle(dpp);
   }
 
   bool is_sync_completed(const DoutPrefixProvider* dpp, optional_yield y,
