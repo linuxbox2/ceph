@@ -604,6 +604,11 @@ class RadosObject : public StoreObject {
 
     bool is_sync_completed(const DoutPrefixProvider* dpp, optional_yield y,
                            const ceph::real_time& obj_mtime) override;
+
+    FSIOResult get_fsio_handle(const DoutPrefixProvider* dpp) override {
+      return FSIOResult{-ENOTSUP, nullptr};
+    }
+
     /* For rgw_admin.cc */
     RGWObjState& get_state() { return state; }
     virtual int load_obj_state(const DoutPrefixProvider* dpp, optional_yield y, bool follow_olh = true) override;

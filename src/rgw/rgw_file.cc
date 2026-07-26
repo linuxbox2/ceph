@@ -1765,6 +1765,95 @@ namespace rgw {
     return rc;
   } /* RGWFileHandle::write_finish */
 
+  /* backward-compatible open, no open tracking */
+  int
+  RGWFileHandle::open(uint32_t rgw_openflags)
+  {
+    lock_guard guard(mtx);
+    if (! is_open()) {
+      if (rgw_openflags & RGW_OPEN_FLAG_V3) {
+        flags |= FLAG_STATELESS_OPEN;
+      }
+      flags |= FLAG_OPEN;
+	return 0;
+      }
+    return -EPERM;
+  } /*  RGWFileHandle::open */
+
+  int RGWFileHandle::open2(uint32_t posix_flags,
+                           uint32_t rgw_openflags) {
+
+    /*
+     * posixflags
+     *
+     * O_RDWR
+     * O_RDONLY
+     * O_WRONLY
+     * O_TRUNC
+     *
+     */
+
+    /* XXXX this isn't handling multiple open2 instances--see epilogue! */
+
+    if (!is_file()) {
+      /* XXXX I don't think we open directories? */
+      return -EINVAL;
+    }
+
+    auto* fs = get_fs();
+    CephContext* cct = static_cast<CephContext*>(fs->get_fs()->rgw);
+    const DoutPrefix dp(cct, dout_subsys, "rgw open: ");
+
+    lock_guard guard(mtx);
+
+    file* f = get_if<file>(&variant_type);
+    if (!f) {
+      return -EISDIR;
+    }
+
+    auto* driver = g_rgwlib->get_driver(); /* XXXX need to link driver to fs */
+    if (driver->have_fsio()) {
+      auto& bucket_name = parent->get_name();
+      auto& object_name = get_name();
+
+      RGWOpenRequest req(
+                         cct, g_rgwlib->get_driver()->get_user(fs->get_user()->user_id),
+                         bucket_name, object_name, 0 /* flags */);
+
+      int rc = g_rgwlib->get_fe()->execute_req(&req);
+      if (!rc) {
+        /* XXX and now what? */
+      } else {
+        req_state* state = req.get_state();
+        /* Object needs a bucket from this point */
+        state->object->set_bucket(state->bucket.get());
+        auto f_result = state->object->get_fsio_handle(&dp);
+        if (get<0>(f_result)) {
+          f->sal_object = state->object->clone();
+          f->fsio_hdl = std::move(get<1>(f_result));
+        }
+      }
+    } /* have fsio */
+
+    if (rgw_openflags & RGW_OPEN_FLAG_V3) {
+      flags |= FLAG_STATELESS_OPEN;
+    }
+
+    if (posix_flags & O_RDONLY) {
+      (f->read_opens)++;
+    }
+    if ((posix_flags & O_WRONLY) ||
+        (posix_flags & O_RDWR)) {
+      (f->write_opens)++;
+    }
+
+    flags |= FLAG_OPEN;
+    return 0;
+
+    return -EPERM;
+
+  } /* RGWFileHandle::open2(...) */
+
   int RGWFileHandle::close()
   {
     lock_guard guard(mtx);
@@ -2492,6 +2581,24 @@ int rgw_open(struct rgw_fs *rgw_fs,
     return -EISDIR;
 
   return rgw_fh->open(flags);
+}
+
+/*
+   open file, tracking open file handles
+*/
+int
+rgw_open2(
+    struct rgw_fs* rgw_fs,
+    struct rgw_file_handle* fh,
+    uint32_t posix_flags,
+    uint32_t flags)
+{
+  RGWFileHandle* rgw_fh = get_rgwfh(fh);
+
+  if (! rgw_fh->is_file())
+    return -EISDIR;
+
+  return rgw_fh->open2(posix_flags, flags);
 }
 
 /*

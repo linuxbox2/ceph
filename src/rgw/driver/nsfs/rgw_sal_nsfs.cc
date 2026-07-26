@@ -4411,7 +4411,7 @@ int NSFSObject::copy_object(const ACLOwner& owner,
   }
 
   return 0;
-}
+} /* NSFSObject::copy_object */
 
 int NSFSObject::list_parts(const DoutPrefixProvider* dpp, CephContext* cct,
 			    int max_parts, int marker, int* next_marker,
@@ -4445,6 +4445,53 @@ int NSFSObject::list_parts(const DoutPrefixProvider* dpp, CephContext* cct,
     ++emitted;
   }
 
+  return 0;
+} /* int NSFSObject::list_parts */
+
+Object::FSIOResult NSFSObject::get_fsio_handle(const DoutPrefixProvider* dpp)
+{
+  int ret{0};
+  const auto& dir = ent->get_parent();
+#if 0 /* XXXX this is going away */
+  const auto& shadow = dir->get_shadow(dpp, true /* create */);
+#endif
+  std::unique_ptr<NSFSFSIOObject> hdl{new NSFSFSIOObject()};
+  hdl->object = clone();
+
+  // TODO: finish :)
+  /* XXX we need handles to a source and target--for now just a target FSEnt
+   * open for writing */
+  std::string target_fname = gen_rand_instance_name();
+
+  hdl->target = std::make_unique<File>(target_fname, dir, driver->ctx());
+  ret = hdl->target->open(dpp);
+
+  return FSIOResult {ret, std::move(hdl)};
+} /* get_fsio_handle */
+
+int64_t NSFSObject::NSFSFSIOObject::pread(int64_t ofs, int64_t len, uint32_t flags)
+{
+  int64_t nread{0};
+
+  return nread;
+}
+
+int64_t NSFSObject::NSFSFSIOObject::pwrite(int64_t ofs, int64_t len, uint32_t flags)
+{
+  int64_t nwr{0};
+
+  return nwr;
+}
+
+int NSFSObject::NSFSFSIOObject::commit(uint32_t flags)
+{
+  /* TODO: implement */
+  return 0;
+}
+
+int NSFSObject::NSFSFSIOObject::close(uint32_t flags)
+{
+  /* TODO: implement */
   return 0;
 }
 

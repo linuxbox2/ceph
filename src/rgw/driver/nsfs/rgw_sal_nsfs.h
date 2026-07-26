@@ -437,6 +437,8 @@ public:
     return *this;
   }
 
+  bool have_fsio() const override { return true; }
+
   virtual int initialize(CephContext *cct, const DoutPrefixProvider *dpp);
   virtual const std::string get_name() const override { return "nsfs"; }
   virtual std::string get_cluster_id(const DoutPrefixProvider* dpp,  optional_yield y) override { return "PLACEHOLDER"; };
@@ -1064,8 +1066,11 @@ public:
 			 bool* truncated, list_parts_each_t&& each_func,
 			 optional_yield y) override;
 
+  FSIOResult get_fsio_handle(const DoutPrefixProvider* dpp) override;
+
   bool is_sync_completed(const DoutPrefixProvider* dpp, optional_yield y,
                          const ceph::real_time& obj_mtime) override;
+
   virtual int load_obj_state(const DoutPrefixProvider* dpp, optional_yield y, bool follow_olh = true) override;
   virtual int set_obj_attrs(const DoutPrefixProvider* dpp, Attrs* setattrs,
 			    Attrs* delattrs, optional_yield y, uint32_t flags) override;
@@ -1135,6 +1140,24 @@ public:
   int fill_cache(const DoutPrefixProvider *dpp, optional_yield y, nsfs::fill_cache_cb_t& cb);
   int stat(const DoutPrefixProvider *dpp);
   int make_ent(nsfs::ObjectType type);
+
+ class NSFSFSIOObject : public FSIOObject {
+  private:
+   std::unique_ptr<Object> object;
+   std::unique_ptr<nsfs::File> target; // XXX can work after cow clone
+
+   friend class NSFSObject;
+
+  protected:
+    NSFSFSIOObject() {}
+  public:
+    virtual int64_t pread(int64_t ofs, int64_t len, uint32_t flags) override;
+    virtual int64_t pwrite(int64_t ofs, int64_t len, uint32_t flags) override;
+    virtual int commit(uint32_t flags) override;
+    virtual int close(uint32_t flags) override;
+
+    virtual ~NSFSFSIOObject() override {}
+  }; /* NSFSFSIOObject */
 
 protected:
   int read(int64_t ofs, int64_t end, bufferlist& bl, const DoutPrefixProvider* dpp, optional_yield y);

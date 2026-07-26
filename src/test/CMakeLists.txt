@@ -315,6 +315,7 @@ add_dependencies(ceph_test_librgw_file
   ceph_test_librgw_file_rename
   ceph_test_librgw_file_nfsns
   ceph_test_librgw_file_aw
+  ceph_test_librgw_file_write2
   ceph_test_librgw_file_chunksim
   ceph_test_librgw_file_marker)
 
@@ -393,6 +394,20 @@ target_link_libraries(ceph_test_librgw_file_aw
   ${ALLOC_LIBS}
   )
 install(TARGETS ceph_test_librgw_file_aw DESTINATION ${CMAKE_INSTALL_BINDIR})
+
+# ceph_test_librgw_file_write2 (nfs write transaction [atomic write] tests)
+add_executable(ceph_test_librgw_file_write2
+  librgw_file_write2.cc
+  )
+target_link_libraries(ceph_test_librgw_file_write2
+  rgw
+  librados
+  ceph-common
+  ${UNITTEST_LIBS}
+  ${EXTRALIBS}
+  ${ALLOC_LIBS}
+  )
+install(TARGETS ceph_test_librgw_file_write2 DESTINATION ${CMAKE_INSTALL_BINDIR})
 
 # ceph_test_librgw_file_marker (READDIR with string and uint64 offsets)
 add_executable(ceph_test_librgw_file_marker

@@ -27,9 +27,8 @@ extern "C" {
 #endif
 
 #define LIBRGW_FILE_VER_MAJOR 1
-#define LIBRGW_FILE_VER_MINOR 2
-#define LIBRGW_FILE_VER_EXTRA 1 /* version number needs to advance to
-				 * match change in rgw_raddir2 signature */
+#define LIBRGW_FILE_VER_MINOR 3 /* adding rgw_open2 and friends */
+#define LIBRGW_FILE_VER_EXTRA 1
 
 #define LIBRGW_FILE_VERSION(maj, min, extra) ((maj << 16) + (min << 8) + extra)
 #define LIBRGW_FILE_VERSION_CODE LIBRGW_FILE_VERSION(LIBRGW_FILE_VER_MAJOR, LIBRGW_FILE_VER_MINOR, LIBRGW_FILE_VER_EXTRA)
@@ -284,8 +283,12 @@ int rgw_truncate(struct rgw_fs *rgw_fs,
 #define RGW_OPEN_FLAG_V3           0x0002 /* ops have v3 semantics */
 #define RGW_OPEN_FLAG_STATELESS    0x0002 /* alias it */
 
-int rgw_open(struct rgw_fs *rgw_fs, struct rgw_file_handle *parent_fh,
+int rgw_open(struct rgw_fs *rgw_fs, struct rgw_file_handle *fh,
 	     uint32_t posix_flags, uint32_t flags);
+
+int rgw_open2(struct rgw_fs* rgw_fs, struct rgw_file_handle* fh,
+              uint32_t posix_flags,
+              uint32_t flags);
 
 /*
    close file

@@ -37,6 +37,7 @@ namespace rgw { namespace sal {
 class POSIXDriver;
 class POSIXBucket;
 class POSIXObject;
+class POSIXFSIOObject;
 
 using DeleteResult = rgw::sal::Object::DeleteOp::Result;
 
@@ -530,6 +531,8 @@ public:
     use_lc_thread = _use_lc_thread;
     return *this;
   }
+
+  bool have_fsio() const override { return true; }
 
   virtual int initialize(CephContext *cct, const DoutPrefixProvider *dpp);
   virtual const std::string get_name() const override { return "posix"; }
@@ -1156,6 +1159,8 @@ public:
 			 bool* truncated, list_parts_each_t&& each_func,
 			 optional_yield y) override;
 
+  FSIOResult get_fsio_handle(const DoutPrefixProvider* dpp) override;
+
   bool is_sync_completed(const DoutPrefixProvider* dpp, optional_yield y,
                          const ceph::real_time& obj_mtime) override;
   virtual int load_obj_state(const DoutPrefixProvider* dpp, optional_yield y, bool follow_olh = true) override;
@@ -1230,6 +1235,24 @@ public:
   int make_ent(posix::ObjectType type);
   bool versioned() { return bucket->versioned(); }
   DeleteResult get_result() {return del_result;}
+
+  class POSIXFSIOObject : public FSIOObject {
+  private:
+    std::unique_ptr<Object> object;
+    std::unique_ptr<posix::File> target; // XXX can work after cow clone
+
+    friend class POSIXObject;
+
+  protected:
+    POSIXFSIOObject() {}
+  public:
+    virtual int64_t pread(int64_t ofs, int64_t len, uint32_t flags) override;
+    virtual int64_t pwrite(int64_t ofs, int64_t len, uint32_t flags) override;
+    virtual int commit(uint32_t flags) override;
+    virtual int close(uint32_t flags) override;
+
+    virtual ~POSIXFSIOObject() override {}
+  }; /* POSIXFsioobject */
 
 protected:
   int read(int64_t ofs, int64_t end, bufferlist& bl, const DoutPrefixProvider* dpp, optional_yield y);

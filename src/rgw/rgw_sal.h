@@ -312,6 +312,8 @@ class Driver {
     Driver() {}
     virtual ~Driver() = default;
 
+    virtual bool have_fsio() const { return false; } /* Supports POSIX-style positional i/o */
+
     /** Post-creation initialization of driver */
     virtual int initialize(CephContext *cct, const DoutPrefixProvider *dpp) = 0;
     /** Name of this driver provider (e.g., "rados") */
@@ -1132,7 +1134,26 @@ class Bucket {
  * is written to, it is replaced, and the old data is not accessible.
  */
 class Object {
-  public:
+public:
+
+  /**
+   * A handle exposing a posix-like, mutable i/o view on an Object
+   */
+    class FSIOObject {
+    protected:
+      // XXX object handle?
+    public:
+      static constexpr uint32_t FLAG_NONE = 0x0000;
+
+      virtual int64_t pread(int64_t ofs, int64_t len, uint32_t flags) = 0;
+      virtual int64_t pwrite(int64_t ofs, int64_t len, uint32_t flags) = 0;
+      virtual int commit(uint32_t flags) = 0;
+      virtual int close(uint32_t flags) = 0;
+
+      FSIOObject() {}
+      virtual ~FSIOObject() {}
+    }; /* FSIOobject */
+
 
     /**
      * @brief Read operation on an Object
@@ -1278,6 +1299,10 @@ class Object {
     virtual bool empty() const = 0;
     /** Get the name of this object */
     virtual const std::string &get_name() const = 0;
+
+    /** Get a fsio view on an object or object prototype */
+    using FSIOResult = std::tuple<int, std::unique_ptr<FSIOObject>>;
+    virtual FSIOResult get_fsio_handle(const DoutPrefixProvider* dpp) = 0;
 
     /** Load the object state for this object. */
     virtual int load_obj_state(const DoutPrefixProvider* dpp, optional_yield y, bool follow_olh = true) = 0;
