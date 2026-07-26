@@ -4249,6 +4249,53 @@ int POSIXObject::list_parts(const DoutPrefixProvider* dpp, CephContext* cct,
   return 0;
 }
 
+Object::FSIOResult POSIXObject::get_fsio_handle(const DoutPrefixProvider* dpp)
+{
+  int ret{0};
+  const auto& dir = ent->get_parent();
+#if 0 /* XXXX this is going away */
+  const auto& shadow = dir->get_shadow(dpp, true /* create */);
+#endif
+  std::unique_ptr<POSIXFSIOObject> hdl{new POSIXFSIOObject()};
+  hdl->object = clone();
+
+  // TODO: finish :)
+  /* XXX we need handles to a source and target--for now just a target FSEnt
+   * open for writing */
+  std::string target_fname = gen_rand_instance_name();
+
+  hdl->target = std::make_unique<File>(target_fname, dir, driver->ctx());
+  ret = hdl->target->open(dpp);
+
+  return FSIOResult {0, std::move(hdl)};
+} /* get_fsio_handle */
+
+int64_t POSIXObject::POSIXFSIOObject::pread(int64_t ofs, int64_t len, uint32_t flags)
+{
+  int64_t nread{0};
+
+  return nread;
+}
+
+int64_t POSIXObject::POSIXFSIOObject::pwrite(int64_t ofs, int64_t len, uint32_t flags)
+{
+  int64_t nwr{0};
+
+  return nwr;
+}
+
+int POSIXObject::POSIXFSIOObject::commit(uint32_t flags)
+{
+  /* TODO: implement */
+  return 0;
+}
+
+int POSIXObject::POSIXFSIOObject::close(uint32_t flags)
+{
+  /* TODO: implement */
+  return 0;
+}
+
 bool POSIXObject::is_sync_completed(const DoutPrefixProvider* dpp, optional_yield y,
                                     const ceph::real_time& obj_mtime)
 {
