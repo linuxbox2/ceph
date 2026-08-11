@@ -59,6 +59,21 @@ options:
   services:
   - rgw
   with_legacy: true
+- name: rgw_debug_skip_put_md5
+  type: bool
+  level: dev
+  desc: Skip MD5 hashing of PutObject/UploadPart bodies and return a placeholder
+    ETag instead. FOR BENCHMARKING ONLY.
+  long_desc: When enabled, RGW does not compute the content MD5 used for ETag on
+    ordinary object/part uploads, trading away ETag-based integrity semantics
+    (conditional requests, client-side ETag==MD5 checks, multisite/lifecycle
+    consumers) for reduced CPU cost during PUT. Never enable in production.
+  default: false
+  services:
+  - rgw
+  flags:
+  - runtime
+  with_legacy: true
 - name: rgw_parquet_buffer_size
   type: size
   level: advanced

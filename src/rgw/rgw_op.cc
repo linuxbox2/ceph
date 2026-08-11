@@ -4713,7 +4713,10 @@ void RGWPutObj::execute(optional_yield y)
 
   auto counters = rgw::op_counters::get(s);
 
-  bool need_calc_md5 = (dlo_manifest == NULL) && (slo_info == NULL);
+  // FOR BENCHMARKING ONLY: skips ETag/MD5 computation on ordinary PUT/UploadPart
+  // bodies, trading away ETag integrity semantics for reduced PUT CPU cost.
+  const bool skip_md5 = s->cct->_conf->rgw_debug_skip_put_md5;
+  bool need_calc_md5 = (dlo_manifest == NULL) && (slo_info == NULL) && !skip_md5;
   rgw::op_counters::inc(counters, l_rgw_op_put_obj, 1);
 
   // report latency on return
@@ -4739,7 +4742,13 @@ void RGWPutObj::execute(optional_yield y)
   }
 
   if (supplied_md5_b64) {
-    need_calc_md5 = true;
+    if (skip_md5) {
+      ldpp_dout(this, 5) << "WARNING: rgw_debug_skip_put_md5 is enabled; "
+          "ignoring client-supplied Content-MD5 and skipping verification"
+          << dendl;
+    } else {
+      need_calc_md5 = true;
+    }
 
     ldpp_dout(this, 15) << "supplied_md5_b64=" << supplied_md5_b64 << dendl;
     op_ret = ceph_unarmor(supplied_md5_bin, &supplied_md5_bin[CEPH_CRYPTO_MD5_DIGESTSIZE + 1],
@@ -5039,7 +5048,9 @@ void RGWPutObj::execute(optional_yield y)
     return;
   }
 
-  hash.Final(m);
+  if (!skip_md5) {
+    hash.Final(m);
+  }
 
   if (compressor && compressor->is_compressed()) {
     bufferlist tmp;
@@ -5068,11 +5079,18 @@ void RGWPutObj::execute(optional_yield y)
     }
   }
 
-  buf_to_hex(m, std::back_inserter(calc_md5));
+  if (skip_md5) {
+    // Fixed placeholder ETag: must stay CEPH_CRYPTO_MD5_DIGESTSIZE*2 hex chars
+    // so downstream hex_to_buf() calls (e.g. multipart-complete composite ETag)
+    // keep working.
+    calc_md5.assign(CEPH_CRYPTO_MD5_DIGESTSIZE * 2, '0');
+  } else {
+    buf_to_hex(m, std::back_inserter(calc_md5));
+  }
 
   etag = calc_md5;
 
-  if (supplied_md5_b64 && (calc_md5 != supplied_md5)) {
+  if (!skip_md5 && supplied_md5_b64 && (calc_md5 != supplied_md5)) {
     op_ret = -ERR_BAD_DIGEST;
     return;
   }

@@ -124,6 +124,16 @@ int main(int argc, char *argv[])
   mutex.unlock();
 
   common_init_finish(g_ceph_context);
+
+  if (g_ceph_context->_conf->rgw_debug_skip_put_md5) {
+    derr << "WARNING: rgw_debug_skip_put_md5 is enabled -- ETag/MD5 "
+            "computation on PutObject/UploadPart is disabled. This is for "
+            "benchmarking ONLY and must never be used in production (it "
+            "breaks ETag integrity semantics: conditional requests, "
+            "client-side ETag==MD5 checks, multisite/lifecycle consumers)."
+         << dendl;
+  }
+
   init_async_signal_handler();
 
   /* XXXX check locations thru sighandler_alrm */
