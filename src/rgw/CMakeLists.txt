@@ -337,6 +337,11 @@ if(WITH_RADOSGW_NSFS)
   list(APPEND librgw_driver_srcs ${librgw_nsfs_srcs})
   list(APPEND librgw_driver_standalone_srcs ${librgw_nsfs_srcs})
 endif()
+if(WITH_RADOSGW_POSIX OR WITH_RADOSGW_NSFS)
+  # Shared by posix and nsfs; compile once to avoid duplicate symbols.
+  list(APPEND librgw_driver_srcs driver/posix/posix_io_uring.cc)
+  list(APPEND librgw_driver_standalone_srcs driver/posix/posix_io_uring.cc)
+endif()
 if(WITH_RADOSGW_D4N)
   list(APPEND librgw_driver_srcs ${librgw_d4n_srcs})
 endif()
@@ -452,6 +457,10 @@ if(WITH_JAEGER)
   target_link_libraries(rgw_common PUBLIC jaeger_base)
 endif()
 
+if(WITH_LIBURING AND (WITH_RADOSGW_POSIX OR WITH_RADOSGW_NSFS))
+  target_link_libraries(rgw_common PRIVATE uring::uring)
+endif()
+
 if(WITH_RADOSGW_RADOS)
   target_link_libraries(rgw_common PRIVATE
 	  cls_2pc_queue_client
@@ -557,6 +566,10 @@ if(WITH_RADOSGW_STANDALONE)
   if(WITH_JAEGER)
     add_dependencies(rgw_common_standalone jaeger_base)
     target_link_libraries(rgw_common_standalone PUBLIC jaeger_base)
+  endif()
+
+  if(WITH_LIBURING AND (WITH_RADOSGW_POSIX OR WITH_RADOSGW_NSFS))
+    target_link_libraries(rgw_common_standalone PRIVATE uring::uring)
   endif()
 endif()
 
