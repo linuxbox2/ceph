@@ -4300,17 +4300,15 @@ int NSFSObject::copy_object(const ACLOwner& owner,
   const auto& dbinfo = db->get_info();
   bool dest_versioned = dbinfo.versioned();
   bool dest_ver_enabled = dbinfo.versioning_enabled();
-  std::string demoted_ver_id;
-  bool did_demote = false;
+  DemoteResult demote;
   std::unique_ptr<VersionLockHandle> vlock;
 
   /* versioned copy: demote existing dest current to .versions/
    * (includes self-copy — S3 requires a new version even when
    * source == dest with MetadataDirective=REPLACE) */
   if (dest_versioned) {
-    /* stat destination to find existing current version */
     dobj->ent.reset();
-    int dret = dobj->stat(dpp);
+    (void)dobj->stat(dpp);
     nsfs::FSEnt* dest_ent = dobj->get_fsent();
 
     int dest_parent_fd = -1;
@@ -4329,58 +4327,11 @@ int NSFSObject::copy_object(const ACLOwner& owner,
       vlock = driver->get_fs_strategy()->version_lock(
         dpp, open_versions_lockfile(dest_parent_fd));
 
-      int vfd = open_versions_dir(dest_parent_fd);
-      if (vfd >= 0) {
-        if (!dest_ver_enabled) {
-          std::string null_name = nsfs_ver_entry(dest_leaf, NULL_VERSION_ID);
-          ::unlinkat(vfd, null_name.c_str(), 0);
-        }
-
-        /* re-stat under lock for fresh state */
-        struct statx cur_stx;
-        if (dret == 0 && dest_ent && dest_ent->exists() &&
-            statx(dest_parent_fd, dest_leaf.c_str(),
-                  AT_SYMLINK_NOFOLLOW, STATX_ALL, &cur_stx) == 0) {
-          bool cur_is_null = false;
-          {
-            int chk_fd = ::openat(dest_parent_fd, dest_leaf.c_str(), O_RDONLY);
-            if (chk_fd >= 0) {
-              cur_is_null = is_null_version_fd(chk_fd);
-              ::close(chk_fd);
-            }
-          }
-          ldpp_dout(dpp, 20) << "copy_file_data: ver_enabled="
-            << dest_ver_enabled << " cur_is_null=" << cur_is_null
-            << " will_demote=" << !(!dest_ver_enabled && cur_is_null)
-            << dendl;
-          if (!(!dest_ver_enabled && cur_is_null)) {
-            std::string cur_ver_id = cur_is_null
-              ? NULL_VERSION_ID
-              : nsfs_version_id_from_statx(cur_stx);
-            std::string ver_name = nsfs_ver_entry(dest_leaf, cur_ver_id);
-
-            SafeResult sr = driver->get_fs_strategy()->safe_link(
-              dpp, dest_parent_fd, dest_leaf,
-              vfd, ver_name,
-              statx_mtime_ns(cur_stx), cur_stx.stx_ino);
-            if (sr == SafeResult::OK) {
-              int demoted_fd = ::openat(vfd, ver_name.c_str(), O_RDONLY);
-              if (demoted_fd >= 0) {
-                auto now_ms = std::to_string(
-                  std::chrono::duration_cast<std::chrono::milliseconds>(
-                    std::chrono::system_clock::now().time_since_epoch()).count());
-                std::string ts_x =
-                  NSFS_XATTR_PREFIX + RGW_NSFS_ATTR_NON_CURRENT_TS;
-                ::fsetxattr(demoted_fd, ts_x.c_str(),
-                            now_ms.c_str(), now_ms.size(), 0);
-                ::close(demoted_fd);
-              }
-              demoted_ver_id = cur_ver_id;
-              did_demote = true;
-            }
-          }
-        }
-        ::close(vfd);
+      int dret2 = demote_current_version(dpp, driver->get_fs_strategy(),
+					 dest_parent_fd, dest_leaf,
+					 dest_ver_enabled, demote);
+      if (dret2 < 0) {
+        return dret2;
       }
     }
   }
@@ -4395,7 +4346,7 @@ int NSFSObject::copy_object(const ACLOwner& owner,
                           << dendl;
         return ret;
     }
-  } else if (did_demote && ent) {
+  } else if (demote.did_demote && ent) {
     rgw_obj_key dst_key = dobj->get_key();
     std::vector<std::unique_ptr<nsfs::Directory>> dst_chain;
     nsfs::Directory* dst_leaf_dir = nullptr;
@@ -4505,15 +4456,15 @@ int NSFSObject::copy_object(const ACLOwner& owner,
     auto* bcache = driver->get_bucket_cache();
     std::string obj_name = dobj->get_key().get_index_key_name();
 
-    if (did_demote) {
+    if (demote.did_demote) {
       cls_rgw_obj_key old_key;
       old_key.name = obj_name;
-      old_key.instance = demoted_ver_id;
+      old_key.instance = demote.demoted_ver_id;
       bcache->remove_entry(dpp, db->get_name(), old_key);
 
       rgw_bucket_dir_entry dem_bde{};
       dem_bde.key.name = obj_name;
-      dem_bde.key.instance = demoted_ver_id;
+      dem_bde.key.instance = demote.demoted_ver_id;
       dem_bde.ver.pool = 1;
       dem_bde.ver.epoch = 1;
       dem_bde.exists = true;
@@ -6974,76 +6925,24 @@ int NSFSMultipartUpload::complete(const DoutPrefixProvider *dpp,
     }
   }
 
-  bool did_demote = false;
-  std::string demoted_ver_id;
+  DemoteResult demote;
 
-  /* versioned: demote current version before publishing, with lock */
   if (versioned && leaf_fd >= 0) {
-    int vfd = open_versions_dir(leaf_fd);
-    if (vfd >= 0) {
-      auto vlock = driver->get_fs_strategy()->version_lock(
-        dpp, open_versions_lockfile(leaf_fd));
+    auto vlock = driver->get_fs_strategy()->version_lock(
+      dpp, open_versions_lockfile(leaf_fd));
 
-      if (!ver_enabled) {
-        std::string null_name = nsfs_ver_entry(leaf_name, NULL_VERSION_ID);
-        ::unlinkat(vfd, null_name.c_str(), 0);
-      }
-
-      struct statx cur_stx;
-      if (statx(leaf_fd, leaf_name.c_str(), AT_SYMLINK_NOFOLLOW,
-                STATX_ALL, &cur_stx) == 0) {
-        bool cur_is_null = false;
-        {
-          int chk_fd = ::openat(leaf_fd, leaf_name.c_str(), O_RDONLY);
-          if (chk_fd >= 0) {
-            cur_is_null = is_null_version_fd(chk_fd);
-            ::close(chk_fd);
-          }
-        }
-        if (!(!ver_enabled && cur_is_null)) {
-          std::string cur_ver_id = cur_is_null
-            ? NULL_VERSION_ID
-            : nsfs_version_id_from_statx(cur_stx);
-          std::string ver_name = nsfs_ver_entry(leaf_name, cur_ver_id);
-
-          SafeResult sr = driver->get_fs_strategy()->safe_link(
-                                    dpp, leaf_fd, leaf_name, vfd, ver_name,
-                                    statx_mtime_ns(cur_stx), cur_stx.stx_ino);
-          if (sr == SafeResult::OK) {
-            int demoted_fd = ::openat(vfd, ver_name.c_str(), O_RDONLY);
-            if (demoted_fd >= 0) {
-              auto now_ms = std::to_string(
-                std::chrono::duration_cast<std::chrono::milliseconds>(
-                  std::chrono::system_clock::now().time_since_epoch()).count());
-              std::string ts_x =
-                NSFS_XATTR_PREFIX + RGW_NSFS_ATTR_NON_CURRENT_TS;
-              ::fsetxattr(demoted_fd, ts_x.c_str(),
-                          now_ms.c_str(), now_ms.size(), 0);
-              ::close(demoted_fd);
-            }
-            demoted_ver_id = cur_ver_id;
-            did_demote = true;
-          } else if (sr == SafeResult::MISMATCH && cur_is_null) {
-            /* null version already demoted */
-          } else if (sr != SafeResult::OK) {
-            ldpp_dout(dpp, 0) << "ERROR: versioned MPU demote failed for "
-              << leaf_name << " sr=" << (int)sr << dendl;
-            ::close(vfd);
-            return -ERR_INTERNAL_ERROR;
-          }
-        }
-      }
-
-      ret = renameat(staging_fd, assembled_name.c_str(),
-                     leaf_fd, leaf_name.c_str());
-      ::close(vfd);
-    } else {
-      ret = renameat(staging_fd, assembled_name.c_str(),
-                     leaf_fd, leaf_name.c_str());
+    int dret = demote_current_version(dpp, driver->get_fs_strategy(),
+				      leaf_fd, leaf_name,
+				      ver_enabled, demote);
+    if (dret < 0) {
+      return dret;
     }
+
+    ret = renameat(staging_fd, assembled_name.c_str(),
+		   leaf_fd, leaf_name.c_str());
   } else {
     ret = renameat(staging_fd, assembled_name.c_str(),
-                   leaf_fd, leaf_name.c_str());
+		   leaf_fd, leaf_name.c_str());
   }
 
   if (ret < 0) {
@@ -7072,15 +6971,15 @@ int NSFSMultipartUpload::complete(const DoutPrefixProvider *dpp,
       auto* bcache = driver->get_bucket_cache();
       std::string obj_name = target_obj->get_key().get_index_key_name();
 
-      if (did_demote) {
+      if (demote.did_demote) {
         cls_rgw_obj_key old_key;
         old_key.name = obj_name;
-        old_key.instance = demoted_ver_id;
+        old_key.instance = demote.demoted_ver_id;
         bcache->remove_entry(dpp, pb->get_name(), old_key);
 
         rgw_bucket_dir_entry dem_bde{};
         dem_bde.key.name = obj_name;
-        dem_bde.key.instance = demoted_ver_id;
+        dem_bde.key.instance = demote.demoted_ver_id;
         dem_bde.ver.pool = 1;
         dem_bde.ver.epoch = 1;
         dem_bde.exists = true;
@@ -7485,15 +7384,13 @@ int NSFSAtomicWriter::complete(size_t accounted_size, const std::string& etag,
   const auto& binfo = b->get_info();
   bool versioned = binfo.versioned();
   bool ver_enabled = binfo.versioning_enabled();
-  bool did_demote = false;
-  std::string demoted_ver_id;
+  DemoteResult demote;
 
   /* versioned PUT: demote current version to .versions/ before publishing */
   if (versioned) {
     nsfs::Directory* parent = obj->get_fsent()
       ? obj->get_fsent()->get_parent() : nullptr;
     int parent_fd = -1;
-    std::string cur_leaf;
 
     if (parent) {
       parent_fd = parent->get_fd();
@@ -7501,74 +7398,21 @@ int NSFSAtomicWriter::complete(size_t accounted_size, const std::string& etag,
         parent->open(dpp);
         parent_fd = parent->get_fd();
       }
-      cur_leaf = obj->get_fsent()->get_name();
     }
 
     if (parent_fd >= 0) {
-      int vfd = open_versions_dir(parent_fd);
-      if (vfd >= 0) {
-        auto vlock = driver->get_fs_strategy()->version_lock(
-          dpp, open_versions_lockfile(parent_fd));
+      auto vlock = driver->get_fs_strategy()->version_lock(
+        dpp, open_versions_lockfile(parent_fd));
 
-        /* in suspended mode, remove any existing _null from .versions/ */
-        if (!ver_enabled) {
-          std::string null_name = nsfs_ver_entry(cur_leaf, NULL_VERSION_ID);
-          ::unlinkat(vfd, null_name.c_str(), 0);
-        }
-
-        /* demote current under lock — fresh stat for accurate state */
-        struct statx cur_stx;
-        if (statx(parent_fd, cur_leaf.c_str(), AT_SYMLINK_NOFOLLOW,
-                  STATX_ALL, &cur_stx) == 0) {
-          bool cur_is_null = false;
-          {
-            int chk_fd = ::openat(parent_fd, cur_leaf.c_str(), O_RDONLY);
-            if (chk_fd >= 0) {
-              cur_is_null = is_null_version_fd(chk_fd);
-              ::close(chk_fd);
-            }
-          }
-          if (!(!ver_enabled && cur_is_null)) {
-            std::string cur_ver_id = cur_is_null
-              ? NULL_VERSION_ID
-              : nsfs_version_id_from_statx(cur_stx);
-            std::string ver_name = nsfs_ver_entry(cur_leaf, cur_ver_id);
-
-            SafeResult sr = driver->get_fs_strategy()->safe_link(
-                                      dpp, parent_fd, cur_leaf,
-                                      vfd, ver_name,
-                                      statx_mtime_ns(cur_stx),
-                                      cur_stx.stx_ino);
-            if (sr == SafeResult::OK) {
-              int demoted_fd = ::openat(vfd, ver_name.c_str(), O_RDONLY);
-              if (demoted_fd >= 0) {
-                auto now_ms = std::to_string(
-                  std::chrono::duration_cast<std::chrono::milliseconds>(
-                    std::chrono::system_clock::now().time_since_epoch()).count());
-                std::string ts_x =
-                  NSFS_XATTR_PREFIX + RGW_NSFS_ATTR_NON_CURRENT_TS;
-                ::fsetxattr(demoted_fd, ts_x.c_str(),
-                            now_ms.c_str(), now_ms.size(), 0);
-                ::close(demoted_fd);
-              }
-              demoted_ver_id = cur_ver_id;
-              did_demote = true;
-            } else if (sr == SafeResult::MISMATCH && cur_is_null) {
-              /* null version already demoted by a prior writer */
-            } else if (sr != SafeResult::OK) {
-              ldpp_dout(dpp, 0) << "ERROR: versioned PUT demote failed for "
-                << cur_leaf << " sr=" << (int)sr << dendl;
-              ::close(vfd);
-              return -ERR_INTERNAL_ERROR;
-            }
-          }
-        }
-
-        ret = obj->link_temp_file(rctx.dpp, rctx.y);
-        ::close(vfd);
-      } else {
-        ret = obj->link_temp_file(rctx.dpp, rctx.y);
+      int dret = demote_current_version(dpp, driver->get_fs_strategy(),
+					parent_fd,
+					obj->get_fsent()->get_name(),
+					ver_enabled, demote);
+      if (dret < 0) {
+        return dret;
       }
+
+      ret = obj->link_temp_file(rctx.dpp, rctx.y);
     } else {
       ret = obj->link_temp_file(rctx.dpp, rctx.y);
     }
@@ -7585,18 +7429,18 @@ int NSFSAtomicWriter::complete(size_t accounted_size, const std::string& etag,
   /* versioned PUT: link_temp_file already set the version_id xattr,
    * set_instance, and added the new current cache entry; handle the
    * demoted entry here */
-  if (versioned && did_demote) {
+  if (versioned && demote.did_demote) {
     auto* bcache = driver->get_bucket_cache();
     std::string obj_name = obj->get_key().get_index_key_name();
 
     cls_rgw_obj_key old_key;
     old_key.name = obj_name;
-    old_key.instance = demoted_ver_id;
+    old_key.instance = demote.demoted_ver_id;
     bcache->remove_entry(rctx.dpp, b->get_name(), old_key);
 
     rgw_bucket_dir_entry dem_bde{};
     dem_bde.key.name = obj_name;
-    dem_bde.key.instance = demoted_ver_id;
+    dem_bde.key.instance = demote.demoted_ver_id;
     dem_bde.ver.pool = 1;
     dem_bde.ver.epoch = 1;
     dem_bde.exists = true;
