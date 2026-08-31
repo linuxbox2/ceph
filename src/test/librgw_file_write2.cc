@@ -13,6 +13,7 @@
  *
  */
 
+#include <fcntl.h>
 #include <stdint.h>
 #include <tuple>
 #include <iostream>
@@ -58,6 +59,9 @@ namespace {
 
   std::string dolor =
     R"(Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat. Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla pariatur. Excepteur sint occaecat cupidatat non proident, sunt in culpa qui officia deserunt mollit anim id est laborum.)";
+
+  std::string lacrimae = dolor + dolor;
+  std::string dolorem = dolor + lorem;
 
   struct rgw_file_handle* bucket_fh = nullptr;
   struct rgw_file_handle* object_fh = nullptr;
@@ -134,6 +138,9 @@ TEST(LibRGW, PUT_OBJECT) {
 TEST(LibRGW, CLOSE1) {
   int ret = rgw_close(fs, object_fh, RGW_CLOSE_FLAG_NONE);
   ASSERT_EQ(ret, 0);
+  /* manual handle release */
+  ret = rgw_fh_rele(fs, object_fh, RGW_FH_RELE_FLAG_NONE);
+  ASSERT_EQ(ret, 0);
 }
 
 TEST(LibRGW, OPEN2)
@@ -141,6 +148,27 @@ TEST(LibRGW, OPEN2)
   int ret = rgw_open2(fs, object_fh, O_RDWR, RGW_OPEN_FLAG_NONE);
   ASSERT_EQ(ret, 0);
 }
+
+TEST(LibRGW, PUT_OBJECT2) {
+
+  struct iovec iov[2];
+  for (int ix : {0, 1}) {
+    iov[ix].iov_base = (void*) dolor.c_str();
+    iov[ix].iov_len = dolor.length();
+  }
+
+  uint64_t nb_written{0};
+  int ret = rgw_writev(fs, object_fh, iov, 2, 0 /* offset */, &nb_written,
+                       RGW_WRITE_FLAG_NONE);
+  ASSERT_EQ(ret, 0);
+  ASSERT_EQ(nb_written, 2 * dolor.length());
+
+  /* commit write transaction */
+  ret = rgw_close2(fs, object_fh, O_RDWR, RGW_CLOSE_FLAG_RELE); // close2
+  /* RELE releases handle reference */
+  ASSERT_EQ(ret, 0);
+}
+
 
 TEST(LibRGW, GET_OBJECT) {
   // XXXX do it

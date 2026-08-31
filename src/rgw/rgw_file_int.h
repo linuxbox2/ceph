@@ -701,6 +701,7 @@ namespace rgw {
                uint32_t flags);
 
     int close();
+    int close2(uint32_t posix_flags, uint32_t flags);
 
     void open_for_create() {
       lock_guard guard(mtx);

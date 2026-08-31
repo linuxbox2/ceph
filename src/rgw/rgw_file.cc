@@ -31,6 +31,7 @@
 #include "services/svc_zone.h"
 
 #include <atomic>
+#include <cstdint>
 
 #define dout_subsys ceph_subsys_rgw
 
@@ -1884,6 +1885,54 @@ namespace rgw {
     return rc;
   } /* RGWFileHandle::close */
 
+  int RGWFileHandle::close2(uint32_t posix_flags, uint32_t flags)
+  {
+    int rc{0};
+    uint32_t close_flags{rgw::sal::Object::FSIOObject::FLAG_NONE};
+
+    lock_guard guard(mtx); // XXX needed? probably
+
+    auto f = std::get_if<file>(&variant_type);
+    if (f) {
+
+      /* close/publish when the last write open is
+       * returned */
+      if (posix_flags & O_RDONLY) {
+        (f->read_opens)--;
+      }
+      if ((posix_flags & O_WRONLY) ||
+          (posix_flags & O_RDWR)) {
+        (f->write_opens)--;
+      }
+
+      if (f->write_opens == 0) {
+        if (f->read_opens == 0) {
+          // XXX need a new close flag for "keep open for reading */
+          abort(); /* XXXX */
+        } else {
+          if (unlikely(flags & RGW_CLOSE_FLAG_DETACH)) {
+            close_flags |= rgw::sal::Object::FSIOObject::FLAG_DETACH;
+          }
+          if (unlikely(flags & RGW_CLOSE_FLAG_DISCARD)) {
+            close_flags |= rgw::sal::Object::FSIOObject::FLAG_DISCARD;
+          }
+          rc = f->fsio_hdl->close(close_flags);
+        }
+      } else {
+        if (f->read_opens == 0) {
+          /* read_opens == 0 && write_opens == 0 */
+          close_flags |= rgw::sal::Object::FSIOObject::FLAG_DISCARD;
+          rc = f->fsio_hdl->close(close_flags);
+        }
+      }
+
+      flags &= ~FLAG_OPEN;
+      flags &= ~FLAG_STATELESS_OPEN;
+    }
+
+    return rc;
+  } /* RGWFileHandle::close2 */
+
   RGWFileHandle::file::~file()
   {
     delete write_req;
@@ -2604,12 +2653,10 @@ int rgw_open(struct rgw_fs *rgw_fs,
 /*
    open file, tracking open file handles
 */
-int
-rgw_open2(
-    struct rgw_fs* rgw_fs,
-    struct rgw_file_handle* fh,
-    uint32_t posix_flags,
-    uint32_t flags)
+int rgw_open2(struct rgw_fs* rgw_fs,
+              struct rgw_file_handle* fh,
+              uint32_t posix_flags,
+              uint32_t flags)
 {
   RGWFileHandle* rgw_fh = get_rgwfh(fh);
 
@@ -2625,13 +2672,28 @@ rgw_open2(
 int rgw_close(struct rgw_fs *rgw_fs,
 	      struct rgw_file_handle *fh, uint32_t flags)
 {
-  RGWLibFS *fs = static_cast<RGWLibFS*>(rgw_fs->fs_private);
   RGWFileHandle* rgw_fh = get_rgwfh(fh);
   int rc = rgw_fh->close(/* XXX */);
 
-  if (flags & RGW_CLOSE_FLAG_RELE)
+  if (flags & RGW_CLOSE_FLAG_RELE) {
+    auto fs = static_cast<RGWLibFS*>(rgw_fs->fs_private);
     fs->unref(rgw_fh);
+  }
 
+  return rc;
+}
+
+int rgw_close2(struct rgw_fs* rgw_fs, struct rgw_file_handle* fh,
+               uint32_t posix_flags /* openflags! */,
+               uint32_t flags)
+{
+  RGWFileHandle* rgw_fh = get_rgwfh(fh);
+  int rc = rgw_fh->close2(posix_flags, flags);
+
+  if (flags & RGW_CLOSE_FLAG_RELE) {
+    auto fs = static_cast<RGWLibFS*>(rgw_fs->fs_private);
+    fs->unref(rgw_fh);
+  }
   return rc;
 }
 
