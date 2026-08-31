@@ -1854,6 +1854,24 @@ namespace rgw {
 
   } /* RGWFileHandle::open2(...) */
 
+  int RGWFileHandle::readv(const struct iovec* iov, int iov_cnt,
+                           uint64_t offset,
+                           uint64_t* bytes_read,
+                           uint32_t flags)
+  {
+    auto  f = get_if<file>(&variant_type);
+    return f->fsio_hdl->preadv(iov, iov_cnt, offset, bytes_read, flags);
+  } /* readv */
+
+  int RGWFileHandle::writev(const struct iovec* iov, int iov_cnt,
+                            uint64_t offset,
+                            uint64_t* bytes_written,
+                            uint32_t flags)
+  {
+    auto  f = get_if<file>(&variant_type);
+    return f->fsio_hdl->pwritev(iov, iov_cnt, offset, bytes_written, flags);
+  } /* writev */
+
   int RGWFileHandle::close()
   {
     lock_guard guard(mtx);
@@ -2702,6 +2720,16 @@ int rgw_read(struct rgw_fs *rgw_fs,
   return fs->read(rgw_fh, offset, length, bytes_read, buffer, flags);
 }
 
+int rgw_readv(struct rgw_fs* rgw_fs, struct rgw_file_handle* fh,
+              const struct iovec* iov, int iov_cnt,
+              uint64_t offset, uint64_t* bytes_read,    
+              uint32_t flags)
+{
+    
+  RGWFileHandle* rgw_fh = get_rgwfh(fh);
+  return rgw_fh->readv(iov, iov_cnt, offset, bytes_read, flags);
+}
+
 /*
    read symbolic link
 */
@@ -2744,124 +2772,35 @@ int rgw_write(struct rgw_fs *rgw_fs,
   rc = rgw_fh->write(offset, length, bytes_written, buffer);
 
   return rc;
-}
+} /* rgw_write */
 
-/*
-   read data from file (vector)
-*/
-class RGWReadV
+int rgw_writev(struct rgw_fs* rgw_fs,
+               struct rgw_file_handle* fh,
+               const struct iovec* iov, int iov_cnt,
+               uint64_t offset, uint64_t* bytes_written,
+               uint32_t flags)
 {
-  buffer::list bl;
-  struct rgw_vio* vio;
-
-public:
-  RGWReadV(buffer::list& _bl, rgw_vio* _vio) : vio(_vio) {
-    bl = std::move(_bl);
-  }
-
-  struct rgw_vio* get_vio() { return vio; }
-
-  const auto& buffers() { return bl.buffers(); }
-
-  unsigned /* XXX */ length() { return bl.length(); }
-
-};
-
-void rgw_readv_rele(struct rgw_uio *uio, uint32_t flags)
-{
-  RGWReadV* rdv = static_cast<RGWReadV*>(uio->uio_p1);
-  rdv->~RGWReadV();
-  ::operator delete(rdv);
-}
-
-int rgw_readv(struct rgw_fs *rgw_fs,
-	      struct rgw_file_handle *fh, rgw_uio *uio, uint32_t flags)
-{
-#if 0 /* XXX */
-  CephContext* cct = static_cast<CephContext*>(rgw_fs->rgw);
-  RGWLibFS *fs = static_cast<RGWLibFS*>(rgw_fs->fs_private);
   RGWFileHandle* rgw_fh = get_rgwfh(fh);
+  int rc{0};
+
+  *bytes_written = 0;
 
   if (! rgw_fh->is_file())
-    return -EINVAL;
+    return -EISDIR;
 
-  int rc = 0;
-
-  buffer::list bl;
-  RGWGetObjRequest req(cct, fs->get_user(), rgw_fh->bucket_name(),
-		      rgw_fh->object_name(), uio->uio_offset, uio->uio_resid,
-		      bl);
-  req.do_hexdump = false;
-
-  rc = g_rgwlib->get_fe()->execute_req(&req);
-
-  if (! rc) {
-    RGWReadV* rdv = static_cast<RGWReadV*>(
-      ::operator new(sizeof(RGWReadV) +
-		    (bl.buffers().size() * sizeof(struct rgw_vio))));
-
-    (void) new (rdv)
-      RGWReadV(bl, reinterpret_cast<rgw_vio*>(rdv+sizeof(RGWReadV)));
-
-    uio->uio_p1 = rdv;
-    uio->uio_cnt = rdv->buffers().size();
-    uio->uio_resid = rdv->length();
-    uio->uio_vio = rdv->get_vio();
-    uio->uio_rele = rgw_readv_rele;
-
-    int ix = 0;
-    auto& buffers = rdv->buffers();
-    for (auto& bp : buffers) {
-      rgw_vio *vio = &(uio->uio_vio[ix]);
-      vio->vio_base = const_cast<char*>(bp.c_str());
-      vio->vio_len = bp.length();
-      vio->vio_u1 = nullptr;
-      vio->vio_p1 = nullptr;
-      ++ix;
-    }
+  if (! rgw_fh->is_open()) {
+    if (flags & RGW_OPEN_FLAG_V3) {
+      rc = rgw_fh->open(flags);
+      if (!! rc)
+	return rc;
+    } else
+      return -EPERM;
   }
 
-  return rc;
-#else
-  return 0;
-#endif
+  return rgw_fh->writev(iov, iov_cnt, offset, bytes_written, flags);
 }
 
-/*
-   write data to file (vector)
-*/
-int rgw_writev(struct rgw_fs *rgw_fs, struct rgw_file_handle *fh,
-	      rgw_uio *uio, uint32_t flags)
-{
 
-  // not supported - rest of function is ignored
-  return -ENOTSUP;
-
-  CephContext* cct = static_cast<CephContext*>(rgw_fs->rgw);
-  RGWLibFS *fs = static_cast<RGWLibFS*>(rgw_fs->fs_private);
-  RGWFileHandle* rgw_fh = get_rgwfh(fh);
-
-  if (! rgw_fh->is_file())
-    return -EINVAL;
-
-  buffer::list bl;
-  for (unsigned int ix = 0; ix < uio->uio_cnt; ++ix) {
-    rgw_vio *vio = &(uio->uio_vio[ix]);
-    bl.push_back(
-      buffer::create_static(vio->vio_len,
-			    static_cast<char*>(vio->vio_base)));
-  }
-
-  std::string oname = rgw_fh->relative_object_name();
-  RGWPutObjRequest req(cct, g_rgwlib->get_driver()->get_user(fs->get_user()->user_id),
-		       rgw_fh->bucket_name(), oname, bl);
-
-  int rc = g_rgwlib->get_fe()->execute_req(&req);
-
-  /* XXX update size (in request) */
-
-  return rc;
-}
 
 /*
    sync written data

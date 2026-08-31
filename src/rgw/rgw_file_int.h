@@ -691,6 +691,15 @@ namespace rgw {
     }
 
     int write_finish(uint32_t flags = FLAG_NONE);
+
+    int readv(const struct iovec* iov, int iov_cnt,
+              uint64_t offset, uint64_t* bytes_read,
+              uint32_t flags);
+
+    int writev(const struct iovec* iov, int iov_cnt,
+               uint64_t offset, uint64_t* bytes_written,
+               uint32_t flags);
+
     int close();
 
     void open_for_create() {

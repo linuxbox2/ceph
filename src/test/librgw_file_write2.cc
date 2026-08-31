@@ -138,8 +138,7 @@ TEST(LibRGW, CLOSE1) {
 
 TEST(LibRGW, OPEN2)
 {
-  int ret = rgw_open2(fs, object_fh, 0 /* posix flags */,
-                     RGW_OPEN_FLAG_NONE);
+  int ret = rgw_open2(fs, object_fh, O_RDWR, RGW_OPEN_FLAG_NONE);
   ASSERT_EQ(ret, 0);
 }
 

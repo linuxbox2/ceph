@@ -1149,10 +1149,12 @@ public:
       static constexpr uint32_t FLAG_DETACH =    0x0008;
       static constexpr uint32_t FLAG_DISCARD =   0x0010;
 
-      virtual int64_t preadv(const struct iovec* iov, int iovcnt,
-			     int64_t ofs, uint32_t flags) = 0;
-      virtual int64_t pwritev(const struct iovec* iov, int iovcnt,
-			      int64_t ofs, uint32_t flags) = 0;
+      virtual int preadv(const struct iovec* iov, int iovcnt,
+			  uint64_t ofs, uint64_t* bytes_read,
+			  uint32_t flags) = 0;
+      virtual int pwritev(const struct iovec* iov, int iovcnt,
+			   uint64_t ofs, uint64_t* bytes_written,
+			   uint32_t flags) = 0;
       virtual int commit(uint32_t flags) = 0;
       virtual int close(uint32_t flags) = 0;
 

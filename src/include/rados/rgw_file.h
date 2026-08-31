@@ -310,6 +310,11 @@ int rgw_read(struct rgw_fs *rgw_fs,
 	     size_t length, size_t *bytes_read, void *buffer,
 	     uint32_t flags);
 
+int rgw_readv(struct rgw_fs* rgw_fs, struct rgw_file_handle* fh,
+              const struct iovec* iov, int iov_cnt,
+              uint64_t offset, uint64_t* bytes_read,
+              uint32_t flags);
+
 /*
    read symbolic link
 */
@@ -330,41 +335,11 @@ int rgw_write(struct rgw_fs *rgw_fs,
 	      size_t length, size_t *bytes_written, void *buffer,
 	      uint32_t flags);
 
-#define RGW_UIO_NONE    0x0000
-#define RGW_UIO_GIFT    0x0001
-#define RGW_UIO_FREE    0x0002
-#define RGW_UIO_BUFQ    0x0004
-
-struct rgw_uio;
-typedef void (*rgw_uio_release)(struct rgw_uio *, uint32_t);
-
-/* buffer vector descriptors */
-struct rgw_vio {
-  void *vio_p1;
-  void *vio_u1;
-  void *vio_base;
-  int32_t vio_len;
-};
-  
-struct rgw_uio {
-  rgw_uio_release uio_rele;
-  void *uio_p1;
-  void *uio_u1;
-  uint64_t uio_offset;
-  uint64_t uio_resid;
-  uint32_t uio_cnt;
-  uint32_t uio_flags;
-  struct rgw_vio *uio_vio; /* appended vectors */
-};
-
-typedef struct rgw_uio rgw_uio;
-
-int rgw_readv(struct rgw_fs *rgw_fs,
-	      struct rgw_file_handle *fh, rgw_uio *uio, uint32_t flags);
-
-int rgw_writev(struct rgw_fs *rgw_fs,
-	       struct rgw_file_handle *fh, rgw_uio *uio, uint32_t flags);
-
+int rgw_writev(struct rgw_fs* rgw_fs,
+               struct rgw_file_handle* fh,
+               const struct iovec* iov, int iov_cnt,
+               uint64_t offset, uint64_t* bytes_written,
+               uint32_t flags);
 /*
    sync written data
 */

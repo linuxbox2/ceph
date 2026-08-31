@@ -4430,14 +4430,14 @@ Object::FSIOResult POSIXObject::get_fsio_handle(const DoutPrefixProvider* dpp,
   return FSIOResult{-ENOTSUP, nullptr};
 }
 
-int64_t POSIXObject::POSIXFSIOObject::preadv(const struct iovec*, int,
-					      int64_t, uint32_t)
+int POSIXObject::POSIXFSIOObject::preadv(const struct iovec*, int,
+					 uint64_t, uint64_t*, uint32_t)
 {
   return -ENOTSUP;
 }
 
-int64_t POSIXObject::POSIXFSIOObject::pwritev(const struct iovec*, int,
-					       int64_t, uint32_t)
+int POSIXObject::POSIXFSIOObject::pwritev(const struct iovec*, int,
+					   uint64_t, uint64_t*, uint32_t)
 {
   return -ENOTSUP;
 }

@@ -1161,10 +1161,12 @@ public:
      : src_obj(_obj), driver(_drv), dpp(_dpp), ephemeral(_ephemeral) {}
 
   public:
-    virtual int64_t preadv(const struct iovec* iov, int iovcnt,
-			   int64_t ofs, uint32_t flags) override;
-    virtual int64_t pwritev(const struct iovec* iov, int iovcnt,
-			    int64_t ofs, uint32_t flags) override;
+    virtual int preadv(const struct iovec* iov, int iovcnt,
+		       uint64_t ofs, uint64_t* bytes_read,
+		       uint32_t flags) override;
+    virtual int pwritev(const struct iovec* iov, int iovcnt,
+			uint64_t ofs, uint64_t* bytes_written,
+			uint32_t flags) override;
     virtual int commit(uint32_t flags) override;
     virtual int close(uint32_t flags) override;
 

@@ -4633,22 +4633,38 @@ Object::FSIOResult NSFSObject::get_fsio_handle(const DoutPrefixProvider* dpp,
   return FSIOResult{0, std::move(hdl)};
 } /* get_fsio_handle */
 
-int64_t NSFSObject::NSFSFSIOObject::preadv(const struct iovec* iov, int iovcnt,
-					    int64_t ofs, uint32_t flags)
+int NSFSObject::NSFSFSIOObject::preadv(const struct iovec* iov, int iovcnt,
+				       uint64_t ofs, uint64_t* bytes_read,
+				       uint32_t flags)
 {
   if (shadow_fd < 0) {
     return -EBADF;
   }
-  return ::preadv(shadow_fd, iov, iovcnt, ofs);
+  ssize_t ret = ::preadv(shadow_fd, iov, iovcnt, ofs);
+  if (ret < 0) {
+    return -errno;
+  }
+  if (bytes_read) {
+    *bytes_read = ret;
+  }
+  return 0;
 }
 
-int64_t NSFSObject::NSFSFSIOObject::pwritev(const struct iovec* iov, int iovcnt,
-					     int64_t ofs, uint32_t flags)
+int NSFSObject::NSFSFSIOObject::pwritev(const struct iovec* iov, int iovcnt,
+					uint64_t ofs, uint64_t* bytes_written,
+					uint32_t flags)
 {
   if (shadow_fd < 0) {
     return -EBADF;
   }
-  return ::pwritev(shadow_fd, iov, iovcnt, ofs);
+  ssize_t ret = ::pwritev(shadow_fd, iov, iovcnt, ofs);
+  if (ret < 0) {
+    return -errno;
+  }
+  if (bytes_written) {
+    *bytes_written = ret;
+  }
+  return 0;
 }
 
 int NSFSObject::NSFSFSIOObject::commit(uint32_t flags)
