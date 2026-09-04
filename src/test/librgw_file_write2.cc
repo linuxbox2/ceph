@@ -15,6 +15,7 @@
 
 #include <fcntl.h>
 #include <stdint.h>
+#include <memory>
 #include <tuple>
 #include <iostream>
 #include <vector>
@@ -65,6 +66,30 @@ namespace {
 
   struct rgw_file_handle* bucket_fh = nullptr;
   struct rgw_file_handle* object_fh = nullptr;
+
+  class Open2Helper {
+  public:
+    struct rgw_fs* fs{nullptr};
+    ;
+    struct rgw_file_handle* bucket_fh{nullptr};
+    struct rgw_file_handle* object_fh{nullptr};
+
+    Open2Helper(rgw_fs* _fs, rgw_file_handle* _bucket,
+                rgw_file_handle* _object) :
+      fs(_fs), bucket_fh(_bucket), object_fh(_object)
+    {}
+
+    rgw_open_fd get_open(uint32_t openflags, uint32_t flags)
+    {
+      int rc{0};
+      rgw_open_fd open_fd;
+      rc = rgw_open2(fs, object_fh, &open_fd, openflags, flags);
+      EXPECT_EQ(rc, 0);
+      return open_fd;
+    }
+  }; /* Open2helper */
+
+  std::unique_ptr<Open2Helper> o2h;
 
   typedef std::tuple<string,uint64_t, struct rgw_file_handle*> fid_type;
   std::vector<fid_type> fids;
@@ -145,11 +170,10 @@ TEST(LibRGW, CLOSE1) {
 
 TEST(LibRGW, OPEN2)
 {
-  int ret = rgw_open2(fs, object_fh, O_RDWR, RGW_OPEN_FLAG_NONE);
-  ASSERT_EQ(ret, 0);
+  o2h = std::make_unique<Open2Helper>(fs, bucket_fh, object_fh);
 }
 
-TEST(LibRGW, PUT_OBJECT2) {
+TEST(LibRGW, PUT_OBJECT2_ONE) {
 
   struct iovec iov[2];
   for (int ix : {0, 1}) {
@@ -157,18 +181,34 @@ TEST(LibRGW, PUT_OBJECT2) {
     iov[ix].iov_len = dolor.length();
   }
 
+  auto open1 = o2h->get_open(O_RDWR, RGW_OPEN_FLAG_NONE);
+
   uint64_t nb_written{0};
-  int ret = rgw_writev(fs, object_fh, iov, 2, 0 /* offset */, &nb_written,
+  int ret = rgw_writev(open1, iov, 2, 0 /* offset */, &nb_written,
                        RGW_WRITE_FLAG_NONE);
   ASSERT_EQ(ret, 0);
   ASSERT_EQ(nb_written, 2 * dolor.length());
 
+  /* read after write */
+  std::string dolor2;
+  char buf[256];
+  memset(buf, 0, 256);
+
+  struct iovec iov2[1];
+  iov2[0].iov_base = buf;
+  iov2[0].iov_len = 0;
+  uint64_t nb_read{0};
+
+  ret = rgw_readv(open1, iov2, 1, 18, &nb_read, RGW_READ_FLAG_NONE);
+  std::string val = "sit amet";
+  ASSERT_TRUE(nb_read == val.length());
+  std::string sic(buf, nb_read);
+  ASSERT_EQ(val, sic);
+
   /* commit write transaction */
-  ret = rgw_close2(fs, object_fh, O_RDWR, RGW_CLOSE_FLAG_RELE); // close2
-  /* RELE releases handle reference */
+  ret = rgw_close2(open1, RGW_CLOSE_FLAG_NONE); // not returning file handle!
   ASSERT_EQ(ret, 0);
 }
-
 
 TEST(LibRGW, GET_OBJECT) {
   // XXXX do it

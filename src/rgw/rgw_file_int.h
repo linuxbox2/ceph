@@ -9,10 +9,12 @@
 /* internal header */
 #include <cstdint>
 #include <memory>
+#include <fcntl.h>
 #include <string.h>
 #include <string_view>
 #include <sys/stat.h>
 #include <stdint.h>
+#include <sys/types.h>
 
 #include <atomic>
 #include <chrono>
@@ -218,9 +220,34 @@ namespace rgw {
   public:
     struct file {
 
+      std::atomic<int32_t> fd_next{2};
+
+      typedef bi::list_member_hook<link_mode> list_hook;
+
+      class Open {
+      public:
+        RGWFileHandle& fh;
+        list_hook file_open_hook;
+        uint32_t posix_flags;
+
+        Open(RGWFileHandle& _fh, uint32_t _posix_flags);
+        ~Open();
+
+        inline bool is_write_open()
+        {
+          return ((posix_flags & O_WRONLY) || (posix_flags & O_RDWR));
+        }
+      }; /* Open */
+
+      using open_list =
+          bi::list<Open, bi::member_hook<Open, bi::list_member_hook<link_mode>,
+                                         &Open::file_open_hook>>;
+      open_list opens;
+
       uint32_t read_opens{0};
       uint32_t write_opens{0};
-      uint32_t stateless_opens{0};
+
+      inline open_list::size_type open_count() { return opens.size(); }
 
       std::unique_ptr<rgw::sal::Object> sal_object;
       std::unique_ptr<sal::Object::FSIOObject> fsio_hdl;
@@ -670,8 +697,6 @@ namespace rgw {
     bool has_children() const;
 
     int open(uint32_t rgw_openflags);
-    int open2(uint32_t posix_flags,
-              uint32_t rgw_openflags);
 
     typedef std::variant<uint64_t*, const char*> readdir_offset;
 
@@ -687,21 +712,23 @@ namespace rgw {
        * expiration of the active write timer (NFS3).  In the
        * interim, the client may send an arbitrary number of COMMIT
        * operations which must return a success result */
+      /* XXXX clients will be able to read-after write consistently
+       * using new open2, close2, ...,  methods */
       return 0;
     }
 
     int write_finish(uint32_t flags = FLAG_NONE);
 
-    int readv(const struct iovec* iov, int iov_cnt,
-              uint64_t offset, uint64_t* bytes_read,
-              uint32_t flags);
+    int open2(file::Open** /* out */, uint32_t posix_flags,
+              uint32_t rgw_openflags);
+    int readv(file::Open* open_hdl, const struct iovec* iov, int iov_cnt,
+              uint64_t offset, uint64_t* bytes_read, uint32_t flags);
 
-    int writev(const struct iovec* iov, int iov_cnt,
-               uint64_t offset, uint64_t* bytes_written,
-               uint32_t flags);
+    int writev(file::Open* open_hdl, const struct iovec* iov, int iov_cnt,
+               uint64_t offset, uint64_t* bytes_written, uint32_t flags);
 
     int close();
-    int close2(uint32_t posix_flags, uint32_t flags);
+    int close2(file::Open* open_hdl, uint32_t flags);
 
     void open_for_create() {
       lock_guard guard(mtx);
@@ -852,6 +879,14 @@ namespace rgw {
 
   inline RGWFileHandle* get_rgwfh(struct rgw_file_handle* fh) {
     return static_cast<RGWFileHandle*>(fh->fh_private);
+  }
+
+  inline RGWFileHandle::file::Open* fd_to_open(rgw_open_fd fd) {
+    return static_cast<RGWFileHandle::file::Open*>(fd);
+  }
+
+  inline rgw_open_fd open_to_fd(RGWFileHandle::file::Open* open) {
+    return static_cast<rgw_open_fd>(open);
   }
 
   inline enum rgw_fh_type fh_type_of(uint32_t flags) {

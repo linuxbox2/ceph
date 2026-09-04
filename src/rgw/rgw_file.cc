@@ -1781,8 +1781,9 @@ namespace rgw {
     return -EPERM;
   } /*  RGWFileHandle::open */
 
-  int RGWFileHandle::open2(uint32_t posix_flags,
-                           uint32_t rgw_openflags) {
+  int RGWFileHandle::open2(file::Open** /* out */, uint32_t posix_flags,
+                           uint32_t rgw_openflags)
+  {
 
     /*
      * posixflags
@@ -1818,8 +1819,8 @@ namespace rgw {
       auto& object_name = get_name();
 
       RGWOpenRequest req(
-                         cct, g_rgwlib->get_driver()->get_user(fs->get_user()->user_id),
-                         bucket_name, object_name, 0 /* flags */);
+          cct, g_rgwlib->get_driver()->get_user(fs->get_user()->user_id),
+          bucket_name, object_name, 0 /* flags */);
 
       int rc = g_rgwlib->get_fe()->execute_req(&req);
       if (!rc) {
@@ -1835,6 +1836,10 @@ namespace rgw {
         }
       }
     } /* have fsio */
+
+    /* save on open list */
+    auto open = new file::Open(*this, posix_flags);
+    f->opens.push_back(*open);
 
     if (rgw_openflags & RGW_OPEN_FLAG_V3) {
       flags |= FLAG_STATELESS_OPEN;
@@ -1855,7 +1860,8 @@ namespace rgw {
 
   } /* RGWFileHandle::open2(...) */
 
-  int RGWFileHandle::readv(const struct iovec* iov, int iov_cnt,
+  int RGWFileHandle::readv(file::Open* open,
+                           const struct iovec* iov, int iov_cnt,
                            uint64_t offset,
                            uint64_t* bytes_read,
                            uint32_t flags)
@@ -1864,11 +1870,16 @@ namespace rgw {
     return f->fsio_hdl->preadv(iov, iov_cnt, offset, bytes_read, flags);
   } /* readv */
 
-  int RGWFileHandle::writev(const struct iovec* iov, int iov_cnt,
+  int RGWFileHandle::writev(file::Open* open,
+                            const struct iovec* iov, int iov_cnt,
                             uint64_t offset,
                             uint64_t* bytes_written,
                             uint32_t flags)
   {
+    if (!open->is_write_open()) {
+      return -EPERM;
+    }
+
     auto  f = get_if<file>(&variant_type);
     return f->fsio_hdl->pwritev(iov, iov_cnt, offset, bytes_written, flags);
   } /* writev */
@@ -1885,7 +1896,7 @@ namespace rgw {
     return rc;
   } /* RGWFileHandle::close */
 
-  int RGWFileHandle::close2(uint32_t posix_flags, uint32_t flags)
+  int RGWFileHandle::close2(file::Open* open, uint32_t flags)
   {
     int rc{0};
     uint32_t close_flags{rgw::sal::Object::FSIOObject::FLAG_NONE};
@@ -1897,11 +1908,11 @@ namespace rgw {
 
       /* close/publish when the last write open is
        * returned */
-      if (posix_flags & O_RDONLY) {
+      if (open->posix_flags & O_RDONLY) {
         (f->read_opens)--;
       }
-      if ((posix_flags & O_WRONLY) ||
-          (posix_flags & O_RDWR)) {
+      if ((open->posix_flags & O_WRONLY) ||
+          (open->posix_flags & O_RDWR)) {
         (f->write_opens)--;
       }
 
@@ -1926,12 +1937,30 @@ namespace rgw {
         }
       }
 
+      /* remove from opens list */
+      auto it = file::open_list::s_iterator_to(*open);
+      f->opens.erase(it);
+      delete(open);
+
       flags &= ~FLAG_OPEN;
       flags &= ~FLAG_STATELESS_OPEN;
     }
 
+    /* TODO remove and dispose handle */
+
     return rc;
   } /* RGWFileHandle::close2 */
+
+  RGWFileHandle::file::Open::Open(RGWFileHandle& _fh, uint32_t _posix_flags)
+    : fh(_fh), posix_flags(_posix_flags)
+  {
+    fh.get_fs()->ref(&fh);
+  }
+
+  RGWFileHandle::file::Open::~Open()
+  {
+    fh.get_fs()->unref(&fh);
+  }
 
   RGWFileHandle::file::~file()
   {
@@ -2653,17 +2682,19 @@ int rgw_open(struct rgw_fs *rgw_fs,
 /*
    open file, tracking open file handles
 */
-int rgw_open2(struct rgw_fs* rgw_fs,
-              struct rgw_file_handle* fh,
-              uint32_t posix_flags,
+int rgw_open2(struct rgw_fs* rgw_fs, struct rgw_file_handle* fh,
+              rgw_open_fd* open_fd /* OUT */, uint32_t posix_flags,
               uint32_t flags)
 {
   RGWFileHandle* rgw_fh = get_rgwfh(fh);
 
-  if (! rgw_fh->is_file())
+  if (!rgw_fh->is_file())
     return -EISDIR;
 
-  return rgw_fh->open2(posix_flags, flags);
+  RGWFileHandle::file::Open* open{nullptr};
+  auto rc = rgw_fh->open2(&open, posix_flags, flags);
+  *open_fd = open_to_fd(open);
+  return rc;
 }
 
 /*
@@ -2683,16 +2714,17 @@ int rgw_close(struct rgw_fs *rgw_fs,
   return rc;
 }
 
-int rgw_close2(struct rgw_fs* rgw_fs, struct rgw_file_handle* fh,
-               uint32_t posix_flags /* openflags! */,
-               uint32_t flags)
+int rgw_close2(rgw_open_fd open_fd, uint32_t flags)
 {
-  RGWFileHandle* rgw_fh = get_rgwfh(fh);
-  int rc = rgw_fh->close2(posix_flags, flags);
+  auto open = fd_to_open(open_fd);
+
+  auto& rgw_fh = open->fh;
+  auto fs = rgw_fh.get_fs();
+
+  int rc = rgw_fh.close2(open, flags);
 
   if (flags & RGW_CLOSE_FLAG_RELE) {
-    auto fs = static_cast<RGWLibFS*>(rgw_fs->fs_private);
-    fs->unref(rgw_fh);
+    fs->unref(&rgw_fh);
   }
   return rc;
 }
@@ -2782,14 +2814,13 @@ int rgw_read(struct rgw_fs *rgw_fs,
   return fs->read(rgw_fh, offset, length, bytes_read, buffer, flags);
 }
 
-int rgw_readv(struct rgw_fs* rgw_fs, struct rgw_file_handle* fh,
+int rgw_readv(rgw_open_fd open_fd,
               const struct iovec* iov, int iov_cnt,
               uint64_t offset, uint64_t* bytes_read,    
               uint32_t flags)
 {
-    
-  RGWFileHandle* rgw_fh = get_rgwfh(fh);
-  return rgw_fh->readv(iov, iov_cnt, offset, bytes_read, flags);
+  auto open = rgw::fd_to_open(open_fd);
+  return open->fh.readv(open, iov, iov_cnt, offset, bytes_read, flags);
 }
 
 /*
@@ -2836,13 +2867,13 @@ int rgw_write(struct rgw_fs *rgw_fs,
   return rc;
 } /* rgw_write */
 
-int rgw_writev(struct rgw_fs* rgw_fs,
-               struct rgw_file_handle* fh,
+int rgw_writev(rgw_open_fd open_fd,
                const struct iovec* iov, int iov_cnt,
                uint64_t offset, uint64_t* bytes_written,
                uint32_t flags)
 {
-  RGWFileHandle* rgw_fh = get_rgwfh(fh);
+  auto open = fd_to_open(open_fd);
+  auto rgw_fh = &(open->fh);
   int rc{0};
 
   *bytes_written = 0;
@@ -2852,14 +2883,14 @@ int rgw_writev(struct rgw_fs* rgw_fs,
 
   if (! rgw_fh->is_open()) {
     if (flags & RGW_OPEN_FLAG_V3) {
-      rc = rgw_fh->open(flags);
+      rc = rgw_fh->open(flags); // XXXX won't work!
       if (!! rc)
 	return rc;
     } else
       return -EPERM;
   }
 
-  return rgw_fh->writev(iov, iov_cnt, offset, bytes_written, flags);
+  return rgw_fh->writev(open, iov, iov_cnt, offset, bytes_written, flags);
 }
 
 

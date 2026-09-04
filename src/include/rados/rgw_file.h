@@ -286,7 +286,11 @@ int rgw_truncate(struct rgw_fs *rgw_fs,
 int rgw_open(struct rgw_fs *rgw_fs, struct rgw_file_handle *fh,
 	     uint32_t posix_flags, uint32_t flags);
 
+
+typedef void* rgw_open_fd;
+
 int rgw_open2(struct rgw_fs* rgw_fs, struct rgw_file_handle* fh,
+              rgw_open_fd* open_fd /* OUT */,
               uint32_t posix_flags,
               uint32_t flags);
 
@@ -302,9 +306,7 @@ int rgw_open2(struct rgw_fs* rgw_fs, struct rgw_file_handle* fh,
 int rgw_close(struct rgw_fs *rgw_fs, struct rgw_file_handle *fh,
 	      uint32_t flags);
 
-int rgw_close2(struct rgw_fs* rgw_fs, struct rgw_file_handle* fh,
-               uint32_t posix_flags /* openflags! */,
-               uint32_t flags);
+int rgw_close2(rgw_open_fd open_fd, uint32_t flags);
 
 /*
    read data from file
@@ -316,7 +318,7 @@ int rgw_read(struct rgw_fs *rgw_fs,
 	     size_t length, size_t *bytes_read, void *buffer,
 	     uint32_t flags);
 
-int rgw_readv(struct rgw_fs* rgw_fs, struct rgw_file_handle* fh,
+int rgw_readv(rgw_open_fd open_fd,
               const struct iovec* iov, int iov_cnt,
               uint64_t offset, uint64_t* bytes_read,
               uint32_t flags);
@@ -341,8 +343,7 @@ int rgw_write(struct rgw_fs *rgw_fs,
 	      size_t length, size_t *bytes_written, void *buffer,
 	      uint32_t flags);
 
-int rgw_writev(struct rgw_fs* rgw_fs,
-               struct rgw_file_handle* fh,
+int rgw_writev(rgw_open_fd open_fd,
                const struct iovec* iov, int iov_cnt,
                uint64_t offset, uint64_t* bytes_written,
                uint32_t flags);
