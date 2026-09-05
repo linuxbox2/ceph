@@ -1826,8 +1826,6 @@ namespace rgw {
 
       int rc = g_rgwlib->get_fe()->execute_req(&req);
       if (rc < 0) {
-        /* this should be trapping permission errors (-EPERM) */
-        rc = req.get_ret();
         return rc;
       } else {
         if (! f->fsio_hdl) {
@@ -1842,11 +1840,24 @@ namespace rgw {
           if (!get<0>(f_result)) {
             f->sal_object = state->object->clone();
             f->fsio_hdl = std::move(get<1>(f_result));
+          } else {
+            lsubdout(fs->get_context(), rgw, 0)
+              << __func__ << " " << object_name
+              << ": attempt to open FSIO handle failed rc=="
+              << std::get<0>(f_result)
+              << dendl;
+            return std::get<0>(f_result);
           }
         } else if (f->fsio_hdl->needs_reclone() &&
 		   ((posix_flags & O_WRONLY) || (posix_flags & O_RDWR))) {
-          f->fsio_hdl->reclone(
-	    rgw::sal::Object::FSIOObject::OPEN_FLAG_NONE);
+          rc = f->fsio_hdl->reclone(
+              rgw::sal::Object::FSIOObject::OPEN_FLAG_NONE);
+          if (!!rc) {
+            lsubdout(fs->get_context(), rgw, 0)
+              << __func__ << " " << object_name
+              << " failed to reclone for new write open" << dendl;
+            return rc;
+          }
         }
       }
     } /* have fsio */

@@ -4751,7 +4751,12 @@ int NSFSObject::NSFSFSIOObject::reclone(uint32_t flags)
   }
 
   /* atomically swap the fd so readers transition seamlessly */
-  ::dup2(new_fd, shadow_fd);
+  if (::dup2(new_fd, shadow_fd) < 0) {
+    int err = -errno;
+    ::close(new_fd);
+    ::unlinkat(shadow_dir_fd, shadow_name.c_str(), 0);
+    return err;
+  }
   ::close(new_fd);
 
   published = false;
