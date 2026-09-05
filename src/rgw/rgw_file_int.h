@@ -233,6 +233,11 @@ namespace rgw {
         Open(RGWFileHandle& _fh, uint32_t _posix_flags);
         ~Open();
 
+        inline bool is_read_open()
+        {
+          return !(posix_flags & (O_WRONLY | O_RDWR));
+        }
+
         inline bool is_write_open()
         {
           return ((posix_flags & O_WRONLY) || (posix_flags & O_RDWR));
@@ -2225,14 +2230,18 @@ public:
   uint64_t _size;
   uint32_t flags;
 
-  static constexpr uint32_t FLAG_NONE = 0x000;
+  static constexpr uint32_t FLAG_NONE =  0x000;
+  static constexpr uint32_t FLAG_WRITE = 0x001;
 
   /* TODO: check args */
   RGWOpenRequest(CephContext* _cct, std::unique_ptr<rgw::sal::User> _user,
 		 const std::string& _bname, const std::string& _oname,
 		 uint32_t _flags)
-    : RGWLibRequest(_cct, std::move(_user)), bucket_name(_bname), obj_name(_oname),
-      _size(0), flags(_flags) {
+    : RGWLibRequest(_cct, std::move(_user)), bucket_name(_bname),
+      obj_name(_oname), _size(0), flags(_flags) {
+    if (flags & FLAG_WRITE) {
+      write_open = true;
+    }
     op = this;
   }
 

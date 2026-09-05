@@ -4562,7 +4562,7 @@ Object::FSIOResult NSFSObject::get_fsio_handle(const DoutPrefixProvider* dpp,
 
   const std::string& leaf = ent->get_name();
   bool shadow_exists = (::faccessat(sdir_fd, leaf.c_str(), F_OK, 0) == 0);
-  bool ephemeral = (flags & FSIOObject::FLAG_EPHEMERAL) != 0;
+  bool ephemeral = (flags & FSIOObject::OPEN_FLAG_EPHEMERAL) != 0;
 
   auto hdl = std::unique_ptr<NSFSFSIOObject>(
     new NSFSFSIOObject(this, driver, dpp, ephemeral));
@@ -4570,11 +4570,11 @@ Object::FSIOResult NSFSObject::get_fsio_handle(const DoutPrefixProvider* dpp,
   hdl->shadow_name = leaf;
 
   if (shadow_exists) {
-    if (flags & FSIOObject::FLAG_EXCL) {
+    if (flags & FSIOObject::OPEN_FLAG_EXCL) {
       ::close(sdir_fd);
       return FSIOResult{-EEXIST, nullptr};
     }
-    if (flags & FSIOObject::FLAG_TRUNC) {
+    if (flags & FSIOObject::OPEN_FLAG_TRUNC) {
       ::unlinkat(sdir_fd, leaf.c_str(), 0);
       shadow_exists = false;
     }
@@ -4675,46 +4675,98 @@ int NSFSObject::NSFSFSIOObject::commit(uint32_t flags)
   return ::fsync(shadow_fd) < 0 ? -errno : 0;
 }
 
+int NSFSObject::NSFSFSIOObject::publish(uint32_t flags)
+{
+  if (shadow_fd < 0) {
+    return -EBADF;
+  }
+  if (published) {
+    return 0;
+  }
+
+  auto* dir = src_obj->get_fsent()->get_parent();
+  int parent_fd = dir->get_fd();
+  const std::string& leaf = src_obj->get_fsent()->get_name();
+
+  ::fsync(shadow_fd);
+
+  /* TODO: fixup pass — compute etag + checksums, stamp xattrs */
+
+  auto* bucket = static_cast<NSFSBucket*>(src_obj->get_bucket());
+  const auto& binfo = bucket->get_info();
+
+  if (binfo.versioned() && parent_fd >= 0) {
+    auto vlock = driver->get_fs_strategy()->version_lock(
+      dpp, open_versions_lockfile(parent_fd));
+
+    DemoteResult demote;
+    demote_current_version(dpp, driver->get_fs_strategy(),
+			   parent_fd, leaf,
+			   binfo.versioning_enabled(), demote);
+  }
+
+  int ret = ::renameat(shadow_dir_fd, shadow_name.c_str(),
+		       parent_fd, leaf.c_str());
+  if (ret < 0) {
+    return -errno;
+  }
+
+  published = true;
+  return 0;
+}
+
+int NSFSObject::NSFSFSIOObject::reclone(uint32_t flags)
+{
+  if (!published || shadow_fd < 0) {
+    return -EINVAL;
+  }
+
+  auto* dir = src_obj->get_fsent()->get_parent();
+  int parent_fd = dir->get_fd();
+  const std::string& leaf = src_obj->get_fsent()->get_name();
+
+  if (shadow_dir_fd < 0) {
+    shadow_dir_fd = open_shadow_dir(parent_fd);
+    if (shadow_dir_fd < 0) {
+      return shadow_dir_fd;
+    }
+  }
+
+  int ret = driver->get_fs_strategy()->clone_file(
+    dpp, parent_fd, leaf, shadow_dir_fd, leaf);
+  if (ret < 0) {
+    return ret;
+  }
+
+  int new_fd = ::openat(shadow_dir_fd, leaf.c_str(), O_RDWR);
+  if (new_fd < 0) {
+    return -errno;
+  }
+
+  /* copy xattrs from published object to new shadow */
+  int src_fd = ::openat(parent_fd, leaf.c_str(), O_RDONLY);
+  if (src_fd >= 0) {
+    copy_xattrs_fd(dpp, src_fd, new_fd);
+    ::close(src_fd);
+  }
+
+  /* atomically swap the fd so readers transition seamlessly */
+  ::dup2(new_fd, shadow_fd);
+  ::close(new_fd);
+
+  published = false;
+  return 0;
+}
+
 int NSFSObject::NSFSFSIOObject::close(uint32_t flags)
 {
   if (shadow_fd < 0 && shadow_dir_fd < 0) {
     return 0;
   }
 
-  bool detach = (flags & FLAG_DETACH) != 0;
-  bool discard = (flags & FLAG_DISCARD) != 0;
+  bool discard = (flags & CLOSE_FLAG_DISCARD) != 0;
 
-  if (!detach && !discard && !published && shadow_fd >= 0) {
-    auto* dir = src_obj->get_fsent()->get_parent();
-    int parent_fd = dir->get_fd();
-    const std::string& leaf = src_obj->get_fsent()->get_name();
-
-    ::fsync(shadow_fd);
-
-    auto* bucket = static_cast<NSFSBucket*>(src_obj->get_bucket());
-    const auto& binfo = bucket->get_info();
-
-    if (binfo.versioned() && parent_fd >= 0) {
-      auto vlock = driver->get_fs_strategy()->version_lock(
-	dpp, open_versions_lockfile(parent_fd));
-
-      DemoteResult demote;
-      demote_current_version(dpp, driver->get_fs_strategy(),
-			     parent_fd, leaf,
-			     binfo.versioning_enabled(), demote);
-    }
-
-    int ret = ::renameat(shadow_dir_fd, shadow_name.c_str(),
-			 parent_fd, leaf.c_str());
-    if (ret < 0) {
-      ret = -errno;
-      /* fall through to fd cleanup */
-    } else {
-      published = true;
-    }
-  } /* publish */
-
-  if (!published && (discard || (detach && ephemeral)) &&
+  if (!published && (discard || ephemeral) &&
       shadow_dir_fd >= 0 && !shadow_name.empty()) {
     ::unlinkat(shadow_dir_fd, shadow_name.c_str(), 0);
   }
@@ -4734,7 +4786,7 @@ int NSFSObject::NSFSFSIOObject::close(uint32_t flags)
 
 NSFSObject::NSFSFSIOObject::~NSFSFSIOObject()
 {
-  close(ephemeral ? FLAG_DISCARD : FLAG_DETACH);
+  close(ephemeral ? CLOSE_FLAG_DISCARD : CLOSE_FLAG_DETACH);
 }
 
 bool NSFSObject::is_sync_completed(const DoutPrefixProvider* dpp, optional_yield y,

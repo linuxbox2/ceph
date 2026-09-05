@@ -15,7 +15,9 @@
 
 #include <fcntl.h>
 #include <stdint.h>
+#include <cstdint>
 #include <memory>
+#include <ranges>
 #include <tuple>
 #include <iostream>
 #include <vector>
@@ -70,7 +72,6 @@ namespace {
   class Open2Helper {
   public:
     struct rgw_fs* fs{nullptr};
-    ;
     struct rgw_file_handle* bucket_fh{nullptr};
     struct rgw_file_handle* object_fh{nullptr};
 
@@ -86,6 +87,67 @@ namespace {
       rc = rgw_open2(fs, object_fh, &open_fd, openflags, flags);
       EXPECT_EQ(rc, 0);
       return open_fd;
+    }
+
+    using ReadResult = std::tuple<int, std::string>;
+    ReadResult read(rgw_open_fd fd, uint64_t off, uint64_t len)
+    {
+      char buf[1024];
+      struct iovec iov[1];
+      uint64_t nb_read{0};
+      std::string str;
+      int ret{0};
+
+      while (len > 0) {
+
+        iov->iov_base = buf;
+        iov->iov_len = std::min(len, uint64_t(1024));
+
+        ret = rgw_readv(fd, iov, 1, off, &nb_read, RGW_READ_FLAG_NONE);
+        if (ret < 0) {
+          return ReadResult(ret, str);
+        }
+        if (nb_read == 0) {
+          break; /* EOF */
+        }
+        str.append((char*)iov->iov_base, nb_read);
+        len -= nb_read;
+        off += nb_read;
+      }
+      return ReadResult(ret, str);
+    }
+
+    using WriteResult = std::tuple<int, uint64_t>;
+    WriteResult write(rgw_open_fd fd, const std::string& str, uint64_t off,
+               uint64_t _len)
+    {
+      struct iovec iov[1];
+      uint64_t nb_written{0}, nb_total{0},  pos{0};
+      uint64_t len{std::min(_len, str.length())};
+
+      while (len > 0) {
+        std::string sub = str.substr(pos);
+        iov->iov_base = (void*) sub.c_str();
+        iov->iov_len = len;
+
+        int ret = rgw_writev(fd, iov, 1, off, &nb_written, RGW_WRITE_FLAG_NONE);
+        if (ret < 0) {
+          return WriteResult(ret, nb_written);
+        }
+        if (unlikely(nb_written == 0)) {
+          break; /* should not happen */
+        }
+        len -= nb_written;
+        off += nb_written;
+        pos += nb_written;
+        nb_total += nb_written;
+      }
+      return WriteResult(0, nb_total);
+    }
+
+    int close(rgw_open_fd fd)
+    {
+      return rgw_close2(fd, RGW_CLOSE_FLAG_NONE);
     }
   }; /* Open2helper */
 
@@ -173,50 +235,70 @@ TEST(LibRGW, OPEN2)
   o2h = std::make_unique<Open2Helper>(fs, bucket_fh, object_fh);
 }
 
-TEST(LibRGW, PUT_OBJECT2_ONE) {
-
-  struct iovec iov[2];
-  for (int ix : {0, 1}) {
-    iov[ix].iov_base = (void*) dolor.c_str();
-    iov[ix].iov_len = dolor.length();
-  }
-
+TEST(LibRGW, OPEN2_1)
+{
+  /* write and read-after-write, same handle */
   auto open1 = o2h->get_open(O_RDWR, RGW_OPEN_FLAG_NONE);
 
-  uint64_t nb_written{0};
-  int ret = rgw_writev(open1, iov, 2, 0 /* offset */, &nb_written,
-                       RGW_WRITE_FLAG_NONE);
-  ASSERT_EQ(ret, 0);
-  ASSERT_EQ(nb_written, 2 * dolor.length());
+  auto nbw = o2h->write(open1, dolor, 0, dolor.length());
+  ASSERT_EQ(std::get<0>(nbw), 0);  
+  ASSERT_EQ(std::get<1>(nbw), dolor.length());
 
-  /* read after write */
-  std::string dolor2;
-  char buf[256];
-  memset(buf, 0, 256);
+  nbw = o2h->write(open1, dolor, dolor.length(), dolor.length());
+  ASSERT_EQ(std::get<0>(nbw), 0);
+  ASSERT_EQ(std::get<1>(nbw), dolor.length());
 
-  struct iovec iov2[1];
-  iov2[0].iov_base = buf;
-  iov2[0].iov_len = 0;
-  uint64_t nb_read{0};
+  /* read after write, same handle */
+  auto rdr1 = o2h->read(open1, 0, 2 * dolor.length());
+  ASSERT_EQ(std::get<0>(rdr1), 0);
+  ASSERT_EQ(std::get<1>(rdr1), dolor+dolor);
 
-  ret = rgw_readv(open1, iov2, 1, 18, &nb_read, RGW_READ_FLAG_NONE);
-  std::string val = "sit amet";
-  ASSERT_TRUE(nb_read == val.length());
-  std::string sic(buf, nb_read);
-  ASSERT_EQ(val, sic);
+  /* read a subrange, same handle */
+  std::string sit = "sit amet";
+  auto rdr2 = o2h->read(open1, 18, 8);
+  ASSERT_EQ(std::get<0>(rdr2), 0);
+  ASSERT_EQ(sit, std::get<1>(rdr2));
 
   /* commit write transaction */
-  ret = rgw_close2(open1, RGW_CLOSE_FLAG_NONE); // not returning file handle!
+  int ret = o2h->close(open1); // not returning file handle!
   ASSERT_EQ(ret, 0);
 }
 
-TEST(LibRGW, GET_OBJECT) {
-  // XXXX do it
+TEST(LibRGW, OPEN2_2)
+{
+  /* write and read-after-write, write and read handles */
+  auto open1 = o2h->get_open(O_RDWR, RGW_OPEN_FLAG_NONE);
+  auto open2 = o2h->get_open(O_RDONLY, RGW_OPEN_FLAG_NONE);
+
+  std::string str1{"one for the money"};
+  auto nbw = o2h->write(open1, str1, 0, str1.length());
+  ASSERT_EQ(std::get<0>(nbw), 0);
+  ASSERT_EQ(std::get<1>(nbw), str1.length());
+
+  auto rdr = o2h->read(open2, 0, str1.length());
+  ASSERT_EQ(std::get<0>(rdr), 0);
+  ASSERT_EQ(str1, std::get<1>(rdr));
+
+  o2h->close(open1);
+  o2h->close(open2);
 }
 
-TEST(LibRGW, CLOSE2) {
-  int ret = rgw_close(fs, object_fh, RGW_CLOSE_FLAG_NONE);
-  ASSERT_EQ(ret, 0);
+TEST(LibRGW, OPEN2_ACC_MODES)
+{
+  /* write and read-after-write, write and read handles */
+  auto open2 = o2h->get_open(O_RDONLY, RGW_OPEN_FLAG_NONE);
+  auto open3 = o2h->get_open(O_WRONLY, RGW_OPEN_FLAG_NONE);
+
+  std::string danger{"beware of darkness"};
+
+  auto wr1 = o2h->write(open2, danger, 0, danger.length());
+  ASSERT_NE(std::get<0>(wr1), 0);
+
+  auto rdr1 = o2h->read(open3, 0, danger.length());
+  ASSERT_NE(std::get<0>(rdr1), 0);
+
+  o2h->close(open2);
+  o2h->close(open3);
 }
 
 TEST(LibRGW, STAT_OBJECT) {

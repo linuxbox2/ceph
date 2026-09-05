@@ -4447,6 +4447,16 @@ int POSIXObject::POSIXFSIOObject::commit(uint32_t flags)
   return -ENOTSUP;
 }
 
+int POSIXObject::POSIXFSIOObject::publish(uint32_t flags)
+{
+  return -ENOTSUP;
+}
+
+int POSIXObject::POSIXFSIOObject::reclone(uint32_t flags)
+{
+  return -ENOTSUP;
+}
+
 int POSIXObject::POSIXFSIOObject::close(uint32_t flags)
 {
   return -ENOTSUP;

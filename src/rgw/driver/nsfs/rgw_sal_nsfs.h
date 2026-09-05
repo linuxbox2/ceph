@@ -1067,7 +1067,7 @@ public:
 			 optional_yield y) override;
 
   FSIOResult get_fsio_handle(const DoutPrefixProvider* dpp,
-			     uint32_t flags = FSIOObject::FLAG_NONE) override;
+			     uint32_t flags = FSIOObject::OPEN_FLAG_NONE) override;
 
   bool is_sync_completed(const DoutPrefixProvider* dpp, optional_yield y,
                          const ceph::real_time& obj_mtime) override;
@@ -1150,7 +1150,6 @@ public:
    int shadow_fd{-1};
    int shadow_dir_fd{-1};
    std::string shadow_name;
-   bool published{false};
    bool ephemeral{false};
 
    friend class NSFSObject;
@@ -1168,6 +1167,8 @@ public:
 			uint64_t ofs, uint64_t* bytes_written,
 			uint32_t flags) override;
     virtual int commit(uint32_t flags) override;
+    virtual int publish(uint32_t flags) override;
+    virtual int reclone(uint32_t flags) override;
     virtual int close(uint32_t flags) override;
 
     virtual ~NSFSFSIOObject() override;

@@ -4,6 +4,7 @@
 #include "include/compat.h"
 #include "include/rados/rgw_file.h"
 
+#include <fcntl.h>
 #include <sys/types.h>
 #include <sys/stat.h>
 
@@ -1781,7 +1782,7 @@ namespace rgw {
     return -EPERM;
   } /*  RGWFileHandle::open */
 
-  int RGWFileHandle::open2(file::Open** /* out */, uint32_t posix_flags,
+  int RGWFileHandle::open2(file::Open** out, uint32_t posix_flags,
                            uint32_t rgw_openflags)
   {
 
@@ -1795,10 +1796,7 @@ namespace rgw {
      *
      */
 
-    /* XXXX this isn't handling multiple open2 instances--see epilogue! */
-
     if (!is_file()) {
-      /* XXXX I don't think we open directories? */
       return -EINVAL;
     }
 
@@ -1818,21 +1816,37 @@ namespace rgw {
       auto& bucket_name = parent->get_name();
       auto& object_name = get_name();
 
+      uint32_t op_flags = ((posix_flags & O_WRONLY) || (posix_flags & O_RDWR))
+        ? RGWOpenRequest::FLAG_WRITE
+        : RGWOpenRequest::FLAG_NONE;
+
       RGWOpenRequest req(
           cct, g_rgwlib->get_driver()->get_user(fs->get_user()->user_id),
-          bucket_name, object_name, 0 /* flags */);
+          bucket_name, object_name, op_flags);
 
       int rc = g_rgwlib->get_fe()->execute_req(&req);
-      if (!rc) {
-        /* XXX and now what? */
+      if (rc < 0) {
+        /* this should be trapping permission errors (-EPERM) */
+        rc = req.get_ret();
+        return rc;
       } else {
-        req_state* state = req.get_state();
-        /* Object needs a bucket from this point */
-        state->object->set_bucket(state->bucket.get());
-        auto f_result = state->object->get_fsio_handle(&dp);
-        if (!get<0>(f_result)) {
-          f->sal_object = state->object->clone();
-          f->fsio_hdl = std::move(get<1>(f_result));
+        if (! f->fsio_hdl) {
+          req_state* state = req.get_state();
+          /* Object needs a bucket from this point */
+          state->object->set_bucket(state->bucket.get());
+          uint32_t hopen_flags = sal::Object::FSIOObject::OPEN_FLAG_NONE;
+          if (posix_flags & O_TRUNC) {
+            hopen_flags |= sal::Object::FSIOObject::OPEN_FLAG_TRUNC;
+          }
+          auto f_result = state->object->get_fsio_handle(&dp, hopen_flags);
+          if (!get<0>(f_result)) {
+            f->sal_object = state->object->clone();
+            f->fsio_hdl = std::move(get<1>(f_result));
+          }
+        } else if (f->fsio_hdl->needs_reclone() &&
+		   ((posix_flags & O_WRONLY) || (posix_flags & O_RDWR))) {
+          f->fsio_hdl->reclone(
+	    rgw::sal::Object::FSIOObject::OPEN_FLAG_NONE);
         }
       }
     } /* have fsio */
@@ -1840,24 +1854,21 @@ namespace rgw {
     /* save on open list */
     auto open = new file::Open(*this, posix_flags);
     f->opens.push_back(*open);
+    *out = open;
 
     if (rgw_openflags & RGW_OPEN_FLAG_V3) {
       flags |= FLAG_STATELESS_OPEN;
     }
 
-    if (posix_flags & O_RDONLY) {
+    if (open->is_read_open()) {
       (f->read_opens)++;
     }
-    if ((posix_flags & O_WRONLY) ||
-        (posix_flags & O_RDWR)) {
+    if (open->is_write_open()) {
       (f->write_opens)++;
     }
 
     flags |= FLAG_OPEN;
     return 0;
-
-    return -EPERM;
-
   } /* RGWFileHandle::open2(...) */
 
   int RGWFileHandle::readv(file::Open* open,
@@ -1866,8 +1877,20 @@ namespace rgw {
                            uint64_t* bytes_read,
                            uint32_t flags)
   {
-    auto  f = get_if<file>(&variant_type);
-    return f->fsio_hdl->preadv(iov, iov_cnt, offset, bytes_read, flags);
+    if (open->posix_flags & O_WRONLY) {
+      return -EBADF;
+    }
+
+    auto f = get_if<file>(&variant_type);
+    if (unlikely(! f)) {
+      return -EINVAL; // or EISDIR
+    }
+
+    if (f->fsio_hdl) {
+      return f->fsio_hdl->preadv(iov, iov_cnt, offset, bytes_read, flags);
+    }
+
+    return -EBADF;
   } /* readv */
 
   int RGWFileHandle::writev(file::Open* open,
@@ -1876,12 +1899,20 @@ namespace rgw {
                             uint64_t* bytes_written,
                             uint32_t flags)
   {
-    if (!open->is_write_open()) {
-      return -EPERM;
+    if (! open->is_write_open()) {
+      return -EBADF;
     }
 
-    auto  f = get_if<file>(&variant_type);
-    return f->fsio_hdl->pwritev(iov, iov_cnt, offset, bytes_written, flags);
+    auto f = get_if<file>(&variant_type);
+    if (unlikely(! f)) {
+      return -EINVAL; // or EISDIR
+    }
+
+    if (f->fsio_hdl) {
+      return f->fsio_hdl->pwritev(iov, iov_cnt, offset, bytes_written, flags);
+    }
+
+    return -EBADF;
   } /* writev */
 
   int RGWFileHandle::close()
@@ -1899,54 +1930,82 @@ namespace rgw {
   int RGWFileHandle::close2(file::Open* open, uint32_t flags)
   {
     int rc{0};
-    uint32_t close_flags{rgw::sal::Object::FSIOObject::FLAG_NONE};
+
+    bool read_open = open->is_read_open();
+    bool write_open = open->is_write_open();
+
+    uint32_t close_flags{rgw::sal::Object::FSIOObject::CLOSE_FLAG_NONE};
+
+    if (unlikely(flags & RGW_CLOSE_FLAG_DETACH)) {
+      close_flags |= rgw::sal::Object::FSIOObject::CLOSE_FLAG_DETACH;
+    }
+    if (unlikely(flags & RGW_CLOSE_FLAG_DISCARD)) {
+      close_flags |= rgw::sal::Object::FSIOObject::CLOSE_FLAG_DISCARD;
+    }
 
     lock_guard guard(mtx); // XXX needed? probably
 
     auto f = std::get_if<file>(&variant_type);
     if (f) {
+      /* publish when the last write open is
+       * returned, close when all opens returned */
+      bool should_close{false};
 
-      /* close/publish when the last write open is
-       * returned */
-      if (open->posix_flags & O_RDONLY) {
+      if (read_open) {
         (f->read_opens)--;
       }
-      if ((open->posix_flags & O_WRONLY) ||
-          (open->posix_flags & O_RDWR)) {
+      if (write_open) {
         (f->write_opens)--;
       }
 
-      if (f->write_opens == 0) {
-        if (f->read_opens == 0) {
-          // XXX need a new close flag for "keep open for reading */
-          abort(); /* XXXX */
-        } else {
-          if (unlikely(flags & RGW_CLOSE_FLAG_DETACH)) {
-            close_flags |= rgw::sal::Object::FSIOObject::FLAG_DETACH;
+      if (write_open) {
+        if (f->write_opens == 0) {
+          if (f->fsio_hdl) {
+            rc = f->fsio_hdl->publish(
+                      rgw::sal::Object::FSIOObject::PUBLISH_FLAG_NONE);
+            if (!!rc) {
+              lsubdout(fs->get_context(), rgw, 0)
+                << __func__ << " " << object_name()
+                << " failed to publish fsio handle " << dendl;
+            }
           }
-          if (unlikely(flags & RGW_CLOSE_FLAG_DISCARD)) {
-            close_flags |= rgw::sal::Object::FSIOObject::FLAG_DISCARD;
+          if (f->read_opens == 0) {
+            /* last open is returned */
+            should_close = true;
           }
-          rc = f->fsio_hdl->close(close_flags);
-        }
+        } /* write_opens == 0 */
       } else {
+        /* read_open */
         if (f->read_opens == 0) {
-          /* read_opens == 0 && write_opens == 0 */
-          close_flags |= rgw::sal::Object::FSIOObject::FLAG_DISCARD;
-          rc = f->fsio_hdl->close(close_flags);
+          /* there is no general action to take here? */
+          if (f->write_opens == 0) {
+            should_close = true;
+          }
         }
+      }
+
+      if (should_close) {
+        if (f->fsio_hdl) {
+          rc = f->fsio_hdl->close(close_flags);
+          if (!! rc) {
+            lsubdout(fs->get_context(), rgw, 0)
+              << __func__ << " " << object_name()
+              << " failed to close via fsio handle " << dendl;
+          }
+          /* reset fsio handles so re-opens see correct state */
+          f->fsio_hdl.reset();
+          f->sal_object.reset();
+        }
+
+        this->flags &= ~FLAG_OPEN;
+        this->flags &= ~FLAG_STATELESS_OPEN;
       }
 
       /* remove from opens list */
       auto it = file::open_list::s_iterator_to(*open);
       f->opens.erase(it);
       delete(open);
-
-      flags &= ~FLAG_OPEN;
-      flags &= ~FLAG_STATELESS_OPEN;
     }
-
-    /* TODO remove and dispose handle */
 
     return rc;
   } /* RGWFileHandle::close2 */
