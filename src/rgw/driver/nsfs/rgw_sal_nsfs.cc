@@ -4764,9 +4764,7 @@ int NSFSObject::NSFSFSIOObject::close(uint32_t flags)
     return 0;
   }
 
-  bool discard = (flags & CLOSE_FLAG_DISCARD) != 0;
-
-  if (!published && (discard || ephemeral) &&
+  if (!published && ephemeral &&
       shadow_dir_fd >= 0 && !shadow_name.empty()) {
     ::unlinkat(shadow_dir_fd, shadow_name.c_str(), 0);
   }
@@ -4786,7 +4784,7 @@ int NSFSObject::NSFSFSIOObject::close(uint32_t flags)
 
 NSFSObject::NSFSFSIOObject::~NSFSFSIOObject()
 {
-  close(ephemeral ? CLOSE_FLAG_DISCARD : CLOSE_FLAG_DETACH);
+  close(CLOSE_FLAG_DETACH);
 }
 
 bool NSFSObject::is_sync_completed(const DoutPrefixProvider* dpp, optional_yield y,

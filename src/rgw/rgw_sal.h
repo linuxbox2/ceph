@@ -1157,7 +1157,6 @@ public:
       /* close flags */
       static constexpr uint32_t CLOSE_FLAG_NONE =     0x0000;
       static constexpr uint32_t CLOSE_FLAG_DETACH =   0x0001;
-      static constexpr uint32_t CLOSE_FLAG_DISCARD =  0x0002;
 
       virtual int preadv(const struct iovec* iov, int iovcnt,
 			  uint64_t ofs, uint64_t* bytes_read,

@@ -1939,9 +1939,6 @@ namespace rgw {
     if (unlikely(flags & RGW_CLOSE_FLAG_DETACH)) {
       close_flags |= rgw::sal::Object::FSIOObject::CLOSE_FLAG_DETACH;
     }
-    if (unlikely(flags & RGW_CLOSE_FLAG_DISCARD)) {
-      close_flags |= rgw::sal::Object::FSIOObject::CLOSE_FLAG_DISCARD;
-    }
 
     lock_guard guard(mtx); // XXX needed? probably
 

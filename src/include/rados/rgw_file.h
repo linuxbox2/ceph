@@ -301,7 +301,6 @@ int rgw_open2(struct rgw_fs* rgw_fs, struct rgw_file_handle* fh,
 #define RGW_CLOSE_FLAG_NONE        0x0000
 #define RGW_CLOSE_FLAG_RELE        0x0001
 #define RGW_CLOSE_FLAG_DETACH      0x0002
-#define RGW_CLOSE_FLAG_DISCARD     0x0004
   
 int rgw_close(struct rgw_fs *rgw_fs, struct rgw_file_handle *fh,
 	      uint32_t flags);
