@@ -1793,6 +1793,7 @@ namespace rgw {
      * O_RDONLY
      * O_WRONLY
      * O_TRUNC
+     * O_EXCL
      *
      */
 
@@ -1816,48 +1817,53 @@ namespace rgw {
       auto& bucket_name = parent->get_name();
       auto& object_name = get_name();
 
-      uint32_t op_flags = ((posix_flags & O_WRONLY) || (posix_flags & O_RDWR))
-        ? RGWOpenRequest::FLAG_WRITE
-        : RGWOpenRequest::FLAG_NONE;
+      if (! f->fsio_hdl) {
+        uint32_t op_flags = ((posix_flags & O_WRONLY) || (posix_flags & O_RDWR))
+          ? RGWOpenRequest::FLAG_WRITE
+          : RGWOpenRequest::FLAG_NONE;
 
-      RGWOpenRequest req(
-          cct, g_rgwlib->get_driver()->get_user(fs->get_user()->user_id),
-          bucket_name, object_name, op_flags);
+        RGWOpenRequest req(
+                           cct, g_rgwlib->get_driver()->get_user(fs->get_user()->user_id),
+                           bucket_name, object_name, op_flags);
 
-      int rc = g_rgwlib->get_fe()->execute_req(&req);
-      if (rc < 0) {
-        return rc;
-      } else {
-        if (! f->fsio_hdl) {
-          uint32_t hopen_flags = sal::Object::FSIOObject::OPEN_FLAG_NONE;
-          if (posix_flags & O_TRUNC) {
-            hopen_flags |= sal::Object::FSIOObject::OPEN_FLAG_TRUNC;
-          }
-          auto f_result = req.sal_object->get_fsio_handle(&dp, hopen_flags);
-          if (!get<0>(f_result)) {
-            f->sal_bucket = std::move(req.sal_bucket);
-            f->sal_object = std::move(req.sal_object);
-            f->fsio_hdl = std::move(get<1>(f_result));
-          } else {
-            lsubdout(fs->get_context(), rgw, 0)
-              << __func__ << " " << object_name
-              << ": attempt to open FSIO handle failed rc=="
-              << std::get<0>(f_result)
-              << dendl;
-            return std::get<0>(f_result);
-          }
-        } else if (f->fsio_hdl->needs_reclone() &&
-		   ((posix_flags & O_WRONLY) || (posix_flags & O_RDWR))) {
-          rc = f->fsio_hdl->reclone(
-              rgw::sal::Object::FSIOObject::OPEN_FLAG_NONE);
-          if (!!rc) {
-            lsubdout(fs->get_context(), rgw, 0)
-              << __func__ << " " << object_name
-              << " failed to reclone for new write open" << dendl;
-            return rc;
-          }
+        int rc = g_rgwlib->get_fe()->execute_req(&req);
+        if (rc < 0) {
+          return rc;
         }
-      }
+
+        uint32_t hopen_flags = sal::Object::FSIOObject::OPEN_FLAG_NONE;
+        if (rgw_openflags & RGW_OPEN_FLAG_CREATE) {
+          hopen_flags |= sal::Object::FSIOObject::OPEN_FLAG_CREATE;
+        }
+        if (posix_flags & O_TRUNC) {
+          hopen_flags |= sal::Object::FSIOObject::OPEN_FLAG_TRUNC;
+        }
+        if (posix_flags & O_EXCL) {
+          hopen_flags |= sal::Object::FSIOObject::OPEN_FLAG_EXCL;
+        }
+        auto f_result = req.sal_object->get_fsio_handle(&dp, hopen_flags);
+        if (!get<0>(f_result)) {
+          f->sal_bucket = std::move(req.sal_bucket);
+          f->sal_object = std::move(req.sal_object);
+          f->fsio_hdl = std::move(get<1>(f_result));
+        } else {
+          lsubdout(fs->get_context(), rgw, 0)
+            << __func__ << " " << object_name
+            << ": attempt to open FSIO handle failed rc=="
+            << std::get<0>(f_result)
+            << dendl;
+          return std::get<0>(f_result);
+        }
+      } else if (f->fsio_hdl->needs_reclone() &&
+                 ((posix_flags & O_WRONLY) || (posix_flags & O_RDWR))) {
+        int rc = f->fsio_hdl->reclone(rgw::sal::Object::FSIOObject::OPEN_FLAG_NONE);
+        if (!!rc) {
+          lsubdout(fs->get_context(), rgw, 0)
+            << __func__ << " " << object_name
+            << " failed to reclone for new write open" << dendl;
+          return rc;
+        }
+      } 
     } /* have fsio */
 
     /* save on open list */

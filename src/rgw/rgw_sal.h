@@ -17,6 +17,7 @@
 
 #include <cstdint>
 #include <optional>
+#include <sys/stat.h>
 #include <sys/uio.h>
 #include <boost/intrusive_ptr.hpp>
 #include <boost/smart_ptr/intrusive_ref_counter.hpp>
@@ -1144,9 +1145,10 @@ public:
     public:
       /* get_fsio_handle flags */
       static constexpr uint32_t OPEN_FLAG_NONE =      0x0000;
-      static constexpr uint32_t OPEN_FLAG_EXCL =      0x0001;
-      static constexpr uint32_t OPEN_FLAG_TRUNC =     0x0002;
-      static constexpr uint32_t OPEN_FLAG_EPHEMERAL = 0x0004;
+      static constexpr uint32_t OPEN_FLAG_CREATE =    0x0001;
+      static constexpr uint32_t OPEN_FLAG_EXCL =      0x0002;
+      static constexpr uint32_t OPEN_FLAG_TRUNC =     0x0004;
+      static constexpr uint32_t OPEN_FLAG_EPHEMERAL = 0x0008;
 
       /* commit flags */
       static constexpr uint32_t COMMIT_FLAG_NONE =    0x0000;
@@ -1168,6 +1170,14 @@ public:
       virtual int publish(uint32_t flags) = 0;
       virtual int reclone(uint32_t flags) = 0;
       virtual int close(uint32_t flags) = 0;
+
+      virtual int fstat(struct stat* st, uint32_t flags) = 0;
+      virtual int fgetattr(const std::string& name, bufferlist& dest,
+			    uint32_t flags) = 0;
+      virtual int fsetattr(const std::string& name, const bufferlist& val,
+			    uint32_t flags) = 0;
+      virtual int fgetattrs(Attrs& attrs, uint32_t flags) = 0;
+      virtual int fsetattrs(Attrs& attrs, uint32_t flags) = 0;
 
       bool resumed() const { return resumed_existing; }
       bool needs_reclone() const { return published; }

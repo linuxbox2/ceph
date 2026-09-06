@@ -2253,7 +2253,7 @@ public:
 
   /* getters */
 
-  bool only_bucket() override { return false; }
+  bool only_bucket() override { return (flags & FLAG_WRITE); }
 
   int op_init() override {
     // assign driver, s, and dialect_handler

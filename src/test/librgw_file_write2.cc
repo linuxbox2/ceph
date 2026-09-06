@@ -75,18 +75,42 @@ namespace {
     struct rgw_file_handle* bucket_fh{nullptr};
     struct rgw_file_handle* object_fh{nullptr};
 
-    Open2Helper(rgw_fs* _fs, rgw_file_handle* _bucket,
-                rgw_file_handle* _object) :
-      fs(_fs), bucket_fh(_bucket), object_fh(_object)
+    Open2Helper(rgw_fs* _fs, rgw_file_handle* _bucket) :
+      fs(_fs), bucket_fh(_bucket)
     {}
 
-    rgw_open_fd get_open(uint32_t openflags, uint32_t flags)
+    using LookupResult = std::tuple<int, rgw_file_handle*>;
+    LookupResult lookup(std::string name)
     {
+      /* look up handle only--no linkage to object/file yet */
       int rc{0};
-      rgw_open_fd open_fd;
-      rc = rgw_open2(fs, object_fh, &open_fd, openflags, flags);
-      EXPECT_EQ(rc, 0);
-      return open_fd;
+      rc = rgw_lookup(fs, bucket_fh, name.c_str(), &object_fh, nullptr,
+                      0, RGW_LOOKUP_FLAG_CREATE);
+      return LookupResult{rc, object_fh};
+    }      
+    
+    using OpenResult = std::tuple<int, rgw_open_fd>;
+    OpenResult open(uint32_t openflags, uint32_t flags)
+    {
+      OpenResult ofr;
+      std::get<0>(ofr) = rgw_open2(fs, object_fh,
+                                   &(std::get<1>(ofr)), openflags, flags);
+      return ofr;
+    }
+
+    using StatResult = std::tuple<int, struct stat>;
+    StatResult stat()
+    {
+      StatResult sr;
+      std::get<0>(sr) = rgw_getattr(fs, object_fh, &(std::get<1>(sr)),
+                                    RGW_GETATTR_FLAG_NONE);
+      return sr;
+    }
+
+    int unlink()
+    {
+      return rgw_unlink(fs, bucket_fh, object_name.c_str(),
+                        RGW_UNLINK_FLAG_NONE);
     }
 
     using ReadResult = std::tuple<int, std::string>;
@@ -145,13 +169,14 @@ namespace {
       return WriteResult(0, nb_total);
     }
 
-    int close(rgw_open_fd fd)
-    {
-      return rgw_close2(fd, RGW_CLOSE_FLAG_NONE);
-    }
-  }; /* Open2helper */
+    int close(rgw_open_fd fd) { return rgw_close2(fd, RGW_CLOSE_FLAG_NONE); }
 
-  std::unique_ptr<Open2Helper> o2h;
+    ~Open2Helper()
+    {
+      (void) rgw_fh_rele(fs, object_fh, RGW_FH_RELE_FLAG_NONE);
+    }
+
+  }; /* Open2helper */
 
   typedef std::tuple<string,uint64_t, struct rgw_file_handle*> fid_type;
   std::vector<fid_type> fids;
@@ -165,20 +190,20 @@ namespace {
   } saved_args;
 }
 
-TEST(LibRGW, INIT) {
+TEST(OPEN2, INIT) {
   int ret = librgw_create(&rgw, saved_args.argc, saved_args.argv);
   ASSERT_EQ(ret, 0);
   ASSERT_NE(rgw, nullptr);
 }
 
-TEST(LibRGW, MOUNT) {
+TEST(OPEN2, MOUNT) {
   int ret = rgw_mount2(rgw, userid.c_str(), access_key.c_str(),
                        secret_key.c_str(), "/", &fs, RGW_MOUNT_FLAG_NONE);
   ASSERT_EQ(ret, 0);
   ASSERT_NE(fs, nullptr);
 }
 
-TEST(LibRGW, CREATE_BUCKET) {
+TEST(OPEN2, CREATE_BUCKET) {
   if (do_create) {
     struct stat st;
     struct rgw_file_handle *fh;
@@ -193,24 +218,24 @@ TEST(LibRGW, CREATE_BUCKET) {
   }
 }
 
-TEST(LibRGW, LOOKUP_BUCKET) {
+TEST(OPEN2, LOOKUP_BUCKET) {
   int ret = rgw_lookup(fs, fs->root_fh, bucket_name.c_str(), &bucket_fh,
 		       nullptr, 0, RGW_LOOKUP_FLAG_NONE);
   ASSERT_EQ(ret, 0);
 }
 
-TEST(LibRGW, LOOKUP_OBJECT) {
+TEST(OPEN2, LOOKUP_OBJECT) {
   int ret = rgw_lookup(fs, bucket_fh, object_name.c_str(), &object_fh,
 		       nullptr, 0, RGW_LOOKUP_FLAG_CREATE);
   ASSERT_EQ(ret, 0);
 }
 
-TEST(LibRGW, OPEN1) {
+TEST(OPEN2, OPEN1) {
   int ret = rgw_open(fs, object_fh, 0 /* posix flags */, RGW_OPEN_FLAG_NONE);
   ASSERT_EQ(ret, 0);
 }
 
-TEST(LibRGW, PUT_OBJECT1) {
+TEST(OPEN2, PUT_OBJECT1) {
   size_t nbytes;
   string data = "hi mom"; // fix this
   int ret = rgw_write(fs, object_fh, 0, data.length(), &nbytes,
@@ -222,7 +247,7 @@ TEST(LibRGW, PUT_OBJECT1) {
   ASSERT_EQ(ret, 0);
 }
 
-TEST(LibRGW, GET_OBJECT1)
+TEST(OPEN2, GET_OBJECT1)
 {
   char sbuf[128];
   memset(sbuf, 0, 128);
@@ -234,7 +259,7 @@ TEST(LibRGW, GET_OBJECT1)
   ASSERT_EQ(str, "hi mom");
 }
 
-TEST(LibRGW, CLOSE1) {
+TEST(OPEN2, CLOSE1) {
   int ret = rgw_close(fs, object_fh, RGW_CLOSE_FLAG_NONE);
   ASSERT_EQ(ret, 0);
   /* manual handle release */
@@ -242,15 +267,38 @@ TEST(LibRGW, CLOSE1) {
   ASSERT_EQ(ret, 0);
 }
 
-TEST(LibRGW, OPEN2)
-{
-  o2h = std::make_unique<Open2Helper>(fs, bucket_fh, object_fh);
+TEST(OPEN2, STAT_OBJECT) {
+  struct stat st;
+  int ret = rgw_getattr(fs, object_fh, &st, RGW_GETATTR_FLAG_NONE);
+  ASSERT_EQ(ret, 0);
+  dout(15) << "rgw_getattr on " << object_name << " size = "
+	   << st.st_size << dendl;
 }
 
-TEST(LibRGW, OPEN2_1)
+TEST(OPEN2, DELETE_OBJECT) {
+  if (do_delete) {
+    int ret = rgw_unlink(fs, bucket_fh, object_name.c_str(),
+			 RGW_UNLINK_FLAG_NONE);
+    ASSERT_EQ(ret, 0);
+  }
+}
+
+TEST(OPEN2, OPEN2_READAFTERWRITE1)
 {
   /* write and read-after-write, same handle */
-  auto open1 = o2h->get_open(O_RDWR, RGW_OPEN_FLAG_NONE);
+  std::unique_ptr<Open2Helper> o2h =
+      std::make_unique<Open2Helper>(fs, bucket_fh);
+  ASSERT_NE(o2h.get(), nullptr);
+
+  auto lfr = o2h->lookup("netbird2");
+  ASSERT_EQ(get<0>(lfr), 0);
+  ASSERT_NE(get<1>(lfr), nullptr);
+
+  auto ofr = o2h->open(O_RDWR, RGW_OPEN_FLAG_CREATE);
+  ASSERT_EQ(get<0>(ofr), 0);
+  ASSERT_NE(get<1>(ofr), nullptr);
+
+  auto open1 = get<1>(ofr);
 
   auto nbw = o2h->write(open1, dolor, 0, dolor.length());
   ASSERT_EQ(std::get<0>(nbw), 0);  
@@ -276,13 +324,26 @@ TEST(LibRGW, OPEN2_1)
   ASSERT_EQ(ret, 0);
 }
 
-TEST(LibRGW, OPEN2_2)
+TEST(OPEN2, OPEN2_READAFTERWRITE2)
 {
   /* write and read-after-write, write and read handles */
-  auto open1 = o2h->get_open(O_RDWR, RGW_OPEN_FLAG_NONE);
-  auto open2 = o2h->get_open(O_RDONLY, RGW_OPEN_FLAG_NONE);
+  std::unique_ptr<Open2Helper> o2h =
+      std::make_unique<Open2Helper>(fs, bucket_fh);
+  ASSERT_NE(o2h.get(), nullptr);
 
-  std::string str1{"one for the money"};
+  auto lfr = o2h->lookup("tray1");
+  ASSERT_EQ(get<0>(lfr), 0);
+  ASSERT_NE(get<1>(lfr), nullptr);
+  
+  auto ofr1 = o2h->open(O_RDWR, RGW_OPEN_FLAG_CREATE);
+  auto open1 = std::get<1>(ofr1);
+  ASSERT_NE(open1, nullptr);
+
+  auto ofr2 = o2h->open(O_RDONLY, RGW_OPEN_FLAG_NONE);  
+  auto open2 = get<1>(ofr2);
+  ASSERT_NE(open2, nullptr);
+
+  std::string str1{"netbird lives in your"};
   auto nbw = o2h->write(open1, str1, 0, str1.length());
   ASSERT_EQ(std::get<0>(nbw), 0);
   ASSERT_EQ(std::get<1>(nbw), str1.length());
@@ -295,12 +356,26 @@ TEST(LibRGW, OPEN2_2)
   o2h->close(open2);
 }
 
-TEST(LibRGW, OPEN2_ACC_MODES)
+TEST(OPEN2, ACC_MODES)
 {
   /* write and read-after-write, write and read handles */
-  auto open2 = o2h->get_open(O_RDONLY, RGW_OPEN_FLAG_NONE);
-  auto open3 = o2h->get_open(O_WRONLY, RGW_OPEN_FLAG_NONE);
+  std::unique_ptr<Open2Helper> o2h =
+      std::make_unique<Open2Helper>(fs, bucket_fh);
+  ASSERT_NE(o2h.get(), nullptr);
 
+  auto lfr = o2h->lookup("accthis1");
+  ASSERT_EQ(get<0>(lfr), 0);
+  ASSERT_NE(get<1>(lfr), nullptr);
+  
+  auto ofr2 = o2h->open(O_RDONLY, RGW_OPEN_FLAG_CREATE);
+  auto ofr3 = o2h->open(O_WRONLY, RGW_OPEN_FLAG_NONE);
+
+  auto open2 = std::get<1>(ofr2);
+  ASSERT_NE(open2, nullptr);
+
+  auto open3 = get<1>(ofr3);
+  ASSERT_NE(open2, nullptr);
+  
   std::string danger{"beware of darkness"};
 
   auto wr1 = o2h->write(open2, danger, 0, danger.length());
@@ -313,23 +388,39 @@ TEST(LibRGW, OPEN2_ACC_MODES)
   o2h->close(open3);
 }
 
-TEST(LibRGW, STAT_OBJECT) {
-  struct stat st;
-  int ret = rgw_getattr(fs, object_fh, &st, RGW_GETATTR_FLAG_NONE);
-  ASSERT_EQ(ret, 0);
-  dout(15) << "rgw_getattr on " << object_name << " size = "
-	   << st.st_size << dendl;
+TEST(OPEN2, CREATE_FLAG)
+{
+  /* open non-existing + FLAG_NONE fails (correctly) */
+  /* open non-existing + FLAG_CREATE succeeds */
 }
 
-TEST(LibRGW, DELETE_OBJECT) {
-  if (do_delete) {
-    int ret = rgw_unlink(fs, bucket_fh, object_name.c_str(),
-			 RGW_UNLINK_FLAG_NONE);
-    ASSERT_EQ(ret, 0);
-  }
+TEST(OPEN2, RENDEZVOUS1)
+{
+  /* write open rendezvous with active stream (published) */
+  /* write open rendezvous with active stream (unpublished/FLAG_CREATE) */
 }
 
-TEST(LibRGW, DELETE_BUCKET) {
+TEST(OPEN2, TRUNC1)
+{
+  /* open handles follow trunc */
+}
+
+TEST(OPEN2, EXCL)
+{
+  /* open O_EXCL cases */
+}
+
+TEST(OPEN2, UNLINK1)
+{
+  /* read and write opens after unlink fail */
+  /* read-open or write-open active streams survive unlink, but */
+  /* write-close after unlink discards changes */
+}
+
+
+/* END ALL TESTS */
+
+TEST(OPEN2, DELETE_BUCKET) {
   if (do_delete) {
     int ret = rgw_unlink(fs, fs->root_fh, bucket_name.c_str(),
 			 RGW_UNLINK_FLAG_NONE);
@@ -337,7 +428,7 @@ TEST(LibRGW, DELETE_BUCKET) {
   }
 }
 
-TEST(LibRGW, CLEANUP) {
+TEST(OPEN2, CLEANUP) {
   int ret;
   if (object_fh) {
     ret = rgw_fh_rele(fs, object_fh, RGW_FH_RELE_FLAG_NONE);
@@ -347,7 +438,7 @@ TEST(LibRGW, CLEANUP) {
   ASSERT_EQ(ret, 0);
 }
 
-TEST(LibRGW, UMOUNT) {
+TEST(OPEN2, UMOUNT) {
   if (! fs)
     return;
 
@@ -355,7 +446,7 @@ TEST(LibRGW, UMOUNT) {
   ASSERT_EQ(ret, 0);
 }
 
-TEST(LibRGW, SHUTDOWN) {
+TEST(OPEN2, SHUTDOWN) {
   librgw_shutdown(rgw);
 }
 

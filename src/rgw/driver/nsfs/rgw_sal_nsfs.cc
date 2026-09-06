@@ -4594,6 +4594,8 @@ Object::FSIOResult NSFSObject::get_fsio_handle(const DoutPrefixProvider* dpp,
     new NSFSFSIOObject(this, driver, dpp, ephemeral));
   hdl->shadow_dir_fd = sdir_fd;
   hdl->shadow_name = leaf;
+  hdl->parent_fd = parent_fd;
+  hdl->leaf_name = leaf;
   hdl->dir_chain = std::move(resolved_dirs);
 
   if (shadow_exists) {
@@ -4620,10 +4622,23 @@ Object::FSIOResult NSFSObject::get_fsio_handle(const DoutPrefixProvider* dpp,
   }
 
   /* check whether source object exists */
-  bool src_exists = ent->exists();
-  if (!src_exists) {
-    int sr = ent->stat(dpp);
-    src_exists = (sr == 0 && ent->exists());
+  bool src_exists = false;
+  if (ent) {
+    src_exists = ent->exists();
+    if (!src_exists) {
+      int sr = ent->stat(dpp);
+      src_exists = (sr == 0 && ent->exists());
+    }
+  }
+
+  if (!src_exists && !(flags & FSIOObject::OPEN_FLAG_CREATE)) {
+    ::close(sdir_fd);
+    return FSIOResult{-ENOENT, nullptr};
+  }
+
+  if (src_exists && (flags & FSIOObject::OPEN_FLAG_EXCL)) {
+    ::close(sdir_fd);
+    return FSIOResult{-EEXIST, nullptr};
   }
 
   if (src_exists) {
@@ -4711,10 +4726,6 @@ int NSFSObject::NSFSFSIOObject::publish(uint32_t flags)
     return 0;
   }
 
-  auto* dir = src_obj->get_fsent()->get_parent();
-  int parent_fd = dir->get_fd();
-  const std::string& leaf = src_obj->get_fsent()->get_name();
-
   ::fsync(shadow_fd);
 
   /* TODO: fixup pass — compute etag + checksums, stamp xattrs */
@@ -4728,12 +4739,12 @@ int NSFSObject::NSFSFSIOObject::publish(uint32_t flags)
 
     DemoteResult demote;
     demote_current_version(dpp, driver->get_fs_strategy(),
-			   parent_fd, leaf,
+			   parent_fd, leaf_name,
 			   binfo.versioning_enabled(), demote);
   }
 
   int ret = ::renameat(shadow_dir_fd, shadow_name.c_str(),
-		       parent_fd, leaf.c_str());
+		       parent_fd, leaf_name.c_str());
   if (ret < 0) {
     return -errno;
   }
@@ -4748,10 +4759,6 @@ int NSFSObject::NSFSFSIOObject::reclone(uint32_t flags)
     return -EINVAL;
   }
 
-  auto* dir = src_obj->get_fsent()->get_parent();
-  int parent_fd = dir->get_fd();
-  const std::string& leaf = src_obj->get_fsent()->get_name();
-
   if (shadow_dir_fd < 0) {
     shadow_dir_fd = open_shadow_dir(parent_fd);
     if (shadow_dir_fd < 0) {
@@ -4760,18 +4767,18 @@ int NSFSObject::NSFSFSIOObject::reclone(uint32_t flags)
   }
 
   int ret = driver->get_fs_strategy()->clone_file(
-    dpp, parent_fd, leaf, shadow_dir_fd, leaf);
+    dpp, parent_fd, leaf_name, shadow_dir_fd, leaf_name);
   if (ret < 0) {
     return ret;
   }
 
-  int new_fd = ::openat(shadow_dir_fd, leaf.c_str(), O_RDWR);
+  int new_fd = ::openat(shadow_dir_fd, leaf_name.c_str(), O_RDWR);
   if (new_fd < 0) {
     return -errno;
   }
 
   /* copy xattrs from published object to new shadow */
-  int src_fd = ::openat(parent_fd, leaf.c_str(), O_RDONLY);
+  int src_fd = ::openat(parent_fd, leaf_name.c_str(), O_RDONLY);
   if (src_fd >= 0) {
     copy_xattrs_fd(dpp, src_fd, new_fd);
     ::close(src_fd);
@@ -4787,6 +4794,81 @@ int NSFSObject::NSFSFSIOObject::reclone(uint32_t flags)
   ::close(new_fd);
 
   published = false;
+  return 0;
+}
+
+int NSFSObject::NSFSFSIOObject::fstat(struct stat* st, uint32_t flags)
+{
+  if (shadow_fd < 0) {
+    return -EBADF;
+  }
+  if (::fstat(shadow_fd, st) < 0) {
+    return -errno;
+  }
+  return 0;
+}
+
+int NSFSObject::NSFSFSIOObject::fgetattr(const std::string& name,
+					  bufferlist& dest, uint32_t flags)
+{
+  if (shadow_fd < 0) {
+    return -EBADF;
+  }
+  std::string xname = make_xattr_name(name);
+  ssize_t len = ::fgetxattr(shadow_fd, xname.c_str(), nullptr, 0);
+  if (len < 0) {
+    return -errno;
+  }
+  if (len == 0) {
+    dest.clear();
+    return 0;
+  }
+  bufferptr bp(len);
+  len = ::fgetxattr(shadow_fd, xname.c_str(), bp.c_str(), len);
+  if (len < 0) {
+    return -errno;
+  }
+  bp.set_length(len);
+  dest.push_back(std::move(bp));
+  return 0;
+}
+
+int NSFSObject::NSFSFSIOObject::fsetattr(const std::string& name,
+					  const bufferlist& val,
+					  uint32_t flags)
+{
+  if (shadow_fd < 0) {
+    return -EBADF;
+  }
+  std::string xname = make_xattr_name(name);
+  std::string sval = val.to_str();
+  if (::fsetxattr(shadow_fd, xname.c_str(),
+		   sval.c_str(), sval.length(), 0) < 0) {
+    return -errno;
+  }
+  return 0;
+}
+
+int NSFSObject::NSFSFSIOObject::fgetattrs(Attrs& attrs, uint32_t flags)
+{
+  if (shadow_fd < 0) {
+    return -EBADF;
+  }
+  return get_x_attrs(null_yield, dpp, shadow_fd, attrs, shadow_name);
+}
+
+int NSFSObject::NSFSFSIOObject::fsetattrs(Attrs& attrs, uint32_t flags)
+{
+  if (shadow_fd < 0) {
+    return -EBADF;
+  }
+  for (auto& [key, bl] : attrs) {
+    std::string xname = make_xattr_name(key);
+    if (::fsetxattr(shadow_fd, xname.c_str(),
+		     bl.c_str(), bl.length(), 0) < 0) {
+      return -errno;
+    }
+  }
   return 0;
 }
 

@@ -4462,6 +4462,33 @@ int POSIXObject::POSIXFSIOObject::close(uint32_t flags)
   return -ENOTSUP;
 }
 
+int POSIXObject::POSIXFSIOObject::fstat(struct stat*, uint32_t)
+{
+  return -ENOTSUP;
+}
+
+int POSIXObject::POSIXFSIOObject::fgetattr(const std::string&, bufferlist&,
+					    uint32_t)
+{
+  return -ENOTSUP;
+}
+
+int POSIXObject::POSIXFSIOObject::fsetattr(const std::string&,
+					    const bufferlist&, uint32_t)
+{
+  return -ENOTSUP;
+}
+
+int POSIXObject::POSIXFSIOObject::fgetattrs(Attrs&, uint32_t)
+{
+  return -ENOTSUP;
+}
+
+int POSIXObject::POSIXFSIOObject::fsetattrs(Attrs&, uint32_t)
+{
+  return -ENOTSUP;
+}
+
 bool POSIXObject::is_sync_completed(const DoutPrefixProvider* dpp, optional_yield y,
                                     const ceph::real_time& obj_mtime)
 {

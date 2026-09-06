@@ -1149,7 +1149,9 @@ public:
    const DoutPrefixProvider* dpp;
    int shadow_fd{-1};
    int shadow_dir_fd{-1};
+   int parent_fd{-1};
    std::string shadow_name;
+   std::string leaf_name;
    bool ephemeral{false};
    std::vector<std::unique_ptr<nsfs::Directory>> dir_chain;
 
@@ -1171,6 +1173,14 @@ public:
     virtual int publish(uint32_t flags) override;
     virtual int reclone(uint32_t flags) override;
     virtual int close(uint32_t flags) override;
+
+    virtual int fstat(struct stat* st, uint32_t flags) override;
+    virtual int fgetattr(const std::string& name, bufferlist& dest,
+			  uint32_t flags) override;
+    virtual int fsetattr(const std::string& name, const bufferlist& val,
+			  uint32_t flags) override;
+    virtual int fgetattrs(Attrs& attrs, uint32_t flags) override;
+    virtual int fsetattrs(Attrs& attrs, uint32_t flags) override;
 
     virtual ~NSFSFSIOObject() override;
   }; /* NSFSFSIOObject */
