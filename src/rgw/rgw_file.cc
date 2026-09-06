@@ -210,8 +210,14 @@ namespace rgw {
 	    /* restore attributes */
 	    auto ux_key = req.get_attr(RGW_ATTR_UNIX_KEY1);
 	    auto ux_attrs = req.get_attr(RGW_ATTR_UNIX1);
-            rgw_fh->set_etag(*(req.get_attr(RGW_ATTR_ETAG)));
-            rgw_fh->set_acls(*(req.get_attr(RGW_ATTR_ACL)));
+	    auto p_etag = req.get_attr(RGW_ATTR_ETAG);
+	    auto p_acl = req.get_attr(RGW_ATTR_ACL);
+	    if (p_etag) {
+	      rgw_fh->set_etag(*p_etag);
+	    }
+	    if (p_acl) {
+	      rgw_fh->set_acls(*p_acl);
+	    }
             if (ux_key && ux_attrs) {
               /* restores unix attrs */
               [[maybe_unused]] DecodeAttrsResult dar = rgw_fh->decode_attrs(ux_key, ux_attrs);
@@ -244,8 +250,14 @@ namespace rgw {
 	    /* restore attributes */
 	    auto ux_key = req.get_attr(RGW_ATTR_UNIX_KEY1);
 	    auto ux_attrs = req.get_attr(RGW_ATTR_UNIX1);
-            rgw_fh->set_etag(*(req.get_attr(RGW_ATTR_ETAG)));
-            rgw_fh->set_acls(*(req.get_attr(RGW_ATTR_ACL)));
+	    auto p_etag = req.get_attr(RGW_ATTR_ETAG);
+	    auto p_acl = req.get_attr(RGW_ATTR_ACL);
+	    if (p_etag) {
+	      rgw_fh->set_etag(*p_etag);
+	    }
+	    if (p_acl) {
+	      rgw_fh->set_acls(*p_acl);
+	    }
             if (ux_key && ux_attrs) {
               /* restores unix attrs */
               [[maybe_unused]] DecodeAttrsResult dar =
@@ -744,8 +756,16 @@ namespace rgw {
         if (st)
 	  (void) rgw_fh->stat(st, RGWFileHandle::FLAG_LOCKED);
 
-        rgw_fh->set_etag(*(req.get_attr(RGW_ATTR_ETAG)));
-        rgw_fh->set_acls(*(req.get_attr(RGW_ATTR_ACL))); 
+	{
+	  auto p_etag = req.get_attr(RGW_ATTR_ETAG);
+	  auto p_acl = req.get_attr(RGW_ATTR_ACL);
+	  if (p_etag) {
+	    rgw_fh->set_etag(*p_etag);
+	  }
+	  if (p_acl) {
+	    rgw_fh->set_acls(*p_acl);
+	  }
+	}
 
 	get<0>(mkr) = rgw_fh;
 	rgw_fh->file_ondisk_version = 0; // inital version
@@ -902,6 +922,28 @@ namespace rgw {
       break;
     };
 
+    rgw_fh->create_stat(st, mask);
+
+    /* if FSIO handle is active, write attrs to the shadow */
+    auto* f = std::get_if<RGWFileHandle::file>(&rgw_fh->variant_type);
+    if (f && f->fsio_hdl) {
+      rgw_fh->encode_attrs(ux_key, ux_attrs);
+      rgw::sal::Attrs attrs;
+      attrs[RGW_ATTR_UNIX_KEY1] = std::move(ux_key);
+      attrs[RGW_ATTR_UNIX1] = std::move(ux_attrs);
+      if (etag.length()) {
+	attrs[RGW_ATTR_ETAG] = std::move(etag);
+      }
+      if (acls.length()) {
+	attrs[RGW_ATTR_ACL] = std::move(acls);
+      }
+      rc = f->fsio_hdl->fsetattrs(attrs, 0);
+      if (rc == 0) {
+	rgw_fh->set_ctime(real_clock::to_timespec(real_clock::now()));
+      }
+      return rc;
+    }
+
     string obj_name{rgw_fh->relative_object_name()};
 
     if (rgw_fh->is_dir() &&
@@ -911,7 +953,6 @@ namespace rgw {
 
     RGWSetAttrsRequest req(cct, user->clone(), rgw_fh->bucket_name(), obj_name);
 
-    rgw_fh->create_stat(st, mask);
     rgw_fh->encode_attrs(ux_key, ux_attrs);
 
     /* save attrs */
@@ -1818,9 +1859,13 @@ namespace rgw {
       auto& object_name = get_name();
 
       if (! f->fsio_hdl) {
-        uint32_t op_flags = ((posix_flags & O_WRONLY) || (posix_flags & O_RDWR))
-          ? RGWOpenRequest::FLAG_WRITE
-          : RGWOpenRequest::FLAG_NONE;
+        uint32_t op_flags = RGWOpenRequest::FLAG_NONE;
+        if ((posix_flags & O_WRONLY) || (posix_flags & O_RDWR)) {
+          op_flags |= RGWOpenRequest::FLAG_WRITE;
+        }
+        if (rgw_openflags & RGW_OPEN_FLAG_CREATE) {
+          op_flags |= RGWOpenRequest::FLAG_CREATE;
+        }
 
         RGWOpenRequest req(
                            cct, g_rgwlib->get_driver()->get_user(fs->get_user()->user_id),
