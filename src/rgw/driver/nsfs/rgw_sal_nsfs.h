@@ -1151,6 +1151,7 @@ public:
    int shadow_dir_fd{-1};
    std::string shadow_name;
    bool ephemeral{false};
+   std::vector<std::unique_ptr<nsfs::Directory>> dir_chain;
 
    friend class NSFSObject;
 

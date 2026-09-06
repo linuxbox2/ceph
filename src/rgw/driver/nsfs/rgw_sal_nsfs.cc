@@ -4545,7 +4545,35 @@ int NSFSObject::list_parts(const DoutPrefixProvider* dpp, CephContext* cct,
 Object::FSIOResult NSFSObject::get_fsio_handle(const DoutPrefixProvider* dpp,
 						uint32_t flags)
 {
-  auto* dir = ent->get_parent();
+  if (!ent) {
+    (void) stat(dpp);
+  }
+
+  nsfs::Directory* dir;
+  std::string leaf;
+  std::vector<std::unique_ptr<nsfs::Directory>> resolved_dirs;
+  if (ent) {
+    dir = ent->get_parent();
+    leaf = ent->get_name();
+  } else {
+    /* object doesn't exist on disk — resolve the parent directory
+     * from the key path so the shadow lands in the right place
+     * for hierarchical keys (e.g., photos/vacation/pic.jpg) */
+    nsfs::Directory* leaf_dir{nullptr};
+    int ret = nsfs::resolve_path(dpp,
+      static_cast<NSFSBucket*>(bucket)->get_dir(),
+      get_fname(/*use_version=*/false),
+      /*create_dirs=*/true,
+      driver->ctx(),
+      resolved_dirs, leaf_dir, leaf);
+    if (ret < 0 || !leaf_dir) {
+      return FSIOResult{ret < 0 ? ret : -EINVAL, nullptr};
+    }
+    dir = leaf_dir;
+  }
+  if (!dir) {
+    return FSIOResult{-EINVAL, nullptr};
+  }
   int parent_fd = dir->get_fd();
   if (parent_fd < 0) {
     dir->open(dpp);
@@ -4559,8 +4587,6 @@ Object::FSIOResult NSFSObject::get_fsio_handle(const DoutPrefixProvider* dpp,
   if (sdir_fd < 0) {
     return FSIOResult{sdir_fd, nullptr};
   }
-
-  const std::string& leaf = ent->get_name();
   bool shadow_exists = (::faccessat(sdir_fd, leaf.c_str(), F_OK, 0) == 0);
   bool ephemeral = (flags & FSIOObject::OPEN_FLAG_EPHEMERAL) != 0;
 
@@ -4568,6 +4594,7 @@ Object::FSIOResult NSFSObject::get_fsio_handle(const DoutPrefixProvider* dpp,
     new NSFSFSIOObject(this, driver, dpp, ephemeral));
   hdl->shadow_dir_fd = sdir_fd;
   hdl->shadow_name = leaf;
+  hdl->dir_chain = std::move(resolved_dirs);
 
   if (shadow_exists) {
     if (flags & FSIOObject::OPEN_FLAG_EXCL) {

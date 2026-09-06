@@ -210,7 +210,7 @@ TEST(LibRGW, OPEN1) {
   ASSERT_EQ(ret, 0);
 }
 
-TEST(LibRGW, PUT_OBJECT) {
+TEST(LibRGW, PUT_OBJECT1) {
   size_t nbytes;
   string data = "hi mom"; // fix this
   int ret = rgw_write(fs, object_fh, 0, data.length(), &nbytes,
@@ -220,6 +220,18 @@ TEST(LibRGW, PUT_OBJECT) {
   /* commit write transaction */
   ret = rgw_close(fs, object_fh, 0 /* flags */);
   ASSERT_EQ(ret, 0);
+}
+
+TEST(LibRGW, GET_OBJECT1)
+{
+  char sbuf[128];
+  memset(sbuf, 0, 128);
+  size_t nread;
+  int ret = rgw_read(fs, object_fh, 0 /* off */, 6 /* len */, &nread, sbuf,
+                     RGW_READ_FLAG_NONE);
+  ASSERT_EQ(ret, 0);
+  std::string str{sbuf, 6};
+  ASSERT_EQ(str, "hi mom");
 }
 
 TEST(LibRGW, CLOSE1) {

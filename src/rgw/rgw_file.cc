@@ -1829,16 +1829,14 @@ namespace rgw {
         return rc;
       } else {
         if (! f->fsio_hdl) {
-          req_state* state = req.get_state();
-          /* Object needs a bucket from this point */
-          state->object->set_bucket(state->bucket.get());
           uint32_t hopen_flags = sal::Object::FSIOObject::OPEN_FLAG_NONE;
           if (posix_flags & O_TRUNC) {
             hopen_flags |= sal::Object::FSIOObject::OPEN_FLAG_TRUNC;
           }
-          auto f_result = state->object->get_fsio_handle(&dp, hopen_flags);
+          auto f_result = req.sal_object->get_fsio_handle(&dp, hopen_flags);
           if (!get<0>(f_result)) {
-            f->sal_object = state->object->clone();
+            f->sal_bucket = std::move(req.sal_bucket);
+            f->sal_object = std::move(req.sal_object);
             f->fsio_hdl = std::move(get<1>(f_result));
           } else {
             lsubdout(fs->get_context(), rgw, 0)

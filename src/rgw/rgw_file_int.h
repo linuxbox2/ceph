@@ -254,6 +254,7 @@ namespace rgw {
 
       inline open_list::size_type open_count() { return opens.size(); }
 
+      std::unique_ptr<rgw::sal::Bucket> sal_bucket;
       std::unique_ptr<rgw::sal::Object> sal_object;
       std::unique_ptr<sal::Object::FSIOObject> fsio_hdl;
       RGWWriteRequest* write_req;
@@ -2227,6 +2228,8 @@ class RGWOpenRequest : public RGWLibRequest,
 public:
   const std::string& bucket_name;
   const std::string& obj_name;
+  std::unique_ptr<rgw::sal::Bucket> sal_bucket;
+  std::unique_ptr<rgw::sal::Object> sal_object;
   uint64_t _size;
   uint32_t flags;
 
@@ -2248,9 +2251,7 @@ public:
   const char* name() const override { return "stat_obj"; }
   RGWOpType get_type() override { return RGW_OP_STAT_OBJ; }
 
-
   /* getters */
-  /* TODO: FSIOObject handle? bucket? parent? */
 
   bool only_bucket() override { return false; }
 
@@ -2284,8 +2285,12 @@ public:
 
   void execute(optional_yield y) override {
     RGWOpen::execute(y);
-    /* TODO: capture handles ! */
-    //_size = get_state()->obj_size;
+    /* save Bucket and Object handles, and link them */
+    auto state = get_state();
+    sal_bucket = state->bucket->clone();
+    sal_object = state->object->clone();
+    sal_object->set_bucket(sal_bucket.get());
+    _size = state->obj_size;
   }
 
 }; /* RGWOpenRequest */
