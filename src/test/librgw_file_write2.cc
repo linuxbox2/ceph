@@ -676,6 +676,45 @@ TEST(OPEN2, XATTR_REMOVE)
   o2h->close(open1);
 }
 
+TEST(OPEN2, ACL_AFTER_PUBLISH)
+{
+  /* verify ACL survives publish: create, write, close, re-lookup */
+  std::unique_ptr<Open2Helper> o2h =
+      std::make_unique<Open2Helper>(fs, bucket_fh);
+  ASSERT_NE(o2h.get(), nullptr);
+
+  auto lfr = o2h->lookup("acltest1");
+  ASSERT_EQ(get<0>(lfr), 0);
+
+  auto ofr = o2h->open(O_RDWR, RGW_OPEN_FLAG_CREATE);
+  auto open1 = std::get<1>(ofr);
+  ASSERT_NE(open1, nullptr);
+
+  std::string data{"acl test data"};
+  auto nbw = o2h->write(open1, data, 0, data.length());
+  ASSERT_EQ(std::get<0>(nbw), 0);
+
+  o2h->close(open1);
+  /* open1 published the shadow — object now exists on disk */
+  o2h.reset();
+
+  /* fresh lookup — exercises stat_leaf which reads ACL xattr;
+   * would crash if ACL is missing (the original bug) */
+  struct rgw_file_handle* relookup_fh{nullptr};
+  int rc = rgw_lookup(fs, bucket_fh, "acltest1", &relookup_fh,
+		      nullptr, 0, RGW_LOOKUP_FLAG_NONE);
+  ASSERT_EQ(rc, 0);
+  ASSERT_NE(relookup_fh, nullptr);
+
+  /* getattr should succeed and return valid size */
+  struct stat st;
+  rc = rgw_getattr(fs, relookup_fh, &st, RGW_GETATTR_FLAG_NONE);
+  ASSERT_EQ(rc, 0);
+  ASSERT_EQ(st.st_size, (off_t)data.length());
+
+  rgw_fh_rele(fs, relookup_fh, RGW_FH_RELE_FLAG_NONE);
+}
+
 TEST(OPEN2, RENDEZVOUS1)
 {
   /* write open rendezvous with active stream (published) */

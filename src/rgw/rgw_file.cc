@@ -937,7 +937,8 @@ namespace rgw {
       if (acls.length()) {
 	attrs[RGW_ATTR_ACL] = std::move(acls);
       }
-      rc = f->fsio_hdl->fsetattrs(attrs, 0);
+      const DoutPrefix adp(cct, dout_subsys, "rgw setattr: ");
+      rc = f->fsio_hdl->fsetattrs(&adp, attrs, 0);
       if (rc == 0) {
 	rgw_fh->set_ctime(real_clock::to_timespec(real_clock::now()));
       }
@@ -1021,6 +1022,7 @@ namespace rgw {
     /* if FSIO handle is active, read xattrs from shadow */
     auto* f = std::get_if<RGWFileHandle::file>(&rgw_fh->variant_type);
     if (f && f->fsio_hdl) {
+      const DoutPrefix xdp(cct, dout_subsys, "rgw getxattrs: ");
       for (uint32_t ix = 0; ix < attrs->xattr_cnt; ++ix) {
 	auto& xattr = attrs->xattrs[ix];
 	std::string k = is_exposed_attr(xattr.key)
@@ -1028,7 +1030,7 @@ namespace rgw {
 	  : prefix_xattr_keystr(xattr.key);
 
 	bufferlist bl;
-	int rc = f->fsio_hdl->fgetattr(k, bl, 0);
+	int rc = f->fsio_hdl->fgetattr(&xdp, k, bl, 0);
 	if (rc < 0) {
 	  continue;
 	}
@@ -1141,8 +1143,9 @@ namespace rgw {
     /* if FSIO handle is active, list xattrs from shadow */
     auto* f = std::get_if<RGWFileHandle::file>(&rgw_fh->variant_type);
     if (f && f->fsio_hdl) {
+      const DoutPrefix xdp(cct, dout_subsys, "rgw lsxattrs: ");
       rgw::sal::Attrs shadow_attrs;
-      int rc = f->fsio_hdl->fgetattrs(shadow_attrs, 0);
+      int rc = f->fsio_hdl->fgetattrs(&xdp, shadow_attrs, 0);
       if (rc < 0) {
 	return rc;
       }
@@ -1223,6 +1226,7 @@ namespace rgw {
     /* if FSIO handle is active, write xattrs to shadow */
     auto* f = std::get_if<RGWFileHandle::file>(&rgw_fh->variant_type);
     if (f && f->fsio_hdl) {
+      const DoutPrefix xdp(cct, dout_subsys, "rgw setxattrs: ");
       for (uint32_t ix = 0; ix < attrs->xattr_cnt; ++ix) {
 	auto& xattr = attrs->xattrs[ix];
 	if (!(xattr.key.len > 0)) {
@@ -1234,7 +1238,7 @@ namespace rgw {
 	string k = prefix_xattr_keystr(xattr.key);
 	bufferlist bl;
 	bl.append(xattr.val.val, xattr.val.len);
-	int rc = f->fsio_hdl->fsetattr(k, bl, 0);
+	int rc = f->fsio_hdl->fsetattr(&xdp, k, bl, 0);
 	if (rc < 0) {
 	  return rc;
 	}
@@ -1287,13 +1291,14 @@ namespace rgw {
     /* if FSIO handle is active, remove xattrs from shadow */
     auto* f = std::get_if<RGWFileHandle::file>(&rgw_fh->variant_type);
     if (f && f->fsio_hdl) {
+      const DoutPrefix xdp(cct, dout_subsys, "rgw rmxattrs: ");
       for (uint32_t ix = 0; ix < attrs->xattr_cnt; ++ix) {
 	auto& xattr = attrs->xattrs[ix];
 	if (!(xattr.key.len > 0)) {
 	  continue;
 	}
 	string k = prefix_xattr_keystr(xattr.key);
-	int rc = f->fsio_hdl->fremovexattr(k, 0);
+	int rc = f->fsio_hdl->fremovexattr(&xdp, k, 0);
 	if (rc < 0 && rc != -ENODATA) {
 	  return rc;
 	}
@@ -2010,7 +2015,7 @@ namespace rgw {
         }
       } else if (f->fsio_hdl->needs_reclone() &&
                  ((posix_flags & O_WRONLY) || (posix_flags & O_RDWR))) {
-        int rc = f->fsio_hdl->reclone(rgw::sal::Object::FSIOObject::OPEN_FLAG_NONE);
+        int rc = f->fsio_hdl->reclone(&dp, rgw::sal::Object::FSIOObject::OPEN_FLAG_NONE);
         if (!!rc) {
           lsubdout(fs->get_context(), rgw, 0)
             << __func__ << " " << object_name
@@ -2099,6 +2104,8 @@ namespace rgw {
   int RGWFileHandle::close2(file::Open* open, uint32_t flags)
   {
     int rc{0};
+    CephContext* cct = static_cast<CephContext*>(fs->get_fs()->rgw);
+    const DoutPrefix dp(cct, dout_subsys, "rgw close2: ");
 
     bool read_open = open->is_read_open();
     bool write_open = open->is_write_open();
@@ -2127,7 +2134,7 @@ namespace rgw {
       if (write_open) {
         if (f->write_opens == 0) {
           if (f->fsio_hdl) {
-            rc = f->fsio_hdl->publish(
+            rc = f->fsio_hdl->publish(&dp,
                       rgw::sal::Object::FSIOObject::PUBLISH_FLAG_NONE);
             if (!!rc) {
               lsubdout(fs->get_context(), rgw, 0)
@@ -2152,7 +2159,7 @@ namespace rgw {
 
       if (should_close) {
         if (f->fsio_hdl) {
-          rc = f->fsio_hdl->close(close_flags);
+          rc = f->fsio_hdl->close(&dp, close_flags);
           if (!! rc) {
             lsubdout(fs->get_context(), rgw, 0)
               << __func__ << " " << object_name()
