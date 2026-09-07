@@ -1018,6 +1018,43 @@ namespace rgw {
       return -EINVAL;
     }
 
+    /* if FSIO handle is active, read xattrs from shadow */
+    auto* f = std::get_if<RGWFileHandle::file>(&rgw_fh->variant_type);
+    if (f && f->fsio_hdl) {
+      for (uint32_t ix = 0; ix < attrs->xattr_cnt; ++ix) {
+	auto& xattr = attrs->xattrs[ix];
+	std::string k = is_exposed_attr(xattr.key)
+	  ? std::string{xattr.key.val, xattr.key.len}
+	  : prefix_xattr_keystr(xattr.key);
+
+	bufferlist bl;
+	int rc = f->fsio_hdl->fgetattr(k, bl, 0);
+	if (rc < 0) {
+	  continue;
+	}
+
+	std::string_view svk =
+	  is_exposed_attr(xattr.key)
+	  ? std::string_view{xattr.key.val, xattr.key.len}
+	  : unprefix_xattr_keystr(k);
+
+	if (svk.empty()) {
+	  continue;
+	}
+
+	std::string val = bl.to_str();
+	rgw_xattrstr xattr_k = { const_cast<char*>(svk.data()),
+				  uint32_t(svk.length()) };
+	rgw_xattrstr xattr_v = { const_cast<char*>(val.c_str()),
+				  uint32_t(val.length()) };
+	rgw_xattr xa = { xattr_k, xattr_v };
+	rgw_xattrlist xattrlist = { &xa, 1 };
+
+	cb(&xattrlist, cb_arg, RGW_GETXATTR_FLAG_NONE);
+      }
+      return 0;
+    }
+
     int rc, rc2, rc3;
     string obj_name{rgw_fh->relative_object_name2()};
 
@@ -1101,6 +1138,39 @@ namespace rgw {
       return -EINVAL;
     }
 
+    /* if FSIO handle is active, list xattrs from shadow */
+    auto* f = std::get_if<RGWFileHandle::file>(&rgw_fh->variant_type);
+    if (f && f->fsio_hdl) {
+      rgw::sal::Attrs shadow_attrs;
+      int rc = f->fsio_hdl->fgetattrs(shadow_attrs, 0);
+      if (rc < 0) {
+	return rc;
+      }
+      for (const auto& [k, v] : shadow_attrs) {
+	std::string_view svk =
+	  is_exposed_attr(rgw_xattrstr{const_cast<char*>(k.c_str()),
+				       uint32_t(k.length())})
+	  ? k
+	  : unprefix_xattr_keystr(k);
+
+	if (svk.empty()) {
+	  continue;
+	}
+
+	rgw_xattrstr xattr_k = { const_cast<char*>(svk.data()),
+				  uint32_t(svk.length()) };
+	rgw_xattrstr xattr_v = { nullptr, 0 };
+	rgw_xattr xattr = { xattr_k, xattr_v };
+	rgw_xattrlist xattrlist = { &xattr, 1 };
+
+	auto cbr = cb(&xattrlist, cb_arg, RGW_LSXATTR_FLAG_NONE);
+	if (cbr & RGW_LSXATTR_FLAG_STOP) {
+	  break;
+	}
+      }
+      return 0;
+    }
+
     int rc, rc2, rc3;
     string obj_name{rgw_fh->relative_object_name2()};
 
@@ -1150,6 +1220,28 @@ namespace rgw {
       return -EINVAL;
     }
 
+    /* if FSIO handle is active, write xattrs to shadow */
+    auto* f = std::get_if<RGWFileHandle::file>(&rgw_fh->variant_type);
+    if (f && f->fsio_hdl) {
+      for (uint32_t ix = 0; ix < attrs->xattr_cnt; ++ix) {
+	auto& xattr = attrs->xattrs[ix];
+	if (!(xattr.key.len > 0)) {
+	  continue;
+	}
+	if (is_exposed_attr(xattr.key)) {
+	  continue;
+	}
+	string k = prefix_xattr_keystr(xattr.key);
+	bufferlist bl;
+	bl.append(xattr.val.val, xattr.val.len);
+	int rc = f->fsio_hdl->fsetattr(k, bl, 0);
+	if (rc < 0) {
+	  return rc;
+	}
+      }
+      return 0;
+    }
+
     int rc, rc2;
     string obj_name{rgw_fh->relative_object_name2()};
 
@@ -1190,6 +1282,23 @@ namespace rgw {
     if ((rgw_fh->is_bucket()) ||
 	(rgw_fh->is_root()))  {
       return -EINVAL;
+    }
+
+    /* if FSIO handle is active, remove xattrs from shadow */
+    auto* f = std::get_if<RGWFileHandle::file>(&rgw_fh->variant_type);
+    if (f && f->fsio_hdl) {
+      for (uint32_t ix = 0; ix < attrs->xattr_cnt; ++ix) {
+	auto& xattr = attrs->xattrs[ix];
+	if (!(xattr.key.len > 0)) {
+	  continue;
+	}
+	string k = prefix_xattr_keystr(xattr.key);
+	int rc = f->fsio_hdl->fremovexattr(k, 0);
+	if (rc < 0 && rc != -ENODATA) {
+	  return rc;
+	}
+      }
+      return 0;
     }
 
     int rc, rc2;

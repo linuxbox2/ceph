@@ -4872,6 +4872,19 @@ int NSFSObject::NSFSFSIOObject::fsetattrs(Attrs& attrs, uint32_t flags)
   return 0;
 }
 
+int NSFSObject::NSFSFSIOObject::fremovexattr(const std::string& name,
+					     uint32_t flags)
+{
+  if (shadow_fd < 0) {
+    return -EBADF;
+  }
+  std::string xname = make_xattr_name(name);
+  if (::fremovexattr(shadow_fd, xname.c_str()) < 0) {
+    return -errno;
+  }
+  return 0;
+}
+
 int NSFSObject::NSFSFSIOObject::close(uint32_t flags)
 {
   if (shadow_fd < 0 && shadow_dir_fd < 0) {

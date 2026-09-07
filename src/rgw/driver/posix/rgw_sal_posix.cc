@@ -4489,6 +4489,11 @@ int POSIXObject::POSIXFSIOObject::fsetattrs(Attrs&, uint32_t)
   return -ENOTSUP;
 }
 
+int POSIXObject::POSIXFSIOObject::fremovexattr(const std::string&, uint32_t)
+{
+  return -ENOTSUP;
+}
+
 bool POSIXObject::is_sync_completed(const DoutPrefixProvider* dpp, optional_yield y,
                                     const ceph::real_time& obj_mtime)
 {

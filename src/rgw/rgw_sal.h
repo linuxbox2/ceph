@@ -1178,6 +1178,7 @@ public:
 			    uint32_t flags) = 0;
       virtual int fgetattrs(Attrs& attrs, uint32_t flags) = 0;
       virtual int fsetattrs(Attrs& attrs, uint32_t flags) = 0;
+      virtual int fremovexattr(const std::string& name, uint32_t flags) = 0;
 
       bool resumed() const { return resumed_existing; }
       bool needs_reclone() const { return published; }

@@ -1265,6 +1265,7 @@ public:
 			  uint32_t flags) override;
     virtual int fgetattrs(Attrs& attrs, uint32_t flags) override;
     virtual int fsetattrs(Attrs& attrs, uint32_t flags) override;
+    virtual int fremovexattr(const std::string& name, uint32_t flags) override;
 
     virtual ~POSIXFSIOObject() override {}
   }; /* POSIXFsioobject */

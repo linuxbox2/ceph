@@ -176,6 +176,69 @@ namespace {
       return rgw_setattr(fs, object_fh, st, mask, RGW_SETATTR_FLAG_NONE);
     }
 
+    int setxattr(const std::string& key, const std::string& val)
+    {
+      rgw_xattrstr k = { const_cast<char*>(key.c_str()),
+			  uint32_t(key.length()) };
+      rgw_xattrstr v = { const_cast<char*>(val.c_str()),
+			  uint32_t(val.length()) };
+      rgw_xattr xa = { k, v };
+      rgw_xattrlist xlist = { &xa, 1 };
+      return rgw_setxattrs(fs, object_fh, &xlist, RGW_SETXATTR_FLAG_NONE);
+    }
+
+    using GetXattrResult = std::tuple<int, std::string>;
+    GetXattrResult getxattr(const std::string& key)
+    {
+      std::string result;
+      rgw_xattrstr k = { const_cast<char*>(key.c_str()),
+			  uint32_t(key.length()) };
+      rgw_xattrstr v = { nullptr, 0 };
+      rgw_xattr xa = { k, v };
+      rgw_xattrlist xlist = { &xa, 1 };
+
+      auto cb = [](rgw_xattrlist* attrs, void* arg, uint32_t flags) -> int {
+	auto* out = static_cast<std::string*>(arg);
+	if (attrs->xattr_cnt > 0 && attrs->xattrs[0].val.val) {
+	  out->assign(attrs->xattrs[0].val.val, attrs->xattrs[0].val.len);
+	}
+	return 0;
+      };
+
+      int rc = rgw_getxattrs(fs, object_fh, &xlist, cb, &result,
+			     RGW_GETXATTR_FLAG_NONE);
+      return GetXattrResult{rc, result};
+    }
+
+    using LsXattrResult = std::tuple<int, std::vector<std::string>>;
+    LsXattrResult lsxattrs()
+    {
+      std::vector<std::string> keys;
+
+      auto cb = [](rgw_xattrlist* attrs, void* arg, uint32_t flags) -> int {
+	auto* out = static_cast<std::vector<std::string>*>(arg);
+	for (uint32_t i = 0; i < attrs->xattr_cnt; ++i) {
+	  out->emplace_back(attrs->xattrs[i].key.val,
+			    attrs->xattrs[i].key.len);
+	}
+	return 0;
+      };
+
+      int rc = rgw_lsxattrs(fs, object_fh, nullptr, cb, &keys,
+			    RGW_LSXATTR_FLAG_NONE);
+      return LsXattrResult{rc, keys};
+    }
+
+    int rmxattr(const std::string& key)
+    {
+      rgw_xattrstr k = { const_cast<char*>(key.c_str()),
+			  uint32_t(key.length()) };
+      rgw_xattrstr v = { nullptr, 0 };
+      rgw_xattr xa = { k, v };
+      rgw_xattrlist xlist = { &xa, 1 };
+      return rgw_rmxattrs(fs, object_fh, &xlist, RGW_RMXATTR_FLAG_NONE);
+    }
+
     ~Open2Helper()
     {
       (void) rgw_fh_rele(fs, object_fh, RGW_FH_RELE_FLAG_NONE);
@@ -475,6 +538,140 @@ TEST(OPEN2, SETATTR_REOPEN)
   ASSERT_EQ(st.st_uid, 1234u);
   ASSERT_EQ(st.st_gid, 5678u);
   ASSERT_EQ(st.st_size, 17);
+
+  o2h->close(open1);
+}
+
+TEST(OPEN2, XATTR_SET_GET)
+{
+  /* set user metadata xattr during open session, read it back */
+  std::unique_ptr<Open2Helper> o2h =
+      std::make_unique<Open2Helper>(fs, bucket_fh);
+  ASSERT_NE(o2h.get(), nullptr);
+
+  auto lfr = o2h->lookup("xattrtest1");
+  ASSERT_EQ(get<0>(lfr), 0);
+
+  auto ofr = o2h->open(O_RDWR, RGW_OPEN_FLAG_CREATE);
+  auto open1 = std::get<1>(ofr);
+  ASSERT_NE(open1, nullptr);
+
+  std::string data{"xattr test"};
+  auto nbw = o2h->write(open1, data, 0, data.length());
+  ASSERT_EQ(std::get<0>(nbw), 0);
+
+  /* set a user metadata xattr */
+  int rc = o2h->setxattr("color", "blue");
+  ASSERT_EQ(rc, 0);
+
+  rc = o2h->setxattr("shape", "round");
+  ASSERT_EQ(rc, 0);
+
+  /* read them back during open session */
+  auto gr1 = o2h->getxattr("color");
+  ASSERT_EQ(std::get<0>(gr1), 0);
+  ASSERT_EQ(std::get<1>(gr1), "blue");
+
+  auto gr2 = o2h->getxattr("shape");
+  ASSERT_EQ(std::get<0>(gr2), 0);
+  ASSERT_EQ(std::get<1>(gr2), "round");
+
+  o2h->close(open1);
+}
+
+TEST(OPEN2, XATTR_PERSIST)
+{
+  /* verify xattrs survive publish + reopen */
+  std::unique_ptr<Open2Helper> o2h =
+      std::make_unique<Open2Helper>(fs, bucket_fh);
+  ASSERT_NE(o2h.get(), nullptr);
+
+  auto lfr = o2h->lookup("xattrtest1");
+  ASSERT_EQ(get<0>(lfr), 0);
+
+  auto ofr = o2h->open(O_RDONLY, RGW_OPEN_FLAG_NONE);
+  auto open1 = std::get<1>(ofr);
+  ASSERT_NE(open1, nullptr);
+
+  /* xattrs should have survived publish */
+  auto gr1 = o2h->getxattr("color");
+  ASSERT_EQ(std::get<0>(gr1), 0);
+  ASSERT_EQ(std::get<1>(gr1), "blue");
+
+  auto gr2 = o2h->getxattr("shape");
+  ASSERT_EQ(std::get<0>(gr2), 0);
+  ASSERT_EQ(std::get<1>(gr2), "round");
+
+  /* data should survive too */
+  auto rdr = o2h->read(open1, 0, 10);
+  ASSERT_EQ(std::get<0>(rdr), 0);
+  ASSERT_EQ(std::get<1>(rdr), "xattr test");
+
+  o2h->close(open1);
+}
+
+TEST(OPEN2, XATTR_LIST)
+{
+  /* list xattrs on an open handle */
+  std::unique_ptr<Open2Helper> o2h =
+      std::make_unique<Open2Helper>(fs, bucket_fh);
+  ASSERT_NE(o2h.get(), nullptr);
+
+  auto lfr = o2h->lookup("xattrtest1");
+  ASSERT_EQ(get<0>(lfr), 0);
+
+  auto ofr = o2h->open(O_RDONLY, RGW_OPEN_FLAG_NONE);
+  auto open1 = std::get<1>(ofr);
+  ASSERT_NE(open1, nullptr);
+
+  auto lsr = o2h->lsxattrs();
+  ASSERT_EQ(std::get<0>(lsr), 0);
+
+  auto& keys = std::get<1>(lsr);
+  /* should contain at least our two user metadata keys */
+  bool found_color = false, found_shape = false;
+  for (const auto& k : keys) {
+    if (k == "color") { found_color = true; }
+    if (k == "shape") { found_shape = true; }
+  }
+  ASSERT_TRUE(found_color);
+  ASSERT_TRUE(found_shape);
+
+  o2h->close(open1);
+}
+
+TEST(OPEN2, XATTR_REMOVE)
+{
+  /* remove an xattr, verify it's gone */
+  std::unique_ptr<Open2Helper> o2h =
+      std::make_unique<Open2Helper>(fs, bucket_fh);
+  ASSERT_NE(o2h.get(), nullptr);
+
+  auto lfr = o2h->lookup("xattrtest1");
+  ASSERT_EQ(get<0>(lfr), 0);
+
+  auto ofr = o2h->open(O_RDWR, RGW_OPEN_FLAG_NONE);
+  auto open1 = std::get<1>(ofr);
+  ASSERT_NE(open1, nullptr);
+
+  /* color should still exist */
+  auto gr1 = o2h->getxattr("color");
+  ASSERT_EQ(std::get<0>(gr1), 0);
+  ASSERT_EQ(std::get<1>(gr1), "blue");
+
+  /* remove it */
+  int rc = o2h->rmxattr("color");
+  ASSERT_EQ(rc, 0);
+
+  /* verify it's gone */
+  auto gr2 = o2h->getxattr("color");
+  /* should return empty or error */
+  ASSERT_TRUE(std::get<1>(gr2).empty());
+
+  /* shape should still exist */
+  auto gr3 = o2h->getxattr("shape");
+  ASSERT_EQ(std::get<0>(gr3), 0);
+  ASSERT_EQ(std::get<1>(gr3), "round");
 
   o2h->close(open1);
 }
