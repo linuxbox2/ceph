@@ -4742,7 +4742,32 @@ int NSFSObject::NSFSFSIOObject::publish(const DoutPrefixProvider* dpp, uint32_t 
 
   ::fsync(shadow_fd);
 
-  /* TODO: fixup pass — compute etag + checksums, stamp xattrs */
+  /* fixup pass: compute etag from shadow content and stamp as xattr */
+  {
+    MD5 hash;
+    hash.SetFlags(EVP_MD_CTX_FLAG_NON_FIPS_ALLOW);
+    unsigned char m[CEPH_CRYPTO_MD5_DIGESTSIZE];
+    char buf[65536];
+    off_t off = 0;
+
+    for (;;) {
+      ssize_t nr = ::pread(shadow_fd, buf, sizeof(buf), off);
+      if (nr <= 0) {
+	break;
+      }
+      hash.Update((const unsigned char*)buf, nr);
+      off += nr;
+    }
+    hash.Final(m);
+
+    bufferlist etag_bl;
+    append_bl(etag_bl, CEPH_CRYPTO_MD5_DIGESTSIZE * 2 + 1, [&](auto iter) {
+      iter = buf_to_hex(m, iter);
+      *iter++ = '\0';
+      return iter;
+    });
+    fsetattr(dpp, RGW_ATTR_ETAG, etag_bl, 0);
+  }
 
   auto* bucket = static_cast<NSFSBucket*>(src_obj->get_bucket());
   const auto& binfo = bucket->get_info();
