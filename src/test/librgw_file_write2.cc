@@ -171,6 +171,11 @@ namespace {
 
     int close(rgw_open_fd fd) { return rgw_close2(fd, RGW_CLOSE_FLAG_NONE); }
 
+    int setattr(struct stat* st, uint32_t mask)
+    {
+      return rgw_setattr(fs, object_fh, st, mask, RGW_SETATTR_FLAG_NONE);
+    }
+
     ~Open2Helper()
     {
       (void) rgw_fh_rele(fs, object_fh, RGW_FH_RELE_FLAG_NONE);
@@ -392,6 +397,86 @@ TEST(OPEN2, CREATE_FLAG)
 {
   /* open non-existing + FLAG_NONE fails (correctly) */
   /* open non-existing + FLAG_CREATE succeeds */
+}
+
+TEST(OPEN2, SETATTR1)
+{
+  /* set attrs during open session, verify, close, reopen, verify */
+  std::unique_ptr<Open2Helper> o2h =
+      std::make_unique<Open2Helper>(fs, bucket_fh);
+  ASSERT_NE(o2h.get(), nullptr);
+
+  auto lfr = o2h->lookup("attrtest1");
+  ASSERT_EQ(get<0>(lfr), 0);
+
+  auto ofr = o2h->open(O_RDWR, RGW_OPEN_FLAG_CREATE);
+  auto open1 = std::get<1>(ofr);
+  ASSERT_NE(open1, nullptr);
+
+  /* write some data */
+  std::string data{"attr test content"};
+  auto nbw = o2h->write(open1, data, 0, data.length());
+  ASSERT_EQ(std::get<0>(nbw), 0);
+
+  /* set uid/gid/mode */
+  struct stat st;
+  memset(&st, 0, sizeof(st));
+  st.st_uid = 1234;
+  st.st_gid = 5678;
+  st.st_mode = 0644;
+  int rc = o2h->setattr(&st, RGW_SETATTR_UID | RGW_SETATTR_GID |
+			      RGW_SETATTR_MODE);
+  ASSERT_EQ(rc, 0);
+
+  /* verify attrs with getattr during open session */
+  auto sr1 = o2h->stat();
+  ASSERT_EQ(std::get<0>(sr1), 0);
+  auto& st1 = std::get<1>(sr1);
+  ASSERT_EQ(st1.st_uid, 1234u);
+  ASSERT_EQ(st1.st_gid, 5678u);
+  ASSERT_EQ(st1.st_size, (off_t)data.length());
+
+  /* close (publish) */
+  o2h->close(open1);
+
+  /* verify attrs survived publish */
+  auto sr2 = o2h->stat();
+  ASSERT_EQ(std::get<0>(sr2), 0);
+  auto& st2 = std::get<1>(sr2);
+  ASSERT_EQ(st2.st_uid, 1234u);
+  ASSERT_EQ(st2.st_gid, 5678u);
+  ASSERT_EQ(st2.st_size, (off_t)data.length());
+}
+
+TEST(OPEN2, SETATTR_REOPEN)
+{
+  /* reopen a published object and verify attrs */
+  std::unique_ptr<Open2Helper> o2h =
+      std::make_unique<Open2Helper>(fs, bucket_fh);
+  ASSERT_NE(o2h.get(), nullptr);
+
+  auto lfr = o2h->lookup("attrtest1");
+  ASSERT_EQ(get<0>(lfr), 0);
+
+  /* reopen for read — object was published by SETATTR1 */
+  auto ofr = o2h->open(O_RDONLY, RGW_OPEN_FLAG_NONE);
+  auto open1 = std::get<1>(ofr);
+  ASSERT_NE(open1, nullptr);
+
+  /* read back data */
+  auto rdr = o2h->read(open1, 0, 17);
+  ASSERT_EQ(std::get<0>(rdr), 0);
+  ASSERT_EQ(std::get<1>(rdr), "attr test content");
+
+  /* verify attrs survived reopen */
+  auto sr = o2h->stat();
+  ASSERT_EQ(std::get<0>(sr), 0);
+  auto& st = std::get<1>(sr);
+  ASSERT_EQ(st.st_uid, 1234u);
+  ASSERT_EQ(st.st_gid, 5678u);
+  ASSERT_EQ(st.st_size, 17);
+
+  o2h->close(open1);
 }
 
 TEST(OPEN2, RENDEZVOUS1)
