@@ -1080,6 +1080,9 @@ public:
   FSIOResult get_fsio_handle(const DoutPrefixProvider* dpp,
 			     uint32_t flags = FSIOObject::OPEN_FLAG_NONE) override;
 
+  int stat_fsio_view(const DoutPrefixProvider* dpp, struct stat* st,
+		     Attrs* attrs, uint32_t flags) override;
+
   bool is_sync_completed(const DoutPrefixProvider* dpp, optional_yield y,
                          const ceph::real_time& obj_mtime) override;
 

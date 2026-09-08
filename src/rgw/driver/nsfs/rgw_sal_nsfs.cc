@@ -4542,6 +4542,97 @@ int NSFSObject::list_parts(const DoutPrefixProvider* dpp, CephContext* cct,
   return 0;
 } /* int NSFSObject::list_parts */
 
+int NSFSObject::stat_fsio_view(const DoutPrefixProvider* dpp,
+			       struct stat* st, Attrs* attrs, uint32_t flags)
+{
+  if (!ent) {
+    (void) stat(dpp);
+  }
+
+  nsfs::Directory* dir{nullptr};
+  std::string leaf;
+  std::vector<std::unique_ptr<nsfs::Directory>> resolved_dirs;
+
+  if (ent) {
+    dir = ent->get_parent();
+    leaf = ent->get_name();
+  } else {
+    /* a probe must not create anything on the way to the answer, so
+     * unlike get_fsio_handle() this resolves without create_dirs */
+    nsfs::Directory* leaf_dir{nullptr};
+    int ret = nsfs::resolve_path(dpp,
+      static_cast<NSFSBucket*>(bucket)->get_dir(),
+      get_fname(/*use_version=*/false),
+      /*create_dirs=*/false,
+      driver->ctx(),
+      resolved_dirs, leaf_dir, leaf);
+    if (ret < 0 || !leaf_dir) {
+      return (ret < 0) ? ret : -ENOENT;
+    }
+    dir = leaf_dir;
+  }
+
+  if (!dir) {
+    return -ENOENT;
+  }
+
+  int parent_fd = dir->get_fd();
+  if (parent_fd < 0) {
+    dir->open(dpp);
+    parent_fd = dir->get_fd();
+  }
+  if (parent_fd < 0) {
+    return -EBADF;
+  }
+
+  /* the shadow is the NFS view whenever one exists;  otherwise the
+   * published object is.  note the shadow directory is only opened if
+   * one is there, so the common case costs a single fstatat */
+  int dir_fd = parent_fd;
+  int sdir_fd = -1;
+
+  if (::faccessat(parent_fd, HIDDEN_SHADOW_PATH.c_str(), F_OK, 0) == 0) {
+    sdir_fd = ::openat(parent_fd, HIDDEN_SHADOW_PATH.c_str(),
+		       O_RDONLY | O_DIRECTORY);
+    if ((sdir_fd >= 0) &&
+	(::faccessat(sdir_fd, leaf.c_str(), F_OK, 0) == 0)) {
+      dir_fd = sdir_fd;
+    }
+  }
+
+  int ret = 0;
+
+  if (st) {
+    if (::fstatat(dir_fd, leaf.c_str(), st, AT_SYMLINK_NOFOLLOW) < 0) {
+      ret = -errno;
+      goto out;
+    }
+  }
+
+  if (attrs) {
+    /* xattrs need a descriptor;  it is transient, unlike the ones an
+     * FSIO handle retains */
+    int fd = ::openat(dir_fd, leaf.c_str(), O_RDONLY);
+    if (fd < 0) {
+      ret = -errno;
+      goto out;
+    }
+    ret = get_x_attrs(null_yield, dpp, fd, *attrs, leaf);
+    ::close(fd);
+  } else if (!st) {
+    /* existence only */
+    if (::faccessat(dir_fd, leaf.c_str(), F_OK, 0) < 0) {
+      ret = -errno;
+    }
+  }
+
+out:
+  if (sdir_fd >= 0) {
+    ::close(sdir_fd);
+  }
+  return ret;
+}
+
 Object::FSIOResult NSFSObject::get_fsio_handle(const DoutPrefixProvider* dpp,
 						uint32_t flags)
 {
