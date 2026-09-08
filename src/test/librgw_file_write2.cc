@@ -1887,6 +1887,53 @@ TEST(OPEN2, TRUNCATE_API)
   ASSERT_EQ(rgw_truncate(fs, bucket_fh, 0, RGW_TRUNCATE_FLAG_NONE), -EISDIR);
 }
 
+TEST(OPEN2, LOOKUP_FINDS_UNPUBLISHED)
+{
+  /* An object which exists only as a shadow is part of the NFS view and
+   * must be findable.  Resolving through a synthesized S3 GET could not
+   * see it -- the shadow is by definition not in the S3 namespace -- so
+   * this is also the assertion which proves the probe is being taken
+   * rather than the fallback. */
+  if (! have_fs_layout()) {
+    GTEST_SKIP() << "not a filesystem-backed driver";
+  }
+
+  reset_object("unpub1");
+
+  std::unique_ptr<Open2Helper> o2h =
+      std::make_unique<Open2Helper>(fs, bucket_fh);
+  ASSERT_EQ(get<0>(o2h->lookup("unpub1")), 0);
+
+  std::string a4{"AAAA"};
+
+  auto ofw = o2h->open(O_RDWR, RGW_OPEN_FLAG_CREATE);
+  ASSERT_EQ(get<0>(ofw), 0);
+  ASSERT_EQ(get<0>(o2h->write(get<1>(ofw), a4, 0, a4.length())), 0);
+
+  /* deliberately not closed: the object exists only in .shadow/ */
+  ASSERT_TRUE(sf::exists(shadow_path("unpub1")));
+  ASSERT_FALSE(sf::exists(published_path("unpub1")));
+
+  /* a lookup without CREATE has to find it anyway */
+  struct rgw_file_handle* fh{nullptr};
+  ASSERT_EQ(rgw_lookup(fs, bucket_fh, "unpub1", &fh, nullptr, 0,
+		       RGW_LOOKUP_FLAG_NONE), 0);
+  ASSERT_NE(fh, nullptr);
+
+  struct stat st;
+  ASSERT_EQ(rgw_getattr(fs, fh, &st, RGW_GETATTR_FLAG_NONE), 0);
+  ASSERT_EQ(st.st_size, (off_t) a4.length());
+
+  (void) rgw_fh_rele(fs, fh, RGW_FH_RELE_FLAG_NONE);
+  ASSERT_EQ(o2h->close(get<1>(ofw)), 0);
+
+  /* and once published it is still found, by the same path */
+  ASSERT_TRUE(sf::exists(published_path("unpub1")));
+  ASSERT_EQ(rgw_lookup(fs, bucket_fh, "unpub1", &fh, nullptr, 0,
+		       RGW_LOOKUP_FLAG_NONE), 0);
+  (void) rgw_fh_rele(fs, fh, RGW_FH_RELE_FLAG_NONE);
+}
+
 /* END ALL TESTS */
 
 TEST(OPEN2, DELETE_BUCKET) {

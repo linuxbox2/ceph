@@ -180,12 +180,76 @@ namespace rgw {
 
     LookupFHResult fhr{nullptr, 0};
 
+    std::string obj_path = parent->format_child_name(path, false);
+
+    /* Resolve the NFS view directly, when the driver has one.  The
+     * fallback below synthesizes an S3 GET, which cannot see a shadow
+     * and brings a lookup-time s3:GetObject check that is the wrong
+     * permission for a lookup;  it is kept only for drivers with no
+     * positional view, and should not be extended. */
+    {
+      const DoutPrefix dp(cct, dout_subsys, "rgw stat_leaf: ");
+      std::unique_ptr<rgw::sal::Bucket> sal_bucket;
+      int rc = g_rgwlib->get_driver()->load_bucket(
+	&dp, rgw_bucket(user->get_tenant(), parent->bucket_name()),
+	&sal_bucket, null_yield);
+      if (rc == 0) {
+	auto sal_object = sal_bucket->get_object(rgw_obj_key(obj_path));
+	struct stat st;
+	rgw::sal::Attrs attrs;
+	memset(&st, 0, sizeof(st));
+
+	rc = sal_object->stat_fsio_view(&dp, &st, &attrs, 0);
+	if (rc == 0) {
+	  /* st_mode carries the type, so one call disambiguates what
+	   * the fallback needs two round trips for */
+	  bool is_dir = S_ISDIR(st.st_mode);
+	  if (((type == RGW_FS_TYPE_DIRECTORY) && !is_dir) ||
+	      ((type == RGW_FS_TYPE_FILE) && is_dir)) {
+	    return fhr; /* wrong type for the hint given */
+	  }
+
+	  fhr = lookup_fh(parent, path,
+			  is_dir ? RGWFileHandle::FLAG_DIRECTORY
+				 : RGWFileHandle::FLAG_CREATE);
+	  if (get<0>(fhr)) {
+	    RGWFileHandle* rgw_fh = get<0>(fhr);
+	    lock_guard guard(rgw_fh->mtx);
+	    rgw_fh->set_size(st.st_size);
+	    rgw_fh->set_times(st.st_mtim);
+
+	    auto find_attr = [&attrs](const char* k) -> buffer::list* {
+	      auto it = attrs.find(k);
+	      return (it != attrs.end()) ? &(it->second) : nullptr;
+	    };
+	    auto ux_key = find_attr(RGW_ATTR_UNIX_KEY1);
+	    auto ux_attrs = find_attr(RGW_ATTR_UNIX1);
+	    auto p_etag = find_attr(RGW_ATTR_ETAG);
+	    auto p_acl = find_attr(RGW_ATTR_ACL);
+	    if (p_etag) {
+	      rgw_fh->set_etag(*p_etag);
+	    }
+	    if (p_acl) {
+	      rgw_fh->set_acls(*p_acl);
+	    }
+	    if (ux_key && ux_attrs) {
+	      [[maybe_unused]] DecodeAttrsResult dar =
+		rgw_fh->decode_attrs(ux_key, ux_attrs);
+	    }
+	  }
+	  return fhr;
+	}
+	if (rc != -ENOTSUP) {
+	  /* the name does not exist in the NFS view */
+	  return fhr;
+	}
+      }
+    }
+
     /* XXX the need for two round-trip operations to identify file or
      * directory leaf objects is unnecessary--the current proposed
      * mechanism to avoid this is to store leaf object names with an
      * object locator w/o trailing slash */
-
-    std::string obj_path = parent->format_child_name(path, false);
 
     for (auto ix : { 0, 1, 2 }) {
       switch (ix) {
