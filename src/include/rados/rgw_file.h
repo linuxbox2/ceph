@@ -301,6 +301,36 @@ int rgw_open2(struct rgw_fs* rgw_fs, struct rgw_file_handle* fh,
 #define RGW_CLOSE_FLAG_NONE        0x0000
 #define RGW_CLOSE_FLAG_RELE        0x0001
 #define RGW_CLOSE_FLAG_DETACH      0x0002
+
+/*
+  RGW_CLOSE_FLAG_DETACH declines to finalize on this close's account:
+  the close does not publish, even when it returns the last write open.
+
+  It is not an abort.  There is one mutable view of an object, shared by
+  every open on it, so one writer's bytes are indistinguishable from
+  another's and cannot be withdrawn.  What follows from that:
+
+    - another writer is still open:  they publish the shared view when
+      they close, including everything this caller wrote.  DETACH
+      suppressed the trigger, nothing more.
+    - this is the last open on the object:  no one else has a claim, so
+      the view is discarded rather than published.  This is the only
+      case in which DETACH abandons anything.
+    - only readers remain:  nothing is published and nothing is
+      discarded -- readers are reading that view, and taking it from
+      them would be worse than leaving it.  It persists, unpublished,
+      until a later writer finishes it or it is unlinked.
+
+  The sense is pthread_detach()'s:  it changes who is responsible for
+  finalizing, not whether the work happened.  A caller wanting
+  transactional abort does not have it here;  only an intersecting
+  unlink discards work another open is still holding.
+
+  NOT YET IMPLEMENTED.  The flag is accepted and currently has no
+  effect -- librgw finalizes by the ordinary rules.  Semantics were
+  settled 2026-09-08 so that the meaning is fixed before a caller
+  depends on it.
+*/
   
 int rgw_close(struct rgw_fs *rgw_fs, struct rgw_file_handle *fh,
 	      uint32_t flags);
