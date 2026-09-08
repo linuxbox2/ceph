@@ -16,6 +16,7 @@
 #include <fcntl.h>
 #include <stdint.h>
 #include <filesystem>
+#include <sys/xattr.h>
 #include <thread>
 #include <chrono>
 #include <cstdint>
@@ -243,6 +244,8 @@ namespace {
     }
 
     int close(rgw_open_fd fd) { return rgw_close2(fd, RGW_CLOSE_FLAG_NONE); }
+
+    rgw::RGWFileHandle* rgw_fh_of() { return rgw::get_rgwfh(object_fh); }
 
     int setattr(struct stat* st, uint32_t mask)
     {
@@ -2251,6 +2254,65 @@ TEST(OPEN2, REOPEN2_MULTI_WRITER)
   ASSERT_EQ(get<0>(rdr), 0);
   ASSERT_EQ(get<1>(rdr), b4 + c4);
   ASSERT_EQ(o2h->close(get<1>(ofr)), 0);
+}
+
+TEST(OPEN2, UNIX_ATTRS_PERSIST)
+{
+  /* A file created through open2/write/close must carry its owner,
+   * group and mode.  The legacy write path stamped these in
+   * RGWWriteRequest::exec_finish(); the FSIO path had no equivalent, so
+   * such a file had uid 0, gid 0 and no mode.
+   *
+   * The lookup on a fresh handle is the part that matters: a handle
+   * which is still live answers getattr from memory and would pass
+   * whether or not anything reached the object. */
+  if (! have_fs_layout()) {
+    GTEST_SKIP() << "not a filesystem-backed driver";
+  }
+
+  reset_object("uxattr1");
+
+  const uint32_t uid = 4242;
+  const uint32_t gid = 4243;
+
+  {
+    std::unique_ptr<Open2Helper> o2h =
+	std::make_unique<Open2Helper>(fs, bucket_fh);
+    ASSERT_EQ(get<0>(o2h->lookup("uxattr1")), 0);
+
+    struct stat st;
+    memset(&st, 0, sizeof(st));
+    st.st_uid = uid;
+    st.st_gid = gid;
+    st.st_mode = 0640;
+    o2h->rgw_fh_of()->create_stat(&st, create_mask);
+
+    std::string a4{"AAAA"};
+    auto ofw = o2h->open(O_RDWR, RGW_OPEN_FLAG_CREATE);
+    ASSERT_EQ(get<0>(ofw), 0);
+    ASSERT_EQ(get<0>(o2h->write(get<1>(ofw), a4, 0, a4.length())), 0);
+    ASSERT_EQ(o2h->close(get<1>(ofw)), 0);
+  }
+
+  /* On the object, not merely in a handle.  Without this the test
+   * passes vacuously: rgw_lookup() may hand back the cached handle,
+   * whose state still holds what create_stat() set, and decode_attrs()
+   * only overwrites it when the attrs are actually present. */
+  ASSERT_TRUE(sf::exists(published_path("uxattr1")));
+  ASSERT_GE(::getxattr(published_path("uxattr1").c_str(),
+		       "user.nsfs.rgw.unix1", nullptr, 0), 0)
+      << "unix attrs were not written to the object";
+
+  /* and come back on a handle which never saw them set */
+  struct rgw_file_handle* fh{nullptr};
+  ASSERT_EQ(rgw_lookup(fs, bucket_fh, "uxattr1", &fh, nullptr, 0,
+		       RGW_LOOKUP_FLAG_NONE), 0);
+  struct stat st2;
+  ASSERT_EQ(rgw_getattr(fs, fh, &st2, RGW_GETATTR_FLAG_NONE), 0);
+  ASSERT_EQ(st2.st_uid, uid);
+  ASSERT_EQ(st2.st_gid, gid);
+  ASSERT_EQ(st2.st_size, 4);
+  (void) rgw_fh_rele(fs, fh, RGW_FH_RELE_FLAG_NONE);
 }
 
 /* END ALL TESTS */

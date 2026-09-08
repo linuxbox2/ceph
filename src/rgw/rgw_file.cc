@@ -2201,6 +2201,56 @@ namespace rgw {
       RGWLibFS::write_timer.add_event(interval, StatelessFinalize(*this));
   } /* RGWFileHandle::arm_stateless_timer */
 
+  /* Write this handle's unix attrs onto the shadow, immediately before
+   * it is published.  mtx must be held.
+   *
+   * The legacy write path did this in RGWWriteRequest::exec_finish():
+   * it set size and mtime from what it had written, encoded, and
+   * emplaced UNIX_KEY1/UNIX1 as part of finishing the write.  The FSIO
+   * path had no equivalent, so a file created through open2/write/close
+   * carried no owner, group or mode at all.
+   *
+   * Doing it at publish rather than at create also captures a setattr
+   * issued while the open was held.  Size and mtime are refreshed from
+   * the shadow first:  encode_attrs() serializes the whole state, so
+   * stamping the handle's cached values would persist a size which
+   * disagrees with the data, and decode_attrs() would hand that back at
+   * the next lookup. */
+  void RGWFileHandle::stamp_unix_attrs()
+  {
+    file* f = get_if<file>(&variant_type);
+    if (! f || ! f->fsio_hdl) {
+      return;
+    }
+
+    CephContext* cct = static_cast<CephContext*>(fs->get_fs()->rgw);
+    const DoutPrefix dp(cct, dout_subsys, "rgw stamp_unix_attrs: ");
+
+    struct stat shadow_st;
+    if (f->fsio_hdl->fstat(&shadow_st, 0) == 0) {
+      state.size = shadow_st.st_size;
+#ifdef HAVE_STAT_ST_MTIMESPEC_TV_NSEC
+      state.mtime = shadow_st.st_mtimespec;
+#else
+      state.mtime = shadow_st.st_mtim;
+#endif
+    }
+
+    ceph::buffer::list ux_key, ux_attrs;
+    encode_attrs(ux_key, ux_attrs);
+
+    rgw::sal::Attrs attrs;
+    attrs[RGW_ATTR_UNIX_KEY1] = std::move(ux_key);
+    attrs[RGW_ATTR_UNIX1] = std::move(ux_attrs);
+
+    int rc = f->fsio_hdl->fsetattrs(&dp, attrs, 0);
+    if (!! rc) {
+      lsubdout(fs->get_context(), rgw, 0)
+        << __func__ << " " << object_name()
+        << " failed to stamp unix attrs rc=" << rc << dendl;
+    }
+  } /* RGWFileHandle::stamp_unix_attrs */
+
   /* mtx must be held */
   void RGWFileHandle::discard_shadow()
   {
@@ -2289,6 +2339,7 @@ namespace rgw {
     (f->read_opens)++;
 
     if ((f->write_opens == 0) && f->fsio_hdl && ! deleted()) {
+      stamp_unix_attrs();
       int rc = f->fsio_hdl->publish(
         &dp, rgw::sal::Object::FSIOObject::PUBLISH_FLAG_NONE);
       if (!! rc) {
@@ -2602,6 +2653,7 @@ namespace rgw {
       if (write_open) {
         if (f->write_opens == 0) {
           if (f->fsio_hdl && ! deleted()) {
+            stamp_unix_attrs();
             publish_rc = f->fsio_hdl->publish(&dp,
                       rgw::sal::Object::FSIOObject::PUBLISH_FLAG_NONE);
             if (!!publish_rc) {
