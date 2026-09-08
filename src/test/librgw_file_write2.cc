@@ -2116,6 +2116,73 @@ TEST(OPEN2, STATELESS_READ_RECLAIMED)
   g_conf().apply_changes(nullptr);
 }
 
+TEST(OPEN2, REOPEN2)
+{
+  /* NFSv4 reopen: change the access mode of an open the caller already
+   * holds, rather than taking another.  The FSAL reaches this on its
+   * first v4 open which changes share mode. */
+  if (! have_fs_layout()) {
+    GTEST_SKIP() << "not a filesystem-backed driver";
+  }
+
+  reset_object("reopen1");
+
+  std::unique_ptr<Open2Helper> o2h =
+      std::make_unique<Open2Helper>(fs, bucket_fh);
+  ASSERT_EQ(get<0>(o2h->lookup("reopen1")), 0);
+
+  std::string a4{"AAAA"};
+  std::string b4{"BBBB"};
+
+  auto ofw = o2h->open(O_RDWR, RGW_OPEN_FLAG_CREATE);
+  ASSERT_EQ(get<0>(ofw), 0);
+  ASSERT_EQ(get<0>(o2h->write(get<1>(ofw), a4, 0, a4.length())), 0);
+  ASSERT_EQ(o2h->close(get<1>(ofw)), 0);
+
+  /* a read open, bound to the published object */
+  auto ofr = o2h->open(O_RDONLY, RGW_OPEN_FLAG_NONE);
+  ASSERT_EQ(get<0>(ofr), 0);
+  auto r1 = get<1>(ofr);
+  ASSERT_FALSE(sf::exists(shadow_path("reopen1")));
+
+  /* writing through it is refused while it is read-only */
+  auto nbw = o2h->write(r1, b4, 0, b4.length());
+  ASSERT_EQ(get<0>(nbw), -EBADF);
+
+  /* upgrade in place:  same open, now a writer, and the shadow exists */
+  ASSERT_EQ(rgw_reopen2(r1, O_RDWR, RGW_OPEN_FLAG_NONE), 0);
+  ASSERT_TRUE(sf::exists(shadow_path("reopen1")));
+
+  ASSERT_EQ(get<0>(o2h->write(r1, b4, 0, b4.length())), 0);
+  auto rdr = o2h->read(r1, 0, b4.length());
+  ASSERT_EQ(get<0>(rdr), 0);
+  ASSERT_EQ(get<1>(rdr), b4);
+
+  /* downgrade:  writes are refused again, and because this returned the
+   * last write access it publishes, exactly as closing it would.  the
+   * alternative -- publish only on close -- loses the write, since
+   * close2 keys off the closing open's mode and this open is now a
+   * reader */
+  ASSERT_EQ(rgw_reopen2(r1, O_RDONLY, RGW_OPEN_FLAG_NONE), 0);
+  ASSERT_EQ(get<0>(o2h->write(r1, a4, 0, a4.length())), -EBADF);
+  ASSERT_FALSE(sf::exists(shadow_path("reopen1")));
+
+  /* the reader follows the publish, and sees what was written */
+  rdr = o2h->read(r1, 0, b4.length());
+  ASSERT_EQ(get<0>(rdr), 0);
+  ASSERT_EQ(get<1>(rdr), b4);
+
+  ASSERT_EQ(o2h->close(r1), 0);
+  ASSERT_FALSE(sf::exists(shadow_path("reopen1")));
+
+  auto ofr2 = o2h->open(O_RDONLY, RGW_OPEN_FLAG_NONE);
+  ASSERT_EQ(get<0>(ofr2), 0);
+  rdr = o2h->read(get<1>(ofr2), 0, b4.length());
+  ASSERT_EQ(get<0>(rdr), 0);
+  ASSERT_EQ(get<1>(rdr), b4);
+  ASSERT_EQ(o2h->close(get<1>(ofr2)), 0);
+}
+
 /* END ALL TESTS */
 
 TEST(OPEN2, DELETE_BUCKET) {

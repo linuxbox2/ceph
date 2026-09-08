@@ -27,7 +27,7 @@ extern "C" {
 #endif
 
 #define LIBRGW_FILE_VER_MAJOR 1
-#define LIBRGW_FILE_VER_MINOR 3 /* adding rgw_open2 and friends */
+#define LIBRGW_FILE_VER_MINOR 4 /* adding rgw_reopen2 */
 #define LIBRGW_FILE_VER_EXTRA 1
 
 #define LIBRGW_FILE_VERSION(maj, min, extra) ((maj << 16) + (min << 8) + extra)
@@ -306,6 +306,16 @@ int rgw_close(struct rgw_fs *rgw_fs, struct rgw_file_handle *fh,
 	      uint32_t flags);
 
 int rgw_close2(rgw_open_fd open_fd, uint32_t flags);
+
+/*
+  change the access mode of an open, without returning it
+
+  An upgrade to write establishes the object's mutable view, since a
+  reader may be bound to the published object.  A downgrade which
+  returns the last write access publishes, exactly as closing it would:
+  giving up write intent and closing empty the same cohort.
+*/
+int rgw_reopen2(rgw_open_fd open_fd, uint32_t posix_flags, uint32_t flags);
 
 /*
    read data from file

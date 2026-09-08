@@ -751,6 +751,11 @@ namespace rgw {
     int open_global(uint32_t posix_flags, uint32_t rgw_openflags);
     int close_global(uint32_t flags);
 
+    /* change the access mode of an existing open (NFSv4 reopen) */
+    int reopen2(file::Open* open_hdl, uint32_t posix_flags);
+    /* mtx must be held */
+    int change_open_mode(file::Open* open_hdl, uint32_t posix_flags);
+
     file::Open* get_global_open() {
       lock_guard guard(mtx);
       auto f = std::get_if<file>(&variant_type);
