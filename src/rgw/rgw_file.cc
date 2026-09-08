@@ -2201,36 +2201,6 @@ namespace rgw {
       RGWLibFS::write_timer.add_event(interval, StatelessFinalize(*this));
   } /* RGWFileHandle::arm_stateless_timer */
 
-  void RGWFileHandle::finalize_stateless()
-  {
-    CephContext* cct = static_cast<CephContext*>(fs->get_fs()->rgw);
-    const DoutPrefix dp(cct, dout_subsys, "rgw finalize_stateless: ");
-
-    lock_guard guard(mtx);
-
-    file* f = get_if<file>(&variant_type);
-    if (! f) {
-      return;
-    }
-
-    /* the event has run;  a subsequent write re-arms (and reclones) */
-    f->stateless_timer_id = 0;
-
-    if (! f->global_open || ! f->global_open->is_write_open() ||
-        ! f->fsio_hdl || deleted()) {
-      return;
-    }
-
-    int rc = f->fsio_hdl->publish(
-      &dp, rgw::sal::Object::FSIOObject::PUBLISH_FLAG_NONE);
-    if (!! rc) {
-      lsubdout(fs->get_context(), rgw, 0)
-        << __func__ << " " << object_name()
-        << " failed to publish idle stateless shadow rc=" << rc
-        << dendl;
-    }
-  } /* RGWFileHandle::finalize_stateless */
-
   /* mtx must be held */
   void RGWFileHandle::discard_shadow()
   {
@@ -2298,8 +2268,8 @@ namespace rgw {
         (f->read_opens)--;
         open->posix_flags = (open->posix_flags & ~O_ACCMODE) | O_RDWR;
         (f->write_opens)++;
-        arm_stateless_timer();
       }
+      arm_stateless_timer();
       return 0;
     }
 
@@ -2308,9 +2278,11 @@ namespace rgw {
     if (! rc) {
       f->global_open = open;
       flags |= FLAG_STATELESS_OPEN;
-      if (write_open) {
-        arm_stateless_timer();
-      }
+      /* every stateless open is armed, not just a writer's:  nothing
+       * else reclaims one.  v4 tells us when it is done;  v3 does not,
+       * so we infer the close, and the cost of inferring it is a held
+       * descriptor and a pinned handle until the idle interval */
+      arm_stateless_timer();
     }
     return rc;
   } /* RGWFileHandle::open_global */
@@ -2355,6 +2327,13 @@ namespace rgw {
         return -EINVAL; // or EISDIR
       }
       hdl = f->fsio_hdl;
+      if (f->global_open == open) {
+        /* activity on the stateless open defers reclamation.  the guard
+         * matters:  a stateful open is never the global one, so this
+         * keeps timer events to handles under v3 access rather than
+         * arming one for every read */
+        arm_stateless_timer();
+      }
     }
 
     if (! hdl) {

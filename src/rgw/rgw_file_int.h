@@ -763,7 +763,6 @@ namespace rgw {
     void arm_stateless_timer();
     /* mtx must be held */
     void discard_shadow();
-    void finalize_stateless();
     int readv(file::Open* open_hdl, const struct iovec* iov, int iov_cnt,
               uint64_t offset, uint64_t* bytes_read, uint32_t flags);
 
@@ -1024,7 +1023,11 @@ namespace rgw {
       }
 
       void operator()() {
-	rgw_fh.finalize_stateless();
+	/* close, not merely publish:  a stateless open has no token held
+	 * anywhere outside librgw, so nothing is invalidated by releasing
+	 * it, and a later read or write simply reopens.  publishing is
+	 * part of the close when a writer is the last one out */
+	rgw_fh.close_global(RGWFileHandle::FLAG_NONE);
 	rgw_fh.get_fs()->unref(&rgw_fh);
       }
     };
