@@ -1175,6 +1175,12 @@ public:
       virtual int publish(const DoutPrefixProvider* dpp, uint32_t flags) = 0;
       virtual int reclone(const DoutPrefixProvider* dpp, uint32_t flags) = 0;
       virtual int close(const DoutPrefixProvider* dpp, uint32_t flags) = 0;
+      /* the object has been unlinked:  drop the shadow's name now,
+       * refuse to publish it, and let the storage be reclaimed when
+       * the last open descriptor is returned (posix unlink) */
+      virtual int discard(const DoutPrefixProvider* dpp, uint32_t flags) {
+	return -ENOTSUP;
+      }
       /* truncate the shadow in place;  clients rendezvoused on it
        * follow, which unlinking and recreating it would defeat */
       virtual int ftruncate(const DoutPrefixProvider* dpp, uint64_t size,
@@ -1206,12 +1212,14 @@ public:
       bool resumed() const { return resumed_existing; }
       /* true when a write requires (re-)establishing a shadow */
       bool needs_shadow() const { return binding != Binding::SHADOW; }
+      bool is_doomed() const { return doomed; }
 
       FSIOObject() {}
       virtual ~FSIOObject() {}
 
     protected:
       bool resumed_existing{false};
+      bool doomed{false};
       Binding binding{Binding::SHADOW};
     }; /* FSIOObject */
 

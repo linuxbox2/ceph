@@ -459,6 +459,9 @@ namespace rgw {
     if (! rc || rc == -ENOENT) {
       // coverity[var_deref_op:SUPPRESS]
       rgw_fh->flags |= RGWFileHandle::FLAG_DELETED;
+      /* drop the shadow's name;  open descriptors keep working until
+       * the last is returned, and the view is never published */
+      rgw_fh->discard_shadow();
       fh_cache.remove(rgw_fh->fh.fh_hk.object, rgw_fh,
 		      RGWFileHandle::FHCache::FLAG_LOCK);
     }
@@ -2131,6 +2134,25 @@ namespace rgw {
     }
   } /* RGWFileHandle::finalize_stateless */
 
+  /* mtx must be held */
+  void RGWFileHandle::discard_shadow()
+  {
+    file* f = get_if<file>(&variant_type);
+    if (! f || ! f->fsio_hdl) {
+      return;
+    }
+
+    CephContext* cct = static_cast<CephContext*>(fs->get_fs()->rgw);
+    const DoutPrefix dp(cct, dout_subsys, "rgw discard_shadow: ");
+
+    int rc = f->fsio_hdl->discard(&dp, 0);
+    if ((!! rc) && (rc != -ENOTSUP)) {
+      lsubdout(fs->get_context(), rgw, 0)
+        << __func__ << " " << object_name()
+        << " failed to discard shadow rc=" << rc << dendl;
+    }
+  } /* RGWFileHandle::discard_shadow */
+
   int RGWFileHandle::open_global(uint32_t posix_flags,
                                  uint32_t rgw_openflags)
   {
@@ -2332,7 +2354,7 @@ namespace rgw {
 
       if (write_open) {
         if (f->write_opens == 0) {
-          if (f->fsio_hdl) {
+          if (f->fsio_hdl && ! deleted()) {
             rc = f->fsio_hdl->publish(&dp,
                       rgw::sal::Object::FSIOObject::PUBLISH_FLAG_NONE);
             if (!!rc) {

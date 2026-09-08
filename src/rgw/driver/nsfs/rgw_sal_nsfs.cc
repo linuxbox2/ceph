@@ -4763,6 +4763,9 @@ int NSFSObject::NSFSFSIOObject::publish(const DoutPrefixProvider* dpp, uint32_t 
   if (shadow_fd < 0) {
     return -EBADF;
   }
+  if (doomed) {
+    return -ESTALE; /* object was unlinked;  never publish */
+  }
   if (binding == Binding::SHADOW_PUBLISHED) {
     return 0;
   }
@@ -5013,14 +5016,38 @@ int NSFSObject::NSFSFSIOObject::ftruncate(const DoutPrefixProvider* dpp,
   return (::ftruncate(shadow_fd, size) < 0) ? -errno : 0;
 }
 
+int NSFSObject::NSFSFSIOObject::discard(const DoutPrefixProvider* dpp,
+					uint32_t flags)
+{
+  if (doomed) {
+    return 0;
+  }
+
+  /* posix unlink:  remove the shadow's name now, but leave the open
+   * descriptors alone--readers and writers continue to operate on it
+   * normally, and the filesystem reclaims the storage when the last
+   * one is closed.  a subsequent open finds no shadow, and so creates
+   * a new one rather than rendezvousing with this (doomed) view */
+  if (binding != Binding::PUBLISHED &&
+      shadow_dir_fd >= 0 && !shadow_name.empty()) {
+    if ((::unlinkat(shadow_dir_fd, shadow_name.c_str(), 0) < 0) &&
+	(errno != ENOENT)) {
+      return -errno;
+    }
+  }
+
+  doomed = true;
+  return 0;
+}
+
 int NSFSObject::NSFSFSIOObject::close(const DoutPrefixProvider* dpp, uint32_t flags)
 {
   if (shadow_fd < 0 && shadow_dir_fd < 0) {
     return 0;
   }
 
-  if (binding == Binding::SHADOW && ephemeral && !resumed_existing &&
-      shadow_dir_fd >= 0 && !shadow_name.empty()) {
+  if (!doomed && binding == Binding::SHADOW && ephemeral &&
+      !resumed_existing && shadow_dir_fd >= 0 && !shadow_name.empty()) {
     ::unlinkat(shadow_dir_fd, shadow_name.c_str(), 0);
   }
 

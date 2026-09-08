@@ -766,6 +766,8 @@ namespace rgw {
     int do_open(file::Open** /* out */, uint32_t posix_flags,
                 uint32_t rgw_openflags);
     void arm_stateless_timer();
+    /* mtx must be held */
+    void discard_shadow();
     void finalize_stateless();
     int readv(file::Open* open_hdl, const struct iovec* iov, int iov_cnt,
               uint64_t offset, uint64_t* bytes_read, uint32_t flags);
