@@ -2074,8 +2074,13 @@ namespace rgw {
 
     auto* driver = g_rgwlib->get_driver(); /* XXXX need to link driver to fs */
     if (driver->have_fsio()) {
-      auto& bucket_name = parent->get_name();
-      auto& object_name = get_name();
+      /* the permission check needs this object's bucket and its full
+       * key, not the immediate parent's name and the leaf--those agree
+       * only for an object at the root of a bucket, which is why this
+       * went unnoticed:  a nested object looked its bucket up by the
+       * name of its containing directory and got NoSuchBucket */
+      const std::string& bkt_name = bucket_name();
+      std::string obj_name = relative_object_name();
 
       if (! f->fsio_hdl) {
         uint32_t op_flags = RGWOpenRequest::FLAG_NONE;
@@ -2088,7 +2093,7 @@ namespace rgw {
 
         RGWOpenRequest req(
                            cct, g_rgwlib->get_driver()->get_user(fs->get_user()->user_id),
-                           bucket_name, object_name, op_flags);
+                           bkt_name, obj_name, op_flags);
 
         int rc = g_rgwlib->get_fe()->execute_req(&req);
         if (rc < 0) {
@@ -2115,7 +2120,7 @@ namespace rgw {
           f->fsio_hdl = std::move(get<1>(f_result));
         } else {
           lsubdout(fs->get_context(), rgw, 0)
-            << __func__ << " " << object_name
+            << __func__ << " " << obj_name
             << ": attempt to open FSIO handle failed rc=="
             << std::get<0>(f_result)
             << dendl;
@@ -2131,7 +2136,7 @@ namespace rgw {
         int rc = f->fsio_hdl->reclone(&dp, rgw::sal::Object::FSIOObject::OPEN_FLAG_NONE);
         if (!!rc) {
           lsubdout(fs->get_context(), rgw, 0)
-            << __func__ << " " << object_name
+            << __func__ << " " << obj_name
             << " failed to establish shadow for write open" << dendl;
           return rc;
         }
@@ -2145,7 +2150,7 @@ namespace rgw {
         int rc = f->fsio_hdl->ftruncate(&dp, 0, 0);
         if (!!rc) {
           lsubdout(fs->get_context(), rgw, 0)
-            << __func__ << " " << object_name
+            << __func__ << " " << obj_name
             << " failed to truncate shadow" << dendl;
           return rc;
         }
