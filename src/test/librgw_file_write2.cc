@@ -31,6 +31,7 @@
 #include "include/rados/librgw.h"
 #include "include/rados/rgw_file.h"
 #include "rgw_lib.h" /* driver hints */
+#include "rgw/rgw_file_int.h" /* the private view: refcounts, handles */
 
 #include "gtest/gtest.h"
 #include "common/ceph_argparse.h"
@@ -2041,6 +2042,78 @@ TEST(OPEN2, NESTED_OBJECT)
 
   (void) rgw_fh_rele(fs, d2, RGW_FH_RELE_FLAG_NONE);
   (void) rgw_fh_rele(fs, d1, RGW_FH_RELE_FLAG_NONE);
+}
+
+TEST(OPEN2, STATELESS_READ_RECLAIMED)
+{
+  /* rgw_read() opens the file handle's stateless open on demand, and a
+   * v3 client never closes.  Nothing but the idle reclaimer returns
+   * that open -- and because the open holds a reference on the handle,
+   * a leak here is self-pinning: the handle can never be evicted, so it
+   * can never be reclaimed either.
+   *
+   * Assert the reference is *returned*, rather than sampling the count
+   * at a moment of our choosing.  A snapshot only says nothing is
+   * outstanding right now, which stops being true as soon as
+   * reclamation is deferred by design;  what matters is that it comes
+   * back. */
+  if (! have_fs_layout()) {
+    GTEST_SKIP() << "not a filesystem-backed driver";
+  }
+
+  g_conf().set_val("rgw_nfs_stateless_finalize_secs", "1");
+  g_conf().apply_changes(nullptr);
+
+  reset_object("rdidle1");
+
+  std::string a4{"AAAA"};
+
+  {
+    std::unique_ptr<Open2Helper> o2h =
+	std::make_unique<Open2Helper>(fs, bucket_fh);
+    ASSERT_EQ(get<0>(o2h->lookup("rdidle1")), 0);
+    auto ofw = o2h->open(O_RDWR, RGW_OPEN_FLAG_CREATE);
+    ASSERT_EQ(get<0>(ofw), 0);
+    ASSERT_EQ(get<0>(o2h->write(get<1>(ofw), a4, 0, a4.length())), 0);
+    ASSERT_EQ(o2h->close(get<1>(ofw)), 0);
+  }
+
+  struct rgw_file_handle* fh{nullptr};
+  ASSERT_EQ(rgw_lookup(fs, bucket_fh, "rdidle1", &fh, nullptr, 0,
+		       RGW_LOOKUP_FLAG_NONE), 0);
+  auto* rgw_fh = rgw::get_rgwfh(fh);
+  const uint32_t baseline = rgw_fh->get_refcnt();
+
+  /* a read, with no close, as a v3 client would issue it */
+  char buf[8];
+  size_t nread{0};
+  memset(buf, 0, sizeof(buf));
+  ASSERT_EQ(rgw_read(fs, fh, 0, a4.length(), &nread, buf,
+		     RGW_READ_FLAG_NONE), 0);
+  ASSERT_EQ(std::string(buf, a4.length()), a4);
+
+  /* the open exists, so the wait below is not vacuous */
+  ASSERT_GT(rgw_fh->get_refcnt(), baseline);
+  ASSERT_NE(rgw_fh->get_global_open(), nullptr);
+
+  /* wait for reclamation rather than assuming it is synchronous */
+  bool reclaimed = false;
+  for (int i = 0; i < 60; ++i) {
+    if ((rgw_fh->get_refcnt() == baseline) &&
+	(rgw_fh->get_global_open() == nullptr)) {
+      reclaimed = true;
+      break;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(250));
+  }
+  ASSERT_TRUE(reclaimed)
+      << "refcnt " << rgw_fh->get_refcnt() << " never returned to "
+      << baseline;
+
+  (void) rgw_fh_rele(fs, fh, RGW_FH_RELE_FLAG_NONE);
+
+  g_conf().set_val("rgw_nfs_stateless_finalize_secs", "300");
+  g_conf().apply_changes(nullptr);
 }
 
 /* END ALL TESTS */
