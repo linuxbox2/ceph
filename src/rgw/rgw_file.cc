@@ -3121,7 +3121,10 @@ int rgw_statfs(struct rgw_fs *rgw_fs,
 	       struct rgw_statvfs *vfs_st, uint32_t flags)
 {
   RGWLibFS *fs = static_cast<RGWLibFS*>(rgw_fs->fs_private);
-  struct rados_cluster_stat_t stats;
+  /* zeroed, not left to the driver:  a driver which does not implement
+   * cluster_stat() returns 0 without touching this, and reporting stack
+   * garbage as free space is worse than reporting nothing */
+  struct rados_cluster_stat_t stats{};
 
   RGWGetClusterStatReq req(fs->get_context(),
 			   g_rgwlib->get_driver()->get_user(fs->get_user()->user_id),
