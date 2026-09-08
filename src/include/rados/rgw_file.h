@@ -312,8 +312,8 @@ int rgw_close2(rgw_open_fd open_fd, uint32_t flags);
 
   An upgrade to write establishes the object's mutable view, since a
   reader may be bound to the published object.  A downgrade which
-  returns the last write access publishes, exactly as closing it would:
-  giving up write intent and closing empty the same cohort.
+  returns the last write open publishes, exactly as closing it would:
+  giving up write intent and closing both return it.
 */
 int rgw_reopen2(rgw_open_fd open_fd, uint32_t posix_flags, uint32_t flags);
 

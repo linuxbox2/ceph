@@ -2270,21 +2270,21 @@ namespace rgw {
     }
   } /* RGWFileHandle::discard_shadow */
 
-  /* Move an existing open between the read-only and write cohorts.
+  /* Move an existing open between read-only and write access.
    * mtx must be held.
    *
    * An upgrade establishes the shadow, since a reader may be bound to
-   * the published object.  A downgrade publishes if it empties the
-   * write cohort:  the cohort emptying is what publishes, whether it
-   * empties by closing or by giving up write intent.  Keeping those two
-   * as one rule matters--close2() keys its publish off the closing
-   * open's mode, so a downgraded last writer would otherwise close
-   * through the read arm and leave the write unpublished with nothing
-   * left to publish it.  The cost when a client upgrades again is one
-   * COW fork.
+   * the published object.  A downgrade publishes if it returns the last
+   * write open:  returning the last write open is what publishes,
+   * whether it is returned by closing or by giving up write intent.
+   * Keeping those two as one rule matters--close2() keys its publish
+   * off the closing open's mode, so a downgraded last writer would
+   * otherwise close through the read arm and leave the write
+   * unpublished with nothing left to publish it.  The cost when a
+   * client upgrades again is one COW fork.
    *
    * read_opens counts read-*only* opens;  an O_RDWR open is counted in
-   * write_opens only (cf. Open::is_read_open), so a change of cohort
+   * write_opens only (cf. Open::is_read_open), so a change of access
    * moves the open between the two counts rather than adjusting one. */
   int RGWFileHandle::change_open_mode(file::Open* open, uint32_t posix_flags)
   {

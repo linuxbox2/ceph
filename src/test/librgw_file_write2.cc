@@ -2188,10 +2188,10 @@ TEST(OPEN2, REOPEN2)
 
 TEST(OPEN2, REOPEN2_MULTI_WRITER)
 {
-  /* A downgrade publishes only when it empties the write cohort.
-   * REOPEN2 cannot show that: with a single writer the cohort always
-   * empties, so an implementation which published on every downgrade
-   * passes it identically.  Two writers is the discriminating case, and
+  /* A downgrade publishes only when it returns the last write open.
+   * REOPEN2 cannot show that: with a single writer every downgrade
+   * returns the last one, so an implementation which published on every
+   * downgrade passes it identically.  Two writers discriminates, and
    * it also covers the thing a share-mode change is for -- the other
    * writer keeps working. */
   if (! have_fs_layout()) {
@@ -2240,7 +2240,8 @@ TEST(OPEN2, REOPEN2_MULTI_WRITER)
   ASSERT_EQ(get<0>(rdr), 0);
   ASSERT_EQ(get<1>(rdr), b4 + c4);
 
-  /* closing the last writer empties the cohort:  now it publishes */
+  /* closing the remaining writer returns the last write open:  now it
+   * publishes */
   ASSERT_EQ(o2h->close(w1), 0);
   ASSERT_FALSE(sf::exists(shadow_path("reopen2")));
   ASSERT_EQ(sf::file_size(published_path("reopen2")),
