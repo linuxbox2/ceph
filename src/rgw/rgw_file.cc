@@ -909,6 +909,18 @@ namespace rgw {
     buffer::list etag = rgw_fh->get_etag();
     buffer::list acls = rgw_fh->get_acls();
 
+    bool truncated{false};
+
+    if ((mask & RGW_SETATTR_SIZE) && st && rgw_fh->is_file()) {
+      /* a size change is a data operation--apply it to the shadow
+       * before the attribute pass (which takes rgw_fh->mtx) */
+      rc = rgw_fh->truncate(st->st_size);
+      if (!! rc) {
+        return rc;
+      }
+      truncated = true;
+    }
+
     lock_guard guard(rgw_fh->mtx);
 
     switch(rgw_fh->fh.fh_type) {
@@ -963,8 +975,16 @@ namespace rgw {
     /* save attrs */
     req.emplace_attr(RGW_ATTR_UNIX_KEY1, std::move(ux_key));
     req.emplace_attr(RGW_ATTR_UNIX1, std::move(ux_attrs));
-    req.emplace_attr(RGW_ATTR_ETAG, std::move(etag));
-    req.emplace_attr(RGW_ATTR_ACL, std::move(acls));
+    /* only stamp etag and acl when we have them--writing an empty
+     * bufferlist over a good policy leaves it undecodable.  after a
+     * truncate, publish() has already stamped an etag for the new
+     * content, so the handle's cached one is stale as well */
+    if ((! truncated) && etag.length()) {
+      req.emplace_attr(RGW_ATTR_ETAG, std::move(etag));
+    }
+    if (acls.length()) {
+      req.emplace_attr(RGW_ATTR_ACL, std::move(acls));
+    }
 
     rc = g_rgwlib->get_fe()->execute_req(&req);
     rc2 = req.get_ret();
@@ -2309,6 +2329,73 @@ namespace rgw {
 
     return hdl->pwritev(iov, iov_cnt, offset, bytes_written, flags);
   } /* writev */
+
+  int RGWFileHandle::truncate(uint64_t size)
+  {
+    auto* driver = g_rgwlib->get_driver();
+    if (! driver->have_fsio()) {
+      /* legacy path:  size is advisory until the write cycle ends */
+      return 0;
+    }
+
+    CephContext* cct = static_cast<CephContext*>(fs->get_fs()->rgw);
+    const DoutPrefix dp(cct, dout_subsys, "rgw truncate: ");
+
+    file::Open* open{nullptr};
+    int rc{0};
+
+    {
+      lock_guard guard(mtx);
+
+      file* f = get_if<file>(&variant_type);
+      if (! f) {
+        return -EISDIR;
+      }
+      if (deleted()) {
+        return -ESTALE;
+      }
+
+      if (! f->fsio_hdl) {
+        /* no open is held:  the truncate is the whole operation, so
+         * take a write open and publish it below */
+        rc = do_open(&open, O_RDWR, RGW_OPEN_FLAG_NONE);
+        if (!! rc) {
+          return rc;
+        }
+      } else if (f->fsio_hdl->needs_shadow()) {
+        rc = f->fsio_hdl->reclone(
+          &dp, rgw::sal::Object::FSIOObject::OPEN_FLAG_NONE);
+        if (!! rc) {
+          return rc;
+        }
+      }
+
+      rc = f->fsio_hdl->ftruncate(&dp, size, 0);
+      if (!! rc) {
+        lsubdout(fs->get_context(), rgw, 0)
+          << __func__ << " " << object_name()
+          << " failed to truncate shadow to " << size
+          << " rc=" << rc << dendl;
+      } else {
+        set_size(size);
+        if (! open && (f->write_opens == 0)) {
+          /* readers may be attached, but no writer will publish this */
+          rc = f->fsio_hdl->publish(
+            &dp, rgw::sal::Object::FSIOObject::PUBLISH_FLAG_NONE);
+        }
+      }
+    } /* !LOCKED */
+
+    if (open) {
+      /* last (only) writer:  publishes */
+      int rc2 = close2(open, RGW_CLOSE_FLAG_NONE);
+      if (! rc) {
+        rc = rc2;
+      }
+    }
+
+    return rc;
+  } /* RGWFileHandle::truncate */
 
   int RGWFileHandle::close()
   {

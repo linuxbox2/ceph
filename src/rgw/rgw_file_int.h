@@ -778,6 +778,10 @@ namespace rgw {
     int close();
     int close2(file::Open* open_hdl, uint32_t flags);
 
+    /* NFS SETATTR with a size:  a complete write operation, not a
+     * cached attribute */
+    int truncate(uint64_t size);
+
     void open_for_create() {
       lock_guard guard(mtx);
       flags |= FLAG_CREATING;
