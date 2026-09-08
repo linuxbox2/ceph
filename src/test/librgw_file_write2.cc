@@ -30,6 +30,7 @@
 
 #include "include/rados/librgw.h"
 #include "include/rados/rgw_file.h"
+#include "rgw_lib.h" /* driver hints */
 
 #include "gtest/gtest.h"
 #include "common/ceph_argparse.h"
@@ -41,7 +42,7 @@
 using namespace std;
 
 namespace {
-  librgw_t rgw = nullptr;
+  librgw_t rgw_h = nullptr;
   string userid("testuser");
   string access_key("");
   string secret_key("");
@@ -285,13 +286,13 @@ namespace {
 }
 
 TEST(OPEN2, INIT) {
-  int ret = librgw_create(&rgw, saved_args.argc, saved_args.argv);
+  int ret = librgw_create(&rgw_h, saved_args.argc, saved_args.argv);
   ASSERT_EQ(ret, 0);
-  ASSERT_NE(rgw, nullptr);
+  ASSERT_NE(rgw_h, nullptr);
 }
 
 TEST(OPEN2, MOUNT) {
-  int ret = rgw_mount2(rgw, userid.c_str(), access_key.c_str(),
+  int ret = rgw_mount2(rgw_h, userid.c_str(), access_key.c_str(),
                        secret_key.c_str(), "/", &fs, RGW_MOUNT_FLAG_NONE);
   ASSERT_EQ(ret, 0);
   ASSERT_NE(fs, nullptr);
@@ -1580,6 +1581,93 @@ TEST(OPEN2, STATELESS_IDLE_FINALIZE)
   g_conf().apply_changes(nullptr);
 }
 
+TEST(OPEN2, FORK_RACE_JOINS_WINNER)
+{
+  /* two instances forking a shadow for the same object:  the fork is
+   * exclusive, so the loser gets EEXIST and joins the winner's shadow
+   * rather than cloning over it.  the race is injected through a driver
+   * hint, so it is deterministic from a single process */
+  if (! have_fs_layout()) {
+    GTEST_SKIP() << "not a filesystem-backed driver";
+  }
+
+  auto* driver = rgw::g_rgwlib->get_driver();
+  const DoutPrefix dp(g_ceph_context, dout_subsys, "write2 test: ");
+  std::map<std::string, std::string> out;
+
+  int ret = driver->driver_hint(&dp, "inject-fork-race",
+				{{"enable", "true"}}, &out);
+  if (ret == -ENOTSUP) {
+    GTEST_SKIP() << "driver does not implement inject-fork-race";
+  }
+  ASSERT_EQ(ret, 0);
+  ASSERT_EQ(out["enabled"], "true");
+
+  std::string published{"PPPP"};
+  std::string won{"RACEWON"};
+
+  /* (a) creating an object:  the racers take the create arm */
+  {
+    std::unique_ptr<Open2Helper> o2h =
+	std::make_unique<Open2Helper>(fs, bucket_fh);
+    auto lfr = o2h->lookup("racenew1");
+    ASSERT_EQ(get<0>(lfr), 0);
+
+    auto ofw = o2h->open(O_RDWR, RGW_OPEN_FLAG_CREATE);
+    ASSERT_EQ(get<0>(ofw), 0);
+    auto w0 = get<1>(ofw);
+
+    auto rdr = o2h->read(w0, 0, won.length());
+    ASSERT_EQ(get<0>(rdr), 0);
+    ASSERT_EQ(get<1>(rdr), won);
+
+    ASSERT_TRUE(sf::exists(shadow_path("racenew1")));
+    ASSERT_EQ(o2h->close(w0), 0);
+    ASSERT_FALSE(sf::exists(shadow_path("racenew1")));
+    ASSERT_EQ(sf::file_size(published_path("racenew1")), won.length());
+  }
+
+  /* (b) forking an existing object:  the racers take the COW clone arm,
+   * which is the one clone_file's exclusive create guards */
+  {
+    ASSERT_EQ(driver->driver_hint(&dp, "inject-fork-race",
+				  {{"enable", "false"}}), 0);
+
+    std::unique_ptr<Open2Helper> o2h =
+	std::make_unique<Open2Helper>(fs, bucket_fh);
+    auto lfr = o2h->lookup("race1");
+    ASSERT_EQ(get<0>(lfr), 0);
+
+    auto ofw = o2h->open(O_RDWR, RGW_OPEN_FLAG_CREATE);
+    ASSERT_EQ(get<0>(ofw), 0);
+    auto w0 = get<1>(ofw);
+    ASSERT_EQ(get<0>(o2h->write(w0, published, 0, published.length())), 0);
+    ASSERT_EQ(o2h->close(w0), 0);
+    ASSERT_EQ(sf::file_size(published_path("race1")), published.length());
+
+    ASSERT_EQ(driver->driver_hint(&dp, "inject-fork-race",
+				  {{"enable", "true"}}), 0);
+
+    /* we lose the fork:  the content is the winner's shadow, not a
+     * clone of the published object */
+    auto ofw1 = o2h->open(O_RDWR, RGW_OPEN_FLAG_NONE);
+    ASSERT_EQ(get<0>(ofw1), 0);
+    auto w1 = get<1>(ofw1);
+
+    auto rdr = o2h->read(w1, 0, won.length());
+    ASSERT_EQ(get<0>(rdr), 0);
+    ASSERT_EQ(get<1>(rdr), won);
+
+    ASSERT_TRUE(sf::exists(shadow_path("race1")));
+    ASSERT_EQ(o2h->close(w1), 0);
+    ASSERT_FALSE(sf::exists(shadow_path("race1")));
+    ASSERT_EQ(sf::file_size(published_path("race1")), won.length());
+  }
+
+  ASSERT_EQ(driver->driver_hint(&dp, "inject-fork-race",
+				{{"enable", "false"}}), 0);
+}
+
 /* END ALL TESTS */
 
 TEST(OPEN2, DELETE_BUCKET) {
@@ -1609,7 +1697,7 @@ TEST(OPEN2, UMOUNT) {
 }
 
 TEST(OPEN2, SHUTDOWN) {
-  librgw_shutdown(rgw);
+  librgw_shutdown(rgw_h);
 }
 
 int main(int argc, char *argv[])
