@@ -4898,6 +4898,9 @@ int NSFSObject::NSFSFSIOObject::reclone(const DoutPrefixProvider* dpp, uint32_t 
   if (binding == Binding::SHADOW) {
     return 0; /* already writable */
   }
+  if (unlikely(driver->skip_reclone_injected())) {
+    return 0; /* inject-skip-reclone */
+  }
 
   if (shadow_dir_fd < 0) {
     shadow_dir_fd = open_shadow_dir(parent_fd);
@@ -7923,6 +7926,22 @@ int NSFSDriver::driver_hint(const DoutPrefixProvider* dpp,
     inject_fork_race = (it->second == "true");
     if (out) {
       (*out)["enabled"] = inject_fork_race ? "true" : "false";
+    }
+    return 0;
+  }
+
+  if (hint == "inject-skip-reclone") {
+    /* make reclone() a no-op, so a write open stays bound to the
+     * published object.  the guards which refuse to mutate or publish
+     * a non-shadow binding are otherwise unreachable--every caller
+     * reclones first */
+    auto it = params.find("enable");
+    if (it == params.end()) {
+      return -EINVAL;
+    }
+    inject_skip_reclone = (it->second == "true");
+    if (out) {
+      (*out)["enabled"] = inject_skip_reclone ? "true" : "false";
     }
     return 0;
   }

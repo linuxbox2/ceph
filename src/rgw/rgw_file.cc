@@ -2465,12 +2465,14 @@ namespace rgw {
         (f->write_opens)--;
       }
 
+      int publish_rc{0};
+
       if (write_open) {
         if (f->write_opens == 0) {
           if (f->fsio_hdl && ! deleted()) {
-            rc = f->fsio_hdl->publish(&dp,
+            publish_rc = f->fsio_hdl->publish(&dp,
                       rgw::sal::Object::FSIOObject::PUBLISH_FLAG_NONE);
-            if (!!rc) {
+            if (!!publish_rc) {
               lsubdout(fs->get_context(), rgw, 0)
                 << __func__ << " " << object_name()
                 << " failed to publish fsio handle " << dendl;
@@ -2506,6 +2508,12 @@ namespace rgw {
 
         this->flags &= ~FLAG_OPEN;
         this->flags &= ~FLAG_STATELESS_OPEN;
+      }
+
+      if (!! publish_rc) {
+        /* the caller's data did not reach the namespace;  that matters
+         * more than how the release itself went */
+        rc = publish_rc;
       }
 
       /* remove from opens list */
