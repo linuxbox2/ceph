@@ -96,6 +96,27 @@ namespace {
     return sf::is_directory(nsfs_base() / bucket_name, ec);
   }
 
+  /* Tests own their objects, and clean at the start rather than the
+   * end:  a failing run leaves its state on disk to be looked at, and
+   * the next run is still repeatable. */
+  void reset_object(const std::string& name) {
+    (void) rgw_unlink(fs, bucket_fh, name.c_str(), RGW_UNLINK_FLAG_NONE);
+
+    if (! have_fs_layout()) {
+      return;
+    }
+
+    /* a shadow which survives the unlink was leaked by an earlier run.
+     * clear it so the suite stays repeatable, but say so--this is how
+     * that class of bug otherwise stays invisible */
+    std::error_code ec;
+    if (sf::exists(shadow_path(name), ec)) {
+      std::cerr << "WARNING: stale shadow for " << name
+		<< ", removed by reset_object" << std::endl;
+      sf::remove(shadow_path(name), ec);
+    }
+  }
+
   class Open2Helper {
   public:
     struct rgw_fs* fs{nullptr};
@@ -309,7 +330,8 @@ TEST(OPEN2, CREATE_BUCKET) {
 
     int ret = rgw_mkdir(fs, fs->root_fh, bucket_name.c_str(), &st, create_mask,
 			&fh, RGW_MKDIR_FLAG_NONE);
-    ASSERT_EQ(ret, 0);
+    /* --create is meant to be safe on every run, not only the first */
+    ASSERT_TRUE((ret == 0) || (ret == -EEXIST)) << "ret=" << ret;
   }
 }
 
@@ -389,6 +411,7 @@ TEST(OPEN2, OPEN2_READAFTERWRITE1)
       std::make_unique<Open2Helper>(fs, bucket_fh);
   ASSERT_NE(o2h.get(), nullptr);
 
+  reset_object("netbird2");
   auto lfr = o2h->lookup("netbird2");
   ASSERT_EQ(get<0>(lfr), 0);
   ASSERT_NE(get<1>(lfr), nullptr);
@@ -430,6 +453,7 @@ TEST(OPEN2, OPEN2_READAFTERWRITE2)
       std::make_unique<Open2Helper>(fs, bucket_fh);
   ASSERT_NE(o2h.get(), nullptr);
 
+  reset_object("tray1");
   auto lfr = o2h->lookup("tray1");
   ASSERT_EQ(get<0>(lfr), 0);
   ASSERT_NE(get<1>(lfr), nullptr);
@@ -462,6 +486,7 @@ TEST(OPEN2, ACC_MODES)
       std::make_unique<Open2Helper>(fs, bucket_fh);
   ASSERT_NE(o2h.get(), nullptr);
 
+  reset_object("accthis1");
   auto lfr = o2h->lookup("accthis1");
   ASSERT_EQ(get<0>(lfr), 0);
   ASSERT_NE(get<1>(lfr), nullptr);
@@ -500,6 +525,7 @@ TEST(OPEN2, SETATTR1)
       std::make_unique<Open2Helper>(fs, bucket_fh);
   ASSERT_NE(o2h.get(), nullptr);
 
+  reset_object("attrtest1");
   auto lfr = o2h->lookup("attrtest1");
   ASSERT_EQ(get<0>(lfr), 0);
 
@@ -580,6 +606,7 @@ TEST(OPEN2, XATTR_SET_GET)
       std::make_unique<Open2Helper>(fs, bucket_fh);
   ASSERT_NE(o2h.get(), nullptr);
 
+  reset_object("xattrtest1");
   auto lfr = o2h->lookup("xattrtest1");
   ASSERT_EQ(get<0>(lfr), 0);
 
@@ -714,6 +741,7 @@ TEST(OPEN2, ACL_AFTER_PUBLISH)
       std::make_unique<Open2Helper>(fs, bucket_fh);
   ASSERT_NE(o2h.get(), nullptr);
 
+  reset_object("acltest1");
   auto lfr = o2h->lookup("acltest1");
   ASSERT_EQ(get<0>(lfr), 0);
 
@@ -753,6 +781,7 @@ TEST(OPEN2, ETAG_AFTER_PUBLISH)
       std::make_unique<Open2Helper>(fs, bucket_fh);
   ASSERT_NE(o2h.get(), nullptr);
 
+  reset_object("etagtest1");
   auto lfr = o2h->lookup("etagtest1");
   ASSERT_EQ(get<0>(lfr), 0);
 
@@ -801,6 +830,7 @@ TEST(OPEN2, RENDEZVOUS1)
       std::make_unique<Open2Helper>(fs, bucket_fh);
   ASSERT_NE(o2h.get(), nullptr);
 
+  reset_object("rendez1");
   auto lfr = o2h->lookup("rendez1");
   ASSERT_EQ(get<0>(lfr), 0);
 
@@ -827,8 +857,8 @@ TEST(OPEN2, RENDEZVOUS1)
 
   /* returning one of two write opens does not publish */
   ASSERT_EQ(o2h->close(w0), 0);
-  auto gr0 = o2h->getxattr("user.rgw.etag" /* RGW_ATTR_ETAG */);
-  ASSERT_TRUE(get<1>(gr0).empty());
+  /* the etag is stamped at publish, so it must not have moved yet */
+  auto etag_mid = get<1>(o2h->getxattr("user.rgw.etag" /* RGW_ATTR_ETAG */));
 
   /* last writer close publishes */
   ASSERT_EQ(o2h->close(w1), 0);
@@ -840,6 +870,7 @@ TEST(OPEN2, RENDEZVOUS1)
   auto gr1 = o2h->getxattr("user.rgw.etag");
   ASSERT_EQ(get<0>(gr1), 0);
   ASSERT_FALSE(get<1>(gr1).empty());
+  ASSERT_NE(get<1>(gr1), etag_mid);
 
   rdr = o2h->read(r1, 0, a4.length() + b4.length());
   ASSERT_EQ(get<0>(rdr), 0);
@@ -875,6 +906,7 @@ TEST(OPEN2, TRUNC1)
       std::make_unique<Open2Helper>(fs, bucket_fh);
   ASSERT_NE(o2h.get(), nullptr);
 
+  reset_object("trunc1");
   auto lfr = o2h->lookup("trunc1");
   ASSERT_EQ(get<0>(lfr), 0);
 
@@ -939,6 +971,7 @@ TEST(OPEN2, UNLINK1)
       std::make_unique<Open2Helper>(fs, bucket_fh);
   ASSERT_NE(o2h.get(), nullptr);
 
+  reset_object("unlink1");
   auto lfr = o2h->lookup("unlink1");
   ASSERT_EQ(get<0>(lfr), 0);
 
@@ -990,6 +1023,7 @@ TEST(OPEN2, READER_FOLLOWS_WRITER)
       std::make_unique<Open2Helper>(fs, bucket_fh);
   ASSERT_NE(o2h.get(), nullptr);
 
+  reset_object("follow1");
   auto lfr = o2h->lookup("follow1");
   ASSERT_EQ(get<0>(lfr), 0);
   ASSERT_NE(get<1>(lfr), nullptr);
@@ -1040,6 +1074,7 @@ TEST(OPEN2, READER_ACROSS_PUBLISH)
       std::make_unique<Open2Helper>(fs, bucket_fh);
   ASSERT_NE(o2h.get(), nullptr);
 
+  reset_object("acrosspub1");
   auto lfr = o2h->lookup("acrosspub1");
   ASSERT_EQ(get<0>(lfr), 0);
 
@@ -1088,6 +1123,8 @@ TEST(OPEN2, V3_POSITIONAL)
   /* stateless (NFSv3) open:  no open token is returned to the caller,
    * and writes are positional--the legacy write cycle rejected any
    * non-contiguous write position */
+  reset_object("v3pos1");
+
   struct rgw_file_handle* fh{nullptr};
   int ret = rgw_lookup(fs, bucket_fh, "v3pos1", &fh, nullptr, 0,
 		       RGW_LOOKUP_FLAG_CREATE);
@@ -1136,6 +1173,8 @@ TEST(OPEN2, V3_POSITIONAL)
 TEST(OPEN2, V3_UPGRADE)
 {
   /* a stateless read open is upgraded in place when a write arrives */
+  reset_object("v3up1");
+
   struct rgw_file_handle* fh{nullptr};
   int ret = rgw_lookup(fs, bucket_fh, "v3up1", &fh, nullptr, 0,
 		       RGW_LOOKUP_FLAG_CREATE);
@@ -1192,6 +1231,7 @@ TEST(OPEN2, SETATTR_SIZE)
       std::make_unique<Open2Helper>(fs, bucket_fh);
   ASSERT_NE(o2h.get(), nullptr);
 
+  reset_object("size1");
   auto lfr = o2h->lookup("size1");
   ASSERT_EQ(get<0>(lfr), 0);
 
@@ -1282,6 +1322,7 @@ TEST(OPEN2, COMMIT1)
       std::make_unique<Open2Helper>(fs, bucket_fh);
   ASSERT_NE(o2h.get(), nullptr);
 
+  reset_object("commit1");
   auto lfr = o2h->lookup("commit1");
   ASSERT_EQ(get<0>(lfr), 0);
 
@@ -1302,8 +1343,8 @@ TEST(OPEN2, COMMIT1)
   ASSERT_EQ(get<0>(rdr), 0);
   ASSERT_EQ(get<1>(rdr), a4);
 
-  auto gr0 = o2h->getxattr("user.rgw.etag" /* RGW_ATTR_ETAG */);
-  ASSERT_TRUE(get<1>(gr0).empty());
+  /* the etag is stamped at publish, so it must not have moved yet */
+  auto etag_mid = get<1>(o2h->getxattr("user.rgw.etag" /* RGW_ATTR_ETAG */));
 
   /* repeated COMMITs succeed */
   ASSERT_EQ(get<0>(o2h->write(w0, b4, a4.length(), b4.length())), 0);
@@ -1326,6 +1367,7 @@ TEST(OPEN2, COMMIT1)
   auto gr1 = o2h->getxattr("user.rgw.etag");
   ASSERT_EQ(get<0>(gr1), 0);
   ASSERT_FALSE(get<1>(gr1).empty());
+  ASSERT_NE(get<1>(gr1), etag_mid);
 
   rdr = o2h->read(r1, 0, a4.length() + b4.length());
   ASSERT_EQ(get<0>(rdr), 0);
@@ -1351,6 +1393,7 @@ TEST(OPEN2, SHADOW_NOT_CREATED_BY_READER)
 
   std::unique_ptr<Open2Helper> o2h =
       std::make_unique<Open2Helper>(fs, bucket_fh);
+  reset_object("noshadow1");
   auto lfr = o2h->lookup("noshadow1");
   ASSERT_EQ(get<0>(lfr), 0);
 
@@ -1392,6 +1435,7 @@ TEST(OPEN2, RESUME_EXISTING_SHADOW)
 
   std::unique_ptr<Open2Helper> o2h =
       std::make_unique<Open2Helper>(fs, bucket_fh);
+  reset_object("resume1");
   auto lfr = o2h->lookup("resume1");
   ASSERT_EQ(get<0>(lfr), 0);
 
@@ -1450,6 +1494,7 @@ TEST(OPEN2, UNLINK_LEAVES_NO_SHADOW)
 
   std::unique_ptr<Open2Helper> o2h =
       std::make_unique<Open2Helper>(fs, bucket_fh);
+  reset_object("unlink2");
   auto lfr = o2h->lookup("unlink2");
   ASSERT_EQ(get<0>(lfr), 0);
 
@@ -1493,6 +1538,7 @@ TEST(OPEN2, UNLINK_WITH_READER_ONLY)
 
   std::unique_ptr<Open2Helper> o2h =
       std::make_unique<Open2Helper>(fs, bucket_fh);
+  reset_object("rdonly1");
   auto lfr = o2h->lookup("rdonly1");
   ASSERT_EQ(get<0>(lfr), 0);
 
@@ -1533,6 +1579,8 @@ TEST(OPEN2, STATELESS_IDLE_FINALIZE)
 
   g_conf().set_val("rgw_nfs_stateless_finalize_secs", "1");
   g_conf().apply_changes(nullptr);
+
+  reset_object("idle1");
 
   struct rgw_file_handle* fh{nullptr};
   int ret = rgw_lookup(fs, bucket_fh, "idle1", &fh, nullptr, 0,
@@ -1610,6 +1658,7 @@ TEST(OPEN2, FORK_RACE_JOINS_WINNER)
   {
     std::unique_ptr<Open2Helper> o2h =
 	std::make_unique<Open2Helper>(fs, bucket_fh);
+    reset_object("racenew1");
     auto lfr = o2h->lookup("racenew1");
     ASSERT_EQ(get<0>(lfr), 0);
 
@@ -1635,6 +1684,7 @@ TEST(OPEN2, FORK_RACE_JOINS_WINNER)
 
     std::unique_ptr<Open2Helper> o2h =
 	std::make_unique<Open2Helper>(fs, bucket_fh);
+    reset_object("race1");
     auto lfr = o2h->lookup("race1");
     ASSERT_EQ(get<0>(lfr), 0);
 
@@ -1694,6 +1744,7 @@ TEST(OPEN2, GUARDS_ON_PUBLISHED_BINDING)
   {
     std::unique_ptr<Open2Helper> o2h =
 	std::make_unique<Open2Helper>(fs, bucket_fh);
+    reset_object("guard1");
     ASSERT_EQ(get<0>(o2h->lookup("guard1")), 0);
 
     auto ofw = o2h->open(O_RDWR, RGW_OPEN_FLAG_CREATE);
@@ -1725,6 +1776,7 @@ TEST(OPEN2, GUARDS_ON_PUBLISHED_BINDING)
   {
     std::unique_ptr<Open2Helper> o2h =
 	std::make_unique<Open2Helper>(fs, bucket_fh);
+    reset_object("guard2");
     ASSERT_EQ(get<0>(o2h->lookup("guard2")), 0);
 
     auto ofw = o2h->open(O_RDWR, RGW_OPEN_FLAG_CREATE);
