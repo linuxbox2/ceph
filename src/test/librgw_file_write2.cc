@@ -2183,6 +2183,76 @@ TEST(OPEN2, REOPEN2)
   ASSERT_EQ(o2h->close(get<1>(ofr2)), 0);
 }
 
+TEST(OPEN2, REOPEN2_MULTI_WRITER)
+{
+  /* A downgrade publishes only when it empties the write cohort.
+   * REOPEN2 cannot show that: with a single writer the cohort always
+   * empties, so an implementation which published on every downgrade
+   * passes it identically.  Two writers is the discriminating case, and
+   * it also covers the thing a share-mode change is for -- the other
+   * writer keeps working. */
+  if (! have_fs_layout()) {
+    GTEST_SKIP() << "not a filesystem-backed driver";
+  }
+
+  reset_object("reopen2");
+
+  std::unique_ptr<Open2Helper> o2h =
+      std::make_unique<Open2Helper>(fs, bucket_fh);
+  ASSERT_EQ(get<0>(o2h->lookup("reopen2")), 0);
+
+  std::string a4{"AAAA"};
+  std::string b4{"BBBB"};
+  std::string c4{"CCCC"};
+
+  /* publish "AAAA" so there is a distinct prior content to compare */
+  auto ofw = o2h->open(O_RDWR, RGW_OPEN_FLAG_CREATE);
+  ASSERT_EQ(get<0>(ofw), 0);
+  ASSERT_EQ(get<0>(o2h->write(get<1>(ofw), a4, 0, a4.length())), 0);
+  ASSERT_EQ(o2h->close(get<1>(ofw)), 0);
+  ASSERT_EQ(sf::file_size(published_path("reopen2")), a4.length());
+
+  /* two writers on the one shadow */
+  auto ofw0 = o2h->open(O_RDWR, RGW_OPEN_FLAG_NONE);
+  ASSERT_EQ(get<0>(ofw0), 0);
+  auto w0 = get<1>(ofw0);
+  auto ofw1 = o2h->open(O_RDWR, RGW_OPEN_FLAG_NONE);
+  ASSERT_EQ(get<0>(ofw1), 0);
+  auto w1 = get<1>(ofw1);
+
+  ASSERT_EQ(get<0>(o2h->write(w0, b4, 0, b4.length())), 0);
+  ASSERT_TRUE(sf::exists(shadow_path("reopen2")));
+
+  /* downgrade w0:  a writer remains, so nothing is published */
+  ASSERT_EQ(rgw_reopen2(w0, O_RDONLY, RGW_OPEN_FLAG_NONE), 0);
+  ASSERT_TRUE(sf::exists(shadow_path("reopen2")));
+  ASSERT_EQ(sf::file_size(published_path("reopen2")), a4.length());
+
+  /* w0 may no longer write, w1 still may */
+  ASSERT_EQ(get<0>(o2h->write(w0, c4, 0, c4.length())), -EBADF);
+  ASSERT_EQ(get<0>(o2h->write(w1, c4, b4.length(), c4.length())), 0);
+
+  /* and w0 reads what w1 writes, through the one shadow */
+  auto rdr = o2h->read(w0, 0, b4.length() + c4.length());
+  ASSERT_EQ(get<0>(rdr), 0);
+  ASSERT_EQ(get<1>(rdr), b4 + c4);
+
+  /* closing the last writer empties the cohort:  now it publishes */
+  ASSERT_EQ(o2h->close(w1), 0);
+  ASSERT_FALSE(sf::exists(shadow_path("reopen2")));
+  ASSERT_EQ(sf::file_size(published_path("reopen2")),
+	    b4.length() + c4.length());
+
+  ASSERT_EQ(o2h->close(w0), 0);
+
+  auto ofr = o2h->open(O_RDONLY, RGW_OPEN_FLAG_NONE);
+  ASSERT_EQ(get<0>(ofr), 0);
+  rdr = o2h->read(get<1>(ofr), 0, b4.length() + c4.length());
+  ASSERT_EQ(get<0>(rdr), 0);
+  ASSERT_EQ(get<1>(rdr), b4 + c4);
+  ASSERT_EQ(o2h->close(get<1>(ofr)), 0);
+}
+
 /* END ALL TESTS */
 
 TEST(OPEN2, DELETE_BUCKET) {
