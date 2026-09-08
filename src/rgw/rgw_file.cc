@@ -3124,12 +3124,9 @@ int rgw_statfs(struct rgw_fs *rgw_fs,
   /* zeroed, not left to the driver:  a driver which does not implement
    * cluster_stat() returns 0 without touching this, and reporting stack
    * garbage as free space is worse than reporting nothing */
-  struct rados_cluster_stat_t stats{};
+  RGWClusterStat stats{};
 
-  RGWGetClusterStatReq req(fs->get_context(),
-			   g_rgwlib->get_driver()->get_user(fs->get_user()->user_id),
-			   stats);
-  int rc = g_rgwlib->get_fe()->execute_req(&req);
+  int rc = g_rgwlib->get_driver()->cluster_stat(stats);
   if (rc < 0) {
     lderr(fs->get_context()) << "ERROR: getting total cluster usage"
                              << cpp_strerror(-rc) << dendl;
