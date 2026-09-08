@@ -1668,6 +1668,90 @@ TEST(OPEN2, FORK_RACE_JOINS_WINNER)
 				{{"enable", "false"}}), 0);
 }
 
+TEST(OPEN2, GUARDS_ON_PUBLISHED_BINDING)
+{
+  /* the FSIO guards which refuse to mutate or publish a handle bound to
+   * the published object.  every caller reclones first, so they are
+   * unreachable through the API;  inject-skip-reclone makes reclone() a
+   * no-op so the binding stays PUBLISHED and the guards are reached */
+  if (! have_fs_layout()) {
+    GTEST_SKIP() << "not a filesystem-backed driver";
+  }
+
+  auto* driver = rgw::g_rgwlib->get_driver();
+  const DoutPrefix dp(g_ceph_context, dout_subsys, "write2 test: ");
+
+  int ret = driver->driver_hint(&dp, "inject-skip-reclone",
+				{{"enable", "false"}});
+  if (ret == -ENOTSUP) {
+    GTEST_SKIP() << "driver does not implement inject-skip-reclone";
+  }
+  ASSERT_EQ(ret, 0);
+
+  std::string a4{"AAAA"};
+
+  /* ftruncate() refuses:  only a shadow is mutable */
+  {
+    std::unique_ptr<Open2Helper> o2h =
+	std::make_unique<Open2Helper>(fs, bucket_fh);
+    ASSERT_EQ(get<0>(o2h->lookup("guard1")), 0);
+
+    auto ofw = o2h->open(O_RDWR, RGW_OPEN_FLAG_CREATE);
+    ASSERT_EQ(get<0>(ofw), 0);
+    ASSERT_EQ(get<0>(o2h->write(get<1>(ofw), a4, 0, a4.length())), 0);
+    ASSERT_EQ(o2h->close(get<1>(ofw)), 0);
+
+    /* a read open binds the published object and holds the handle, so
+     * the write open below has something to (not) reclone */
+    auto ofr = o2h->open(O_RDONLY, RGW_OPEN_FLAG_NONE);
+    ASSERT_EQ(get<0>(ofr), 0);
+
+    ASSERT_EQ(driver->driver_hint(&dp, "inject-skip-reclone",
+				  {{"enable", "true"}}), 0);
+
+    auto ofw1 = o2h->open(O_RDWR|O_TRUNC, RGW_OPEN_FLAG_NONE);
+    ASSERT_EQ(get<0>(ofw1), -EPERM);
+
+    ASSERT_EQ(driver->driver_hint(&dp, "inject-skip-reclone",
+				  {{"enable", "false"}}), 0);
+    ASSERT_EQ(o2h->close(get<1>(ofr)), 0);
+
+    /* the published object was not truncated */
+    ASSERT_EQ(sf::file_size(published_path("guard1")), a4.length());
+  }
+
+  /* publish() refuses, and close2 reports it rather than swallowing it
+   * behind the release result */
+  {
+    std::unique_ptr<Open2Helper> o2h =
+	std::make_unique<Open2Helper>(fs, bucket_fh);
+    ASSERT_EQ(get<0>(o2h->lookup("guard2")), 0);
+
+    auto ofw = o2h->open(O_RDWR, RGW_OPEN_FLAG_CREATE);
+    ASSERT_EQ(get<0>(ofw), 0);
+    ASSERT_EQ(get<0>(o2h->write(get<1>(ofw), a4, 0, a4.length())), 0);
+    ASSERT_EQ(o2h->close(get<1>(ofw)), 0);
+
+    auto ofr = o2h->open(O_RDONLY, RGW_OPEN_FLAG_NONE);
+    ASSERT_EQ(get<0>(ofr), 0);
+
+    ASSERT_EQ(driver->driver_hint(&dp, "inject-skip-reclone",
+				  {{"enable", "true"}}), 0);
+
+    auto ofw1 = o2h->open(O_RDWR, RGW_OPEN_FLAG_NONE);
+    ASSERT_EQ(get<0>(ofw1), 0);
+    /* last writer close tries to publish a non-shadow binding */
+    ASSERT_EQ(o2h->close(get<1>(ofw1)), -EINVAL);
+
+    ASSERT_EQ(driver->driver_hint(&dp, "inject-skip-reclone",
+				  {{"enable", "false"}}), 0);
+    ASSERT_EQ(o2h->close(get<1>(ofr)), 0);
+
+    ASSERT_EQ(sf::file_size(published_path("guard2")), a4.length());
+    ASSERT_FALSE(sf::exists(shadow_path("guard2")));
+  }
+}
+
 /* END ALL TESTS */
 
 TEST(OPEN2, DELETE_BUCKET) {
