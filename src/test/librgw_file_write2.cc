@@ -16,6 +16,8 @@
 #include <fcntl.h>
 #include <stdint.h>
 #include <filesystem>
+#include <thread>
+#include <chrono>
 #include <cstdint>
 #include <memory>
 #include <ranges>
@@ -1477,6 +1479,105 @@ TEST(OPEN2, UNLINK_LEAVES_NO_SHADOW)
   ASSERT_EQ(o2h->close(w1), 0);
   ASSERT_FALSE(sf::exists(published_path("unlink2")));
   ASSERT_FALSE(sf::exists(shadow_path("unlink2")));
+}
+
+TEST(OPEN2, UNLINK_WITH_READER_ONLY)
+{
+  /* unlink while only a read open is held:  the handle is bound to the
+   * published object, not to a shadow, so discard() has no shadow to
+   * drop--but the open must keep working and nothing may be published */
+  if (! have_fs_layout()) {
+    GTEST_SKIP() << "not a filesystem-backed driver";
+  }
+
+  std::unique_ptr<Open2Helper> o2h =
+      std::make_unique<Open2Helper>(fs, bucket_fh);
+  auto lfr = o2h->lookup("rdonly1");
+  ASSERT_EQ(get<0>(lfr), 0);
+
+  std::string a4{"AAAA"};
+
+  auto ofw = o2h->open(O_RDWR, RGW_OPEN_FLAG_CREATE);
+  ASSERT_EQ(get<0>(ofw), 0);
+  auto w0 = get<1>(ofw);
+  ASSERT_EQ(get<0>(o2h->write(w0, a4, 0, a4.length())), 0);
+  ASSERT_EQ(o2h->close(w0), 0);
+
+  auto ofr = o2h->open(O_RDONLY, RGW_OPEN_FLAG_NONE);
+  ASSERT_EQ(get<0>(ofr), 0);
+  auto r1 = get<1>(ofr);
+  ASSERT_FALSE(sf::exists(shadow_path("rdonly1")));
+
+  ASSERT_EQ(rgw_unlink(fs, bucket_fh, "rdonly1", RGW_UNLINK_FLAG_NONE), 0);
+  ASSERT_FALSE(sf::exists(published_path("rdonly1")));
+
+  /* the reader's fd holds the unlinked inode */
+  auto rdr = o2h->read(r1, 0, a4.length());
+  ASSERT_EQ(get<0>(rdr), 0);
+  ASSERT_EQ(get<1>(rdr), a4);
+
+  ASSERT_EQ(o2h->close(r1), 0);
+  ASSERT_FALSE(sf::exists(published_path("rdonly1")));
+  ASSERT_FALSE(sf::exists(shadow_path("rdonly1")));
+}
+
+TEST(OPEN2, STATELESS_IDLE_FINALIZE)
+{
+  /* the idle finalizer publishes an unclosed stateless writer without
+   * closing it, and a write which follows must re-fork the shadow
+   * rather than mutate the object it just published */
+  if (! have_fs_layout()) {
+    GTEST_SKIP() << "not a filesystem-backed driver";
+  }
+
+  g_conf().set_val("rgw_nfs_stateless_finalize_secs", "1");
+  g_conf().apply_changes(nullptr);
+
+  struct rgw_file_handle* fh{nullptr};
+  int ret = rgw_lookup(fs, bucket_fh, "idle1", &fh, nullptr, 0,
+		       RGW_LOOKUP_FLAG_CREATE);
+  ASSERT_EQ(ret, 0);
+
+  std::string a4{"AAAA"};
+  std::string b4{"BBBB"};
+  size_t nbytes{0};
+
+  ret = rgw_open(fs, fh, O_RDWR, RGW_OPEN_FLAG_V3|RGW_OPEN_FLAG_CREATE);
+  ASSERT_EQ(ret, 0);
+  ret = rgw_write(fs, fh, 0, a4.length(), &nbytes, (void*) a4.c_str(),
+		  RGW_OPEN_FLAG_V3);
+  ASSERT_EQ(ret, 0);
+
+  ASSERT_TRUE(sf::exists(shadow_path("idle1")));
+  ASSERT_FALSE(sf::exists(published_path("idle1")));
+
+  /* no close;  the idle timer finalizes */
+  std::this_thread::sleep_for(std::chrono::seconds(4));
+
+  ASSERT_TRUE(sf::exists(published_path("idle1")));
+  ASSERT_FALSE(sf::exists(shadow_path("idle1")));
+  ASSERT_EQ(sf::file_size(published_path("idle1")), a4.length());
+
+  /* the open is still live:  a further write must re-fork, not mutate
+   * the published object */
+  ret = rgw_write(fs, fh, a4.length(), b4.length(), &nbytes,
+		  (void*) b4.c_str(), RGW_OPEN_FLAG_V3);
+  ASSERT_EQ(ret, 0);
+
+  ASSERT_TRUE(sf::exists(shadow_path("idle1")));
+  ASSERT_EQ(sf::file_size(published_path("idle1")), a4.length());
+
+  ret = rgw_close(fs, fh, RGW_CLOSE_FLAG_NONE);
+  ASSERT_EQ(ret, 0);
+
+  ASSERT_FALSE(sf::exists(shadow_path("idle1")));
+  ASSERT_EQ(sf::file_size(published_path("idle1")),
+	    a4.length() + b4.length());
+
+  (void) rgw_fh_rele(fs, fh, RGW_FH_RELE_FLAG_NONE);
+
+  g_conf().set_val("rgw_nfs_stateless_finalize_secs", "300");
+  g_conf().apply_changes(nullptr);
 }
 
 /* END ALL TESTS */

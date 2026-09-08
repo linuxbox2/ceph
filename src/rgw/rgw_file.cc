@@ -46,7 +46,6 @@ namespace rgw {
   std::atomic<uint32_t> RGWLibFS::fs_inst_counter;
 
   uint32_t RGWLibFS::write_completion_interval_s = 10;
-  uint32_t RGWLibFS::stateless_finalize_interval_s = 300;
 
   ceph::timer<ceph::mono_clock> RGWLibFS::write_timer{
     ceph::construct_suspended};
@@ -2111,17 +2110,16 @@ namespace rgw {
 
     /* an idle timer, not a deadline:  i/o on the stateless open
      * defers it, so a slow but active writer never trips it */
+    auto interval = std::chrono::seconds(
+      fs->get_context()->_conf->rgw_nfs_stateless_finalize_secs);
+
     if (f->stateless_timer_id) {
-      RGWLibFS::write_timer.adjust_event(
-        f->stateless_timer_id,
-        std::chrono::seconds(RGWLibFS::stateless_finalize_interval_s));
+      RGWLibFS::write_timer.adjust_event(f->stateless_timer_id, interval);
       return;
     }
 
     f->stateless_timer_id =
-      RGWLibFS::write_timer.add_event(
-        std::chrono::seconds(RGWLibFS::stateless_finalize_interval_s),
-        StatelessFinalize(*this));
+      RGWLibFS::write_timer.add_event(interval, StatelessFinalize(*this));
   } /* RGWFileHandle::arm_stateless_timer */
 
   void RGWFileHandle::finalize_stateless()
