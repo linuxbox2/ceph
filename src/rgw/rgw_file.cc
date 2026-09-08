@@ -2330,6 +2330,34 @@ namespace rgw {
     return hdl->pwritev(iov, iov_cnt, offset, bytes_written, flags);
   } /* writev */
 
+  int RGWFileHandle::commit(uint64_t offset, uint64_t length, uint32_t flags)
+  {
+    std::shared_ptr<sal::Object::FSIOObject> hdl;
+    {
+      unique_lock guard{mtx, std::defer_lock};
+      if (likely(! (flags & FLAG_LOCKED))) {
+        guard.lock();
+      }
+      auto f = get_if<file>(&variant_type);
+      if (! f) {
+        return 0; /* not a file--nothing to make durable */
+      }
+      hdl = f->fsio_hdl;
+    }
+
+    if (! hdl) {
+      /* no shadow is attached:  a legacy write cycle, or nothing has
+       * been written through this handle.  COMMIT still succeeds */
+      return 0;
+    }
+
+    CephContext* cct = static_cast<CephContext*>(fs->get_fs()->rgw);
+    const DoutPrefix dp(cct, dout_subsys, "rgw commit: ");
+
+    return hdl->commit(&dp,
+		       rgw::sal::Object::FSIOObject::COMMIT_FLAG_NONE);
+  } /* RGWFileHandle::commit */
+
   int RGWFileHandle::truncate(uint64_t size)
   {
     auto* driver = g_rgwlib->get_driver();
@@ -3472,7 +3500,11 @@ int rgw_writev(rgw_open_fd open_fd,
 int rgw_fsync(struct rgw_fs *rgw_fs, struct rgw_file_handle *handle,
 	      uint32_t flags)
 {
-  return 0;
+  RGWFileHandle* rgw_fh = get_rgwfh(handle);
+
+  /* FSAL_RGW calls this for a stable (FILE_SYNC) write, so it has to
+   * be a real fsync of the shadow, not a no-op */
+  return rgw_fh->commit(0, 0, RGWFileHandle::FLAG_NONE);
 }
 
 int rgw_commit(struct rgw_fs *rgw_fs, struct rgw_file_handle *fh,
