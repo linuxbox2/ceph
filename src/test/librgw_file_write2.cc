@@ -1542,7 +1542,8 @@ TEST(OPEN2, UNLINK_LEAVES_NO_SHADOW)
 
   ASSERT_EQ(rgw_unlink(fs, bucket_fh, "unlink2", RGW_UNLINK_FLAG_NONE), 0);
 
-  /* name is gone immediately, both in the namespace and in .shadow */
+  /* the name is gone immediately;  on the nsfs/posix drivers that is
+   * observable in both the namespace and .shadow */
   ASSERT_FALSE(sf::exists(published_path("unlink2")));
   ASSERT_FALSE(sf::exists(shadow_path("unlink2")));
 
@@ -1939,7 +1940,8 @@ TEST(OPEN2, LOOKUP_FINDS_UNPUBLISHED)
   ASSERT_EQ(get<0>(ofw), 0);
   ASSERT_EQ(get<0>(o2h->write(get<1>(ofw), a4, 0, a4.length())), 0);
 
-  /* deliberately not closed: the object exists only in .shadow/ */
+  /* deliberately not closed, so it stays unpublished;  on the
+   * nsfs/posix drivers that means it exists only in .shadow/ */
   ASSERT_TRUE(sf::exists(shadow_path("unpub1")));
   ASSERT_FALSE(sf::exists(published_path("unpub1")));
 
@@ -2351,11 +2353,11 @@ TEST(OPEN2, STATFS)
 
 TEST(OPEN2, DIR_ATTRS_PERSIST)
 {
-  /* A directory's attributes live on its .folder sentinel, not on the
-   * directory inode.  Nothing in this suite asserted on directory
-   * attributes, which is why a lookup path that read them from the
-   * inode went unnoticed here and only showed up in nfsns, and there
-   * only on a second run against the same root.
+  /* On the nsfs/posix drivers a directory's attributes live on its
+   * .folder sentinel, not on the directory inode.  Nothing in this
+   * suite asserted on directory attributes, which is why a lookup path
+   * that read them from the inode went unnoticed here and only showed
+   * up in nfsns, and there only on a second run against the same root.
    *
    * The eviction is what makes this test able to fail: rgw_lookup()
    * otherwise returns the cached handle, whose state still holds what
@@ -2409,8 +2411,8 @@ TEST(OPEN2, DIR_ATTRS_PERSIST)
   ASSERT_EQ(rc, 0);
   ASSERT_TRUE(S_ISDIR(st2.st_mode));
 
-  /* the unix attrs live on the directory's .folder sentinel, not on the
-   * directory inode */
+  /* on the nsfs/posix drivers these live on the directory's .folder
+   * sentinel, not on the directory inode */
   ASSERT_NE(attrs.find(RGW_ATTR_UNIX1), attrs.end())
       << "directory unix attrs were not resolved";
   ASSERT_NE(attrs.find(RGW_ATTR_UNIX_KEY1), attrs.end());
