@@ -2349,6 +2349,75 @@ TEST(OPEN2, STATFS)
   }
 }
 
+TEST(OPEN2, DIR_ATTRS_PERSIST)
+{
+  /* A directory's attributes live on its .folder sentinel, not on the
+   * directory inode.  Nothing in this suite asserted on directory
+   * attributes, which is why a lookup path that read them from the
+   * inode went unnoticed here and only showed up in nfsns, and there
+   * only on a second run against the same root.
+   *
+   * The eviction is what makes this test able to fail: rgw_lookup()
+   * otherwise returns the cached handle, whose state still holds what
+   * rgw_mkdir() put there, and the assertion passes without any of it
+   * having been read back. */
+  if (! have_fs_layout()) {
+    GTEST_SKIP() << "not a filesystem-backed driver";
+  }
+
+  const uint32_t uid = 5150;
+  const uint32_t gid = 5151;
+
+  (void) rgw_unlink(fs, bucket_fh, "attrdir1", RGW_UNLINK_FLAG_NONE);
+
+  struct stat st;
+  memset(&st, 0, sizeof(st));
+  st.st_uid = uid;
+  st.st_gid = gid;
+  st.st_mode = 0750;
+
+  struct rgw_file_handle* dfh{nullptr};
+  int ret = rgw_mkdir(fs, bucket_fh, "attrdir1", &st, create_mask, &dfh,
+		      RGW_MKDIR_FLAG_NONE);
+  ASSERT_TRUE((ret == 0) || (ret == -EEXIST)) << "ret=" << ret;
+  if (! dfh) {
+    ASSERT_EQ(rgw_lookup(fs, bucket_fh, "attrdir1", &dfh, nullptr, 0,
+			 RGW_LOOKUP_FLAG_NONE), 0);
+  }
+
+  /* Ask the resolver directly rather than going through rgw_lookup().
+   * A lookup hands back the cached handle, whose state still holds what
+   * rgw_mkdir() put there, so the assertion would pass without any of
+   * it being read back -- which is why this went unnoticed until nfsns
+   * hit it across two runs, with a cold cache. */
+  auto* driver = rgw::g_rgwlib->get_driver();
+  const DoutPrefix dp(g_ceph_context, dout_subsys, "write2 test: ");
+
+  std::unique_ptr<rgw::sal::Bucket> sal_bucket;
+  ASSERT_EQ(driver->load_bucket(&dp, rgw_bucket("", bucket_name),
+			        &sal_bucket, null_yield), 0);
+  auto sal_object = sal_bucket->get_object(rgw_obj_key("attrdir1"));
+
+  struct stat st2;
+  rgw::sal::Attrs attrs;
+  memset(&st2, 0, sizeof(st2));
+
+  int rc = sal_object->stat_fsio_view(&dp, &st2, &attrs, 0);
+  if (rc == -ENOTSUP) {
+    GTEST_SKIP() << "driver has no positional view";
+  }
+  ASSERT_EQ(rc, 0);
+  ASSERT_TRUE(S_ISDIR(st2.st_mode));
+
+  /* the unix attrs live on the directory's .folder sentinel, not on the
+   * directory inode */
+  ASSERT_NE(attrs.find(RGW_ATTR_UNIX1), attrs.end())
+      << "directory unix attrs were not resolved";
+  ASSERT_NE(attrs.find(RGW_ATTR_UNIX_KEY1), attrs.end());
+
+  (void) rgw_fh_rele(fs, dfh, RGW_FH_RELE_FLAG_NONE);
+}
+
 /* END ALL TESTS */
 
 TEST(OPEN2, DELETE_BUCKET) {
