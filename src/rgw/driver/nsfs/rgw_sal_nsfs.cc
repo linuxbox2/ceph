@@ -120,6 +120,13 @@ const std::string MP_OBJ_PART_PFX = "part-";
 const std::string MP_OBJ_HEAD_NAME = MP_OBJ_PART_PFX + "00000";
 const std::string NSFS_FOLDER_OBJECT_NAME = ".folder";
 
+/* multipart staging:  <bucket>/.multipart_<upload_id>/ holding
+ * part-NNNNN plus .meta and .assembled (see DESIGN.md) */
+static const std::string MP_STAGING_PREFIX = ".multipart_";
+static const std::string MP_META_NAME = ".meta";
+static const std::string MP_ASSEMBLED_NAME = ".assembled";
+static const std::string VERSIONS_LOCK_NAME = ".lock";
+
 /* Names this driver creates on disk which are not objects.  Listing
  * paths suppress exactly these;  every other dot-prefixed name is an
  * ordinary object.  Hiding all of them is a client convention -- ls
@@ -129,10 +136,14 @@ static bool is_reserved_name(std::string_view name)
 {
   if ((name == HIDDEN_SHADOW_PATH) ||
       (name == HIDDEN_VERSIONS_PATH) ||
-      (name == NSFS_FOLDER_OBJECT_NAME)) {
+      (name == NSFS_FOLDER_OBJECT_NAME) ||
+      (name == MP_META_NAME) ||
+      (name == MP_ASSEMBLED_NAME) ||
+      (name == VERSIONS_LOCK_NAME)) {
     return true;
   }
-  return name.starts_with(nsfs::TMP_LINK_PREFIX) ||
+  return name.starts_with(MP_STAGING_PREFIX) ||
+	 name.starts_with(nsfs::TMP_LINK_PREFIX) ||
 	 name.starts_with(nsfs::UNLINK_TMP_PREFIX) ||
 	 name.starts_with(nsfs::CLONE_PARENT_PREFIX);
 }
@@ -4029,7 +4040,7 @@ int NSFSBucket::check_empty(const DoutPrefixProvider* dpp, optional_yield y)
   return dir->for_each(dpp, [](const char* name) {
     /* for_each filters out "." and "..", so reaching here is not empty */
     std::string_view check_name = name;
-    if (!check_name.starts_with(".multipart")) { // incomplete uploads can be deleted
+    if (!check_name.starts_with(MP_STAGING_PREFIX)) { // incomplete uploads can be deleted
       return -ENOTEMPTY;
     }
     return 0;
@@ -7064,7 +7075,7 @@ std::unique_ptr<rgw::sal::Object> NSFSMultipartUpload::get_meta_obj()
 
   load(nullptr);
 
-  static const std::string meta_name{".meta"};
+  static const std::string& meta_name = MP_META_NAME;
   if (!shadow) {
     meta_obj = bucket->get_object(rgw_obj_key(get_meta(), std::string(), mp_ns));
   } else {
@@ -7387,7 +7398,7 @@ int NSFSMultipartUpload::complete(const DoutPrefixProvider *dpp,
   int staging_fd = shadow->get_dir()->get_fd();
 
   // assemble parts into a single file via copy_file_range
-  std::string assembled_name = ".assembled";
+  std::string assembled_name = MP_ASSEMBLED_NAME;
   ret = assemble_parts(dpp, staging_fd, total_parts, assembled_name);
   if (ret < 0) {
     return ret;
