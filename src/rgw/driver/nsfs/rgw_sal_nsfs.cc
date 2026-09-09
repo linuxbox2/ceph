@@ -120,6 +120,23 @@ const std::string MP_OBJ_PART_PFX = "part-";
 const std::string MP_OBJ_HEAD_NAME = MP_OBJ_PART_PFX + "00000";
 const std::string NSFS_FOLDER_OBJECT_NAME = ".folder";
 
+/* Names this driver creates on disk which are not objects.  Listing
+ * paths suppress exactly these;  every other dot-prefixed name is an
+ * ordinary object.  Hiding all of them is a client convention -- ls
+ * filters, readdir(3) does not -- and a server which drops them from
+ * the listing leaves a namespace a client cannot see or empty. */
+static bool is_reserved_name(std::string_view name)
+{
+  if ((name == HIDDEN_SHADOW_PATH) ||
+      (name == HIDDEN_VERSIONS_PATH) ||
+      (name == NSFS_FOLDER_OBJECT_NAME)) {
+    return true;
+  }
+  return name.starts_with(nsfs::TMP_LINK_PREFIX) ||
+	 name.starts_with(nsfs::UNLINK_TMP_PREFIX) ||
+	 name.starts_with(nsfs::CLONE_PARENT_PREFIX);
+}
+
 /* See posix driver comment — object ownership is now read from the
  * standard RGW_ATTR_ACL attribute, matching rados. The former
  * NSFSOwner xattr could not represent account-owned objects. */
@@ -1846,7 +1863,7 @@ int Directory::fill_cache(const DoutPrefixProvider *dpp, optional_yield y,
   int ret = for_each(dpp, [this, &cb, &dpp, &y, &path_prefix, flags](const char *name) {
     std::unique_ptr<FSEnt> ent;
 
-    if (name[0] == '.' && name != NSFS_FOLDER_OBJECT_NAME) {
+    if (is_reserved_name(name) && name != NSFS_FOLDER_OBJECT_NAME) {
       return 0;
     }
 
