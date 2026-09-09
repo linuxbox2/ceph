@@ -1922,8 +1922,10 @@ TEST(OPEN2, LOOKUP_FINDS_UNPUBLISHED)
   /* An object which exists only as a shadow is part of the NFS view and
    * must be findable.  Resolving through a synthesized S3 GET could not
    * see it -- the shadow is by definition not in the S3 namespace -- so
-   * this is also the assertion which proves the probe is being taken
-   * rather than the fallback. */
+   * Note this does not by itself prove the probe is being taken:  the
+   * helper's lookup uses RGW_LOOKUP_FLAG_CREATE, so a handle is already
+   * cached and the lookup below can be answered from it.
+   * SAL_RESOLVES_UNPUBLISHED_SHADOW is the discriminating assertion. */
   if (! have_fs_layout()) {
     GTEST_SKIP() << "not a filesystem-backed driver";
   }
@@ -1963,6 +1965,66 @@ TEST(OPEN2, LOOKUP_FINDS_UNPUBLISHED)
   ASSERT_EQ(rgw_lookup(fs, bucket_fh, "unpub1", &fh, nullptr, 0,
 		       RGW_LOOKUP_FLAG_NONE), 0);
   (void) rgw_fh_rele(fs, fh, RGW_FH_RELE_FLAG_NONE);
+}
+
+TEST(OPEN2, SAL_RESOLVES_UNPUBLISHED_SHADOW)
+{
+  /* LOOKUP_FINDS_UNPUBLISHED asserts the same property through
+   * rgw_lookup(), but it cannot distinguish resolution from a cache hit:
+   * Open2Helper::lookup() looks the name up with RGW_LOOKUP_FLAG_CREATE
+   * before the object exists, so a handle for it is already cached, and
+   * the later RGW_LOOKUP_FLAG_NONE lookup can be answered from the cache
+   * without anything being read back.
+   *
+   * Ask the SAL directly instead.  A sal::Object obtained from the
+   * bucket carries no RGWFileHandle state, so a hit here can only come
+   * from stat_fsio_view() resolving .shadow/ -- which is what decides
+   * whether the unpublished-shadow gap is actually closed. */
+  if (! have_fs_layout()) {
+    GTEST_SKIP() << "not a filesystem-backed driver";
+  }
+
+  reset_object("unpub2");
+
+  std::unique_ptr<Open2Helper> o2h =
+      std::make_unique<Open2Helper>(fs, bucket_fh);
+  ASSERT_EQ(get<0>(o2h->lookup("unpub2")), 0);
+
+  std::string a4{"AAAA"};
+
+  auto ofw = o2h->open(O_RDWR, RGW_OPEN_FLAG_CREATE);
+  ASSERT_EQ(get<0>(ofw), 0);
+  ASSERT_EQ(get<0>(o2h->write(get<1>(ofw), a4, 0, a4.length())), 0);
+
+  /* deliberately not closed:  unpublished, which on the nsfs/posix
+   * drivers means it exists only in .shadow/ */
+  ASSERT_TRUE(sf::exists(shadow_path("unpub2")));
+  ASSERT_FALSE(sf::exists(published_path("unpub2")));
+
+  auto* driver = rgw::g_rgwlib->get_driver();
+  const DoutPrefix dp(g_ceph_context, dout_subsys, "write2 test: ");
+
+  std::unique_ptr<rgw::sal::Bucket> sal_bucket;
+  ASSERT_EQ(driver->load_bucket(&dp, rgw_bucket("", bucket_name),
+			        &sal_bucket, null_yield), 0);
+  auto sal_object = sal_bucket->get_object(rgw_obj_key("unpub2"));
+
+  struct stat st;
+  rgw::sal::Attrs attrs;
+  memset(&st, 0, sizeof(st));
+
+  int rc = sal_object->stat_fsio_view(&dp, &st, &attrs, 0);
+  if (rc == -ENOTSUP) {
+    GTEST_SKIP() << "driver has no positional view";
+  }
+  ASSERT_EQ(rc, 0) << "unpublished shadow did not resolve";
+
+  /* the published object does not exist, so a size which matches what
+   * was written can only have come from the shadow */
+  ASSERT_EQ(st.st_size, (off_t) a4.length());
+
+  ASSERT_EQ(o2h->close(get<1>(ofw)), 0);
+  ASSERT_TRUE(sf::exists(published_path("unpub2")));
 }
 
 TEST(OPEN2, NESTED_OBJECT)
