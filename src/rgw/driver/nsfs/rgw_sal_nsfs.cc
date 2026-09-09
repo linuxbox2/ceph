@@ -349,7 +349,9 @@ static void promote_version(int parent_fd, const std::string& leaf,
     if (vdir) {
       struct dirent* de;
       while ((de = readdir(vdir)) != nullptr) {
-        if (de->d_name[0] == '.') { continue; }
+        /* no dot filter:  the key match below rejects ".", ".." and
+         * .lock, and filtering on the dot would hide the versions of
+         * an object whose own name begins with one */
         std::string vn(de->d_name);
         if (vn.size() <= leaf.size() + 1 ||
             vn.compare(0, leaf.size(), leaf) != 0 ||
@@ -1837,8 +1839,7 @@ int Directory::copy(const DoutPrefixProvider *dpp, optional_yield y,
   ret = for_each(dpp, [this, &dest, &dpp, &y](const char* name) {
     std::unique_ptr<FSEnt> sobj;
 
-    if (name[0] == '.') {
-      /* Skip dotfiles */
+    if (is_reserved_name(name)) {
       return 0;
     }
 
@@ -1994,10 +1995,9 @@ int Directory::fill_cache(const DoutPrefixProvider *dpp, optional_yield y,
       if (vdir) {
         struct dirent* de;
         while ((de = readdir(vdir)) != nullptr) {
-          if (de->d_name[0] == '.') {
-            continue;
-          }
-
+          /* no dot filter:  the parse below rejects ".", ".." and
+           * .lock, and filtering on the dot would hide the versions of
+           * an object whose own name begins with one */
           std::string vname(de->d_name);
           /* parse "key_version_id" — find the last '_mtime-' or '_null' */
           std::string obj_name;
@@ -3976,8 +3976,7 @@ int NSFSBucket::read_stats(const DoutPrefixProvider *dpp, optional_yield y,
 
   // TODO: bucket stats shouldn't have to list all objects
   return dir->for_each(dpp, [this, dpp, y, &main] (const char* name) {
-    if (name[0] == '.') {
-      /* Skip dotfiles */
+    if (is_reserved_name(name)) {
       return 0;
     }
 
@@ -5690,9 +5689,9 @@ int NSFSObject::stat(const DoutPrefixProvider* dpp)
               std::string max_name;
               struct dirent* de;
               while ((de = readdir(vdir)) != nullptr) {
-                if (de->d_name[0] == '.') {
-                  continue;
-                }
+                /* no dot filter:  the key match below rejects ".", ".."
+                 * and .lock, and filtering on the dot would hide the
+                 * versions of an object whose name begins with one */
                 std::string vname(de->d_name);
                 /* match entries for this key: "leafname_..." */
                 if (vname.size() <= leaf_name.size() + 1 ||
