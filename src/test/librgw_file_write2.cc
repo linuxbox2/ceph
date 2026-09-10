@@ -2766,6 +2766,19 @@ TEST(OPEN2, VER_WRITE_TWICE_MAKES_TWO_VERSIONS)
     }
   }
   ASSERT_EQ(n, 2) << "two NFS writes did not produce two versions";
+
+  /* and only one of them may be current.  Read from the incremental
+   * cache deliberately -- a rebuild recomputes the flag, so listing
+   * through one would repair a stale FLAG_CURRENT and hide it. */
+  int currents = 0;
+  for (auto& o : objs) {
+    if (o.key.name == "vtwice" &&
+	(o.flags & rgw_bucket_dir_entry::FLAG_CURRENT)) {
+      ++currents;
+    }
+  }
+  ASSERT_EQ(currents, 1)
+    << "publishing a new version left the previous one flagged current";
 }
 
 /* unlink is POSIX from the NFS side:  the name goes away.  In a
@@ -3054,6 +3067,191 @@ TEST(OPEN2, VER_DOTFILE_UNLINK_CREATES_DELETE_MARKER)
   ASSERT_NE(rgw_lookup(fs, ver_bucket_fh, ".hidden", &fh, nullptr, 0,
 		       RGW_LOOKUP_FLAG_NONE), 0)
     << "unlinked dot-prefixed name still resolves over NFS";
+}
+
+/*
+ * Suspended versioning.
+ *
+ * Suspended is not "off".  The bucket is still versioned() -- versions
+ * made while it was enabled survive untouched -- but it is no longer
+ * versioning_enabled(), and S3 says a write then creates or replaces the
+ * *null* version rather than minting a new one.  It is the one mode in
+ * which a write destroys data:  the previous null version's content is
+ * gone.  So repeated writes must not accumulate versions.
+ *
+ * These run last because they leave the bucket suspended for anything
+ * that follows;  the final test restores it.
+ */
+
+static int ver_count(const DoutPrefixProvider* dp, const std::string& key,
+		     int* nulls = nullptr, int* currents = nullptr)
+{
+  std::vector<rgw_bucket_dir_entry> objs;
+  if (librgw_test::list_bucket(dp, ver_bucket_name, true, objs) != 0) {
+    return -1;
+  }
+  int n = 0;
+  if (nulls) *nulls = 0;
+  if (currents) *currents = 0;
+  for (auto& o : objs) {
+    if (o.key.name != key) {
+      continue;
+    }
+    ++n;
+    if (nulls && o.key.instance == "null") {
+      ++(*nulls);
+    }
+    if (currents && (o.flags & rgw_bucket_dir_entry::FLAG_CURRENT)) {
+      ++(*currents);
+    }
+  }
+  return n;
+}
+
+static void ver_write(const char* key, const std::string& body)
+{
+  std::unique_ptr<Open2Helper> o2h =
+      std::make_unique<Open2Helper>(fs, ver_bucket_fh);
+  ASSERT_EQ(get<0>(o2h->lookup(key)), 0);
+  auto ofw = o2h->open(O_RDWR, RGW_OPEN_FLAG_CREATE);
+  ASSERT_EQ(get<0>(ofw), 0);
+  ASSERT_EQ(get<0>(o2h->write(get<1>(ofw), body, 0, body.length())), 0);
+  ASSERT_EQ(o2h->close(get<1>(ofw)), 0);
+}
+
+TEST(OPEN2, VER_SUSPEND_PRESERVES_ENABLED_VERSIONS)
+{
+  if (! ver_bucket_fh) {
+    GTEST_SKIP() << "versioned bucket unavailable";
+  }
+  const DoutPrefix dp(g_ceph_context, dout_subsys, "write2 test: ");
+
+  /* two versions while enabled */
+  ver_write("vsusp", "enabled one");
+  ver_write("vsusp", "enabled two");
+  ASSERT_EQ(librgw_test::invalidate_listing_cache(&dp, ver_bucket_name), 0);
+  ASSERT_EQ(ver_count(&dp, "vsusp"), 2) << "setup did not produce two versions";
+
+  ASSERT_EQ(librgw_test::set_bucket_versioning(
+	      &dp, ver_bucket_name, librgw_test::Versioning::Suspended), 0);
+  librgw_test::Versioning got{librgw_test::Versioning::Off};
+  ASSERT_EQ(librgw_test::get_bucket_versioning(&dp, ver_bucket_name, got), 0);
+  ASSERT_EQ(got, librgw_test::Versioning::Suspended)
+    << "suspend fixture did not take effect";
+
+  ver_write("vsusp", "suspended one");
+
+  ASSERT_EQ(librgw_test::invalidate_listing_cache(&dp, ver_bucket_name), 0);
+  int nulls = 0;
+  int n = ver_count(&dp, "vsusp", &nulls);
+  ASSERT_EQ(n, 3)
+    << "suspending must retain versions made while enabled";
+  ASSERT_EQ(nulls, 1)
+    << "a write to a suspended bucket must create exactly one null version";
+}
+
+TEST(OPEN2, VER_SUSPEND_WRITES_DO_NOT_ACCUMULATE)
+{
+  if (! ver_bucket_fh) {
+    GTEST_SKIP() << "versioned bucket unavailable";
+  }
+  const DoutPrefix dp(g_ceph_context, dout_subsys, "write2 test: ");
+
+  /* two further writes while suspended:  each replaces the null version
+   * rather than adding one, so the count must not move */
+  ver_write("vsusp", "suspended two");
+  ver_write("vsusp", "suspended three");
+
+  ASSERT_EQ(librgw_test::invalidate_listing_cache(&dp, ver_bucket_name), 0);
+  int nulls = 0;
+  int n = ver_count(&dp, "vsusp", &nulls);
+  ASSERT_EQ(n, 3)
+    << "writes to a suspended bucket accumulated versions";
+  ASSERT_EQ(nulls, 1) << "more than one null version";
+
+  /* and the newest content is what a reader sees */
+  std::unique_ptr<Open2Helper> o2h =
+      std::make_unique<Open2Helper>(fs, ver_bucket_fh);
+  ASSERT_EQ(get<0>(o2h->lookup("vsusp")), 0);
+  auto ofr = o2h->open(O_RDONLY, RGW_OPEN_FLAG_NONE);
+  ASSERT_EQ(get<0>(ofr), 0);
+  auto rr = o2h->read(get<1>(ofr), 0, 64);
+  ASSERT_EQ(get<0>(rr), 0);
+  ASSERT_EQ(get<1>(rr), std::string("suspended three"));
+  ASSERT_EQ(o2h->close(get<1>(ofr)), 0);
+}
+
+/* only one version of a key may be current, at any versioning state.
+ * Checked against the incremental cache rather than a rebuild:  a
+ * rebuild recomputes the flag, so it would repair a stale one and hide
+ * it. */
+TEST(OPEN2, VER_SUSPEND_ONE_CURRENT_IN_CACHE)
+{
+  if (! ver_bucket_fh) {
+    GTEST_SKIP() << "versioned bucket unavailable";
+  }
+  const DoutPrefix dp(g_ceph_context, dout_subsys, "write2 test: ");
+
+  ver_write("vsuspcur", "first while suspended");
+  ver_write("vsuspcur", "second while suspended");
+
+  int currents = 0;
+  int n = ver_count(&dp, "vsuspcur", nullptr, &currents);
+  ASSERT_GE(n, 1);
+  ASSERT_EQ(currents, 1)
+    << "the listing cache holds more than one current version";
+}
+
+/* The store is the authority, but note its shape:  the current version
+ * IS the top-level file, and only non-current versions live in
+ * .versions/.  So the null version a suspended write creates is not in
+ * .versions/ at all -- it is the object itself, carrying a version-id
+ * xattr of "null".  Asserting a .versions/<key>_null entry here would be
+ * asserting a model of the store rather than the store. */
+TEST(OPEN2, VER_SUSPEND_ON_DISK)
+{
+  if (! ver_bucket_fh) {
+    GTEST_SKIP() << "versioned bucket unavailable";
+  }
+  auto vdir = nsfs_base() / ver_bucket_name / ".versions";
+  ASSERT_TRUE(sf::is_directory(vdir));
+
+  int nulls = 0, reals = 0;
+  for (auto& de : sf::directory_iterator(vdir)) {
+    auto fn = de.path().filename().string();
+    if (fn.rfind("vsusp_", 0) != 0) {
+      continue;
+    }
+    if (fn == "vsusp_null") {
+      ++nulls;
+    } else {
+      ++reals;
+    }
+  }
+  ASSERT_EQ(reals, 2) << "enabled-era versions did not survive suspension";
+  ASSERT_EQ(nulls, 0)
+    << "the null version is the current object, not a .versions/ entry";
+
+  /* the current object carries the null version id */
+  auto cur = nsfs_base() / ver_bucket_name / "vsusp";
+  ASSERT_TRUE(sf::exists(cur)) << "no current object after a suspended write";
+
+  char buf[64];
+  std::string vid_x = std::string("user.nsfs.") + "version_id";
+  ssize_t len = ::getxattr(cur.c_str(), vid_x.c_str(), buf, sizeof(buf));
+  ASSERT_GT(len, 0) << "current object carries no version id";
+  ASSERT_EQ(std::string(buf, len), std::string("null"))
+    << "a write to a suspended bucket must stamp the null version id";
+}
+
+TEST(OPEN2, VER_SUSPEND_RESTORE)
+{
+  if (! ver_bucket_fh) {
+    GTEST_SKIP() << "versioned bucket unavailable";
+  }
+  const DoutPrefix dp(g_ceph_context, dout_subsys, "write2 test: ");
+  ASSERT_EQ(librgw_test::set_bucket_versioning(
+	      &dp, ver_bucket_name, librgw_test::Versioning::Enabled), 0);
 }
 
 TEST(OPEN2, DELETE_BUCKET) {
