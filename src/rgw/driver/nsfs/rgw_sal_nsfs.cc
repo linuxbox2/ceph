@@ -5067,6 +5067,30 @@ int NSFSObject::NSFSFSIOObject::publish(const DoutPrefixProvider* dpp, uint32_t 
     return -errno;
   }
 
+  /* Stamp the version id, as the S3 write path does in link_temp_file().
+   *
+   * demote_current_version() decides what a later write is demoting by
+   * reading this xattr, and is_null_version_fd() treats its absence as
+   * the null version.  Without it every object written over NFS was the
+   * null version:  a second write demoted the first to <leaf>_null, a
+   * third collided on that same slot, and the versions collapsed onto
+   * one entry instead of accumulating.
+   *
+   * shadow_fd still refers to this inode -- the rename moved the name,
+   * not the file -- so it stamps the published object. */
+  std::string ver_id;
+  if (binfo.versioned()) {
+    ver_id = NULL_VERSION_ID;
+    struct statx vstx;
+    if (binfo.versioning_enabled() &&
+	statx(shadow_fd, "", AT_EMPTY_PATH, STATX_ALL, &vstx) == 0) {
+      ver_id = nsfs_version_id_from_statx(vstx);
+    }
+    std::string vid_x = NSFS_XATTR_PREFIX + RGW_NSFS_ATTR_VERSION_ID;
+    ::fsetxattr(shadow_fd, vid_x.c_str(), ver_id.c_str(), ver_id.size(), 0);
+    src_obj->set_instance(ver_id);
+  }
+
   /* update bucket listing cache */
   auto* bcache = driver->get_bucket_cache();
   if (bcache) {
@@ -5080,6 +5104,14 @@ int NSFSObject::NSFSFSIOObject::publish(const DoutPrefixProvider* dpp, uint32_t 
       bde.ver.pool = 1;
       bde.ver.epoch = 1;
       bde.exists = true;
+      if (binfo.versioned()) {
+	/* the id stamped above:  without it every publish writes the
+	 * same cache key and a new version replaces its predecessor's
+	 * row rather than taking a place beside it */
+	bde.key.instance = ver_id;
+	bde.flags = rgw_bucket_dir_entry::FLAG_VER |
+		    rgw_bucket_dir_entry::FLAG_CURRENT;
+      }
       bde.meta.category = RGWObjCategory::Main;
       bde.meta.size = pub_stx.stx_size;
       bde.meta.accounted_size = pub_stx.stx_size;

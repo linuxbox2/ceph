@@ -2735,6 +2735,39 @@ TEST(OPEN2, VER_SETUP)
     << "versioning fixture did not take effect";
 }
 
+/* Writing the same name twice must leave two versions, not one.  If this
+ * fails everything below is measuring the wrong thing. */
+TEST(OPEN2, VER_WRITE_TWICE_MAKES_TWO_VERSIONS)
+{
+  if (! ver_bucket_fh) {
+    GTEST_SKIP() << "versioned bucket unavailable";
+  }
+  const DoutPrefix dp(g_ceph_context, dout_subsys, "write2 test: ");
+
+  std::unique_ptr<Open2Helper> o2h =
+      std::make_unique<Open2Helper>(fs, ver_bucket_fh);
+  ASSERT_EQ(get<0>(o2h->lookup("vtwice")), 0);
+
+  for (auto* body : {"first", "second"}) {
+    auto ofw = o2h->open(O_RDWR, RGW_OPEN_FLAG_CREATE);
+    ASSERT_EQ(get<0>(ofw), 0);
+    std::string b{body};
+    ASSERT_EQ(get<0>(o2h->write(get<1>(ofw), b, 0, b.length())), 0);
+    ASSERT_EQ(o2h->close(get<1>(ofw)), 0);
+  }
+
+  std::vector<rgw_bucket_dir_entry> objs;
+  ASSERT_EQ(librgw_test::list_bucket(&dp, ver_bucket_name, true, objs), 0);
+
+  int n = 0;
+  for (auto& o : objs) {
+    if (o.key.name == "vtwice") {
+      ++n;
+    }
+  }
+  ASSERT_EQ(n, 2) << "two NFS writes did not produce two versions";
+}
+
 /* unlink is POSIX from the NFS side:  the name goes away.  In a
  * versioned bucket that must not destroy history -- S3 semantics for a
  * delete without a versionId is a delete marker over a retained
