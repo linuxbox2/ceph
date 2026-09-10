@@ -74,6 +74,39 @@ per-object work.  One `renameat()`:
   operations on that name;
 - **O(1)** in the number of objects beneath, where rados is O(N).
 
+**That holds for a prefix, not for a single versioned object.**  nsfs puts
+an object's history beside it rather than inside it —
+
+```
+<bucket>/photo.jpg                    <- current
+<bucket>/.versions/photo.jpg_<verid>  <- older versions
+```
+
+— so renaming one versioned object is the leaf plus N version entries:
+N+1 renames, and the set is *not* atomic.  Interrupted midway it leaves
+versions orphaned under the old name.  Still cheap, since nothing but
+metadata moves, but the atomicity claim above belongs to prefix rename
+only.
+
+| case | cost | atomic |
+|---|---|---|
+| unversioned object | 1 rename | yes |
+| prefix / directory | 1 rename | yes |
+| versioned object | 1 + N versions | **no** |
+
+This is a consequence of our layout, not of versioned rename as such.
+posix is heading for objects-as-directories, where an object's versions
+live *inside* the object's own directory — one `renameat` moves the object
+and its whole history atomically, and the row above disappears.  Noted as
+context rather than a proposal:  rgw-standalone owns that schema, and
+whether nsfs should follow is a separate question from rename.
+
+Prefix fanout is planned there too — splitting wide directories by prefix
+— and whether that preserves single-`renameat` prefix rename depends on
+where the split lands relative to the logical directory.  Deliberately not
+designed here;  treat it as an unknown that will need answering when it
+arrives.
+
 Three further properties fall out without special handling:
 
 - `.versions/` and `.shadow/` are created with `mkdirat` on the
@@ -194,6 +227,25 @@ every advantage in §2.  This is today's behaviour.
 **(c) Refuse under versioning.**  Rename on unversioned buckets only,
 `-EPERM` otherwise.  Honest, cheap, and leaves versioned buckets — the
 configuration this driver is being built for — without the operation.
+
+### 4.1 What (a) means concretely
+
+An S3 client sees the object leave the old key and appear at the new one,
+carrying its versions:  `ListObjectVersions` at the new key returns the
+same versions with the **same version ids**, since ids are
+`mtime-<base36>-ino-<base36>` and a rename changes neither.
+
+Cross-bucket follows a rule rather than a fudge:  history can only move
+somewhere able to hold it.
+
+- source has no history -> any target;
+- source has history -> target must be **versioned or suspended**, else
+  refuse.
+
+Suspended qualifies because such a bucket still holds non-current
+versions, it merely stops minting new ones.  Into an unversioned target
+the only alternatives are to refuse or to drop the history silently, and
+the second is data loss.
 
 **Recommendation: (a), stated as a divergence.**  For a gateway whose
 primary interface is NFS, the filesystem's semantics are the contract and
