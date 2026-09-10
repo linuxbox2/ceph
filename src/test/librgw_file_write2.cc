@@ -2898,6 +2898,164 @@ TEST(OPEN2, VER_DEMOTED_ETAG_MATCHES_OBJECT)
   ASSERT_TRUE(found) << "demoted version absent from the version listing";
 }
 
+/*
+ * Dot-prefixed objects in a versioned bucket.
+ *
+ * A version entry is named "<key>_<version_id>", so for a key that
+ * itself begins with a dot every one of its versions does too.  The
+ * scans of .versions/ used to skip any name starting with a dot, which
+ * hid all of them -- from version enumeration, from newest-version
+ * resolution, and from promotion on delete.  That became reachable when
+ * ordinary dotfiles started being listed;  before then the driver hid
+ * them everywhere and was at least consistent.
+ */
+
+TEST(OPEN2, VER_DOTFILE_TWO_VERSIONS)
+{
+  if (! ver_bucket_fh) {
+    GTEST_SKIP() << "versioned bucket unavailable";
+  }
+  const DoutPrefix dp(g_ceph_context, dout_subsys, "write2 test: ");
+
+  std::unique_ptr<Open2Helper> o2h =
+      std::make_unique<Open2Helper>(fs, ver_bucket_fh);
+  ASSERT_EQ(get<0>(o2h->lookup(".hidden")), 0);
+
+  for (auto* body : {"dot first", "dot second"}) {
+    auto ofw = o2h->open(O_RDWR, RGW_OPEN_FLAG_CREATE);
+    ASSERT_EQ(get<0>(ofw), 0);
+    std::string b{body};
+    ASSERT_EQ(get<0>(o2h->write(get<1>(ofw), b, 0, b.length())), 0);
+    ASSERT_EQ(o2h->close(get<1>(ofw)), 0);
+  }
+
+  /* The rows added incrementally as each version was published would
+   * satisfy this on their own.  Drop the cache so the listing has to
+   * rebuild by walking .versions/ -- that walk is the thing under test,
+   * and it is the only path that has to recognise a version entry whose
+   * name begins with a dot. */
+  ASSERT_EQ(librgw_test::invalidate_listing_cache(&dp, ver_bucket_name), 0);
+
+  std::vector<rgw_bucket_dir_entry> objs;
+  ASSERT_EQ(librgw_test::list_bucket(&dp, ver_bucket_name, true, objs), 0);
+
+  int n = 0;
+  for (auto& o : objs) {
+    if (o.key.name == ".hidden") {
+      ++n;
+    }
+  }
+  ASSERT_EQ(n, 2)
+    << "versions of a dot-prefixed key were not enumerated from the store";
+}
+
+/* the version entries must be on disk under their real ids, not hidden
+ * or collapsed -- the listing could in principle be right for the wrong
+ * reason, so check the store directly */
+TEST(OPEN2, VER_DOTFILE_VERSIONS_ON_DISK)
+{
+  if (! ver_bucket_fh) {
+    GTEST_SKIP() << "versioned bucket unavailable";
+  }
+  auto vdir = nsfs_base() / ver_bucket_name / ".versions";
+  ASSERT_TRUE(sf::is_directory(vdir));
+
+  int entries = 0;
+  for (auto& de : sf::directory_iterator(vdir)) {
+    auto fn = de.path().filename().string();
+    if (fn.rfind(".hidden_", 0) == 0) {
+      ++entries;
+      EXPECT_EQ(fn.find("_null"), std::string::npos)
+	<< "dot-prefixed version stored as the null version: " << fn;
+    }
+  }
+  ASSERT_GE(entries, 1)
+    << "no version entry for a dot-prefixed key in .versions/";
+}
+
+/* reading the name back must give the newest content, which is what
+ * newest-version resolution decides */
+TEST(OPEN2, VER_DOTFILE_READS_NEWEST)
+{
+  if (! ver_bucket_fh) {
+    GTEST_SKIP() << "versioned bucket unavailable";
+  }
+  std::unique_ptr<Open2Helper> o2h =
+      std::make_unique<Open2Helper>(fs, ver_bucket_fh);
+  ASSERT_EQ(get<0>(o2h->lookup(".hidden")), 0);
+
+  auto ofr = o2h->open(O_RDONLY, RGW_OPEN_FLAG_NONE);
+  ASSERT_EQ(get<0>(ofr), 0);
+  auto rr = o2h->read(get<1>(ofr), 0, 64);
+  ASSERT_EQ(get<0>(rr), 0);
+  ASSERT_EQ(get<1>(rr), std::string("dot second"))
+    << "a dot-prefixed key did not resolve to its newest version";
+  ASSERT_EQ(o2h->close(get<1>(ofr)), 0);
+}
+
+/* and it must still be listed as an ordinary object -- the reserved-name
+ * predicate suppresses driver names, not every leading dot */
+TEST(OPEN2, VER_DOTFILE_LISTED_AS_OBJECT)
+{
+  if (! ver_bucket_fh) {
+    GTEST_SKIP() << "versioned bucket unavailable";
+  }
+  const DoutPrefix dp(g_ceph_context, dout_subsys, "write2 test: ");
+
+  ASSERT_EQ(librgw_test::invalidate_listing_cache(&dp, ver_bucket_name), 0);
+
+  std::vector<rgw_bucket_dir_entry> objs;
+  ASSERT_EQ(librgw_test::list_bucket(&dp, ver_bucket_name, false, objs), 0);
+
+  bool found = false;
+  for (auto& o : objs) {
+    if (o.key.name == ".hidden") {
+      found = true;
+    }
+    EXPECT_NE(o.key.name, ".versions") << "driver name leaked into a listing";
+    EXPECT_NE(o.key.name, ".shadow") << "driver name leaked into a listing";
+  }
+  ASSERT_TRUE(found) << "dot-prefixed object absent from the ordinary listing";
+}
+
+/* unlink of a dot-prefixed key must behave like any other:  a delete
+ * marker over a retained version */
+TEST(OPEN2, VER_DOTFILE_UNLINK_CREATES_DELETE_MARKER)
+{
+  if (! ver_bucket_fh) {
+    GTEST_SKIP() << "versioned bucket unavailable";
+  }
+  const DoutPrefix dp(g_ceph_context, dout_subsys, "write2 test: ");
+
+  ASSERT_EQ(librgw_test::warm_listing_cache(&dp, ver_bucket_name), 0);
+  ASSERT_EQ(rgw_unlink(fs, ver_bucket_fh, ".hidden", RGW_UNLINK_FLAG_NONE), 0);
+
+  ASSERT_EQ(librgw_test::invalidate_listing_cache(&dp, ver_bucket_name), 0);
+
+  std::vector<rgw_bucket_dir_entry> objs;
+  ASSERT_EQ(librgw_test::list_bucket(&dp, ver_bucket_name, true, objs), 0);
+
+  int versions = 0, markers = 0;
+  for (auto& o : objs) {
+    if (o.key.name != ".hidden") {
+      continue;
+    }
+    ++versions;
+    if (o.flags & rgw_bucket_dir_entry::FLAG_DELETE_MARKER) {
+      ++markers;
+    }
+  }
+  ASSERT_EQ(markers, 1)
+    << "unlink of a dot-prefixed key left no delete marker";
+  ASSERT_EQ(versions, 3)
+    << "both prior versions must survive beside the marker";
+
+  struct rgw_file_handle* fh{nullptr};
+  ASSERT_NE(rgw_lookup(fs, ver_bucket_fh, ".hidden", &fh, nullptr, 0,
+		       RGW_LOOKUP_FLAG_NONE), 0)
+    << "unlinked dot-prefixed name still resolves over NFS";
+}
+
 TEST(OPEN2, DELETE_BUCKET) {
   if (do_delete) {
     int ret = rgw_unlink(fs, fs->root_fh, bucket_name.c_str(),

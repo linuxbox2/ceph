@@ -159,4 +159,17 @@ inline int get_object_attr(const DoutPrefixProvider* dpp,
   return 0;
 }
 
+/* Drop a bucket's listing cache so the next listing rebuilds it from the
+ * store.  Goes through driver_hint() because the cache is driver-internal
+ * and a test binary cannot reach it without pulling in driver headers --
+ * which is what hints are for. */
+inline int invalidate_listing_cache(const DoutPrefixProvider* dpp,
+                                    const std::string& bucket_name)
+{
+  auto* driver = rgw::g_rgwlib->get_driver();
+  std::map<std::string, std::string> params{{"bucket", bucket_name}};
+  std::map<std::string, std::string> out;
+  return driver->driver_hint(dpp, "invalidate-cache", params, &out);
+}
+
 } /* namespace librgw_test */

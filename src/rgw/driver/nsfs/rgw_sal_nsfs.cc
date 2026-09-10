@@ -8238,6 +8238,30 @@ int NSFSDriver::driver_hint(const DoutPrefixProvider* dpp,
     return 0;
   }
 
+  if (hint == "invalidate-cache") {
+    /* drop a bucket's listing cache, so the next listing rebuilds it by
+     * enumerating the store.  The incremental and rebuild paths compose
+     * keys differently and only the rebuild walks .versions/, so a test
+     * that means to exercise the rebuild has no other way to reach it
+     * from inside one process.
+     *
+     * The side branch carries this verb too, along with
+     * invalidate-quota-cache;  they want merging. */
+    auto it = params.find("bucket");
+    if (it == params.end()) {
+      return -EINVAL;
+    }
+    auto* bcache = get_bucket_cache();
+    if (!bcache) {
+      return -ENOTSUP;
+    }
+    int ret = bcache->invalidate_bucket(dpp, it->second);
+    if (out) {
+      (*out)["invalidated"] = (ret == 0) ? "true" : "false";
+    }
+    return ret;
+  }
+
   return -ENOTSUP;
 }
 
