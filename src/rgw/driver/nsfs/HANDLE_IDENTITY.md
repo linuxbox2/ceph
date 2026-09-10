@@ -80,6 +80,11 @@ authorization check at resolve time.  Encoding it in the key was a way to
 make one deployment work, not a design, and it should be replaced rather
 than carried forward — independently of anything below.
 
+That is also how Ganesha's other drivers work:  a handle identifies an
+object, and the export decides who may resolve it.  Together with §2.2 it
+means this direction converges on established practice on both axes —
+derivation and isolation — rather than inventing either.
+
 ### 1.2 Why it is content-addressed
 
 This is not arbitrary, and it is the reason the design resists change.  An
