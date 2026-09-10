@@ -54,7 +54,32 @@ the thousands.  The bucket name is also present in *both* halves, since
 the object path includes it.  Meanwhile the object half, which has to
 distinguish every object in the store, gets the same 64 bits.
 
-### 1.1 Why it is content-addressed
+### 1.1 The salt is per-export, and it is load-bearing
+
+The salt is named `tenant` but is `get_fs()->get_user()->user_id.to_str()`
+— the user id.  Each mount authenticates as a user, so it is effectively
+**per-export**, not per-tenant in the RGW sense.
+
+It is not decoration.  It arose from a deployment running two exports with
+different access/secret key pairs over overlapping data, which needed the
+two to be isolated from each other.  The salt makes the two exports'
+key spaces disjoint, so a handle minted by one means nothing to the other.
+
+That matters more than it looks, because `rgw_lookup_handle()` performs no
+authorization check:
+
+```cpp
+RGWFileHandle* rgw_fh = fs->lookup_handle(*fh_hk);
+if (! rgw_fh) { return -ENOENT; }
+```
+
+It is a cache lookup on that mount's `RGWLibFS` and nothing else.  **The
+isolation therefore rests on key-space disjointness rather than on a
+permission check at resolve time.**  Any scheme that makes handles
+predictable across exports has to replace that property with a real check,
+not merely preserve the bits.
+
+### 1.2 Why it is content-addressed
 
 This is not arbitrary, and it is the reason the design resists change.  An
 NFS filehandle must be **persistent**: a client may present one after a
@@ -92,7 +117,16 @@ after rename: IDENTICAL -- handle is rename-invariant
 32 bits left for a bucket discriminator — no widening of the public
 struct.  That is the re-apportionment §1's lopsidedness invites.
 
-The caveat is **fsid**.  `(ino, gen)` is unique within one filesystem.  A
+The first caveat is **§1.1's isolation**.  An inode-derived handle is
+*identical* across exports for the same file — that is the whole point of
+it — so the per-export salt cannot survive in its current form.  Either the
+discriminator carries the export identity, which spends the 32 spare bits
+that were earmarked for a bucket discriminator and leaves nothing for
+fsid, or `rgw_lookup_handle()` grows the authorization check it does not
+currently have.  The second is the better answer and is a behaviour change
+in its own right.
+
+The second caveat is **fsid**.  `(ino, gen)` is unique within one filesystem.  A
 single data root makes the fsid implicit and 96 bits sufficient.
 Per-account filesystem roots — which the multi-account design
 contemplates — would need an fsid component too, and 128 bits then gets
@@ -175,13 +209,16 @@ it should:
 
 1. keep filesystem specifics out of `rgw_file` — the driver returns
    opaque identity bits and answers whether it can resolve them;
-2. preserve the persistence property in §1.1 for every driver, since that
+2. preserve the persistence property in §1.2 for every driver, since that
    is what the current scheme buys and what a consumer relies on;
 3. state its uniqueness scope explicitly (per filesystem, per data root,
    per cluster), because §2.1 turns on it;
 4. carry a generation or equivalent, so a stale handle cannot alias a
    different object (§2);
-5. be adoptable by posix without nsfs-specific plumbing (§3).
+5. be adoptable by posix without nsfs-specific plumbing (§3);
+6. say what isolates one export's handles from another's (§1.1), since
+   predictable handles remove the property the current salt supplies by
+   construction.
 
 ---
 
