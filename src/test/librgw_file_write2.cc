@@ -2735,7 +2735,16 @@ TEST(OPEN2, PUBLISHED_ETAG_MATCHES_LISTING)
  * ---------------------------------------------------------------------
  */
 
-static const std::string ver_bucket_name{"sorrydave-ver"};
+/* Per-process name.  A versioned bucket accumulates by design:  each run
+ * of this suite adds two more versions of every key the VER_ tests write,
+ * so a fixed name makes them pass only against a freshly wiped data root
+ * and fail on every re-run -- "n which is: 12, 2" after six runs.  A fresh
+ * bucket per process restores the clean-root behaviour without the fixture
+ * having to delete versions itself, which would couple setup to the very
+ * operations these tests exercise:  a regression in version delete would
+ * then break setup and fail all ten at once, hiding the cause. */
+static const std::string ver_bucket_name{
+  "sorrydave-ver-" + std::to_string(::getpid())};
 static struct rgw_file_handle* ver_bucket_fh{nullptr};
 
 TEST(OPEN2, VER_SETUP)
