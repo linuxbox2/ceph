@@ -149,15 +149,16 @@ of both styles with nothing to reconcile them:
 Nothing detects or reports this.  The gateway has no notion of an ETag
 epoch.
 
-### 3.3 Cost, unmeasured
+### 3.3 Cost, unmeasured here
 
-We have not measured our own hashing cost.  The ~40% figure in
-circulation is from NooBaa's workload, not ours, and it is not
-transferable: an inline PUT hash overlaps with I/O the gateway is doing
-anyway, whereas `publish()` is a *separate* full read of data that was
-just written.  Those have very different profiles, and `publish()` may
-well show a larger saving than the S3 path.  Before this is presented as
-a performance feature, it should be measured on both paths independently.
+We have not measured the saving ourselves;  Mark Kogan observed it and
+owns testing for non-regression.  What is worth recording is that the
+figure is not one number.  An inline PUT hash overlaps with I/O the
+gateway is doing anyway, whereas `publish()` is a *separate* full read of
+data that was just written -- so the two paths have materially different
+profiles, and `publish()` may well show a larger saving than the S3 path
+rather than the same one.  A single percentage quoted for "the option"
+should be read as applying to whichever path was measured.
 
 ### 3.4 Integrity posture
 
@@ -214,7 +215,9 @@ question to settle before this goes upstream.
 
 ## 6. Status
 
-Implemented and validated on nsfs in both modes.  Deferred: posix
-`generate_etag()` (§1.1), measurement (§3.3), and the granularity
-question (§3.1, §5), which should be settled before the option is
-presented as generally useful.
+Implemented and validated on nsfs in both modes -- 648/649 baseline and
+77/77 `librgw_file_write2` with the option on and off alike.
+
+Open: posix `generate_etag()` (§1.1), and the granularity and mixed-mode
+questions (§3.1, §3.2, §5), which should be settled before the option is
+presented as generally useful.  Performance measurement is Mark's (§3.3).
