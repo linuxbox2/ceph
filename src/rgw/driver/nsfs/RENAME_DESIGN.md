@@ -239,13 +239,26 @@ Cross-bucket follows a rule rather than a fudge:  history can only move
 somewhere able to hold it.
 
 - source has no history -> any target;
-- source has history -> target must be **versioned or suspended**, else
-  refuse.
+- source has history -> target **versioned or suspended**:  history moves;
+- source has history -> target **unversioned**:  refuse, *unless* the
+  caller asks for it explicitly.
 
 Suspended qualifies because such a bucket still holds non-current
-versions, it merely stops minting new ones.  Into an unversioned target
-the only alternatives are to refuse or to drop the history silently, and
-the second is data loss.
+versions, it merely stops minting new ones.
+
+The explicit case is worth having rather than a flat refusal:  flattening
+an object to its current version is a legitimate thing to want, and what
+makes it dangerous is doing it *silently*.  So gate it on a flag —
+`rgw_rename()` already takes a `uint32_t flags` and defines only
+`RGW_RENAME_FLAG_NONE`, so this is additive with no ABI change.  With the
+flag the move slices the history off, keeping the current version;
+without it the rename fails rather than discarding anything.
+
+A useful property falls out:  **a filesystem client cannot trigger it.**
+`rename(2)` has no such flag and Ganesha's FSAL will not invent one, so an
+NFS user doing `mv` between buckets gets an error, never quiet history
+loss.  The flag is reachable only by a librgw consumer that has said what
+it means to do.
 
 **Recommendation: (a), stated as a divergence.**  For a gateway whose
 primary interface is NFS, the filesystem's semantics are the contract and
