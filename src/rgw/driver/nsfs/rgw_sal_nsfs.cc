@@ -1187,8 +1187,20 @@ int FSEnt::fill_cache(const DoutPrefixProvider *dpp, optional_yield y, fill_cach
 {
   rgw_bucket_dir_entry bde{};
 
-  std::string full_key = path_prefix + get_name();
-  rgw_obj_key key = decode_obj_key(full_key);
+  rgw_obj_key key = decode_obj_key(path_prefix + get_name());
+
+  int ret = make_dir_entry(dpp, y, key, flags, bde);
+  if (ret < 0) {
+    return ret;
+  }
+  return cb(dpp, bde);
+}
+
+int FSEnt::make_dir_entry(const DoutPrefixProvider *dpp, optional_yield y,
+			  const rgw_obj_key& in_key, uint32_t flags,
+			  rgw_bucket_dir_entry& bde)
+{
+  rgw_obj_key key = in_key;
   if (parent->get_type() == ObjectType::MULTIPART) {
     key.ns = mp_ns;
   }
@@ -1256,7 +1268,7 @@ int FSEnt::fill_cache(const DoutPrefixProvider *dpp, optional_yield y, fill_cach
     }
   }
 
-  return cb(dpp, bde);
+  return 0;
 }
 
 int File::create(const DoutPrefixProvider *dpp, bool* existed, bool temp_file)
@@ -5073,7 +5085,6 @@ int NSFSObject::NSFSFSIOObject::publish(const DoutPrefixProvider* dpp, uint32_t 
       bde.meta.accounted_size = pub_stx.stx_size;
       bde.meta.mtime = from_statx_timestamp(pub_stx.stx_mtime);
       bde.meta.storage_class = RGW_STORAGE_CLASS_STANDARD;
-      bde.meta.etag = synthesize_etag(pub_stx);
       {
 	Attrs shadow_attrs;
 	if (fgetattrs(dpp, shadow_attrs, 0) == 0) {
@@ -5082,6 +5093,17 @@ int NSFSObject::NSFSFSIOObject::publish(const DoutPrefixProvider* dpp, uint32_t 
 	    bde.meta.owner = to_string(acl_owner.id);
 	    bde.meta.owner_display_name = acl_owner.display_name;
 	  }
+	  /* the digest stamped above, which is what HEAD returns;  the
+	   * synthesized change token is for objects that carry no etag,
+	   * i.e. sideloaded files, and reporting it here disagreed with
+	   * HEAD for every object published from NFS */
+	  bufferlist etag_bl;
+	  if (rgw::sal::get_attr(shadow_attrs, RGW_ATTR_ETAG, etag_bl)) {
+	    bde.meta.etag = etag_bl.to_str();
+	  }
+	}
+	if (bde.meta.etag.empty()) {
+	  bde.meta.etag = synthesize_etag(pub_stx);
 	}
       }
       bcache->add_entry(dpp, bucket->get_name(), bde);
@@ -5940,11 +5962,20 @@ int NSFSObject::link_temp_file(const DoutPrefixProvider *dpp, optional_yield y)
     flags = FSEnt::FLAG_LIST_VERSIONS;
   }
 
-  ent->fill_cache(nullptr, null_yield,
-      [&](const DoutPrefixProvider *dpp, rgw_bucket_dir_entry &bde) -> int {
-	driver->get_bucket_cache()->add_entry(dpp, b->get_name(), bde);
-	return 0;
-      }, flags);
+  /* Add this object's listing entry from the key we already have.  Going
+   * through fill_cache() here composed the key from an empty path prefix,
+   * so a nested object was cached under its bare leaf name -- absent
+   * under its real key, and colliding with any same-named leaf in another
+   * directory. */
+  auto* bcache = driver->get_bucket_cache();
+  if (bcache) {
+    rgw_bucket_dir_entry bde{};
+    ret = ent->make_dir_entry(dpp, y, get_key(), flags, bde);
+    if (ret < 0) {
+      return ret;
+    }
+    bcache->add_entry(dpp, b->get_name(), bde);
+  }
   return 0;
 }
 
