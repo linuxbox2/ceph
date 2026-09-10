@@ -6570,17 +6570,38 @@ static void cache_promoted_current(NSFSDriver* driver,
                                    PromoteResult& promoted,
                                    const struct statx& pstx)
 {
+  /* One descriptor, one attribute sweep.  get_x_attrs() lists and reads
+   * every xattr on the file, and parse_xattr_name() accepts both the
+   * user.nsfs.rgw. and user.nsfs. prefixes -- so the digest, the version
+   * id and the delete-marker flag all arrive in pattrs, and the separate
+   * fgetxattr() for each is redundant with the sweep. */
+  Attrs pattrs;
+  int fd = ::openat(parent_fd, leaf.c_str(), O_RDONLY);
+  if (fd >= 0) {
+    get_x_attrs(null_yield, dpp, fd, pattrs, leaf);
+    ::close(fd);
+  }
+
   std::string promoted_ver = promoted.version_id;
   if (!promoted.promoted) {
-    bool is_null = false;
-    int chk = ::openat(parent_fd, leaf.c_str(), O_RDONLY);
-    if (chk >= 0) {
-      is_null = is_null_version_fd(chk);
-      promoted.etag = etag_from_fd(chk);
-      ::close(chk);
-    }
+    /* promote_version() promoted nothing -- a current version already
+     * existed, so another writer won -- so describe what is on disk.  An
+     * empty instance would make a *distinct* cache key and add a row
+     * beside that writer's rather than overwriting it, which shows up as
+     * a surplus version in the listing. */
+    auto vit = pattrs.find(RGW_NSFS_ATTR_VERSION_ID);
+    /* absent or empty reads as the null version, matching
+     * is_null_version_fd()'s len <= 0 case */
+    bool is_null = (vit == pattrs.end()) || (vit->second.length() == 0) ||
+                   (vit->second.to_str() == NULL_VERSION_ID);
     promoted_ver = is_null ? NULL_VERSION_ID
                            : nsfs_version_id_from_statx(pstx);
+  }
+  if (promoted.etag.empty()) {
+    auto eit = pattrs.find(RGW_ATTR_ETAG);
+    if (eit != pattrs.end()) {
+      promoted.etag = eit->second.to_str();
+    }
   }
 
   rgw_bucket_dir_entry bde{};
@@ -6598,24 +6619,16 @@ static void cache_promoted_current(NSFSDriver* driver,
     ? synthesize_etag(pstx) : promoted.etag;
   bde.flags = rgw_bucket_dir_entry::FLAG_VER |
               rgw_bucket_dir_entry::FLAG_CURRENT;
-  {
-    int afd = ::openat(parent_fd, leaf.c_str(), O_RDONLY);
-    if (afd >= 0) {
-      char dm_buf[8];
-      std::string dm_x = NSFS_XATTR_PREFIX + RGW_NSFS_ATTR_DELETE_MARKER;
-      if (::fgetxattr(afd, dm_x.c_str(), dm_buf, sizeof(dm_buf)) > 0) {
-        bde.flags |= rgw_bucket_dir_entry::FLAG_DELETE_MARKER;
-      }
-      Attrs pattrs;
-      get_x_attrs(null_yield, dpp, afd, pattrs, leaf);
-      ACLOwner acl_owner;
-      if (decode_acl_owner(pattrs, acl_owner) >= 0) {
-        bde.meta.owner = to_string(acl_owner.id);
-        bde.meta.owner_display_name = acl_owner.display_name;
-      }
-      ::close(afd);
-    }
+  auto dit = pattrs.find(RGW_NSFS_ATTR_DELETE_MARKER);
+  if (dit != pattrs.end() && dit->second.length() > 0) {
+    bde.flags |= rgw_bucket_dir_entry::FLAG_DELETE_MARKER;
   }
+  ACLOwner acl_owner;
+  if (decode_acl_owner(pattrs, acl_owner) >= 0) {
+    bde.meta.owner = to_string(acl_owner.id);
+    bde.meta.owner_display_name = acl_owner.display_name;
+  }
+
   driver->get_bucket_cache()->add_entry(dpp, bucket_name, bde);
 }
 
