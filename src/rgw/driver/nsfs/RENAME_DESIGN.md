@@ -254,11 +254,18 @@ makes it dangerous is doing it *silently*.  So gate it on a flag —
 flag the move slices the history off, keeping the current version;
 without it the rename fails rather than discarding anything.
 
-A useful property falls out:  **a filesystem client cannot trigger it.**
-`rename(2)` has no such flag and Ganesha's FSAL will not invent one, so an
-NFS user doing `mv` between buckets gets an error, never quiet history
-loss.  The flag is reachable only by a librgw consumer that has said what
-it means to do.
+The granularity that falls out is the right one.  `rename(2)` has no such
+flag, so **no client can ask for slicing on a particular `mv`** — an NFS
+user moving an object between buckets gets an error, never quiet history
+loss.  But it is not unreachable from NFS either:  Ganesha has places to
+bind policy, the Export block among them, so an administrator can decide
+that a given export slices, once and deliberately, and the FSAL passes the
+flag.  Account-scoped properties would give a second binding point when
+they exist.
+
+That is the correct shape for this:  a standing administrative decision
+rather than a per-operation one, made by someone who can see what the
+export is for, and never inferred from a client's `mv`.
 
 **Recommendation: (a), stated as a divergence.**  For a gateway whose
 primary interface is NFS, the filesystem's semantics are the contract and
