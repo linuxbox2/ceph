@@ -65,19 +65,20 @@ different access/secret key pairs over overlapping data, which needed the
 two to be isolated from each other.  The salt makes the two exports'
 key spaces disjoint, so a handle minted by one means nothing to the other.
 
-That matters more than it looks, because `rgw_lookup_handle()` performs no
-authorization check:
+It works because `rgw_lookup_handle()` performs no authorization check:
 
 ```cpp
 RGWFileHandle* rgw_fh = fs->lookup_handle(*fh_hk);
 if (! rgw_fh) { return -ENOENT; }
 ```
 
-It is a cache lookup on that mount's `RGWLibFS` and nothing else.  **The
-isolation therefore rests on key-space disjointness rather than on a
-permission check at resolve time.**  Any scheme that makes handles
-predictable across exports has to replace that property with a real check,
-not merely preserve the bits.
+It is a cache lookup on that mount's `RGWLibFS` and nothing else, so the
+isolation rests entirely on the two key spaces being disjoint.
+
+**Decided: isolation does not belong in the handle key.**  It needs a real
+authorization check at resolve time.  Encoding it in the key was a way to
+make one deployment work, not a design, and it should be replaced rather
+than carried forward — independently of anything below.
 
 ### 1.2 Why it is content-addressed
 
@@ -117,16 +118,12 @@ after rename: IDENTICAL -- handle is rename-invariant
 32 bits left for a bucket discriminator — no widening of the public
 struct.  That is the re-apportionment §1's lopsidedness invites.
 
-The first caveat is **§1.1's isolation**.  An inode-derived handle is
-*identical* across exports for the same file — that is the whole point of
-it — so the per-export salt cannot survive in its current form.  Either the
-discriminator carries the export identity, which spends the 32 spare bits
-that were earmarked for a bucket discriminator and leaves nothing for
-fsid, or `rgw_lookup_handle()` grows the authorization check it does not
-currently have.  The second is the better answer and is a behaviour change
-in its own right.
+An inode-derived handle is identical across exports for the same file, so
+the per-export salt cannot survive — which §1.1 has already settled: the
+isolation moves to an authorization check and the bits are freed rather
+than re-spent.
 
-The second caveat is **fsid**.  `(ino, gen)` is unique within one filesystem.  A
+The caveat that remains is **fsid**.  `(ino, gen)` is unique within one filesystem.  A
 single data root makes the fsid implicit and 96 bits sufficient.
 Per-account filesystem roots — which the multi-account design
 contemplates — would need an fsid component too, and 128 bits then gets
@@ -216,9 +213,8 @@ it should:
 4. carry a generation or equivalent, so a stale handle cannot alias a
    different object (§2);
 5. be adoptable by posix without nsfs-specific plumbing (§3);
-6. say what isolates one export's handles from another's (§1.1), since
-   predictable handles remove the property the current salt supplies by
-   construction.
+6. rely on an authorization check for export isolation, not on the shape
+   of the key (§1.1).
 
 ---
 
