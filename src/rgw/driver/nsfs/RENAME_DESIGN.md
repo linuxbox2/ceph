@@ -119,28 +119,46 @@ assigning each result to the same `ret` and returning only the last — so
 it reports `rgw_close`'s status and discards every earlier failure.  It
 cannot fail in the case that matters.
 
-**3.3 The legacy write path does not write on an FSIO driver.**  This is
-the root cause, and the interesting one.  `rgw_write()` contains:
+**3.3 The v1 create sequence no longer creates on an FSIO driver.**  This
+is the root cause.  Measured, by instrumenting the suite's helper rather
+than reading the guard:
 
-```cpp
-if (g_rgwlib->get_driver()->have_fsio()) {
-    auto* open = rgw_fh->get_global_open();
-    if (! open || ! open->is_write_open()) {
-      if (! (flags & RGW_OPEN_FLAG_V3) && ! open) {
-        return -EPERM;
+```
+lookup = 0     handle created
+open   = -2    ENOENT
+write  = -1    EPERM
+close  =  0    <- make_object() returns this, hiding both failures
 ```
 
-Legacy `rgw_open()` establishes no global open, so a caller using
-`rgw_open`/`rgw_write`/`rgw_close` without `RGW_OPEN_FLAG_V3` gets
-`-EPERM` from the write.  Confirmed on disk: after a run the buckets and
-subdirectories exist with their `.folder` sentinels and the object does
-not exist at all — neither as a leaf nor as a shadow.
+`rgw_lookup(RGW_LOOKUP_FLAG_CREATE)` creates a *handle*, not an object.
+The suite then calls `rgw_open(fs, fh, 0 /* posix flags */, 0)`, and
+`posix_flags == 0` is `O_RDONLY`.  On an FSIO driver `rgw_open()` passes
+that straight to `open_global()`, which really opens a file — so it is an
+`O_RDONLY` open of something that does not exist yet, and returns
+`-ENOENT`.  No global open is established, and the subsequent `rgw_write()`
+takes its `! open` branch and returns `-EPERM`.
 
-This matters well beyond the test.  Consumers of the v1 API — Samba in
-IBM among them — use exactly this call sequence.  Whether they are
-expected to pass `RGW_OPEN_FLAG_V3`, or whether legacy `rgw_open` should
-establish a global open on an FSIO driver, is a compatibility decision
-that should be made explicitly rather than discovered.
+The `-EPERM` is therefore a symptom, not the cause.  (An earlier revision
+of this note said `rgw_open()` establishes no global open;  that was
+inferred from reading the guard rather than observed, and is wrong — it
+calls `open_global(posix_flags, flags)` directly.)
+
+**What matters is that this is a semantic change in the v1 path, not a
+test bug.**  `lookup(CREATE)` + `open` + `write` + `close` was the v1
+create sequence, and it worked on rados because the open was bookkeeping
+and the write transaction created the object at close.  On an FSIO driver
+the open is a real `openat()`, so the same sequence fails unless the caller
+asks for `O_RDWR`.  Either:
+
+- `rgw_open()` on an FSIO driver treats a handle created by
+  `FLAG_CREATE` as a creating open, preserving the v1 sequence;  or
+- v1 callers must pass `O_RDWR`, and the behaviour change is documented.
+
+The Samba consumers are new and track our evolution, and the v1 path may
+be retired in a couple of releases — so this is a free choice rather than
+a constraint.  It should still be made deliberately:  until it is, the
+older sequence silently creates nothing on nsfs, which is how a test suite
+came to report success while writing no objects at all.
 
 **3.4 The suite is not re-run safe.**  On a dirty root, bucket and subdir
 creation fail `-EEXIST` and three of four failures become that instead,
@@ -149,7 +167,10 @@ masking the above.  Same class as the `VER_` family fixed in
 
 **Nothing here has been fixed.**  The list is the prerequisite set: no
 rename design can be validated until §3.3 is settled, because the tests
-cannot create an object to rename.
+cannot create an object to rename.  Note that §3.2 and §3.3 compound —
+the helper discards the errors that would have made this obvious, so the
+first visible symptom is three rename failures reporting the wrong
+errno.
 
 ---
 
