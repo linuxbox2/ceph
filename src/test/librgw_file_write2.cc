@@ -35,6 +35,7 @@
 #include "include/rados/rgw_file.h"
 #include "rgw_lib.h" /* driver hints */
 #include "rgw/rgw_file_int.h" /* the private view: refcounts, handles */
+#include "librgw_sal_fixture.h" /* SAL-level bucket state the C API cannot set */
 
 #include "gtest/gtest.h"
 #include "common/ceph_argparse.h"
@@ -2685,6 +2686,183 @@ TEST(OPEN2, PUBLISHED_ETAG_MATCHES_LISTING)
   ASSERT_TRUE(found) << "published object absent from the listing";
   ASSERT_EQ(listed_etag, object_etag)
     << "listing etag disagrees with the object's own etag";
+}
+
+/*
+ * ---------------------------------------------------------------------
+ * NFS behaviour in a versioned bucket.
+ *
+ * librgw exposes no way to list or address non-current versions -- that
+ * is a separate piece of work -- but the driver must already behave
+ * correctly for an NFS client operating in a versioned bucket.  These
+ * pin the parts that are observable today.
+ *
+ * The bucket is made versioned through the SAL, since PutBucketVersioning
+ * is an S3 op with no rgw_file equivalent.  See librgw_sal_fixture.h.
+ * ---------------------------------------------------------------------
+ */
+
+static const std::string ver_bucket_name{"sorrydave-ver"};
+static struct rgw_file_handle* ver_bucket_fh{nullptr};
+
+TEST(OPEN2, VER_SETUP)
+{
+  if (! have_fs_layout()) {
+    GTEST_SKIP() << "not a filesystem-backed driver";
+  }
+
+  struct stat st;
+  st.st_uid = 0; st.st_gid = 0; st.st_mode = 755;
+
+  int rc = rgw_lookup(fs, fs->root_fh, ver_bucket_name.c_str(), &ver_bucket_fh,
+		      nullptr, 0, RGW_LOOKUP_FLAG_NONE);
+  if (rc != 0) {
+    rc = rgw_mkdir(fs, fs->root_fh, ver_bucket_name.c_str(), &st,
+		   RGW_SETATTR_UID|RGW_SETATTR_GID|RGW_SETATTR_MODE,
+		   &ver_bucket_fh, RGW_MKDIR_FLAG_NONE);
+  }
+  ASSERT_EQ(rc, 0);
+  ASSERT_NE(ver_bucket_fh, nullptr);
+
+  const DoutPrefix dp(g_ceph_context, dout_subsys, "write2 test: ");
+  ASSERT_EQ(librgw_test::set_bucket_versioning(
+	      &dp, ver_bucket_name, librgw_test::Versioning::Enabled), 0);
+
+  /* assert the fixture took, rather than assuming it did */
+  librgw_test::Versioning got{librgw_test::Versioning::Off};
+  ASSERT_EQ(librgw_test::get_bucket_versioning(&dp, ver_bucket_name, got), 0);
+  ASSERT_EQ(got, librgw_test::Versioning::Enabled)
+    << "versioning fixture did not take effect";
+}
+
+/* unlink is POSIX from the NFS side:  the name goes away.  In a
+ * versioned bucket that must not destroy history -- S3 semantics for a
+ * delete without a versionId is a delete marker over a retained
+ * version, and NFS deletes act immediately on S3. */
+TEST(OPEN2, VER_UNLINK_CREATES_DELETE_MARKER)
+{
+  if (! ver_bucket_fh) {
+    GTEST_SKIP() << "versioned bucket unavailable";
+  }
+  const DoutPrefix dp(g_ceph_context, dout_subsys, "write2 test: ");
+
+  std::unique_ptr<Open2Helper> o2h =
+      std::make_unique<Open2Helper>(fs, ver_bucket_fh);
+  ASSERT_EQ(get<0>(o2h->lookup("vdel")), 0);
+
+  std::string body{"to be deleted"};
+  auto ofw = o2h->open(O_RDWR, RGW_OPEN_FLAG_CREATE);
+  ASSERT_EQ(get<0>(ofw), 0);
+  ASSERT_EQ(get<0>(o2h->write(get<1>(ofw), body, 0, body.length())), 0);
+  ASSERT_EQ(o2h->close(get<1>(ofw)), 0);
+
+  /* exercise the incremental cache path, not a rebuild */
+  ASSERT_EQ(librgw_test::warm_listing_cache(&dp, ver_bucket_name), 0);
+
+  ASSERT_EQ(rgw_unlink(fs, ver_bucket_fh, "vdel", RGW_UNLINK_FLAG_NONE), 0);
+
+  std::vector<rgw_bucket_dir_entry> objs;
+  ASSERT_EQ(librgw_test::list_bucket(&dp, ver_bucket_name, true, objs), 0);
+
+  int versions = 0, markers = 0, current = 0;
+  for (auto& o : objs) {
+    if (o.key.name != "vdel") {
+      continue;
+    }
+    ++versions;
+    if (o.flags & rgw_bucket_dir_entry::FLAG_DELETE_MARKER) {
+      ++markers;
+    }
+    if (o.flags & rgw_bucket_dir_entry::FLAG_CURRENT) {
+      ++current;
+    }
+  }
+
+  ASSERT_EQ(markers, 1) << "NFS unlink did not leave a delete marker";
+  ASSERT_EQ(versions, 2)
+    << "the deleted version was not retained alongside the marker";
+  ASSERT_EQ(current, 1) << "exactly one entry must be current";
+}
+
+/* the name must be gone from the NFS view even though the data is not */
+TEST(OPEN2, VER_UNLINK_LOOKUP_IS_ENOENT)
+{
+  if (! ver_bucket_fh) {
+    GTEST_SKIP() << "versioned bucket unavailable";
+  }
+  struct rgw_file_handle* fh{nullptr};
+  int rc = rgw_lookup(fs, ver_bucket_fh, "vdel", &fh, nullptr, 0,
+		      RGW_LOOKUP_FLAG_NONE);
+  ASSERT_NE(rc, 0) << "unlinked name still resolves over NFS";
+}
+
+/* the demoted version's data must still be on disk under .versions/ */
+TEST(OPEN2, VER_UNLINK_PRIOR_VERSION_ON_DISK)
+{
+  if (! ver_bucket_fh) {
+    GTEST_SKIP() << "versioned bucket unavailable";
+  }
+  auto vdir = nsfs_base() / ver_bucket_name / ".versions";
+  ASSERT_TRUE(sf::is_directory(vdir)) << "no .versions/ after a versioned unlink";
+
+  int entries = 0;
+  for (auto& de : sf::directory_iterator(vdir)) {
+    if (de.path().filename().string().rfind("vdel", 0) == 0) {
+      ++entries;
+    }
+  }
+  /* the demoted version and the delete marker */
+  ASSERT_GE(entries, 2) << "demoted version missing from .versions/";
+}
+
+/* A non-current version's listed etag must be its own etag, not the
+ * synthesized change token -- the same rule publish() follows.  The
+ * token is for objects that carry no etag, i.e. sideloaded files. */
+TEST(OPEN2, VER_DEMOTED_ETAG_MATCHES_OBJECT)
+{
+  if (! ver_bucket_fh) {
+    GTEST_SKIP() << "versioned bucket unavailable";
+  }
+  const DoutPrefix dp(g_ceph_context, dout_subsys, "write2 test: ");
+
+  std::unique_ptr<Open2Helper> o2h =
+      std::make_unique<Open2Helper>(fs, ver_bucket_fh);
+  ASSERT_EQ(get<0>(o2h->lookup("vetag")), 0);
+
+  std::string body{"demoted etag body"};
+  auto ofw = o2h->open(O_RDWR, RGW_OPEN_FLAG_CREATE);
+  ASSERT_EQ(get<0>(ofw), 0);
+  ASSERT_EQ(get<0>(o2h->write(get<1>(ofw), body, 0, body.length())), 0);
+  ASSERT_EQ(o2h->close(get<1>(ofw)), 0);
+
+  /* the etag of the version that is about to be demoted */
+  std::string published_etag;
+  ASSERT_EQ(librgw_test::get_object_attr(&dp, ver_bucket_name,
+					 rgw_obj_key("vetag"),
+					 RGW_ATTR_ETAG, published_etag), 0);
+  ASSERT_FALSE(published_etag.empty());
+
+  ASSERT_EQ(librgw_test::warm_listing_cache(&dp, ver_bucket_name), 0);
+
+  /* unlinking demotes it and adds a delete marker */
+  ASSERT_EQ(rgw_unlink(fs, ver_bucket_fh, "vetag", RGW_UNLINK_FLAG_NONE), 0);
+
+  std::vector<rgw_bucket_dir_entry> objs;
+  ASSERT_EQ(librgw_test::list_bucket(&dp, ver_bucket_name, true, objs), 0);
+
+  bool found = false;
+  for (auto& o : objs) {
+    if (o.key.name != "vetag") {
+      continue;
+    }
+    if (o.flags & rgw_bucket_dir_entry::FLAG_DELETE_MARKER) {
+      continue; /* a marker has no content and no digest */
+    }
+    found = true;
+    ASSERT_EQ(o.meta.etag, published_etag)
+      << "demoted version listed with an etag that is not its own";
+  }
+  ASSERT_TRUE(found) << "demoted version absent from the version listing";
 }
 
 TEST(OPEN2, DELETE_BUCKET) {

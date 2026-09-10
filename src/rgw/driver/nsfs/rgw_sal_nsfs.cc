@@ -7027,7 +7027,16 @@ int NSFSObject::NSFSDeleteOp::delete_obj(const DoutPrefixProvider* dpp,
     dem_bde.meta.accounted_size = ent->get_stx().stx_size;
     dem_bde.meta.mtime = from_statx_timestamp(ent->get_stx().stx_mtime);
     dem_bde.meta.storage_class = RGW_STORAGE_CLASS_STANDARD;
-    dem_bde.meta.etag = synthesize_etag(ent->get_stx());
+    {
+      /* its own digest, as HEAD reports it;  the synthesized change
+       * token is for objects that carry no etag */
+      bufferlist etag_bl;
+      if (rgw::sal::get_attr(source->get_attrs(), RGW_ATTR_ETAG, etag_bl)) {
+	dem_bde.meta.etag = etag_bl.to_str();
+      } else {
+	dem_bde.meta.etag = synthesize_etag(ent->get_stx());
+      }
+    }
     dem_bde.flags = rgw_bucket_dir_entry::FLAG_VER;
     {
       ACLOwner acl_owner;
