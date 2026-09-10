@@ -3254,6 +3254,130 @@ TEST(OPEN2, VER_SUSPEND_RESTORE)
 	      &dp, ver_bucket_name, librgw_test::Versioning::Enabled), 0);
 }
 
+/*
+ * The finalize interval means two different things.
+ *
+ * v3 sends no signal that a write has finished, so librgw infers the
+ * close from the writer going quiet.  On an unversioned bucket that
+ * interval is an S3-visibility SLA.  On a versioned one every publish
+ * mints a permanent version, so it is instead the length of pause
+ * treated as still-writing, and has to exceed application think-time --
+ * otherwise a client that dribbles writes to one file mints a version
+ * per pause.
+ */
+
+static sf::path ver_published_path(const std::string& obj)
+{
+  return nsfs_base() / ver_bucket_name / obj;
+}
+
+static sf::path ver_shadow_path(const std::string& obj)
+{
+  return nsfs_base() / ver_bucket_name / ".shadow" / obj;
+}
+
+/* The interval is chosen from a flag resolved once, when the stateless
+ * open is created -- not cached on the bucket handle, which outlives any
+ * versioning change and would keep a mounted export on the wrong
+ * interval indefinitely. */
+TEST(OPEN2, VER_TIMER_FLAG_RESOLVED_PER_OPEN)
+{
+  if (! ver_bucket_fh) {
+    GTEST_SKIP() << "versioned bucket unavailable";
+  }
+
+  auto stateless_versioned = [](struct rgw_file_handle* fh) -> bool {
+    auto* rgw_fh = rgw::get_rgwfh(fh);
+    auto* f = std::get_if<rgw::RGWFileHandle::file>(&rgw_fh->variant_type);
+    return f && f->versioned_bucket;
+  };
+
+  std::string body{"DDDD"};
+  size_t nbytes{0};
+
+  struct rgw_file_handle* vfh{nullptr};
+  ASSERT_EQ(rgw_lookup(fs, ver_bucket_fh, "vflag", &vfh, nullptr, 0,
+		       RGW_LOOKUP_FLAG_CREATE), 0);
+  ASSERT_EQ(rgw_open(fs, vfh, O_RDWR,
+		     RGW_OPEN_FLAG_V3|RGW_OPEN_FLAG_CREATE), 0);
+  ASSERT_EQ(rgw_write(fs, vfh, 0, body.length(), &nbytes,
+		      (void*) body.c_str(), RGW_OPEN_FLAG_V3), 0);
+  EXPECT_TRUE(stateless_versioned(vfh))
+    << "a stateless open in a versioned bucket did not resolve as versioned";
+  ASSERT_EQ(rgw_close(fs, vfh, RGW_CLOSE_FLAG_NONE), 0);
+
+  reset_object("pflag");
+  struct rgw_file_handle* pfh{nullptr};
+  ASSERT_EQ(rgw_lookup(fs, bucket_fh, "pflag", &pfh, nullptr, 0,
+		       RGW_LOOKUP_FLAG_CREATE), 0);
+  ASSERT_EQ(rgw_open(fs, pfh, O_RDWR,
+		     RGW_OPEN_FLAG_V3|RGW_OPEN_FLAG_CREATE), 0);
+  ASSERT_EQ(rgw_write(fs, pfh, 0, body.length(), &nbytes,
+		      (void*) body.c_str(), RGW_OPEN_FLAG_V3), 0);
+  EXPECT_FALSE(stateless_versioned(pfh))
+    << "a stateless open in an unversioned bucket resolved as versioned";
+  ASSERT_EQ(rgw_close(fs, pfh, RGW_CLOSE_FLAG_NONE), 0);
+}
+
+TEST(OPEN2, VER_TIMER_LONGER_IN_VERSIONED_BUCKET)
+{
+  if (! ver_bucket_fh) {
+    GTEST_SKIP() << "versioned bucket unavailable";
+  }
+
+  /* a short SLA and a long still-writing tolerance */
+  g_conf().set_val("rgw_nfs_stateless_finalize_secs", "1");
+  g_conf().set_val("rgw_nfs_stateless_finalize_versioned_secs", "3600");
+  g_conf().apply_changes(nullptr);
+
+  std::string body{"CCCC"};
+  size_t nbytes{0};
+
+  /* control:  the unversioned bucket must finalize inside the window.
+   * Without it a versioned bucket that never publishes for an unrelated
+   * reason would satisfy the assertion below. */
+  reset_object("timerctl");
+  struct rgw_file_handle* pfh{nullptr};
+  ASSERT_EQ(rgw_lookup(fs, bucket_fh, "timerctl", &pfh, nullptr, 0,
+		       RGW_LOOKUP_FLAG_CREATE), 0);
+  ASSERT_EQ(rgw_open(fs, pfh, O_RDWR,
+		     RGW_OPEN_FLAG_V3|RGW_OPEN_FLAG_CREATE), 0);
+  ASSERT_EQ(rgw_write(fs, pfh, 0, body.length(), &nbytes,
+		      (void*) body.c_str(), RGW_OPEN_FLAG_V3), 0);
+
+  /* subject:  same shape, in the versioned bucket */
+  struct rgw_file_handle* vfh{nullptr};
+  ASSERT_EQ(rgw_lookup(fs, ver_bucket_fh, "timerver", &vfh, nullptr, 0,
+		       RGW_LOOKUP_FLAG_CREATE), 0);
+  ASSERT_EQ(rgw_open(fs, vfh, O_RDWR,
+		     RGW_OPEN_FLAG_V3|RGW_OPEN_FLAG_CREATE), 0);
+  ASSERT_EQ(rgw_write(fs, vfh, 0, body.length(), &nbytes,
+		      (void*) body.c_str(), RGW_OPEN_FLAG_V3), 0);
+
+  ASSERT_TRUE(sf::exists(ver_shadow_path("timerver")));
+
+  std::this_thread::sleep_for(std::chrono::seconds(4));
+
+  EXPECT_TRUE(sf::exists(published_path("timerctl")))
+    << "control: an unversioned stateless write did not finalize on the "
+       "short interval, so this test cannot distinguish anything";
+
+  EXPECT_FALSE(sf::exists(ver_published_path("timerver")))
+    << "a versioned bucket finalized on the unversioned interval";
+  EXPECT_TRUE(sf::exists(ver_shadow_path("timerver")))
+    << "the versioned write's shadow went away without publishing";
+
+  /* close both:  the versioned one publishes here, on the last write
+   * open being returned, which is the rule the timer only stands in for */
+  ASSERT_EQ(rgw_close(fs, pfh, RGW_CLOSE_FLAG_NONE), 0);
+  ASSERT_EQ(rgw_close(fs, vfh, RGW_CLOSE_FLAG_NONE), 0);
+  ASSERT_TRUE(sf::exists(ver_published_path("timerver")));
+
+  g_conf().set_val("rgw_nfs_stateless_finalize_secs", "300");
+  g_conf().set_val("rgw_nfs_stateless_finalize_versioned_secs", "1800");
+  g_conf().apply_changes(nullptr);
+}
+
 TEST(OPEN2, DELETE_BUCKET) {
   if (do_delete) {
     int ret = rgw_unlink(fs, fs->root_fh, bucket_name.c_str(),
