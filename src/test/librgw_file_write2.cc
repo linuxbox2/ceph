@@ -2610,6 +2610,83 @@ TEST(OPEN2, PUBLISHED_ETAG_IS_BARE_HEX)
   }
 }
 
+TEST(OPEN2, PUBLISHED_ETAG_MATCHES_LISTING)
+{
+  /* publish() computes a real MD5 from the shadow's content and stamps it
+   * as RGW_ATTR_ETAG, which is what HEAD returns.  The listing entry it
+   * adds must carry the same value -- a listing that reports the
+   * synthesized change token while HEAD reports a digest is a LIST/HEAD
+   * disagreement, the same class of bug as the trailing NUL that
+   * PUBLISHED_ETAG_IS_BARE_HEX pins down.
+   *
+   * The bucket listing is cached, and a cold-cache list rebuilds it from
+   * disk -- which would repair whatever the incremental add got wrong and
+   * hide the defect.  So list once to warm the cache before publishing
+   * the object under test. */
+  if (! have_fs_layout()) {
+    GTEST_SKIP() << "not a filesystem-backed driver";
+  }
+
+  auto* driver = rgw::g_rgwlib->get_driver();
+  const DoutPrefix dp(g_ceph_context, dout_subsys, "write2 test: ");
+
+  std::unique_ptr<rgw::sal::Bucket> sal_bucket;
+  ASSERT_EQ(driver->load_bucket(&dp, rgw_bucket("", bucket_name),
+				&sal_bucket, null_yield), 0);
+
+  /* warm the listing cache */
+  {
+    rgw::sal::Bucket::ListParams params;
+    rgw::sal::Bucket::ListResults results;
+    ASSERT_EQ(sal_bucket->list(&dp, params, 1000, results, null_yield), 0);
+  }
+
+  reset_object("etagpub1");
+
+  std::unique_ptr<Open2Helper> o2h =
+      std::make_unique<Open2Helper>(fs, bucket_fh);
+  ASSERT_EQ(get<0>(o2h->lookup("etagpub1")), 0);
+
+  std::string body{"etag listing agreement"};
+  auto ofw = o2h->open(O_RDWR, RGW_OPEN_FLAG_CREATE);
+  ASSERT_EQ(get<0>(ofw), 0);
+  ASSERT_EQ(get<0>(o2h->write(get<1>(ofw), body, 0, body.length())), 0);
+  ASSERT_EQ(o2h->close(get<1>(ofw)), 0);
+  ASSERT_TRUE(sf::exists(published_path("etagpub1")));
+
+  /* the object's own etag, as HEAD would report it */
+  auto sal_object = sal_bucket->get_object(rgw_obj_key("etagpub1"));
+  struct stat st;
+  rgw::sal::Attrs attrs;
+  memset(&st, 0, sizeof(st));
+  int rc = sal_object->stat_fsio_view(&dp, &st, &attrs, 0);
+  if (rc == -ENOTSUP) {
+    GTEST_SKIP() << "driver has no positional view";
+  }
+  ASSERT_EQ(rc, 0);
+  auto it = attrs.find(RGW_ATTR_ETAG);
+  ASSERT_NE(it, attrs.end()) << "published object carries no etag";
+  std::string object_etag = it->second.to_str();
+
+  /* the etag the listing reports for the same object */
+  rgw::sal::Bucket::ListParams params;
+  rgw::sal::Bucket::ListResults results;
+  ASSERT_EQ(sal_bucket->list(&dp, params, 1000, results, null_yield), 0);
+
+  std::string listed_etag;
+  bool found = false;
+  for (auto& o : results.objs) {
+    if (o.key.name == "etagpub1") {
+      listed_etag = o.meta.etag;
+      found = true;
+      break;
+    }
+  }
+  ASSERT_TRUE(found) << "published object absent from the listing";
+  ASSERT_EQ(listed_etag, object_etag)
+    << "listing etag disagrees with the object's own etag";
+}
+
 TEST(OPEN2, DELETE_BUCKET) {
   if (do_delete) {
     int ret = rgw_unlink(fs, fs->root_fh, bucket_name.c_str(),
