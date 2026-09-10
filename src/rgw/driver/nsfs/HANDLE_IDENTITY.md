@@ -85,13 +85,32 @@ object, and the export decides who may resolve it.  Together with §2.2 it
 means this direction converges on established practice on both axes —
 derivation and isolation — rather than inventing either.
 
-### 1.2 Why it is content-addressed
+### 1.2 Content-addressed, but not persistent
 
-This is not arbitrary, and it is the reason the design resists change.  An
-NFS filehandle must be **persistent**: a client may present one after a
-server restart and the server has to resolve it.  Hashing the path makes a
-handle reconstructible with no persistent handle table anywhere.  That is
-a real property, and any replacement has to supply it.
+An NFS filehandle is supposed to be **durable**:  a client may present one
+after a server restart and the server has to resolve it.  Hashing the path
+looks like it buys that without a handle table anywhere.
+
+**It does not.**  `RGWLibFS::lookup_handle()` is a cache lookup —
+`fh_cache.find_latch()`, and on a miss it logs "handle lookup failed" and
+returns nullptr, bar a special case for the root handle.  There is no
+reconstruction and there cannot be:  XXH64 is one-way, so the bits name an
+object only while an `RGWFileHandle` for it is still in the cache.
+
+So a filehandle does not survive a restart of the NFS server that issued
+it, and does not even survive LRU eviction under pressure.  In both cases
+`FSAL_RGW::create_handle()` gets nothing back and returns `ESTALE`
+(`nfs-ganesha/src/FSAL/FSAL_RGW/export.c:282`), with the object entirely
+unchanged.  `ceph_test_librgw_file_fhcache` asserts both, each paired with
+a positive control so a broken resolution path cannot be mistaken for the
+property under test.
+
+This inverts the usual argument for leaving the scheme alone.  The
+durability that content-addressing appears to provide is not there, so a
+filesystem-derived handle would not be trading it away — it would be
+**adding** durability librgw does not currently have, since
+`open_by_handle_at()` resolves after a restart.  Whatever else the
+transition in §5 costs, this is not on the list.
 
 ---
 
@@ -211,8 +230,9 @@ it should:
 
 1. keep filesystem specifics out of `rgw_file` — the driver returns
    opaque identity bits and answers whether it can resolve them;
-2. preserve the persistence property in §1.2 for every driver, since that
-   is what the current scheme buys and what a consumer relies on;
+2. be explicit about handle lifetime, and prefer durability where the
+   driver can supply it (§1.2) -- the current scheme offers none, so this
+   is a floor to raise rather than a property to protect;
 3. state its uniqueness scope explicitly (per filesystem, per data root,
    per cluster), because §2.1 turns on it;
 4. carry a generation or equivalent, so a stale handle cannot alias a
