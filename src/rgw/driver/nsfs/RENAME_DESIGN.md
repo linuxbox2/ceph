@@ -403,14 +403,53 @@ move is the direct one.
 
 ---
 
-## 6. Generality
+## 6. Generality, and why the interface shape is the risk
 
-If the external metadata store lets rados rename a metadata subtree, that
-is the *same shape* as §2 — move one node, keys beneath it re-derive.
-Which argues for choosing (a)'s semantics now in a form that generalises,
-rather than as an nsfs-local special case: the divergence from S3 is then
-a property of RGW's filesystem-like namespaces generally, and one
-argument covers both.
+The external metadata schema being designed for rados introduces a
+**name-to-object-id indirection**, precisely so that objects can be renamed
+without moving data — rename becomes a remapping of names onto ids.  So
+rename in that world is not a filesystem operation at all, and NFS rename
+will be required there.
+
+Two things follow, and they pull in opposite directions.
+
+### 6.1 The right place to prototype, the wrong place to generalise from
+
+nsfs is the only backend that can do **prefix** rename cheaply today:  one
+`renameat` moves a whole subtree, because the keys beneath it re-derive
+(§2).  That makes it the natural place to build and exercise the operation,
+and it is a genuine precursor to the metadata work rather than a detour.
+
+But in full generality the metadata feature is **prefix rename**, and the
+SAL interface for that is probably *not* "rename one object".  Single-object
+rename is the degenerate case of a prefix operation, not the foundation of
+one — build the easy case first and the general case arrives bolted onto
+something shaped wrong.  Two specific traps:
+
+- **Shape.**  If the eventual rados mechanism is a name-to-id rebinding,
+  then the primitive that generalises is closer to *rebind this name (or
+  name prefix) to this location* than to *rename this file*.  nsfs fulfils
+  a rebind with `renameat`;  metadata-rados fulfils it with an index
+  update.  An interface modelled on the filesystem call would not survive
+  the translation.
+- **Guarantees.**  The complexities genuinely differ and do not converge.
+  Prefix rename is one call on nsfs and O(n-objects) name updates under the
+  indirection.  So the interface must let a driver *report* what it can
+  guarantee — atomic, or linear and interruptible, or unsupported — rather
+  than promise atomicity or O(1).  Validating a prefix interface against
+  nsfs alone invites encoding nsfs's single-call atomicity into the
+  contract, which would mislead rados later.
+
+We will not know for some time whether an operation designed now is the
+right one.  That argues for the capability seam used elsewhere in this
+note, and against freezing a signature early.
+
+### 6.2 What generalises regardless
+
+The *semantics* in §4 do:  if rename is a namespace operation that carries
+history, that is a property of RGW's filesystem-like namespaces generally,
+and one argument covers nsfs, posix and a later metadata-rados alike.  The
+divergence from S3 is then not an nsfs-local special case.
 
 ---
 

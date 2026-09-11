@@ -192,14 +192,31 @@ be in the container's bounding set, not merely set on the file.
 
 ## 3. Why this is worth doing now, and for whom
 
-The weak argument is that implementation experience would transfer to the
-metadata work.  That is true but not sufficient on its own.
+Three propositions, in increasing order of how much they justify.
 
-The concrete argument is a potential consumer: a **standalone deployment
-on xfs — the flash appliance** — which could take advantage of this if it
-became interested in NFS export.  *(Assumed to be the posix driver rather
-than nsfs;  worth confirming, though see below — it matters less than it
-first appears.)*
+**It is a precursor.**  NFS rename will be required once the external
+metadata schema lands, and that schema introduces a name-to-object-id
+indirection (see `RENAME_DESIGN.md` §6).  Doing handle identity properly on
+a filesystem first is how the shape gets learned, on the one backend where
+the operations are cheap enough to iterate on.  Not merely "implementation
+experience" — the handle is the thing rename breaks, so a durable handle is
+the precondition for rename meaning anything.
+
+**The nsfs work stands on its own.**  Making librgw-nfs efficient on nsfs,
+and later posix, is the current work and is valuable as a demonstration
+regardless of what follows it.
+
+**And there is a concrete consumer.**  A standalone deployment on **xfs —
+the flash appliance** — which could take advantage of this if it became
+interested in NFS export.  *(Assumed to be the posix driver rather than
+nsfs;  worth confirming, though see below — it matters less than it first
+appears.)*
+
+Note what that consumer is *not*:  it is xfs, not GPFS.  The handle scheme
+would arguably generalise to GPFS, which nsfs also backs, but rgw-nfs on
+Spectrum Scale is unlikely to be productized — so GPFS-specific work here
+is fair to carry and unlikely to be exploited, and should not be used to
+justify anything on its own.
 
 And NFS is expected to come to posix in due course regardless.  So posix
 is a **first-class consumer of this abstraction, not a hypothetical one**,
