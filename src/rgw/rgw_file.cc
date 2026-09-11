@@ -3368,8 +3368,18 @@ int rgw_lookup(struct rgw_fs *rgw_fs,
       if (! get<0>(fhr)) {
 	if (! (flags & RGW_LOOKUP_FLAG_CREATE))
 	  return -ENOENT;
-	else
+	else {
 	  fhr = fs->lookup_fh(parent, path, RGWFileHandle::FLAG_CREATE);
+	  /* The object does not exist and the caller asked for it to be
+	   * created:  both halves of the intent are known here and nowhere
+	   * else, so record it on the handle.  rgw_open() needs it -- see
+	   * the note there.  (RGWFileHandle::FLAG_CREATE in fhr's flags word
+	   * is not this:  that is a transient "just minted" bit returned to
+	   * the caller, not durable state.) */
+	  if (get<0>(fhr)) {
+	    get<0>(fhr)->open_for_create();
+	  }
+	}
       }
       rgw_fh = get<0>(fhr);
     }
@@ -3474,7 +3484,33 @@ int rgw_open(struct rgw_fs *rgw_fs,
     return -EISDIR;
   }
 
-  return rgw_fh->open_global(posix_flags, flags);
+  /* v1 compatibility.  rgw_lookup(RGW_LOOKUP_FLAG_CREATE) on an object
+   * which did not exist recorded the caller's intent to create it, so
+   * supply what that implies rather than requiring the caller to say it
+   * twice.
+   *
+   * This keeps one v1 contract across drivers.  Where there is no FSIO
+   * view the open is bookkeeping and nothing had to be said:  the write
+   * transaction created the object at rgw_close(), so
+   * lookup(CREATE)/open/write/close worked with posix_flags 0.  Where the
+   * open is a real openat(), the same sequence is an O_RDONLY open of an
+   * object that does not exist -- -ENOENT, after which the write has no
+   * open to use and returns -EPERM, one call downstream of the cause.
+   * Inferring here means a v1 consumer moving from rados to a
+   * filesystem-backed driver does not have to change. */
+  if (rgw_fh->creating()) {
+    if (! (posix_flags & (O_WRONLY|O_RDWR))) {
+      posix_flags |= O_RDWR;
+    }
+    flags |= RGW_OPEN_FLAG_CREATE;
+  }
+
+  int rc = rgw_fh->open_global(posix_flags, flags);
+  if (! rc) {
+    /* it exists now;  a later open must not infer again */
+    rgw_fh->clear_creating();
+  }
+  return rc;
 }
 
 /*
