@@ -3421,6 +3421,199 @@ TEST(OPEN2, RENAME_ROLLBACK_LEAVES_SOURCE_INTACT)
   EXPECT_EQ(rn_read(ver_bucket_fh, src, 32), "second");
 }
 
+/* ---- recovery from an interrupted move --------------------------------
+ *
+ * A crash between the first version move and the leaf rename leaves an
+ * intent record and the object's history split across two directories.
+ * Recovery derives the direction from where the leaf ended up, and runs at
+ * the next version-lock acquisition on that directory -- so the next write to
+ * *any* object there repairs it.
+ *
+ * These trigger it that way on purpose.  Retrying the same rename would also
+ * pass, and would not distinguish recovery from the retry simply redoing the
+ * work.
+ */
+
+static void rn_inject(const DoutPrefixProvider* dpp, const std::string& count,
+		      const std::string& abandon, int* ret)
+{
+  auto* driver = rgw::g_rgwlib->get_driver();
+  *ret = driver->driver_hint(dpp, "inject-rename-fail-after",
+			     {{"count", count}, {"abandon", abandon}});
+}
+
+TEST(OPEN2, RENAME_RECOVERS_UNCOMMITTED_MOVE)
+{
+  if (! ver_bucket_fh) {
+    GTEST_SKIP() << "versioned bucket unavailable";
+  }
+  const DoutPrefix dp(g_ceph_context, dout_subsys, "write2 test: ");
+  const std::string src{"rnv-src7"}, dst{"rnv-dst7"}, other{"rnv-other7"};
+
+  /* equal-length bodies:  these are NFS writes at offset 0, which do not
+   * truncate, so a shorter third body would read back with the tail of the
+   * second still attached */
+  ASSERT_EQ(rn_make(ver_bucket_fh, src, "first"), 0);
+  ASSERT_EQ(rn_make(ver_bucket_fh, src, "secnd"), 0);
+  ASSERT_EQ(rn_make(ver_bucket_fh, src, "third"), 0);
+  const int nver = rn_version_count(ver_bucket_name, src);
+  ASSERT_GE(nver, 2) << "need more than one version entry, or stopping after "
+		        "one does not leave a split";
+  const auto ids_before = rn_version_ids(&dp, ver_bucket_name, src);
+
+  /* give up after one version has moved, without rolling back -- what a
+   * crash leaves, and the only way to reach the recovery path */
+  int ret = 0;
+  rn_inject(&dp, "1", "versions", &ret);
+  if (ret == -ENOTSUP || ret == -EINVAL) {
+    GTEST_SKIP() << "driver does not implement inject-rename-fail-after";
+  }
+  ASSERT_EQ(ret, 0);
+
+  EXPECT_NE(rgw_rename(fs, ver_bucket_fh, src.c_str(),
+		       ver_bucket_fh, dst.c_str(), RGW_RENAME_FLAG_NONE), 0);
+
+  rn_inject(&dp, "-1", "none", &ret);
+  ASSERT_EQ(ret, 0);
+
+  /* the delta itself:  history in two places, and a record pointing at it.
+   * Assert it before repairing, or the test cannot tell a recovery from a
+   * move that never broke. */
+  ASSERT_EQ(rn_version_count(ver_bucket_name, dst), 1)
+      << "injection did not leave a version at the destination";
+  ASSERT_EQ(rn_version_count(ver_bucket_name, src), nver - 1)
+      << "injection did not leave the rest at the source";
+  ASSERT_TRUE(rn_intent_present(ver_bucket_name))
+      << "abandoning a move did not leave an intent record;  nothing below "
+	 "is testing recovery";
+
+  /* an unrelated write into the same directory:  it takes the version lock,
+   * which is where recovery runs */
+  ASSERT_EQ(rn_make(ver_bucket_fh, other, "unrelated"), 0);
+
+  EXPECT_FALSE(rn_intent_present(ver_bucket_name))
+      << "a write to the directory did not clear the intent record";
+  EXPECT_EQ(rn_version_count(ver_bucket_name, dst), 0)
+      << "recovery left the stranded version at the destination";
+  EXPECT_EQ(rn_version_count(ver_bucket_name, src), nver)
+      << "recovery did not return the whole history";
+  EXPECT_EQ(rn_version_ids(&dp, ver_bucket_name, src), ids_before)
+      << "recovery returned different versions than the move took";
+  EXPECT_EQ(rn_read(ver_bucket_fh, src, 32), "third")
+      << "the object is not usable after recovery";
+}
+
+TEST(OPEN2, RENAME_RECOVERS_COMMITTED_SLICE)
+{
+  if (! ver_bucket_fh) {
+    GTEST_SKIP() << "versioned bucket unavailable";
+  }
+  const DoutPrefix dp(g_ceph_context, dout_subsys, "write2 test: ");
+  const std::string src{"rnv-src5"}, dst{"rnv-dst5"}, other{"rnv-other5"};
+
+  ASSERT_EQ(rn_make(ver_bucket_fh, src, "first"), 0);
+  ASSERT_EQ(rn_make(ver_bucket_fh, src, "current"), 0);
+  ASSERT_GT(rn_version_count(ver_bucket_name, src), 0);
+
+  /* give up after the leaf has landed.  The leaf rename is the commit point,
+   * so recovery has to roll *forward* here -- the opposite of the case above
+   * from an almost identical on-disk state, which is why the record has to
+   * say the move was sliced. */
+  int ret = 0;
+  rn_inject(&dp, "-1", "leaf", &ret);
+  if (ret == -ENOTSUP || ret == -EINVAL) {
+    GTEST_SKIP() << "driver does not implement inject-rename-fail-after";
+  }
+  ASSERT_EQ(ret, 0);
+
+  EXPECT_NE(rgw_rename(fs, ver_bucket_fh, src.c_str(),
+		       bucket_fh, dst.c_str(),
+		       RGW_RENAME_FLAG_SLICE_VERSIONS), 0);
+
+  rn_inject(&dp, "-1", "none", &ret);
+  ASSERT_EQ(ret, 0);
+
+  ASSERT_TRUE(sf::exists(rn_path(bucket_name, dst)))
+      << "injection did not let the leaf land";
+  ASSERT_FALSE(sf::exists(rn_path(ver_bucket_name, src)))
+      << "the leaf is still at the source, so this is not the committed case";
+  ASSERT_GT(rn_version_count(ver_bucket_name, src), 0)
+      << "injection did not leave the sliced history behind";
+  ASSERT_TRUE(rn_intent_present(ver_bucket_name));
+
+  ASSERT_EQ(rn_make(ver_bucket_fh, other, "unrelated"), 0);
+
+  EXPECT_FALSE(rn_intent_present(ver_bucket_name))
+      << "a write to the directory did not clear the intent record";
+  EXPECT_EQ(rn_version_count(ver_bucket_name, src), 0)
+      << "recovery did not drop the sliced history;  it lists as versions of "
+	 "an object that is no longer there";
+  EXPECT_EQ(rn_read(bucket_fh, dst, 32), "current")
+      << "recovery disturbed the committed leaf";
+}
+
+TEST(OPEN2, RENAME_RECOVERY_REFUSES_WHEN_LEAF_IS_AT_BOTH_KEYS)
+{
+  if (! ver_bucket_fh) {
+    GTEST_SKIP() << "versioned bucket unavailable";
+  }
+  const DoutPrefix dp(g_ceph_context, dout_subsys, "write2 test: ");
+  const std::string src{"rnv-src6"}, dst{"rnv-dst6"}, other{"rnv-other6"};
+
+  ASSERT_EQ(rn_make(ver_bucket_fh, src, "first"), 0);
+  ASSERT_EQ(rn_make(ver_bucket_fh, src, "current"), 0);
+
+  int ret = 0;
+  rn_inject(&dp, "-1", "leaf", &ret);
+  if (ret == -ENOTSUP || ret == -EINVAL) {
+    GTEST_SKIP() << "driver does not implement inject-rename-fail-after";
+  }
+  ASSERT_EQ(ret, 0);
+  EXPECT_NE(rgw_rename(fs, ver_bucket_fh, src.c_str(),
+		       ver_bucket_fh, dst.c_str(), RGW_RENAME_FLAG_NONE), 0);
+  rn_inject(&dp, "-1", "none", &ret);
+  ASSERT_EQ(ret, 0);
+  ASSERT_TRUE(rn_intent_present(ver_bucket_name));
+
+  /* Put something back at the source key behind the driver's back, which is
+   * what a client recreating the key after a crash amounts to.  Recovery can
+   * no longer tell which leaf is the object, and guessing would destroy real
+   * data, so it must refuse and keep the record. */
+  {
+    int fd = ::open(rn_path(ver_bucket_name, src).c_str(),
+		    O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    ASSERT_GE(fd, 0);
+    ASSERT_EQ(::write(fd, "interloper", 10), 10);
+    ::close(fd);
+  }
+
+  /* a write to the directory still succeeds:  refusing every write because
+   * one object's move is stuck would be worse than the delta */
+  EXPECT_EQ(rn_make(ver_bucket_fh, other, "unrelated"), 0)
+      << "an unrecoverable record blocked an unrelated write";
+  EXPECT_TRUE(rn_intent_present(ver_bucket_name))
+      << "recovery cleared a record it could not resolve";
+  EXPECT_TRUE(sf::exists(rn_path(ver_bucket_name, src)))
+      << "recovery removed one of the two leaves";
+  EXPECT_TRUE(sf::exists(rn_path(ver_bucket_name, dst)))
+      << "recovery removed one of the two leaves";
+
+  /* a rename out of the directory, by contrast, must refuse:  there is one
+   * record per directory, so writing a new one would lose the only pointer
+   * to the stranded versions */
+  EXPECT_EQ(rgw_rename(fs, ver_bucket_fh, other.c_str(),
+		       ver_bucket_fh, "rnv-dst6b", RGW_RENAME_FLAG_NONE),
+	    -EBUSY)
+      << "rename proceeded over an unrecovered record";
+
+  /* leave the directory usable for anything that runs after this */
+  auto vdir = nsfs_base() / ver_bucket_name / ".versions";
+  ASSERT_EQ(::removexattr(vdir.c_str(), "user.nsfs.rename_intent"), 0);
+  EXPECT_EQ(rgw_rename(fs, ver_bucket_fh, other.c_str(),
+		       ver_bucket_fh, "rnv-dst6b", RGW_RENAME_FLAG_NONE), 0)
+      << "the directory did not become usable once the ambiguity was removed";
+}
+
 TEST(OPEN2, VER_WRITE_TWICE_MAKES_TWO_VERSIONS)
 {
   if (! ver_bucket_fh) {
