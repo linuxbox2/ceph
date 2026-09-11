@@ -6,9 +6,8 @@
 with respect to other operations "where possible".  RGW cannot honour
 that in general, and the reason is structural rather than an
 implementation shortcoming.  This document records the structural
-argument, the property that exempts nsfs from it, what is actually broken
-today, and the semantic question that has to be answered before any of it
-is built.
+argument, the property that exempts nsfs from it, what the existing tests
+were really telling us, and the semantics chosen for it.
 
 Handle identity is the axis underneath most of what follows and is
 treated separately in [HANDLE_IDENTITY.md](HANDLE_IDENTITY.md) — including
@@ -128,84 +127,60 @@ rgw-standalone before assuming posix can or cannot follow.
 
 ---
 
-## 3. What is broken today
+## 3. What the tests said, and what was actually wrong
 
-`ceph_test_librgw_file_rename` has three tests — `TOPDIR_RENAME`,
-`SUBDIR_RENAME`, `CROSS_BUCKET_RENAME`.  **All three fail on nsfs on a
-clean data root**, each reporting `-EINVAL`.  None of it is about rename
-semantics.  Four independent defects, outermost first:
+An earlier revision of this note reported all three tests in
+`ceph_test_librgw_file_rename` failing on nsfs on a clean root, and
+concluded that the v1 create sequence had been broken by FSIO — that
+`rgw_open`/`rgw_write`/`rgw_close` no longer worked and the fix was a
+compatibility decision about the v1 API.
 
-**3.1 The reported error is not the real one.**  In `RGWLibFS::rename()`
-step 0 declares its own `int rc` inside the `case 0:` block, shadowing
-the function's `rc`, which was initialised to `-EINVAL`.  When the copy
-fails the real error stays in the inner variable and `-EINVAL` is
-returned.  The actual error is `-ENOENT`, visible only at `debug_rgw=1`:
+**That was wrong.**  Rename works today for files, cross-bucket included;
+the suite was reporting on itself.  Fixed in "test: open for write and for
+create when creating an object".
 
-```
-rename step 0 failed src=/wyndemere tommy1 dst=/wyndemere ricky1 rc -2
-```
+`make_object()` called `rgw_open(fs, fh, 0 /* posix flags */, 0)` — that
+is `O_RDONLY` with no `RGW_OPEN_FLAG_CREATE`.  On a driver with an FSIO
+view `rgw_open()` opens the file for real, so it returned `-ENOENT`;
+`rgw_write()` then had no open and returned `-EPERM`; nothing was written;
+and every rename failed `-ENOENT` on a source that did not exist.
+`librgw_file_nfsns.cc` has always passed
+`O_RDWR` with `RGW_OPEN_FLAG_V3|RGW_OPEN_FLAG_CREATE`, and passes.
 
-**3.2 The source object never exists.**  `copy_obj` cannot stat it
-because nothing created it.  The suite's `make_object()` helper does
-`rgw_lookup(FLAG_CREATE)`, `rgw_open`, `rgw_write`, `rgw_close`,
-assigning each result to the same `ret` and returning only the last — so
-it reports `rgw_close`'s status and discards every earlier failure.  It
-cannot fail in the case that matters.
+Two things made this hard to see, and both are the same shape:
 
-**3.3 The v1 create sequence no longer creates on an FSIO driver.**  This
-is the root cause.  Measured, by instrumenting the suite's helper rather
-than reading the guard:
+- `make_object()` assigned four results to one `ret` and returned the
+  last, so it reported `rgw_close()`'s status and swallowed the two
+  failures that mattered.
+- `RGWLibFS::rename()`'s step 0 declares its own `int rc` inside the
+  `case 0:` block, shadowing the function's `rc`, which was initialised to
+  `-EINVAL`.  A failed copy therefore returns `-EINVAL` and the real errno
+  is visible only at `debug_rgw=1`.  **Still unfixed** — two lines, no
+  design content.
 
-```
-lookup = 0     handle created
-open   = -2    ENOENT
-write  = -1    EPERM
-close  =  0    <- make_object() returns this, hiding both failures
-```
+The suite was also not re-run safe:  fixed names, `-EEXIST` from
+`rgw_mkdir` on a second run, three failures for that instead.  Also fixed.
 
-`rgw_lookup(RGW_LOOKUP_FLAG_CREATE)` creates a *handle*, not an object.
-The suite then calls `rgw_open(fs, fh, 0 /* posix flags */, 0)`, and
-`posix_flags == 0` is `O_RDONLY`.  On an FSIO driver `rgw_open()` passes
-that straight to `open_global()`, which really opens a file — so it is an
-`O_RDONLY` open of something that does not exist yet, and returns
-`-ENOENT`.  No global open is established, and the subsequent `rgw_write()`
-takes its `! open` branch and returns `-EPERM`.
+### 3.1 What the green suite does not tell you
 
-The `-EPERM` is therefore a symptom, not the cause.  (An earlier revision
-of this note said `rgw_open()` establishes no global open;  that was
-inferred from reading the guard rather than observed, and is wrong — it
-calls `open_global(posix_flags, flags)` directly.)
+It asserts only that the destination resolves.  Nothing checks that the
+source is gone, that content survived, or that the etag or version id is
+unchanged — so a rename that copied and forgot to delete passes all three.
+That matters more now that it is green, because green invites trust.  Any
+rename work wants those assertions first;  inode equality across the move
+is the direct control that distinguishes a real rename from
+copy-then-delete.
 
-**What matters is that this is a semantic change in the v1 path, not a
-test bug.**  `lookup(CREATE)` + `open` + `write` + `close` was the v1
-create sequence, and it worked on rados because the open was bookkeeping
-and the write transaction created the object at close.  On an FSIO driver
-the open is a real `openat()`, so the same sequence fails unless the caller
-asks for `O_RDWR`.  Either:
+### 3.2 An unwired flag, noticed on the way
 
-- `rgw_open()` on an FSIO driver treats a handle created by
-  `FLAG_CREATE` as a creating open, preserving the v1 sequence;  or
-- v1 callers must pass `O_RDWR`, and the behaviour change is documented.
-
-The Samba consumers are new and track our evolution, and the v1 path may
-be retired in a couple of releases — so this is a free choice rather than
-a constraint.  It should still be made deliberately:  until it is, the
-older sequence silently creates nothing on nsfs, which is how a test suite
-came to report success while writing no objects at all.
-
-**3.4 The suite is not re-run safe.**  On a dirty root, bucket and subdir
-creation fail `-EEXIST` and three of four failures become that instead,
-masking the above.  Same class as the `VER_` family fixed in
-`librgw_file_write2`.
-
-**Nothing here has been fixed.**  The list is the prerequisite set: no
-rename design can be validated until §3.3 is settled, because the tests
-cannot create an object to rename.  Note that §3.2 and §3.3 compound —
-the helper discards the errors that would have made this obvious, so the
-first visible symptom is three rename failures reporting the wrong
-errno.
-
----
+`RGWFileHandle` carries `FLAG_CREATING` with `creating()`,
+`open_for_create()` and `clear_creating()` (`rgw_file_int.h:327, 730,
+795, 800`), and nothing in the tree calls any of them.  It is not the
+mechanism above — `RGW_OPEN_FLAG_CREATE` is, and it works — so this is a
+separate question:  whether handle *state* ("this handle names an object
+that does not exist yet") expresses something the per-open request flag
+does not, or whether it is redundant and should go.  Unresolved;  recorded
+so it is not mistaken for the cause of anything.
 
 ## 4. The semantic question
 
@@ -441,6 +416,19 @@ argument covers both.
 
 ## 7. Status
 
-Design only; nothing implemented.  Blocked on §3.3 — the legacy write
-path's `-EPERM` on FSIO drivers — which is a compatibility question about
-the v1 API and not ours to answer alone.  §4 is a decision, not a task.
+Design only; nothing implemented, and **not blocked**.  An earlier revision
+said it was, on a v1 API compatibility question that turned out not to
+exist (§3).  Rename works today for files, cross-bucket included, and
+`ceph_test_librgw_file_rename` is green and re-run safe.
+
+§4 is settled:  (a), history moves with the object, cross-bucket gated on
+the target being able to hold it, slicing available as export policy.
+
+What is actually outstanding:
+
+- the assertions the suite is missing (§3.1) — worth having before any
+  rename work, not after;
+- the `rc` shadowing in `RGWLibFS::rename()` (§3) — two lines;
+- directory rename itself (§5), whose real constraint is the filehandle
+  (§5.2, §5.3);
+- whether `FLAG_CREATING` is wanted or should go (§3.2).
