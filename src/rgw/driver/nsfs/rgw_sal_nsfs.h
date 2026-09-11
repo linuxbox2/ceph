@@ -206,6 +206,7 @@ public:
   virtual int write(int64_t ofs, bufferlist& bl, const DoutPrefixProvider* dpp, optional_yield y) override;
   virtual int read(int64_t ofs, int64_t end, bufferlist& bl, const DoutPrefixProvider* dpp, optional_yield y) override;
   virtual int copy(const DoutPrefixProvider *dpp, optional_yield y, Directory* dst_dir, const std::string& name) override;
+  virtual int rename(const DoutPrefixProvider* dpp, optional_yield y, Directory* dst_dir, const std::string& dst_name);
   virtual int link_temp_file(const DoutPrefixProvider* dpp, optional_yield y, std::string target_fname) override;
   virtual std::unique_ptr<FSEnt> clone_base() override {
     return std::make_unique<File>(*this);
@@ -444,6 +445,9 @@ protected:
   /* driver hint state (test only)--see driver_hint() */
   bool inject_fork_race{false};
   bool inject_skip_reclone{false};
+  /* -1 disables;  otherwise fail a rename after this many version entries
+   * have moved, so the rollback path is exercised rather than assumed */
+  int inject_rename_fail_after{-1};
 
 public:
   NSFSDriver(CephContext *_cct) : StoreDriver(), cct(_cct), zone(this)
@@ -781,6 +785,7 @@ public:
 
   bool fork_race_injected() const { return inject_fork_race; }
   bool skip_reclone_injected() const { return inject_skip_reclone; }
+  int rename_fail_after_injected() const { return inject_rename_fail_after; }
 
   /* Internal APIs */
   int get_root_fd() { return root_dir->get_fd(); }
@@ -1077,6 +1082,10 @@ public:
 			    uint32_t flags,
 			    std::list<rgw_obj_index_key>* remove_objs,
 			    RGWObjVersionTracker* objv) override;
+  virtual int rename(const DoutPrefixProvider* dpp, optional_yield y,
+  		     rgw::sal::Bucket* dest_bucket,
+  		     const rgw_obj_key& dest_key, uint32_t flags) override;
+
   virtual int copy_object(const ACLOwner& owner,
                const rgw_user& remote_user,
                req_info* info, const rgw_zone_id& source_zone,

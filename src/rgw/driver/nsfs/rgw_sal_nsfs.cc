@@ -588,6 +588,114 @@ static int open_versions_dir(int parent_fd)
   return vfd;
 }
 
+/* ---- rename support -------------------------------------------------- */
+
+/* The .versions/ entries belonging to one leaf.
+ *
+ * The suffix parse matches the listing path (see FSEnt::fill_cache):  an
+ * entry is "<leaf>_null" or "<leaf>_mtime-...".  Requiring the separator to
+ * fall exactly at leaf.size() is what stops "photo.jpg" collecting the
+ * versions of "photo.jpg.bak". */
+struct LeafVersion {
+  std::string entry;   /* <leaf>_<version-id> */
+  std::string ver_id;
+};
+
+static int list_leaf_versions(int parent_fd, const std::string& leaf,
+			      std::vector<LeafVersion>& out)
+{
+  int vfd = ::openat(parent_fd, HIDDEN_VERSIONS_PATH.c_str(),
+		     O_RDONLY | O_DIRECTORY);
+  if (vfd < 0) {
+    /* no .versions/ at all just means no history */
+    return (errno == ENOENT) ? 0 : -errno;
+  }
+  DIR* vdir = ::fdopendir(vfd);
+  if (! vdir) {
+    int err = errno;
+    ::close(vfd);
+    return -err;
+  }
+  struct dirent* de;
+  while ((de = ::readdir(vdir)) != nullptr) {
+    std::string vname(de->d_name);
+    if (vname.size() <= leaf.size() || vname.compare(0, leaf.size(), leaf) != 0
+	|| vname[leaf.size()] != '_') {
+      continue;
+    }
+    std::string vid = vname.substr(leaf.size() + 1);
+    if (vid != NULL_VERSION_ID && vid.compare(0, 6, "mtime-") != 0) {
+      continue;
+    }
+    out.push_back(LeafVersion{vname, vid});
+  }
+  ::closedir(vdir); /* closes vfd */
+  return 0;
+}
+
+/* Intent record.
+ *
+ * One xattr on the source .versions/ directory, written before the first
+ * move and cleared after the leaf lands.  It carries *what the move was*,
+ * never how far it got:  the leaf's location is the commit record, so
+ * recovery derives direction from the filesystem rather than from a progress
+ * counter that could go stale.  Two xattr operations for the whole move,
+ * whatever the version count.  See RENAME_DESIGN.md. */
+static std::string rename_intent_xattr()
+{
+  return NSFS_XATTR_PREFIX + std::string("rename_intent");
+}
+
+static int write_rename_intent(int src_parent_fd, const std::string& leaf,
+			       const std::string& dst_bucket,
+			       const std::string& dst_key)
+{
+  int vfd = open_versions_dir(src_parent_fd);
+  if (vfd < 0) {
+    return vfd;
+  }
+  std::string rec = leaf;
+  rec.push_back('\0');
+  rec += dst_bucket;
+  rec.push_back('\0');
+  rec += dst_key;
+  std::string name = rename_intent_xattr();
+  int ret = ::fsetxattr(vfd, name.c_str(), rec.c_str(), rec.size(), 0);
+  int err = ret < 0 ? -errno : 0;
+  ::close(vfd);
+  return err;
+}
+
+static void clear_rename_intent(int src_parent_fd)
+{
+  int vfd = ::openat(src_parent_fd, HIDDEN_VERSIONS_PATH.c_str(),
+		     O_RDONLY | O_DIRECTORY);
+  if (vfd < 0) {
+    return;
+  }
+  std::string name = rename_intent_xattr();
+  (void) ::fremovexattr(vfd, name.c_str());
+  ::close(vfd);
+}
+
+static bool rename_intent_present(int src_parent_fd, std::string& rec)
+{
+  int vfd = ::openat(src_parent_fd, HIDDEN_VERSIONS_PATH.c_str(),
+		     O_RDONLY | O_DIRECTORY);
+  if (vfd < 0) {
+    return false;
+  }
+  char buf[1024];
+  std::string name = rename_intent_xattr();
+  ssize_t len = ::fgetxattr(vfd, name.c_str(), buf, sizeof(buf));
+  ::close(vfd);
+  if (len <= 0) {
+    return false;
+  }
+  rec.assign(buf, len);
+  return true;
+}
+
 static int open_versions_lockfile(int parent_fd)
 {
   int ret = ensure_versions_dir(parent_fd);
@@ -1643,6 +1751,53 @@ int File::read(int64_t ofs, int64_t left, bufferlist& bl,
   bl.append(bp, 0, ret);
 
   return ret;
+}
+
+/* Move this file's directory entry into dst_dir under dst_name.
+ *
+ * Directory::rename() exists beside this and is deliberately different:  it
+ * uses RENAME_EXCHANGE when the destination is occupied, which is what the
+ * shadow/publish flow wants.  An object rename wants POSIX replace
+ * semantics, so this is a plain renameat(). */
+int File::rename(const DoutPrefixProvider* dpp, optional_yield y,
+		 Directory* dst_dir, const std::string& dst_name)
+{
+  if (! parent || ! dst_dir) {
+    return -EINVAL;
+  }
+  int src_fd = parent->get_fd();
+  if (src_fd < 0) {
+    int ret = parent->open(dpp);
+    if (ret < 0) {
+      return ret;
+    }
+    src_fd = parent->get_fd();
+  }
+  int dst_fd = dst_dir->get_fd();
+  if (dst_fd < 0) {
+    int ret = dst_dir->open(dpp);
+    if (ret < 0) {
+      return ret;
+    }
+    dst_fd = dst_dir->get_fd();
+  }
+  if (src_fd < 0 || dst_fd < 0) {
+    return -EIO;
+  }
+
+  if (::renameat(src_fd, fname.c_str(), dst_fd, dst_name.c_str()) < 0) {
+    int err = errno;
+    ldpp_dout(dpp, 0) << "ERROR: renameat " << fname << " -> " << dst_name
+		      << ": " << cpp_strerror(err) << dendl;
+    return -err;
+  }
+
+  /* keep the FSEnt consistent with where the file now is, as
+   * Directory::rename() does -- a live ent pointing at a moved name is a
+   * hazard for anything still holding it */
+  parent = dst_dir;
+  fname = dst_name;
+  return 0;
 }
 
 int File::copy(const DoutPrefixProvider *dpp, optional_yield y,
@@ -4448,6 +4603,271 @@ int NSFSObject::delete_object(const DoutPrefixProvider* dpp,
   return 0;
 }
 
+/* Move an object, with its history, without copying data.
+ *
+ * PROVISIONAL -- see RENAME_DESIGN.md.  This is the single-object case;  the
+ * general operation is expected to be a prefix-capable rebind.
+ *
+ * The order is versions first and the leaf last, so the leaf rename is the
+ * commit point and the object is resolvable at exactly one key throughout.
+ * An intent xattr on the source .versions/ makes an interrupted move
+ * recognisable;  the leaf's location tells recovery which way to go, so the
+ * record carries no progress state.
+ *
+ * Serialised against other version mutations by the version lock.  Listing
+ * does not take that lock -- it does not today for demote/promote either --
+ * so a caller racing a rename may observe an intermediate state, and one who
+ * is not racing never does.  That is a deliberate choice, argued in
+ * RENAME_DESIGN.md;  locking listing would cost every versioned LIST.
+ */
+int NSFSObject::rename(const DoutPrefixProvider* dpp, optional_yield y,
+		       rgw::sal::Bucket* dest_bucket,
+		       const rgw_obj_key& dest_key, uint32_t flags)
+{
+  if (! driver->ctx()->_conf->rgw_nsfs_enable_rename) {
+    return -ENOTSUP;
+  }
+  FSStrategy* fs_strategy = driver->get_fs_strategy();
+  if (! fs_strategy || ! fs_strategy->can_rename()) {
+    /* GPFS lands here deliberately */
+    return -ENOTSUP;
+  }
+
+  NSFSBucket* sb = static_cast<NSFSBucket*>(get_bucket());
+  NSFSBucket* db = static_cast<NSFSBucket*>(dest_bucket);
+  if (! sb || ! db) {
+    return -EINVAL;
+  }
+
+  int ret = stat(dpp);
+  if (ret < 0) {
+    return ret;
+  }
+
+  nsfs::FSEnt* sent = get_fsent();
+  if (! sent || ! sent->get_parent()) {
+    return -EINVAL;
+  }
+  auto* src_file = dynamic_cast<nsfs::File*>(sent);
+  if (! src_file) {
+    /* a directory object is the prefix case, which this is not */
+    return -ENOTSUP;
+  }
+
+  nsfs::Directory* src_dir = sent->get_parent();
+  int src_parent_fd = src_dir->get_fd();
+  if (src_parent_fd < 0) {
+    (void) src_dir->open(dpp);
+    src_parent_fd = src_dir->get_fd();
+  }
+  if (src_parent_fd < 0) {
+    return -EIO;
+  }
+  const std::string src_leaf = sent->get_name();
+
+  /* an interrupted move left a record;  do not compound it */
+  std::string stale;
+  if (rename_intent_present(src_parent_fd, stale)) {
+    ldpp_dout(dpp, 0) << "ERROR: rename: an earlier move out of this directory "
+      << "did not complete -- .versions/ carries a rename_intent record.  "
+      << "Refusing rather than compounding it" << dendl;
+    return -EBUSY;
+  }
+
+  /* resolve the destination, creating intermediate directories */
+  std::vector<std::unique_ptr<nsfs::Directory>> dchain;
+  nsfs::Directory* dst_dir{nullptr};
+  std::string dst_leaf;
+  ret = nsfs::resolve_path(dpp, db->get_dir(), dest_key.name,
+			   /*create_dirs=*/true, driver->ctx(),
+			   dchain, dst_dir, dst_leaf);
+  if (ret < 0 || ! dst_dir) {
+    return (ret < 0) ? ret : -EIO;
+  }
+  int dst_parent_fd = dst_dir->get_fd();
+  if (dst_parent_fd < 0) {
+    (void) dst_dir->open(dpp);
+    dst_parent_fd = dst_dir->get_fd();
+  }
+  if (dst_parent_fd < 0) {
+    return -EIO;
+  }
+
+  /* what history there is, and whether the destination can hold it */
+  std::vector<LeafVersion> versions;
+  ret = list_leaf_versions(src_parent_fd, src_leaf, versions);
+  if (ret < 0) {
+    return ret;
+  }
+
+  /* versioned() covers suspended too:  such a bucket still holds
+   * non-current versions, it only stops minting new ones */
+  const bool dst_holds_history = db->get_info().versioned();
+  const bool slice = (flags & FLAG_SLICE_VERSIONS);
+
+  if (! versions.empty() && ! dst_holds_history && ! slice) {
+    ldpp_dout(dpp, 4) << "rename: source has " << versions.size()
+      << " non-current version(s) and " << db->get_name()
+      << " cannot hold them;  refusing.  FLAG_SLICE_VERSIONS moves the "
+      << "current version and drops the history" << dendl;
+    return -EINVAL;
+  }
+  const bool slicing = (! versions.empty() && ! dst_holds_history && slice);
+
+  /* serialise against other version mutations on the source */
+  auto vlock = fs_strategy->version_lock(
+    dpp, open_versions_lockfile(src_parent_fd));
+
+  ret = write_rename_intent(src_parent_fd, src_leaf, db->get_name(),
+			    dest_key.name);
+  if (ret < 0) {
+    return ret;
+  }
+
+  int src_vfd = -1;
+  int dst_vfd = -1;
+  size_t moved = 0;
+
+  auto roll_back = [&]() {
+    for (size_t k = 0; k < moved; ++k) {
+      std::string dname = dst_leaf + "_" + versions[k].ver_id;
+      if (::renameat(dst_vfd, dname.c_str(),
+		     src_vfd, versions[k].entry.c_str()) < 0) {
+	ldpp_dout(dpp, 0) << "ERROR: rename rollback failed for " << dname
+	  << ": " << cpp_strerror(errno) << ".  The intent record is left in "
+	  << "place;  " << src_leaf << " needs manual attention" << dendl;
+	return false;
+      }
+    }
+    return true;
+  };
+
+  if (! versions.empty() && ! slicing) {
+    dst_vfd = open_versions_dir(dst_parent_fd);
+    src_vfd = ::openat(src_parent_fd, HIDDEN_VERSIONS_PATH.c_str(),
+		       O_RDONLY | O_DIRECTORY);
+    if (dst_vfd < 0 || src_vfd < 0) {
+      ret = (dst_vfd < 0) ? dst_vfd : -errno;
+      if (dst_vfd >= 0) { ::close(dst_vfd); }
+      if (src_vfd >= 0) { ::close(src_vfd); }
+      clear_rename_intent(src_parent_fd);
+      return ret;
+    }
+
+    for (; moved < versions.size(); ++moved) {
+      std::string dname = dst_leaf + "_" + versions[moved].ver_id;
+      const int fail_after = driver->rename_fail_after_injected();
+      if (fail_after >= 0 && (int) moved >= fail_after) {
+	ret = -EIO;
+	ldpp_dout(dpp, 4) << "rename: injected failure after " << moved
+	  << " version(s);  rolling back" << dendl;
+	if (roll_back()) {
+	  clear_rename_intent(src_parent_fd);
+	}
+	::close(src_vfd);
+	::close(dst_vfd);
+	return ret;
+      }
+      if (::renameat(src_vfd, versions[moved].entry.c_str(),
+		     dst_vfd, dname.c_str()) < 0) {
+	ret = -errno;
+	ldpp_dout(dpp, 0) << "ERROR: rename: moving version "
+	  << versions[moved].entry << " failed: " << cpp_strerror(-ret)
+	  << ";  rolling back" << dendl;
+	if (roll_back()) {
+	  clear_rename_intent(src_parent_fd);
+	}
+	::close(src_vfd);
+	::close(dst_vfd);
+	return ret;
+      }
+    }
+  }
+
+  /* COMMIT:  the leaf */
+  ret = src_file->rename(dpp, y, dst_dir, dst_leaf);
+  if (ret < 0) {
+    ldpp_dout(dpp, 0) << "ERROR: rename: moving " << src_leaf
+      << " failed: " << cpp_strerror(-ret) << ";  rolling back" << dendl;
+    if (roll_back()) {
+      clear_rename_intent(src_parent_fd);
+    }
+    if (src_vfd >= 0) { ::close(src_vfd); }
+    if (dst_vfd >= 0) { ::close(dst_vfd); }
+    return ret;
+  }
+
+  /* slicing:  the history must not outlive the key it belonged to, or it
+   * lists as versions of an object that is no longer there */
+  if (slicing) {
+    int svfd = ::openat(src_parent_fd, HIDDEN_VERSIONS_PATH.c_str(),
+			O_RDONLY | O_DIRECTORY);
+    if (svfd >= 0) {
+      for (const auto& v : versions) {
+	if (::unlinkat(svfd, v.entry.c_str(), 0) < 0) {
+	  ldpp_dout(dpp, 0) << "ERROR: rename: sliced version " << v.entry
+	    << " could not be removed: " << cpp_strerror(errno) << dendl;
+	}
+      }
+      ::close(svfd);
+    }
+  }
+
+  clear_rename_intent(src_parent_fd);
+  if (src_vfd >= 0) { ::close(src_vfd); }
+  if (dst_vfd >= 0) { ::close(dst_vfd); }
+
+  /* Cache:  move the entries, do not drop the bucket and do not re-describe
+   * them.
+   *
+   * A rename changes the key and nothing else, so the cached entries are
+   * rekeyed in place -- see BucketCache::rename_entries(), which does it in
+   * one bounded walk per chunk.  Re-reading each object to rebuild its entry
+   * would duplicate fill_cache()'s job and risk describing it differently
+   * from how it was described before, for no gain. */
+  {
+    auto* bcache = driver->get_bucket_cache();
+    const std::string src_key = get_key().get_index_key_name();
+    const bool dst_versioned = db->get_info().versioned();
+
+    if (bcache) {
+      if (slicing) {
+	/* only the current version survives, and it lands somewhere that
+	 * holds no versions:  it must shed its instance and FLAG_VER or it
+	 * would list as a version in a bucket that has none */
+	(void) bcache->rename_entries(dpp, sb->get_name(), src_key,
+	  db->get_name(), dest_key.name,
+	  [](const rgw_bucket_dir_entry& e) {
+	    return (e.flags & rgw_bucket_dir_entry::FLAG_CURRENT) != 0;
+	  },
+	  [](rgw_bucket_dir_entry& e) {
+	    e.key.instance.clear();
+	    e.flags &= ~rgw_bucket_dir_entry::FLAG_VER;
+	  });
+	/* and the history that was unlinked above goes from the cache too */
+	(void) bcache->remove_entries(dpp, sb->get_name(), src_key,
+	  [](const rgw_bucket_dir_entry&) { return true; });
+      } else {
+	(void) bcache->rename_entries(dpp, sb->get_name(), src_key,
+	  db->get_name(), dest_key.name,
+	  [](const rgw_bucket_dir_entry&) { return true; },
+	  [dst_versioned](rgw_bucket_dir_entry& e) {
+	    if (! dst_versioned) {
+	      e.key.instance.clear();
+	      e.flags &= ~rgw_bucket_dir_entry::FLAG_VER;
+	    }
+	  });
+      }
+    }
+  }
+
+  ldpp_dout(dpp, 10) << "rename: " << sb->get_name() << "/" << src_leaf
+    << " -> " << db->get_name() << "/" << dest_key.name << " ("
+    << versions.size() << " version(s)"
+    << (slicing ? ", sliced" : "") << ")" << dendl;
+  return 0;
+}
+
 int NSFSObject::copy_object(const ACLOwner& owner,
                               const rgw_user& remote_user,
                               req_info* info,
@@ -5228,6 +5648,7 @@ int NSFSObject::NSFSFSIOObject::publish(const DoutPrefixProvider* dpp, uint32_t 
 			   parent_fd, leaf_name,
 			   binfo.versioning_enabled(), demote);
   }
+  {
 
   int ret = ::renameat(shadow_dir_fd, shadow_name.c_str(),
 		       parent_fd, leaf_name.c_str());
@@ -5311,7 +5732,10 @@ int NSFSObject::NSFSFSIOObject::publish(const DoutPrefixProvider* dpp, uint32_t 
       /* and flip the version this publish demoted from current to
        * non-current, as NSFSAtomicWriter::complete() does for an S3 PUT.
        * Without it the previous current entry stays in the cache still
-       * flagged current, so the object lists with two. */
+       * flagged current, so the object lists with two.  It was invisible for
+       * a while because the first listing of a bucket fills from the store,
+       * which derives the flags correctly and repairs it -- so only a reader
+       * that got there after the cache was already filled ever saw it. */
       if (demote.did_demote) {
 	std::string obj_name = src_obj->get_key().get_index_key_name();
 
@@ -5333,6 +5757,7 @@ int NSFSObject::NSFSFSIOObject::publish(const DoutPrefixProvider* dpp, uint32_t 
     }
   }
 
+  }
   binding = Binding::SHADOW_PUBLISHED;
   return 0;
 }
@@ -8448,6 +8873,21 @@ int NSFSDriver::driver_hint(const DoutPrefixProvider* dpp,
     inject_fork_race = (it->second == "true");
     if (out) {
       (*out)["enabled"] = inject_fork_race ? "true" : "false";
+    }
+    return 0;
+  }
+
+  if (hint == "inject-rename-fail-after") {
+    /* fail a rename after N version entries have moved.  Without this the
+     * rollback path only ever runs in production:  every test rename either
+     * succeeds outright or fails before it has moved anything. */
+    auto it = params.find("count");
+    if (it == params.end()) {
+      return -EINVAL;
+    }
+    inject_rename_fail_after = std::stoi(it->second);
+    if (out) {
+      (*out)["count"] = std::to_string(inject_rename_fail_after);
     }
     return 0;
   }
