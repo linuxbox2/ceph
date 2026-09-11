@@ -9,6 +9,10 @@ it.  This document records what the handle is today, what a
 filesystem-backed driver could use instead, what that costs, and what an
 abstraction has to provide for it to be worth doing.
 
+**Status: parked.**  The scheme §2 proposes needs an object's identity to
+survive an overwrite, and §7 records the measurement showing it does not.
+This is analysis to resume from, not a plan in progress — see §8.
+
 **Scope note.**  The subject is `rgw_file`'s handle contract, which is
 driver-agnostic; the document lives here because this is where the working
 notes are, not because it is nsfs-specific.  If anything, the likely first
@@ -136,7 +140,7 @@ after rename: IDENTICAL -- handle is rename-invariant
   Dropping it to save bits reintroduces exactly the aliasing bug knfsd's
   gen field exists to prevent.
 
-### 2.1 The bit budget works, with one caveat
+### 2.1 The bit budget works
 
 96 bits of `(ino, gen)` fits inside the existing 128-bit `rgw_fh_hk` with
 32 bits left for a bucket discriminator — no widening of the public
@@ -147,12 +151,16 @@ the per-export salt cannot survive — which §1.1 has already settled: the
 isolation moves to an authorization check and the bits are freed rather
 than re-spent.
 
-The caveat that remains is **fsid**.  `(ino, gen)` is unique within one filesystem.  A
-single data root makes the fsid implicit and 96 bits sufficient.
-Per-account filesystem roots — which the multi-account design
-contemplates — would need an fsid component too, and 128 bits then gets
-tight.  Decide whether per-account roots are in scope before committing to
-a layout.
+The caveat used to be **fsid**.  `(ino, gen)` is unique within one
+filesystem, so per-account filesystem roots would need an fsid component
+too and 128 bits would get tight.  **That is retired.**  The per-account
+namespace feature — implemented somewhat as an afterthought in v1 — is
+provisionally dropped:  which paths are reachable by which NFS clients and
+users is to be controlled by strong authentication, not by mount
+permissions.  One data root makes `(ino, gen)` globally unique, so 96 bits
+suffice and the remaining 32 are free, which is what a fallback
+discriminator needs.  This is the same move as the export-isolation
+decision in §1.1:  from structural separation to authorization.
 
 ### 2.2 The capability is not a concern
 
@@ -192,7 +200,19 @@ be in the container's bounding set, not merely set on the file.
 
 ## 3. Why this is worth doing now, and for whom
 
-Three propositions, in increasing order of how much they justify.
+First, a correction to the framing this document originally used.  An NFS
+filehandle is contractually a fixed mapping from opaque bytes to a
+particular file.  NFSv4.1 introduced **volatile filehandles**, which appear
+to have been intended for exactly our situation — but the industry did not
+adopt them, and Linux clients, which is to say nearly all of them, refuse
+them.  So we cannot *declare* our handles volatile;  we are obliged to
+present them as persistent whether they are or not.
+
+Open-by-handle is therefore not an optimisation.  It is the only honest way
+to keep a promise we have no choice but to make, and rename-invariance is a
+consequence of that rather than the goal.
+
+Three further propositions, in increasing order of how much they justify.
 
 **It is a precursor.**  NFS rename will be required once the external
 metadata schema lands, and that schema introduces a name-to-object-id
@@ -271,6 +291,41 @@ a server has no in-band way to recognise an old-format handle and resolve
 it compatibly.  Any re-derivation therefore wants a deliberate migration
 story, and the bit-allocation argument should not make it look cheap.
 
+**It does not solve lookup-for-create by itself.**
+`rgw_lookup(RGW_LOOKUP_FLAG_CREATE)` mints a handle for an object that has
+no inode, so there is no filesystem handle to derive from — and it cannot be
+patched by changing the handle later, since that is precisely the change
+this scheme exists to make impossible.
+
+Three options were considered.  *Create at lookup* was rejected:  a failed
+follow-up leaves a stray object, and a zero-length object becoming
+S3-visible on a mere lookup is wrong.  *Alias* — register the FS-derived
+handle as an additional name at creation — was rejected too:  registering a
+second name in our own table is easy, but cooperating cleanly and
+efficiently with nfs-ganesha's fileid management is not.  *Late identity* —
+assign `fh_hk` when the object comes into existence, and let nothing emit it
+before — is the choice.
+
+What makes that settle rather than merely defer the problem is that it is
+contained to FSAL_RGW, which is ours to evolve.  Verified:  every
+`construct_handle()` call site runs only after the object demonstrably
+exists — `handle.c:104` (lookup then getattr, bailing if either fails),
+`handle.c:340` (after `rgw_mkdir`), `handle.c:1046` (after `rgw_create`),
+`export.c:201`, `export.c:291`, `main.c:345` (the export root, which exists
+by definition).  `handle.c:104` is the notable one:  even if a creating
+lookup returned a handle for a nonexistent object, the following
+`rgw_getattr` fails and `construct_handle()` is never reached.  The
+invariant is *enforced* by a gate already present, not merely observed.
+
+So no `fsal_api` change and no Ganesha core change:  the pre-create window
+never escapes librgw, and late identity is an internal ordering concern.  An
+**ephemeral handle state** in the FSAL contract — a handle that must not be
+keyed or wired, guaranteed to resolve into a cache key by the time the
+create succeeds, discarded if it fails — is not needed, but it remains the
+right framing if some future path does hand out a pre-create handle, and it
+would be reusable by any backend that assigns identity at creation,
+including a metadata-schema rados.
+
 **It does not make rename free.**  It makes the handle survive one, which
 removes the ESTALE exposure that currently justifies refusing to rename
 open files, and removes the O(cached handles) re-keying.  The listing-cache
@@ -290,11 +345,126 @@ solving it locally in a way that has to be undone.
 
 ---
 
-## 7. Status
+## 7. Overwrite changes the inode, and that parks this
 
-Design only.  Decisions needed, none of them ours alone:
+Measured 2026-09-11 while specifying the fileid contract.  An S3 PUT over an
+existing key writes a temp file and links it into place, so the object gets a
+**new inode on every overwrite**:
 
-- whether per-account filesystem roots are in scope (§2.1, sets the layout)
-- whether the standalone/flash-appliance consumer is posix or nsfs (§3) --
-  lower stakes than it looks, since NFS is expected on posix regardless
-- what the handle-format migration looks like (§5)
+    after first  PUT: ino=2959671
+    after second PUT: ino=3015189  size=10   (content genuinely replaced)
+
+The FSIO path should do the same by construction — an existing object's
+shadow is a CoW clone, so a new inode, and `publish()` renames it over the
+leaf — though only the S3 side was measured.  (An earlier attempt to show
+this with `write2` was inconclusive and withdrawn:  the test unlinks its
+object, so the second run created it fresh and xfs reused the just-freed
+inode.  Same number, different reason.)
+
+This is close to fatal for §2.  An inode-derived filehandle would break not
+only on rename but whenever *anyone* overwrites the object — including an S3
+client overwriting something an NFS client holds a handle to.  Rename is
+rare and explicit;  overwrite is ordinary traffic.  And today's path-hash
+handle *does* survive an overwrite, because the path does not change.  So an
+inode-derived handle would be a **regression** on this axis, not an
+improvement.
+
+### 7.1 The rescue that nearly worked
+
+`XFS_IOC_START_COMMIT` / `XFS_IOC_COMMIT_RANGE` (`xfs_fs.h:1081-1082`)
+commits file1's contents into file2 if file2 still has the same
+inode/mtime/ctime, moving file2's old contents to file1, `-EBUSY` on
+mismatch, restartable after a crash.  That is `publish()`, as a filesystem
+primitive.
+
+Measured working, on a filesystem formatted `-i exchange=1`:
+
+    before:  leaf ino=131 "A"      shadow ino=132 "BBBB"
+    after:   leaf ino=131 "BBBB"   shadow ino=132 "A"    leaf inode PRESERVED
+
+on a `FICLONERANGE` clone of the leaf — the shadow model's exact shape.  It
+would have given identity preserved across overwrite, the displaced content
+landing in the shadow (which is exactly what becomes the non-current
+version), a kernel CAS replacing `demote_current_version()`'s hand-rolled
+retry, and crash restart owned by the filesystem.  Requirements: kernel
+6.13+, and the `exchange=1` feature, set at format with `-i exchange=1`
+(the inode option group, *not* `-m`) and retrofittable with
+`xfs_admin -O exchange=1`.
+
+### 7.2 Why it is foregone: xattrs do not move
+
+Measured on the same filesystem:
+
+    before:  leaf xattr=leaf-side    shadow xattr=shadow-side
+    after:   leaf xattr=leaf-side    shadow xattr=shadow-side   (unchanged)
+
+Content swaps;  xattrs stay with their inodes.  And no attr-fork exchange is
+exposed to userspace — the ioctl family is 129/130/131 with flags TO_EOF,
+DSYNC, DRY_RUN and FILE1_WRITTEN, and nothing else.  The kernel exchanges
+attr forks internally for online repair, but not as an operation.
+
+So `publish()` would invert to "commit the content, then stamp the leaf with
+new metadata and the shadow with old", leaving a window where the leaf has
+new content and stale metadata.  Today's rename-publish installs content and
+metadata together atomically, so this is a loss:
+
+    |                     | rename-publish | commit-range          |
+    |---------------------|----------------|-----------------------|
+    | identity on overwrite | changes      | preserved             |
+    | content + metadata  | atomic         | split                 |
+    | crash restart       | ours           | the filesystem's      |
+    | portability         | any fs         | xfs 6.13+, exchange=1 |
+
+**The decisive item is the version id, not the etag.**  Under
+`rgw_non_md5_etag` the etag is `mtime-ino` and therefore derivable, so it
+would be automatically correct after a swap with nothing stored to tear.
+The version id has no such escape:  it is stored *precisely* to be stable,
+and on publish the old version id must travel with the old content into
+`.versions/` — which the exchange cannot do, and which cannot be re-derived
+on the shadow because the exchange updates both files' mtimes.
+
+XFS "METADIR" is not the answer, checked so nobody re-chases it:  per
+`mkfs.xfs(8)` it moves XFS's *own* metadata (realtime bitmaps, quota files)
+into a hidden inode tree rather than fixed superblock slots.  It does not
+touch the attr fork, where user xattrs live.  The thing that would solve
+this is smaller — a `COMMIT_RANGE` flag meaning "exchange the attr forks
+along with the data".  That is a general need for anyone doing atomic file
+replacement with associated xattrs, not a Ceph-specific one.
+
+### 7.3 Scope
+
+None of this touches rename:  `renameat()` preserves the inode and the
+xattrs travel with it, since they are on the inode being moved.  The
+commit-range material bears only on **publish** — whether identity survives
+an overwrite.
+
+    rename implementation   unaffected;  implemented, see RENAME_DESIGN.md
+    CoW / shadow publish    unaffected;  stays rename-based
+    fileid redesign         PARKED
+
+---
+
+## 8. Status
+
+**Parked, not deferred.**  §2's scheme needs identity stable across
+overwrite, and §7 shows it is not.  Without an attr-fork exchange the
+options are write-in-place (which destroys atomic publish), a stored id plus
+an index (which is the handle table this scheme exists to avoid), or
+accepting breakage on write (a regression on today's behaviour).  So this
+waits on one of two things, neither of them ours:
+
+- an attr-fork exchange facility in the exchange-range API (§7.2), or
+- the external metadata schema supplying durable object ids (§6).
+
+The rest of the document stands as the analysis to resume from.  Two
+questions that were open are now closed:  per-account filesystem roots are
+provisionally dropped, which retires the fsid caveat (§2.1), and
+lookup-for-create is settled by late identity, which is contained to
+FSAL_RGW (§5).  What remains open is the handle-format migration (§5), which
+only matters once this is unparked.
+
+What is *not* parked is the negative result being recorded rather than
+rediscovered:  `ceph_test_librgw_file_fhcache` pins the current handle's
+lifetime — that it resolves while cached, survives a release, and goes stale
+on eviction and across a remount — with assertions that say in their failure
+messages that this document needs revisiting if they ever pass.

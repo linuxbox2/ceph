@@ -250,30 +250,124 @@ strictly on the way to (a).
 
 ---
 
-## 5. What has to be built
+## 5. What was built
 
-Assuming (a), and assuming §3 is resolved first:
+Landed 2026-09-11 as a single cut in seven commits — SAL seam, cache
+primitives, nsfs implementation, `rgw_file`, tests, and recovery.  Phasing
+was considered (knob default-off, unversioned before versioned) and
+rejected:  it would have created a transitional state where unversioned
+objects moved and versioned ones copied, which is a worse inconsistency
+than landing the novel machinery with the seam.
 
-1. **A rename path in the driver.**  `FSStrategy` gains a rename, and
-   nsfs implements it as `renameat()` between resolved parent
-   descriptors.  Cross-bucket is the same call — buckets are top-level
-   directories — provided both are on one filesystem; `EXDEV` needs a
-   defined answer rather than a copy fallback that silently reintroduces
-   O(size).
-2. **Listing-cache invalidation.**  LMDB entries are keyed by composed
-   name, so every entry beneath a renamed prefix is stale.  Purging the
-   bucket's cache and letting the next LIST rebuild from the store is
-   correct by construction — the path a cold bucket already takes — and
-   costs one rebuild with no per-object work in the rename itself.
-   Rewriting the affected key range instead is an optimisation, not a
-   requirement.
-3. **Invalidation — the part that already has design behind it.**  See
-   §5.2;  it is the substantive piece, not a detail.
-4. **Keep the open-file refusal**, and work out whether it extends to a
-   subtree.  See §5.3.
-5. **Directory rename** stops being `-EPERM` on drivers that report the
-   capability, and stays `-EPERM` elsewhere.  It should be a driver
-   capability, not an `#ifdef` — rados may acquire it later (§6).
+1. **A rename path in the driver.**  `Object::rename()` on the SAL,
+   `-ENOTSUP` by default;  nsfs implements it as `renameat()` between
+   resolved parent descriptors, gated on `FSStrategy::can_rename()` (so
+   GPFS declines) and on `rgw_nsfs_enable_rename`.  Cross-bucket is the
+   same call — buckets are top-level directories.  `EXDEV` is an error,
+   not a copy fallback that would silently reintroduce O(size).
+2. **Listing-cache rekey, not invalidation.**  The first cut dropped the
+   whole bucket's cache.  That was wrong:  a rename touches N+1 entries and
+   dropping the bucket costs a rebuild unbounded in bucket size.  Because
+   keys sort `name '\0' instance`, a key and all its versions are
+   contiguous, so `BucketCache::rename_entries()` rekeys them in one
+   bounded cursor walk per chunk.  Nor are the entries re-described from
+   disk:  a rename changes the key and nothing else, so re-reading each
+   object would duplicate `fill_cache()`'s job and risk describing it
+   differently than before.  Chunked at 1024 rather than buffered whole,
+   since a key's version count is client-controlled.
+3. **Invalidation** — see §5.2.  Unchanged in design;  the handle is
+   rekeyed in the `FHCache` rather than retired, and `set_times()` still
+   moves both parents' change attributes, which is what makes a Linux
+   client re-resolve.
+4. **The open-file refusal is kept.**  Whether it extends to a subtree is
+   still open;  see §5.3.
+5. **Directory rename remains `-EPERM`.**  It is the prefix case, and §6
+   argues the prefix interface should not be derived from the single-object
+   one.  A directory object resolves to `nsfs::Directory` and
+   `NSFSObject::rename()` returns `-ENOTSUP` for it deliberately.
+
+### 5.1 Concurrency and crash atomicity
+
+Two separate problems.  Concurrency is about what another caller may
+*observe* mid-move;  crash atomicity is about what is left behind.
+
+**Why ordering alone is not enough.**  Listing enumerates `.versions/` by
+readdir and emits entries whether or not the leaf exists — required,
+because after the current version is deleted the rest must still list, so
+it cannot change.  Therefore orphan entries at the destination are visible
+as versions of a key that is not otherwise there, and the source lists with
+shrinking history while the move runs.  Suppressing both sides would need
+listing to synthesise entries from wherever they physically are:  a journal
+with redirect.  Rejected as disproportionate.
+
+**Chosen — sequential atomicity.**  Rename holds the per-directory version
+lock (`FSStrategy::version_lock`, already used by `copy_object`,
+`publish` and `delete_obj`) for the duration.  Listing does **not** take it.
+So a caller who races a rename may observe a torn state and a caller who
+does not, never does.  That is precisely the guarantee the existing version
+paths already give — listing does not lock against demote or promote today
+— so rename introduces no new weakness and costs nothing on the listing
+hot path.  Within the lock the ordering still matters:  **versions first,
+leaf last**, so the leaf rename is the commit point and the object is
+resolvable at exactly one key throughout.
+
+**Rejected — atomicity by mutual exclusion.**  Lock both directories and
+have versioned *listing* take the lock too, so no concurrent caller can
+observe an intermediate state.  Strictly stronger, and not chosen because
+it makes every versioned listing block behind any in-flight version
+mutation — a real cost on a hot path and the first thing a reviewer would
+ask about — and because two-directory locking needs a canonical order (by
+inode) or a reverse-direction rename deadlocks against it.  Worth
+revisiting only with a measurement of the listing cost;  it is the upgrade
+path and the chosen model does not block it.
+
+**The intent record.**  One xattr on the *source* `.versions/` directory,
+written before the first move and cleared after the leaf lands:
+
+    user.nsfs.rename_intent = leaf \0 tenant \0 bucket \0 key \0 flags
+
+Two xattr operations for the whole move, whatever the version count.  It
+carries *what the move was*, never how far it got — recovery derives the
+state from the filesystem, which is cheaper and cannot go stale:
+
+    leaf still at the source  -> never committed -> ROLL BACK
+                                 (return any versions found at the
+                                  destination)
+    leaf at the destination   -> committed       -> ROLL FORWARD
+                                 (send the history still behind after it,
+                                  or drop it if the move was sliced)
+
+**The leaf's location is the commit record**, which falls out of
+versions-first-leaf-last and is what makes the record lightweight.
+
+The slice flag has to be recorded even though nothing else about the move
+does.  The same on-disk state — leaf committed, history still at the source
+— means "forward this" for an ordinary move and "delete this" for a sliced
+one, and only the record can say which.
+
+Present at both keys, or at neither, is not a state the sequence can
+produce:  `renameat()` is atomic and the version lock excludes the other
+mutations.  It means something outside the driver has been at the directory
+— most plausibly a client recreating the source key after the crash.
+Recovery refuses and keeps the record rather than guess, because destroying
+real data is worse than staying stuck.
+
+**When recovery runs.**  At version-lock acquisition, in
+`version_lock_recovering()`, which all eight lock sites now go through.  So
+the next write to *any* object in that directory repairs it — not only the
+next rename, which might never come.  A failed recovery does not fail the
+caller:  the record may describe a different object, and refusing every
+write to a directory because one object's move is stuck is worse than the
+delta.  `rename()` is the exception and refuses, because there is one
+record per directory and writing a new one would lose the only pointer to
+the stranded versions.
+
+Read paths deliberately do not repair.  `Directory::fill_cache()` notices
+the record and says so in the log, but does not take the version lock:
+that would put a mutation on the read path and create a
+bucket-cache-entry-lock -> version-lock ordering that exists nowhere else.
+The cost is that a listing can show the delta until the next write to that
+directory.  A background sweep is not in scope.
 
 ### 5.2 Invalidation
 
@@ -391,15 +485,40 @@ that has to be undone later.
 
 ### 5.4 Tests
 
-The existing three only assert that the destination resolves.  None
-checks that the source is gone, that content survived, or that the etag
-or version id is unchanged — so a rename that copied and failed to delete
-would pass all three.  Any rename work needs, at minimum: source absent
-afterwards, content identical, etag unchanged, version id unchanged
-(which is the O(1) claim), and a directory rename over a prefix holding
-several objects and several versions.  A control that distinguishes
-`renameat` from copy-then-delete is essential — inode equality across the
-move is the direct one.
+`ceph_test_librgw_file_rename`'s three original tests only asserted that the
+destination resolves.  None checked that the source was gone, that content
+survived, or that the etag or version id was unchanged — so a rename that
+copied and failed to delete would have passed all three.
+
+The net is now in `ceph_test_librgw_file_write2` (`OPEN2.RENAME_*`), which
+runs through open2 against a filesystem-backed driver:  source absent
+afterwards, content identical, etag unchanged, **inode equality across the
+move** — the control that distinguishes `renameat` from copy-then-delete —
+cross-bucket, over an existing key, directory refused, open file refused,
+history moved with the object, a versioned source refused into a bucket
+that cannot hold history, slicing when asked, rollback when a move fails
+partway, and the three recovery cases below.
+
+Two of these are boundary markers rather than ordinary assertions, and are
+meant to go red when the design moves:
+
+- `RENAME_PRESERVES_INODE` asserts rename is a move and not a copy.  It is
+  achievable on any filesystem backend, and on a future metadata-backed
+  rados by rebinding a name;  it is not achievable on rados today.  The
+  suite is scoped to filesystem layouts already, but this should gate on a
+  driver capability once one exists.
+- `RENAME_REFUSES_DIRECTORY` records where the design stops.  nsfs *could*
+  do prefix rename in one `renameat`;  when that lands this test should be
+  inverted rather than deleted.
+
+Recovery needs an injected failure that leaves the intent record, because
+the ordinary error paths all clean up after themselves:
+`inject-rename-fail-after` takes `abandon=versions|leaf`, which gives up
+without rolling back — the state a crash leaves, and the only state the
+recovery path can be tested against.  The three tests trigger recovery with
+an *unrelated write* into the same directory rather than by retrying the
+rename, since a retry would pass whether or not recovery ran.  Verified to
+fail with recovery disabled:  those three and nothing else.
 
 ---
 
@@ -434,11 +553,14 @@ something shaped wrong.  Two specific traps:
   the translation.
 - **Guarantees.**  The complexities genuinely differ and do not converge.
   Prefix rename is one call on nsfs and O(n-objects) name updates under the
-  indirection.  So the interface must let a driver *report* what it can
-  guarantee — atomic, or linear and interruptible, or unsupported — rather
-  than promise atomicity or O(1).  Validating a prefix interface against
-  nsfs alone invites encoding nsfs's single-call atomicity into the
-  contract, which would mislead rados later.
+  indirection.  An earlier revision of this document concluded that the
+  interface should therefore let a driver *report* what it can guarantee —
+  atomic, or linear and interruptible, or unsupported.  **That is retired.**
+  The goal for the metadata case is prefix rename atomic *from the caller's
+  view*, by whatever mechanism;  a backend limitation reported upward is
+  exactly the leak the interface must not have.  What remains true is the
+  narrower warning:  validating a prefix interface against nsfs alone
+  invites encoding nsfs's single-call implementation into the contract.
 
 We will not know for some time whether an operation designed now is the
 right one.  That argues for the capability seam used elsewhere in this
@@ -455,19 +577,41 @@ divergence from S3 is then not an nsfs-local special case.
 
 ## 7. Status
 
-Design only; nothing implemented, and **not blocked**.  An earlier revision
-said it was, on a v1 API compatibility question that turned out not to
-exist (§3).  Rename works today for files, cross-bucket included, and
-`ceph_test_librgw_file_rename` is green and re-run safe.
+**Implemented for nsfs, provisionally** — see §6 for why the interface
+shape, not the implementation, is the risk.  Landed 2026-09-11;  `posix`
+declines through `can_rename()` and so does GPFS.
 
 §4 is settled:  (a), history moves with the object, cross-bucket gated on
 the target being able to hold it, slicing available as export policy.
+Slicing is reachable through `RGW_RENAME_FLAG_SLICE_VERSIONS`, which
+`rgw_file` drives from its own configuration;  nothing further is needed to
+bind it to export policy.
 
-What is actually outstanding:
+Two things were found on the way, neither planned.  The first was
+pre-existing:  `publish()` declared its `DemoteResult` inside the block that
+takes the version lock, so the result died there and the listing cache never
+flipped the demoted entry from current to non-current — two `IsLatest=true`
+for one key over S3.  It was hidden because the first listing of a bucket
+fills from the store and derives the flags correctly, and the test whose
+comment says it reads the incremental cache deliberately was always the
+first lister, so it always got the rebuild it meant to avoid.  The second
+was the measurement that overwrite changes the inode, which parked the
+whole open-by-handle direction;  see HANDLE_IDENTITY.md.
 
-- the assertions the suite is missing (§3.1) — worth having before any
-  rename work, not after;
-- the `rc` shadowing in `RGWLibFS::rename()` (§3) — two lines;
-- directory rename itself (§5), whose real constraint is the filehandle
-  (§5.2, §5.3);
-- whether `FLAG_CREATING` is wanted or should go (§3.2).
+### 7.1 What is not done
+
+- **Directory (prefix) rename.**  §6 argues it should not be derived from
+  the single-object interface, so this is a decision outstanding rather
+  than a missing implementation.
+- **Whether the open-file refusal should extend to a subtree** (§5.3),
+  which only matters once prefix rename exists.
+- **`FLAG_CREATING`** patches the same seam late identity would (§3.2).  If
+  open-by-handle is ever unparked, the inference should be *replaced* by it
+  rather than living alongside it — two mechanisms for one window is how
+  they drift.
+- **A background sweep** for intent records.  Not in scope:  recovery runs
+  at the next version-lock acquisition on the directory, and a listing
+  reports the delta in the log meanwhile (§5.1).
+- **The intermediate commits were not individually built.**  Dependency
+  order makes each compilable by construction, which is reasoning rather
+  than a test.
