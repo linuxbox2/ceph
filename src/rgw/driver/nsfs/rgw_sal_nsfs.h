@@ -448,6 +448,11 @@ protected:
   /* -1 disables;  otherwise fail a rename after this many version entries
    * have moved, so the rollback path is exercised rather than assumed */
   int inject_rename_fail_after{-1};
+  /* where an injected rename gives up *without* cleaning up, standing in for
+   * a crash:  0 none, 1 after inject_rename_fail_after versions have moved,
+   * 2 after the leaf has landed.  Either leaves the intent record behind,
+   * which is the only state recovery can be tested against */
+  int inject_rename_abandon{0};
 
 public:
   NSFSDriver(CephContext *_cct) : StoreDriver(), cct(_cct), zone(this)
@@ -786,6 +791,7 @@ public:
   bool fork_race_injected() const { return inject_fork_race; }
   bool skip_reclone_injected() const { return inject_skip_reclone; }
   int rename_fail_after_injected() const { return inject_rename_fail_after; }
+  int rename_abandon_injected() const { return inject_rename_abandon; }
 
   /* Internal APIs */
   int get_root_fd() { return root_dir->get_fd(); }
