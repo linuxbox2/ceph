@@ -218,6 +218,11 @@ question to settle before this goes upstream.
 Implemented and validated on nsfs in both modes -- 648/649 baseline and
 77/77 `librgw_file_write2` with the option on and off alike.
 
-Open: posix `generate_etag()` (§1.1), and the granularity and mixed-mode
-questions (§3.1, §3.2, §5), which should be settled before the option is
-presented as generally useful.  Performance measurement is Mark's (§3.3).
+Open: posix `generate_etag()` (§1.1), which waits on a posix review.
+
+The option's *shape* — granularity, mixed-mode buckets, and whether the
+selector should be deployment identity rather than a performance toggle
+(§3.1, §3.2, §5), plus the integrity posture (§3.4) — is deferred to a later
+level-up.  It should be settled before the option is presented as generally
+useful, but it is a design decision rather than outstanding work on this
+branch.  Performance measurement is Mark's (§3.3).

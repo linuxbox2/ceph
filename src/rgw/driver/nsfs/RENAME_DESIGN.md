@@ -602,9 +602,9 @@ whole open-by-handle direction;  see HANDLE_IDENTITY.md.
 
 - **Directory (prefix) rename.**  §6 argues it should not be derived from
   the single-object interface, so this is a decision outstanding rather
-  than a missing implementation.
-- **Whether the open-file refusal should extend to a subtree** (§5.3),
-  which only matters once prefix rename exists.
+  than a missing implementation.  Deferred to a later level-up of this work,
+  along with **whether the open-file refusal should extend to a subtree**
+  (§5.3), which only matters once prefix rename exists.
 - **`FLAG_CREATING`** patches the same seam late identity would (§3.2).  If
   open-by-handle is ever unparked, the inference should be *replaced* by it
   rather than living alongside it — two mechanisms for one window is how
