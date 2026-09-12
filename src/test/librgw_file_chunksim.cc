@@ -135,7 +135,14 @@ namespace {
 	 * irrespective of entry count */
         if (refcnt != 2) {
           auto ref_str = to_string(refcnt);
-          std::cout << "trapped on refcnt=" << ref_str << std::endl;
+          std::cout << "refcnt=" << ref_str << " (not the steady-state 2)"
+                    << " name=" << obj.name
+                    << " fh_hk=" << std::hex << obj.rgw_fh->get_key().fh_hk.object
+                    << std::dec
+                    << (obj.rgw_fh->is_dir() ? " dir" : " file")
+                    << " chunk_entries=" << num_entries
+                    << " dirents=" << dirents.size()
+                    << std::endl;
           ceph_assert((refcnt == 2) || (refcnt == 3));
 	}
         if (unlikely(evict)) {
