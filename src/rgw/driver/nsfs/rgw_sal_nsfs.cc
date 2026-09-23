@@ -1235,6 +1235,7 @@ static inline std::string bucket_fname(std::string name, std::optional<std::stri
 }
 
 static int assemble_parts(const DoutPrefixProvider* dpp,
+                          FSStrategy* fs_strategy,
                           int dir_fd,
                           int num_parts,
                           const std::string& output_name)
@@ -1267,36 +1268,15 @@ static int assemble_parts(const DoutPrefixProvider* dpp,
       ret = errno;
       return -ret;
     }
-    off_t remaining = stx.stx_size;
-    off_t part_offset = 0;
 
-    while (remaining > 0) {
-      ssize_t copied = copy_file_range(part_fd, &part_offset,
-                                       out_fd, &out_offset,
-                                       remaining, 0);
-      if (copied < 0) {
-        if (errno == EXDEV || errno == ENOSYS || errno == EOPNOTSUPP) {
-          char buf[65536];
-          lseek(part_fd, part_offset, SEEK_SET);
-          while (remaining > 0) {
-            ssize_t nr = ::read(part_fd, buf,
-                                std::min(remaining, (off_t)sizeof(buf)));
-            if (nr <= 0) break;
-            ssize_t nw = ::write(out_fd, buf, nr);
-            if (nw != nr) return -EIO;
-            remaining -= nr;
-            out_offset += nr;
-            part_offset += nr;
-          }
-          break;
-        }
-        ret = errno;
-        ldpp_dout(dpp, 0) << "ERROR: copy_file_range failed for "
-                          << part_name << ": " << cpp_strerror(ret) << dendl;
-        return -ret;
-      }
-      remaining -= copied;
+    ret = fs_strategy->copy_range(dpp, part_fd, 0, out_fd, out_offset,
+                                  stx.stx_size);
+    if (ret < 0) {
+      ldpp_dout(dpp, 0) << "ERROR: could not copy part " << part_name
+                        << ": " << cpp_strerror(-ret) << dendl;
+      return ret;
     }
+    out_offset += stx.stx_size;
   }
 
   return 0;
@@ -2962,6 +2942,7 @@ int NSFSDriver::initialize(CephContext *cct, const DoutPrefixProvider *dpp)
   }
   ldpp_dout(dpp, 1) << "nsfs: using " << fs_strategy->name()
     << " fs strategy" << dendl;
+  fs_strategy->set_shares_extents(nsfs::probe_shares_extents(dpp, base_path));
 
   /* ordered listing cache */
   bucket_cache.reset(
@@ -4938,15 +4919,6 @@ int NSFSObject::rename(const DoutPrefixProvider* dpp, optional_yield y,
 		       rgw::sal::Bucket* dest_bucket,
 		       const rgw_obj_key& dest_key, uint32_t flags)
 {
-  if (! driver->ctx()->_conf->rgw_nsfs_enable_rename) {
-    return -ENOTSUP;
-  }
-  FSStrategy* fs_strategy = driver->get_fs_strategy();
-  if (! fs_strategy || ! fs_strategy->can_rename()) {
-    /* GPFS lands here deliberately */
-    return -ENOTSUP;
-  }
-
   NSFSBucket* sb = static_cast<NSFSBucket*>(get_bucket());
   NSFSBucket* db = static_cast<NSFSBucket*>(dest_bucket);
   if (! sb || ! db) {
@@ -4978,6 +4950,39 @@ int NSFSObject::rename(const DoutPrefixProvider* dpp, optional_yield y,
     return -EIO;
   }
   const std::string src_leaf = sent->get_name();
+
+  /* Refuse before deciding how to do it.
+   *
+   * Moving history into a bucket that cannot hold it is refused further
+   * down, under the version lock, where the list is authoritative.  But
+   * that check used to sit behind the mechanism gates below:  a driver
+   * which cannot move a name returns -ENOTSUP first, and RGWLibFS::rename
+   * then emulates the rename by copy-and-delete (rgw_file.cc), performing
+   * the very operation this refuses and dropping the history silently.  On
+   * GPFS that is every rename.  So the policy is asked first and the
+   * mechanism second.  The check under the lock stays and remains the
+   * authoritative one;  this one exists to precede the gates. */
+  if (! (flags & FLAG_SLICE_VERSIONS) && ! db->get_info().versioned()) {
+    std::vector<LeafVersion> pre_versions;
+    if ((list_leaf_versions(src_parent_fd, src_leaf, pre_versions) == 0) &&
+	! pre_versions.empty()) {
+      ldpp_dout(dpp, 4) << "rename: source has " << pre_versions.size()
+	<< " non-current version(s) and " << db->get_name()
+	<< " cannot hold them;  refusing.  FLAG_SLICE_VERSIONS moves the "
+	<< "current version and drops the history" << dendl;
+      return -EINVAL;
+    }
+  }
+
+  if (! driver->ctx()->_conf->rgw_nsfs_enable_rename) {
+    return -ENOTSUP;
+  }
+  FSStrategy* fs_strategy = driver->get_fs_strategy();
+  if (! fs_strategy || ! fs_strategy->can_rename()) {
+    /* GPFS lands here deliberately */
+    return -ENOTSUP;
+  }
+
 
   /* Serialise against other version mutations on the source.  Taken here
    * rather than just before the first move:  recovery below repairs the
@@ -8616,9 +8621,10 @@ int NSFSMultipartUpload::complete(const DoutPrefixProvider *dpp,
   NSFSBucket* pb = static_cast<NSFSBucket*>(bucket);
   int staging_fd = shadow->get_dir()->get_fd();
 
-  // assemble parts into a single file via copy_file_range
+  // assemble parts into a single file
   std::string assembled_name = MP_ASSEMBLED_NAME;
-  ret = assemble_parts(dpp, staging_fd, total_parts, assembled_name);
+  ret = assemble_parts(dpp, driver->get_fs_strategy(), staging_fd,
+                       total_parts, assembled_name);
   if (ret < 0) {
     return ret;
   }
@@ -9398,6 +9404,54 @@ int NSFSDriver::driver_hint(const DoutPrefixProvider* dpp,
     }
     if (out) {
       (*out)["enabled"] = on ? "true" : "false";
+    }
+    return 0;
+  }
+
+  if (hint == "fs-capabilities") {
+    /* What this deployment can do, asked once so that a test states its
+     * expectations as a function of the backend rather than carrying a list
+     * of names known to fail somewhere.  Read-only:  no params.
+     *
+     * Every value here is something the driver already knows and a test
+     * cannot reliably work out for itself -- can_rename is a strategy
+     * decision, and extent sharing was measured at mount. */
+    if (! out) {
+      return -EINVAL;
+    }
+    if (! fs_strategy) {
+      return -EINVAL;
+    }
+    (*out)["strategy"] = fs_strategy->name();
+    (*out)["can_rename"] = fs_strategy->can_rename() ? "true" : "false";
+    (*out)["shares_extents"] =
+      fs_strategy->shares_extents() ? "true" : "false";
+    (*out)["rename_enabled"] =
+      ctx()->_conf->rgw_nsfs_enable_rename ? "true" : "false";
+    return 0;
+  }
+
+  if (hint == "inject-buffered-copy") {
+    /* make FSStrategy::copy_range skip copy_file_range and take the
+     * buffered path.  On XFS copy_file_range always succeeds, so the
+     * fallback -- the only path GPFS ever takes, since GPFS answers
+     * EOPNOTSUPP at every granularity -- would otherwise never run
+     * under test on a development filesystem */
+    auto it = params.find("enable");
+    if (it == params.end()) {
+      return -EINVAL;
+    }
+    const bool on = (it->second == "true");
+    if (! fs_strategy) {
+      return -EINVAL;
+    }
+    fs_strategy->set_force_buffered_copy(on);
+    if (out) {
+      (*out)["enabled"] = on ? "true" : "false";
+      /* bytes the fallback has copied since this hint was last called,
+       * so a test can prove which path ran rather than assume it */
+      (*out)["buffered_bytes"] =
+	std::to_string(fs_strategy->take_buffered_bytes());
     }
     return 0;
   }

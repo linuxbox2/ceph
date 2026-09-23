@@ -113,6 +113,28 @@ namespace {
     return sf::is_directory(nsfs_base() / bucket_name, ec);
   }
 
+  /* What this deployment can do, asked of the driver once at mount.  Tests
+   * state their expectations as a function of this rather than carrying a
+   * list of test names known to fail on somebody's machine, and every run
+   * prints it, so a result can be read without knowing which backend
+   * produced it. */
+  struct FsProfile {
+    bool known{false};
+    bool can_rename{false};
+    bool rename_enabled{false};
+    bool shares_extents{false};
+    std::string strategy{"unknown"};
+  };
+  FsProfile fs_profile;
+
+  /* can a rename actually move the name, or will it be emulated by
+   * copy-and-delete in RGWLibFS::rename?  Both are correct;  they differ in
+   * what survives, which is what the rename tests are about. */
+  bool moves_names() {
+    return fs_profile.known && fs_profile.can_rename &&
+	   fs_profile.rename_enabled;
+  }
+
   /* Tests own their objects, and clean at the start rather than the
    * end:  a failing run leaves its state on disk to be looked at, and
    * the next run is still repeatable. */
@@ -354,6 +376,32 @@ extern "C" {
   }
 }
 
+static void load_fs_profile(const DoutPrefixProvider* dpp)
+{
+  std::map<std::string, std::string> out;
+  auto* driver = rgw::g_rgwlib->get_driver();
+
+  int ret = driver->driver_hint(dpp, "fs-capabilities", {}, &out);
+  if (ret != 0) {
+    std::cout << "[          ] fs profile: unavailable (" << ret
+	      << ");  capability-dependent tests will skip" << std::endl;
+    return;
+  }
+
+  fs_profile.known = true;
+  fs_profile.strategy = out["strategy"];
+  fs_profile.can_rename = (out["can_rename"] == "true");
+  fs_profile.rename_enabled = (out["rename_enabled"] == "true");
+  fs_profile.shares_extents = (out["shares_extents"] == "true");
+
+  std::cout << "[          ] fs profile: strategy=" << fs_profile.strategy
+	    << " moves_names=" << (moves_names() ? "yes" : "no")
+	    << " (can_rename=" << (fs_profile.can_rename ? "yes" : "no")
+	    << " enabled=" << (fs_profile.rename_enabled ? "yes" : "no")
+	    << ") shares_extents="
+	    << (fs_profile.shares_extents ? "yes" : "no") << std::endl;
+}
+
 TEST(OPEN2, INIT) {
   int ret = librgw_create(&rgw_h, saved_args.argc, saved_args.argv);
   ASSERT_EQ(ret, 0);
@@ -365,6 +413,9 @@ TEST(OPEN2, MOUNT) {
                        secret_key.c_str(), "/", &fs, RGW_MOUNT_FLAG_NONE);
   ASSERT_EQ(ret, 0);
   ASSERT_NE(fs, nullptr);
+
+  const DoutPrefix dp(g_ceph_context, dout_subsys, "write2 test: ");
+  load_fs_profile(&dp);
 }
 
 TEST(OPEN2, CREATE_BUCKET) {
@@ -839,6 +890,27 @@ static int fsio_inject(const DoutPrefixProvider* dpp, const char* hint,
 			     {{"enable", on ? "true" : "false"}});
 }
 
+static int fsio_inject_out(const DoutPrefixProvider* dpp, const char* hint,
+			   bool on, std::map<std::string, std::string>* out)
+{
+  auto* driver = rgw::g_rgwlib->get_driver();
+  return driver->driver_hint(dpp, hint,
+			     {{"enable", on ? "true" : "false"}}, out);
+}
+
+/* first differing offset, or npos.  Comparing multi-megabyte strings with
+ * EXPECT_EQ prints both of them on failure, which is unreadable and slow. */
+static size_t first_difference(const std::string& a, const std::string& b)
+{
+  const size_t n = std::min(a.length(), b.length());
+  for (size_t i = 0; i < n; ++i) {
+    if (a[i] != b[i]) {
+      return i;
+    }
+  }
+  return (a.length() == b.length()) ? std::string::npos : n;
+}
+
 /* Remove any temp left in .shadow/ by an earlier run, and return the
  * directory so a test can assert on what *it* leaves.  Clean at the start,
  * never at the end:  a failing run leaves its evidence in place, and a test
@@ -1117,6 +1189,111 @@ TEST(OPEN2, SHADOW_COW_FAILURE_LEAVES_NO_TEMP)
   EXPECT_EQ(st.st_size, (off_t) data.length())
       << "a failed COW build disturbed the object it was cloning";
   ASSERT_EQ(rgw_fh_rele(fs, rfh, 0), 0);
+}
+
+/* FSStrategy::copy_range() prefers copy_file_range(2), which shares extents
+ * on XFS and returns EOPNOTSUPP on GPFS at every granularity
+ * (probes/results-cowprobe-2026-09-22.txt).  So on a development filesystem
+ * the buffered fallback -- the only path GPFS ever takes -- never executes,
+ * and no amount of passing tests here says anything about it.
+ * inject-buffered-copy forces it, and the hint reports the bytes the
+ * fallback moved, so each polarity can be shown to have taken the path it
+ * claims rather than merely to have produced the right bytes.
+ *
+ * The two arms run an identical sequence, which is what lets the second
+ * one mean something:  the first proves that sequence does clone, so a
+ * zero count in the second is copy_file_range having done it, not the
+ * clone having been skipped.  On a filesystem which cannot share extents
+ * the second arm has no separate path to take, and the test says so
+ * rather than asserting a zero it would never see. */
+TEST(OPEN2, BUFFERED_COPY_MATCHES_COPY_FILE_RANGE)
+{
+  const DoutPrefix dp(g_ceph_context, dout_subsys, "write2 test: ");
+  const std::string name{"sb-bufcopy"};
+  (void) rgw_unlink(fs, bucket_fh, name.c_str(), RGW_UNLINK_FLAG_NONE);
+
+  /* over preferred_io_size()'s 1 MiB floor and not a multiple of it, so the
+   * fallback has to iterate, advance both offsets, and end on a short read */
+  const size_t body_len = (3 * 1024 * 1024) + 4097;
+  std::string body(body_len, '\0');
+  for (size_t i = 0; i < body_len; ++i) {
+    body[i] = (char) ((i * 31) + (i >> 13));
+  }
+
+  {
+    Open2Helper o2h(fs, bucket_fh);
+    ASSERT_EQ(get<0>(o2h.lookup(name)), 0);
+    auto ofw = o2h.open(O_RDWR, RGW_OPEN_FLAG_CREATE);
+    ASSERT_EQ(get<0>(ofw), 0);
+    ASSERT_EQ(get<0>(o2h.write(get<1>(ofw), body, 0, body.length())), 0);
+    ASSERT_EQ(o2h.close(get<1>(ofw)), 0);
+  }
+
+  const off_t poke = (2 * 1024 * 1024) + 11;
+
+  /* Where copy_file_range works, the two arms take different paths and the
+   * counter separates them.  Where it does not -- GPFS -- there is only one
+   * path, the hint changes nothing, and both arms must account for every
+   * byte.  Asserting zero there would fail for the right reason and read
+   * like a regression. */
+  if (! fs_profile.known) {
+    GTEST_SKIP() << "no fs profile;  cannot say which path a copy should "
+		    "take";
+  }
+  const bool shares = fs_profile.shares_extents;
+
+  for (bool buffered : {true, false}) {
+    std::map<std::string, std::string> out;
+    int ret = fsio_inject_out(&dp, "inject-buffered-copy", buffered, &out);
+    if (ret == -ENOTSUP || ret == -EINVAL) {
+      GTEST_SKIP() << "driver does not implement inject-buffered-copy";
+    }
+    ASSERT_EQ(ret, 0);
+
+    const std::string mark = buffered ? "B" : "R";
+    {
+      /* O_RDWR with no O_TRUNC on an existing object:  the COW clone arm */
+      Open2Helper o2h(fs, bucket_fh);
+      ASSERT_EQ(get<0>(o2h.lookup(name)), 0);
+      auto ofw = o2h.open(O_RDWR, RGW_OPEN_FLAG_NONE);
+      ASSERT_EQ(get<0>(ofw), 0);
+      ASSERT_EQ(get<0>(o2h.write(get<1>(ofw), mark, poke, mark.length())), 0);
+      ASSERT_EQ(o2h.close(get<1>(ofw)), 0);
+    }
+    body[poke] = mark[0];
+
+    out.clear();
+    ASSERT_EQ(fsio_inject_out(&dp, "inject-buffered-copy", false, &out), 0);
+    ASSERT_NE(out.find("buffered_bytes"), out.end());
+    const uint64_t counted = std::stoull(out["buffered_bytes"]);
+
+    if (buffered || ! shares) {
+      EXPECT_EQ(counted, body_len)
+	  << "the fallback moved " << counted << " of " << body_len
+	  << " bytes;  the content check below is not testing it";
+    } else {
+      EXPECT_EQ(counted, 0u)
+	  << "the fallback ran " << counted << " bytes where "
+	     "copy_file_range should have;  the positive case above is not "
+	     "distinguishing the two paths";
+    }
+
+    Open2Helper o2h(fs, bucket_fh);
+    ASSERT_EQ(get<0>(o2h.lookup(name)), 0);
+    auto ofr = o2h.open(O_RDONLY, RGW_OPEN_FLAG_NONE);
+    ASSERT_EQ(get<0>(ofr), 0);
+    auto rr = o2h.read(get<1>(ofr), 0, body_len);
+    ASSERT_EQ(get<0>(rr), 0);
+    EXPECT_EQ(get<1>(rr).length(), body_len)
+	<< (buffered ? "buffered" : "copy_file_range") << " clone is short";
+    EXPECT_EQ(first_difference(get<1>(rr), body), std::string::npos)
+	<< (buffered ? "buffered" : "copy_file_range")
+	<< " clone differs from the original at offset "
+	<< first_difference(get<1>(rr), body);
+    ASSERT_EQ(o2h.close(get<1>(ofr)), 0);
+  }
+
+  (void) rgw_unlink(fs, bucket_fh, name.c_str(), RGW_UNLINK_FLAG_NONE);
 }
 
 TEST(OPEN2, SHADOW_BUILD_FAILURE_LEAKS_NO_DESCRIPTORS)
@@ -3812,10 +3989,25 @@ TEST(OPEN2, RENAME_PRESERVES_INODE)
 
   const ino_t after = rn_ino(rn_path(bucket_name, dst));
   ASSERT_NE(after, (ino_t) 0) << "could not stat the destination";
-  ASSERT_EQ(after, before)
-      << "inode changed:  the object was copied and the original unlinked, "
-	 "not renamed.  Every other assertion in this group passes either "
-	 "way, which is why this one is here";
+
+  /* Both outcomes are correct;  which one is correct here is the profile's
+   * to say.  A driver that can move the name keeps the inode.  One that
+   * cannot gets RGWLibFS::rename's copy-and-delete, which necessarily does
+   * not -- asserted rather than skipped, so that a driver silently losing
+   * its move is still a failure. */
+  if (moves_names()) {
+    EXPECT_EQ(after, before)
+	<< "inode changed:  the object was copied and the original "
+	   "unlinked, not renamed.  Every other assertion in this group "
+	   "passes either way, which is why this one is here";
+  } else {
+    EXPECT_NE(after, before)
+	<< "the inode survived on a driver which cannot move names;  either "
+	   "the move happened after all, or this is not measuring the rename";
+  }
+  EXPECT_EQ(rn_read(bucket_fh, dst, strlen("same inode please")),
+	    "same inode please")
+      << "content did not survive the rename";
 }
 
 TEST(OPEN2, RENAME_CROSS_BUCKET)
@@ -4026,6 +4218,21 @@ TEST(OPEN2, RENAME_VERSIONED_MOVES_HISTORY)
   ASSERT_EQ(rgw_rename(fs, ver_bucket_fh, src.c_str(),
 		       ver_bucket_fh, dst.c_str(), RGW_RENAME_FLAG_NONE), 0);
 
+  if (! moves_names()) {
+    /* Copy-and-delete moves nothing.  The destination is a new object with
+     * new version ids, and deleting the source in a versioned bucket adds a
+     * delete marker rather than removing anything -- so the old key's
+     * history is still present, and still costs what it cost.  That is the
+     * divergence worth recording:  a rename here does not free the source.
+     * Asserted rather than skipped, so it cannot change unnoticed. */
+    EXPECT_GE(rn_version_count(ver_bucket_name, src), nver)
+	<< "history vanished from the source;  copy-and-delete in a "
+	   "versioned bucket should leave it behind a delete marker";
+    EXPECT_NE(rn_version_ids(&dp, ver_bucket_name, dst), ids_before)
+	<< "version ids survived a copy;  then it was not a copy";
+    return;
+  }
+
   EXPECT_EQ(rn_version_count(ver_bucket_name, src), 0)
       << "history left behind at the old key";
   EXPECT_EQ(rn_version_count(ver_bucket_name, dst), nver)
@@ -4069,6 +4276,13 @@ TEST(OPEN2, RENAME_VERSIONED_INTO_UNVERSIONED_REFUSED)
 
 TEST(OPEN2, RENAME_SLICE_DROPS_HISTORY)
 {
+  if (! moves_names()) {
+    /* Not a divergence to record:  slicing, rollback and the intent record
+     * are machinery of the move itself, and there is no move here.  The
+     * copy-and-delete fallback has none of it and nothing to assert. */
+    GTEST_SKIP() << "driver cannot move names (strategy "
+		 << fs_profile.strategy << ");  no move to exercise";
+  }
   if (! ver_bucket_fh) {
     GTEST_SKIP() << "versioned bucket unavailable";
   }
@@ -4094,6 +4308,13 @@ TEST(OPEN2, RENAME_SLICE_DROPS_HISTORY)
 
 TEST(OPEN2, RENAME_ROLLBACK_LEAVES_SOURCE_INTACT)
 {
+  if (! moves_names()) {
+    /* Not a divergence to record:  slicing, rollback and the intent record
+     * are machinery of the move itself, and there is no move here.  The
+     * copy-and-delete fallback has none of it and nothing to assert. */
+    GTEST_SKIP() << "driver cannot move names (strategy "
+		 << fs_profile.strategy << ");  no move to exercise";
+  }
   if (! ver_bucket_fh) {
     GTEST_SKIP() << "versioned bucket unavailable";
   }
@@ -4163,6 +4384,13 @@ static void rn_inject(const DoutPrefixProvider* dpp, const std::string& count,
 
 TEST(OPEN2, RENAME_RECOVERS_UNCOMMITTED_MOVE)
 {
+  if (! moves_names()) {
+    /* Not a divergence to record:  slicing, rollback and the intent record
+     * are machinery of the move itself, and there is no move here.  The
+     * copy-and-delete fallback has none of it and nothing to assert. */
+    GTEST_SKIP() << "driver cannot move names (strategy "
+		 << fs_profile.strategy << ");  no move to exercise";
+  }
   if (! ver_bucket_fh) {
     GTEST_SKIP() << "versioned bucket unavailable";
   }
@@ -4224,6 +4452,13 @@ TEST(OPEN2, RENAME_RECOVERS_UNCOMMITTED_MOVE)
 
 TEST(OPEN2, RENAME_RECOVERS_COMMITTED_SLICE)
 {
+  if (! moves_names()) {
+    /* Not a divergence to record:  slicing, rollback and the intent record
+     * are machinery of the move itself, and there is no move here.  The
+     * copy-and-delete fallback has none of it and nothing to assert. */
+    GTEST_SKIP() << "driver cannot move names (strategy "
+		 << fs_profile.strategy << ");  no move to exercise";
+  }
   if (! ver_bucket_fh) {
     GTEST_SKIP() << "versioned bucket unavailable";
   }
@@ -4273,6 +4508,13 @@ TEST(OPEN2, RENAME_RECOVERS_COMMITTED_SLICE)
 
 TEST(OPEN2, RENAME_RECOVERY_REFUSES_WHEN_LEAF_IS_AT_BOTH_KEYS)
 {
+  if (! moves_names()) {
+    /* Not a divergence to record:  slicing, rollback and the intent record
+     * are machinery of the move itself, and there is no move here.  The
+     * copy-and-delete fallback has none of it and nothing to assert. */
+    GTEST_SKIP() << "driver cannot move names (strategy "
+		 << fs_profile.strategy << ");  no move to exercise";
+  }
   if (! ver_bucket_fh) {
     GTEST_SKIP() << "versioned bucket unavailable";
   }
