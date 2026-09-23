@@ -30,6 +30,7 @@
 #include "../posix/qd2_pending.h"
 #include "../posix/posix_io_uring.h"
 #include "fs_strategy.h"
+#include "mpu_strategy.h"
 
 class RGWLC;
 
@@ -129,6 +130,10 @@ protected:
   bool stat_done{false};
   CephContext* ctx;
   FSStrategy* fs_strategy;
+  /* the multipart layout, carried the same way and for the same reason as
+   * fs_strategy:  an MPDirectory has to name and enumerate parts, and is
+   * built from its parent rather than from the driver */
+  MPUStrategy* mpu_strategy{nullptr};
 
 public:
   static constexpr uint32_t FLAG_NONE =      0x0;
@@ -144,12 +149,17 @@ public:
     stx(_ent.stx),
     stat_done(_ent.stat_done),
     ctx(_ent.ctx),
-    fs_strategy(_ent.fs_strategy)
+    fs_strategy(_ent.fs_strategy),
+    mpu_strategy(_ent.mpu_strategy)
   { }
 
   virtual ~FSEnt() { }
 
   int get_fd() { return fd; };
+  /* seeded on the root directory by the driver;  every child inherits it
+   * through the constructors above */
+  void set_mpu_strategy(MPUStrategy* s) { mpu_strategy = s; }
+  MPUStrategy* get_mpu_strategy() const { return mpu_strategy; }
   void set_sync_on_close(bool sync) { need_fsync = sync; }
   std::string& get_name() { return fname; }
   Directory* get_parent() { return parent; }
@@ -435,6 +445,7 @@ protected:
   std::unique_ptr<rgw::posix::SyncFsThread> syncfs_thread;
   UserCache user_cache;
   std::unique_ptr<nsfs::FSStrategy> fs_strategy;
+  std::unique_ptr<nsfs::MPUStrategy> mpu_strategy;
   std::string base_path;
   std::unique_ptr<nsfs::Directory> root_dir;
   int root_fd;
@@ -816,6 +827,7 @@ public:
   nsfs::MultipartCache* get_multipart_cache() { return multipart_cache.get(); }
   UserCache& get_user_cache() { return user_cache; }
   nsfs::FSStrategy* get_fs_strategy() { return fs_strategy.get(); }
+  nsfs::MPUStrategy* get_mpu_strategy() { return mpu_strategy.get(); }
 
   /* called by nsfs::BucketCache layer when a new object is discovered
    * by inotify or similar */

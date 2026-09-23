@@ -116,15 +116,13 @@ static const std::string VERSIONS_LOCKFILE = ".versions/.lock";
  * LWE cluster-wide right on GPFS. */
 
 const std::string mp_ns = "multipart";
-const std::string MP_OBJ_PART_PFX = "part-";
-const std::string MP_OBJ_HEAD_NAME = MP_OBJ_PART_PFX + "00000";
 const std::string NSFS_FOLDER_OBJECT_NAME = ".folder";
 
-/* multipart staging:  <bucket>/.multipart_<upload_id>/ holding
- * part-NNNNN plus .meta and .assembled (see DESIGN.md) */
-static const std::string MP_STAGING_PREFIX = ".multipart_";
-static const std::string MP_META_NAME = ".meta";
-static const std::string MP_ASSEMBLED_NAME = ".assembled";
+/* The multipart staging layout -- where an in-flight upload's parts live
+ * and what they are called -- now belongs to MPUStrategy (mpu_strategy.h),
+ * because it is the part of nsfs that has to differ from NooBaa's and,
+ * separately, has to differ on a filesystem which cannot share extents.
+ * See DESIGN.md. */
 static const std::string VERSIONS_LOCK_NAME = ".lock";
 
 /* Names this driver creates on disk which are not objects.  Listing
@@ -132,18 +130,42 @@ static const std::string VERSIONS_LOCK_NAME = ".lock";
  * ordinary object.  Hiding all of them is a client convention -- ls
  * filters, readdir(3) does not -- and a server which drops them from
  * the listing leaves a namespace a client cannot see or empty. */
-static bool is_reserved_name(std::string_view name)
+/* the names a layout contributes, or none.  Fetched once by a caller and
+ * held across its loop:  the virtual call belongs outside the readdir,
+ * not once per directory entry. */
+static const nsfs::ReservedNames& reserved_of(const nsfs::MPUStrategy* mpu)
+{
+  static const nsfs::ReservedNames none{};
+  return mpu ? mpu->reserved_names() : none;
+}
+
+static bool is_reserved_name(std::string_view name,
+			     const nsfs::ReservedNames& rn)
 {
   if ((name == HIDDEN_SHADOW_PATH) ||
       (name == HIDDEN_VERSIONS_PATH) ||
       (name == NSFS_FOLDER_OBJECT_NAME) ||
-      (name == MP_META_NAME) ||
-      (name == MP_ASSEMBLED_NAME) ||
       (name == VERSIONS_LOCK_NAME)) {
     return true;
   }
-  return name.starts_with(MP_STAGING_PREFIX) ||
-	 name.starts_with(nsfs::TMP_LINK_PREFIX) ||
+  /* the layout's own scaffolding, matched against its names rather than
+   * asked of it:  this runs per directory entry */
+  for (const auto& e : rn.exact) {
+    if (name == e) {
+      return true;
+    }
+  }
+  for (const auto& p : rn.prefixes) {
+    if (name.starts_with(p)) {
+      return true;
+    }
+  }
+  for (const auto& p : rn.staging_prefixes) {
+    if (name.starts_with(p)) {
+      return true;
+    }
+  }
+  return name.starts_with(nsfs::TMP_LINK_PREFIX) ||
 	 name.starts_with(nsfs::UNLINK_TMP_PREFIX) ||
 	 name.starts_with(nsfs::CLONE_PARENT_PREFIX);
 }
@@ -206,7 +228,8 @@ static bool dir_has_content(int parent_fd, const char* dname,
   return found;
 }
 
-static bool entry_is_content(int parent_fd, std::string_view name)
+static bool entry_is_content(int parent_fd, std::string_view name,
+			     const nsfs::ReservedNames& rn)
 {
   if (name == HIDDEN_VERSIONS_PATH) {
     /* version entries are user data;  the lock file is ours */
@@ -219,11 +242,13 @@ static bool entry_is_content(int parent_fd, std::string_view name)
   if (name == NSFS_FOLDER_OBJECT_NAME) {
     return true; /* the sentinel of a directory object */
   }
-  if (name.starts_with(MP_STAGING_PREFIX)) {
-    return true; /* an incomplete upload, as S3 has it */
+  for (const auto& p : rn.staging_prefixes) {
+    if (name.starts_with(p)) {
+      return true; /* an incomplete upload, as S3 has it */
+    }
   }
   /* remaining reserved names are scaffolding */
-  return !is_reserved_name(name);
+  return !is_reserved_name(name, rn);
 }
 
 /* See posix driver comment — object ownership is now read from the
@@ -1234,54 +1259,6 @@ static inline std::string bucket_fname(std::string name, std::optional<std::stri
   return name;
 }
 
-static int assemble_parts(const DoutPrefixProvider* dpp,
-                          FSStrategy* fs_strategy,
-                          int dir_fd,
-                          int num_parts,
-                          const std::string& output_name)
-{
-  int out_fd = openat(dir_fd, output_name.c_str(),
-                      O_WRONLY | O_CREAT | O_TRUNC, S_IRWXU);
-  if (out_fd < 0) {
-    int ret = errno;
-    ldpp_dout(dpp, 0) << "ERROR: could not create assembly file "
-                      << output_name << ": " << cpp_strerror(ret) << dendl;
-    return -ret;
-  }
-  auto close_out = make_scope_guard([out_fd] { ::close(out_fd); });
-
-  off_t out_offset = 0;
-  for (int i = 1; i <= num_parts; ++i) {
-    std::string part_name = MP_OBJ_PART_PFX + fmt::format("{:0>5}", i);
-    int part_fd = openat(dir_fd, part_name.c_str(), O_RDONLY);
-    if (part_fd < 0) {
-      int ret = errno;
-      ldpp_dout(dpp, 0) << "ERROR: could not open part " << part_name
-                        << ": " << cpp_strerror(ret) << dendl;
-      return -ret;
-    }
-    auto close_part = make_scope_guard([part_fd] { ::close(part_fd); });
-
-    struct statx stx;
-    int ret = statx(part_fd, "", AT_EMPTY_PATH, STATX_SIZE, &stx);
-    if (ret < 0) {
-      ret = errno;
-      return -ret;
-    }
-
-    ret = fs_strategy->copy_range(dpp, part_fd, 0, out_fd, out_offset,
-                                  stx.stx_size);
-    if (ret < 0) {
-      ldpp_dout(dpp, 0) << "ERROR: could not copy part " << part_name
-                        << ": " << cpp_strerror(-ret) << dendl;
-      return ret;
-    }
-    out_offset += stx.stx_size;
-  }
-
-  return 0;
-}
-
 static inline bool get_attr(Attrs& attrs, const char* name, bufferlist& bl)
 {
   auto iter = attrs.find(name);
@@ -1451,7 +1428,8 @@ static int remove_x_attr(const DoutPrefixProvider *dpp, optional_yield y,
 }
 
 static int delete_directory(int parent_fd, const char* dname, bool delete_children,
-		     const DoutPrefixProvider* dpp)
+		     const DoutPrefixProvider* dpp,
+		     const nsfs::ReservedNames& rn)
 {
   int ret;
   int dir_fd = -1;
@@ -1489,7 +1467,7 @@ static int delete_directory(int parent_fd, const char* dname, bool delete_childr
 
     /* scaffolding is removed with the directory;  content blocks the
      * removal unless the caller asked to recurse.  See entry_is_content. */
-    if (entry_is_content(dir_fd, entry->d_name) && !delete_children) {
+    if (entry_is_content(dir_fd, entry->d_name, rn) && !delete_children) {
       closedir(dir);
       return -ENOTEMPTY;
     }
@@ -1505,7 +1483,7 @@ static int delete_directory(int parent_fd, const char* dname, bool delete_childr
 
     if (S_ISDIR(stx.stx_mode)) {
       /* Recurse */
-      ret = delete_directory(dir_fd, entry->d_name, true, dpp);
+      ret = delete_directory(dir_fd, entry->d_name, true, dpp, rn);
       if (ret < 0) {
         closedir(dir);
         return ret;
@@ -1543,12 +1521,14 @@ namespace nsfs {
 
 FSEnt::FSEnt(std::string _name, Directory* _parent, CephContext* _ctx, FSStrategy* _strat)
   : fname(_name), parent(_parent), ctx(_ctx),
-    fs_strategy(_strat ? _strat : (_parent ? _parent->fs_strategy : nullptr))
+    fs_strategy(_strat ? _strat : (_parent ? _parent->fs_strategy : nullptr)),
+    mpu_strategy(_parent ? _parent->mpu_strategy : nullptr)
 {}
 
 FSEnt::FSEnt(std::string _name, Directory* _parent, struct statx& _stx, CephContext* _ctx, FSStrategy* _strat)
   : fname(_name), parent(_parent), exist(true), stx(_stx), stat_done(true), ctx(_ctx),
-    fs_strategy(_strat ? _strat : (_parent ? _parent->fs_strategy : nullptr))
+    fs_strategy(_strat ? _strat : (_parent ? _parent->fs_strategy : nullptr)),
+    mpu_strategy(_parent ? _parent->mpu_strategy : nullptr)
 {}
 
 int FSEnt::stat(const DoutPrefixProvider* dpp, bool force)
@@ -2241,7 +2221,8 @@ int Directory::stat(const DoutPrefixProvider* dpp, bool force)
 
 int Directory::remove(const DoutPrefixProvider* dpp, optional_yield y, bool delete_children)
 {
-  return delete_directory(parent->get_fd(), fname.c_str(), delete_children, dpp);
+  return delete_directory(parent->get_fd(), fname.c_str(), delete_children,
+			  dpp, reserved_of(mpu_strategy));
 }
 
 int Directory::write(int64_t ofs, bufferlist& bl, const DoutPrefixProvider* dpp,
@@ -2362,7 +2343,8 @@ int Directory::rename(const DoutPrefixProvider* dpp, optional_yield y, Directory
   if (S_ISREG(stx.stx_mode)) {
     ret = unlinkat(parent_fd, src_name.c_str(), 0);
   } else if (S_ISDIR(stx.stx_mode)) {
-    ret = delete_directory(parent_fd, src_name.c_str(), true, dpp);
+    ret = delete_directory(parent_fd, src_name.c_str(), true, dpp,
+			   reserved_of(mpu_strategy));
   }
   if (ret < 0) {
     ret = errno;
@@ -2416,10 +2398,11 @@ int Directory::copy(const DoutPrefixProvider *dpp, optional_yield y,
     return ret;
   }
 
-  ret = for_each(dpp, [this, &dest, &dpp, &y](const char* name) {
+  const auto& rn = reserved_of(mpu_strategy);
+  ret = for_each(dpp, [this, &dest, &dpp, &y, &rn](const char* name) {
     std::unique_ptr<FSEnt> sobj;
 
-    if (is_reserved_name(name)) {
+    if (is_reserved_name(name, rn)) {
       return 0;
     }
 
@@ -2489,10 +2472,13 @@ int Directory::fill_cache(const DoutPrefixProvider *dpp, optional_yield y,
                           fill_cache_cb_t &cb, uint32_t flags,
                           const std::string& path_prefix)
 {
-  int ret = for_each(dpp, [this, &cb, &dpp, &y, &path_prefix, flags](const char *name) {
+  const auto& rn = reserved_of(mpu_strategy);
+  int ret = for_each(dpp, [this, &cb, &dpp, &y, &path_prefix, flags,
+			   &rn](const char *name) {
     std::unique_ptr<FSEnt> ent;
 
-    if (is_reserved_name(name) && name != NSFS_FOLDER_OBJECT_NAME) {
+    if (is_reserved_name(name, rn) &&
+	name != NSFS_FOLDER_OBJECT_NAME) {
       return 0;
     }
 
@@ -2777,7 +2763,7 @@ int MPDirectory::stat(const DoutPrefixProvider* dpp, bool force)
     struct statx stx;
     std::string sname = name;
 
-    if (sname.rfind(MP_OBJ_PART_PFX, 0) != 0) {
+    if (! mpu_strategy->is_part_name(sname)) {
       /* Skip non-parts */
       return 0;
     }
@@ -2808,7 +2794,7 @@ int MPDirectory::stat(const DoutPrefixProvider* dpp, bool force)
 
 std::unique_ptr<File> MPDirectory::get_part_file(int partnum)
 {
-  std::string partname = MP_OBJ_PART_PFX + fmt::format("{:0>5}", partnum);
+  std::string partname = mpu_strategy->part_name(partnum);
   rgw_obj_key part_key(partname);
 
   return std::make_unique<File>(partname, this, ctx);
@@ -2944,6 +2930,11 @@ int NSFSDriver::initialize(CephContext *cct, const DoutPrefixProvider *dpp)
     << " fs strategy" << dendl;
   fs_strategy->set_shares_extents(nsfs::probe_shares_extents(dpp, base_path));
 
+  /* one implementation today;  the selection which will pick between this
+   * and a write-into-final-offset layout asks FSStrategy, because that is
+   * what decides whether assembling from per-part files is free */
+  mpu_strategy = std::make_unique<nsfs::RGWMPUStrategy>();
+
   /* ordered listing cache */
   bucket_cache.reset(
     new BucketCache(
@@ -2983,7 +2974,7 @@ int NSFSDriver::initialize(CephContext *cct, const DoutPrefixProvider *dpp)
 	  return;
 	}
 	for (auto& [num, pi] : parts) {
-	  auto fname = MP_OBJ_PART_PFX + fmt::format("{:0>5}", num);
+	  auto fname = mpu_strategy->part_name(num);
 	  int pfd = ::openat(dir_fd, fname.c_str(), O_RDWR);
 	  if (pfd < 0) continue;
 	  NSFSUploadPartInfo upi;
@@ -3012,6 +3003,7 @@ int NSFSDriver::initialize(CephContext *cct, const DoutPrefixProvider *dpp)
   user_cache.set_max_size(dpp, g_conf().get_val<uint64_t>("rgw_nsfs_cache_max_users"));
 
   root_dir = std::make_unique<Directory>(base_path, nullptr, ctx(), fs_strategy.get());
+  root_dir->set_mpu_strategy(mpu_strategy.get());
   ret = root_dir->open(dpp);
   if (ret < 0) {
     if (ret == -ENOTDIR) {
@@ -4577,8 +4569,9 @@ int NSFSBucket::read_stats(const DoutPrefixProvider *dpp, optional_yield y,
   auto& main = stats[RGWObjCategory::Main];
 
   // TODO: bucket stats shouldn't have to list all objects
-  return dir->for_each(dpp, [this, dpp, y, &main] (const char* name) {
-    if (is_reserved_name(name)) {
+  const auto& rn = reserved_of(driver->get_mpu_strategy());
+  return dir->for_each(dpp, [this, dpp, y, &main, &rn] (const char* name) {
+    if (is_reserved_name(name, rn)) {
       return 0;
     }
 
@@ -4676,9 +4669,10 @@ int NSFSBucket::write_attrs(const DoutPrefixProvider* dpp, optional_yield y)
 int NSFSBucket::check_empty(const DoutPrefixProvider* dpp, optional_yield y)
 {
   int bucket_fd = dir->get_fd();
-  return dir->for_each(dpp, [bucket_fd](const char* name) {
+  const auto& rn = reserved_of(driver->get_mpu_strategy());
+  return dir->for_each(dpp, [bucket_fd, &rn](const char* name) {
     /* for_each filters out "." and ".." */
-    if (entry_is_content(bucket_fd, name)) {
+    if (entry_is_content(bucket_fd, name, rn)) {
       return -ENOTEMPTY;
     }
     return 0;
@@ -8300,7 +8294,7 @@ std::unique_ptr<rgw::sal::Object> NSFSMultipartUpload::get_meta_obj()
 
   load(nullptr);
 
-  static const std::string& meta_name = MP_META_NAME;
+  const std::string meta_name = driver->get_mpu_strategy()->meta_name();
   if (!shadow) {
     meta_obj = bucket->get_object(rgw_obj_key(get_meta(), std::string(), mp_ns));
   } else {
@@ -8400,15 +8394,11 @@ int NSFSMultipartUpload::list_parts(const DoutPrefixProvider *dpp, CephContext *
       dir->for_each(dpp,
 	[&](const char* name) -> int {
 	  std::string sname(name);
-	  if (!sname.starts_with(MP_OBJ_PART_PFX)) {
+	  auto parsed = driver->get_mpu_strategy()->part_number(sname);
+	  if (!parsed) {
 	    return 0;
 	  }
-	  uint32_t pnum = 0;
-	  try {
-	    pnum = std::stoul(sname.substr(MP_OBJ_PART_PFX.length()));
-	  } catch (...) {
-	    return 0;
-	  }
+	  const uint32_t pnum = *parsed;
 	  if (pm.contains(pnum)) {
 	    return 0;
 	  }
@@ -8622,9 +8612,10 @@ int NSFSMultipartUpload::complete(const DoutPrefixProvider *dpp,
   int staging_fd = shadow->get_dir()->get_fd();
 
   // assemble parts into a single file
-  std::string assembled_name = MP_ASSEMBLED_NAME;
-  ret = assemble_parts(dpp, driver->get_fs_strategy(), staging_fd,
-                       total_parts, assembled_name);
+  std::string assembled_name = driver->get_mpu_strategy()->assembled_name();
+  ret = driver->get_mpu_strategy()->assemble(dpp, driver->get_fs_strategy(),
+					    staging_fd, total_parts,
+					    assembled_name);
   if (ret < 0) {
     return ret;
   }
@@ -8852,7 +8843,8 @@ int NSFSMultipartUpload::complete(const DoutPrefixProvider *dpp,
   }
   shadow->get_dir()->close();
   delete_directory(pb->get_dir()->get_fd(),
-                   get_fname().c_str(), true, dpp);
+                   get_fname().c_str(), true, dpp,
+                   reserved_of(driver->get_mpu_strategy()));
 
   // update bucket cache
   target_obj->set_obj_size(ofs);
@@ -8927,7 +8919,7 @@ int NSFSMultipartUpload::get_info(const DoutPrefixProvider *dpp, optional_yield 
 
 std::string NSFSMultipartUpload::get_fname()
 {
-  return "." + mp_ns + "_" + mp_obj.upload_id;
+  return driver->get_mpu_strategy()->staging_dir_name(mp_obj.upload_id);
 }
 
 std::unique_ptr<Writer> NSFSMultipartUpload::get_writer(
@@ -8939,7 +8931,7 @@ std::unique_ptr<Writer> NSFSMultipartUpload::get_writer(
 				  uint64_t part_num,
 				  const std::string& part_num_str)
 {
-  std::string fname = MP_OBJ_PART_PFX + fmt::format("{:0>5}", part_num);
+  std::string fname = driver->get_mpu_strategy()->part_name(part_num);
   rgw_obj_key part_key(fname);
 
   load(dpp);
