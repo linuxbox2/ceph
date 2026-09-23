@@ -129,7 +129,12 @@ namespace {
 
   /* can a rename actually move the name, or will it be emulated by
    * copy-and-delete in RGWLibFS::rename?  Both are correct;  they differ in
-   * what survives, which is what the rename tests are about. */
+   * what survives, which is what the rename tests are about.
+   *
+   * False also when the profile is unknown, which is safe for a caller
+   * that skips on false and WRONG for one that asserts the other
+   * behaviour:  a driver which does not answer the hint may well move
+   * names.  Such a caller must test fs_profile.known first. */
   bool moves_names() {
     return fs_profile.known && fs_profile.can_rename &&
 	   fs_profile.rename_enabled;
@@ -381,7 +386,7 @@ static void load_fs_profile(const DoutPrefixProvider* dpp)
   std::map<std::string, std::string> out;
   auto* driver = rgw::g_rgwlib->get_driver();
 
-  int ret = driver->driver_hint(dpp, "fs-capabilities", {}, &out);
+  int ret = driver->driver_hint(dpp, "fs-features", {}, &out);
   if (ret != 0) {
     std::cout << "[          ] fs profile: unavailable (" << ret
 	      << ");  capability-dependent tests will skip" << std::endl;
@@ -1208,6 +1213,10 @@ TEST(OPEN2, SHADOW_COW_FAILURE_LEAVES_NO_TEMP)
  * rather than asserting a zero it would never see. */
 TEST(OPEN2, BUFFERED_COPY_MATCHES_COPY_FILE_RANGE)
 {
+  if (! fs_profile.known) {
+    GTEST_SKIP() << "no fs profile;  cannot say which path a copy should "
+		    "take";
+  }
   const DoutPrefix dp(g_ceph_context, dout_subsys, "write2 test: ");
   const std::string name{"sb-bufcopy"};
   (void) rgw_unlink(fs, bucket_fh, name.c_str(), RGW_UNLINK_FLAG_NONE);
@@ -1236,10 +1245,6 @@ TEST(OPEN2, BUFFERED_COPY_MATCHES_COPY_FILE_RANGE)
    * path, the hint changes nothing, and both arms must account for every
    * byte.  Asserting zero there would fail for the right reason and read
    * like a regression. */
-  if (! fs_profile.known) {
-    GTEST_SKIP() << "no fs profile;  cannot say which path a copy should "
-		    "take";
-  }
   const bool shares = fs_profile.shares_extents;
 
   for (bool buffered : {true, false}) {
@@ -3979,6 +3984,10 @@ TEST(OPEN2, RENAME_PRESERVES_INODE)
     GTEST_SKIP() << "not a filesystem-backed driver";
   }
   const std::string src{"rn-src4"}, dst{"rn-dst4"};
+  if (! fs_profile.known) {
+    GTEST_SKIP() << "no fs profile;  a driver which does not report cannot "
+		    "be assumed to be one which cannot move names";
+  }
   ASSERT_EQ(rn_make(bucket_fh, src, "same inode please"), 0);
 
   const ino_t before = rn_ino(rn_path(bucket_name, src));
@@ -4205,6 +4214,10 @@ TEST(OPEN2, RENAME_VERSIONED_MOVES_HISTORY)
   }
   const DoutPrefix dp(g_ceph_context, dout_subsys, "write2 test: ");
   const std::string src{"rnv-src1"}, dst{"rnv-dst1"};
+  if (! fs_profile.known) {
+    GTEST_SKIP() << "no fs profile;  a driver which does not report cannot "
+		    "be assumed to be one which cannot move names";
+  }
 
   /* two publishes:  one current plus one non-current */
   ASSERT_EQ(rn_make(ver_bucket_fh, src, "first"), 0);

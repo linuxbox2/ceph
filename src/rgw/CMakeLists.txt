@@ -593,6 +593,7 @@ set(rgw_a_srcs
   rgw_process.cc
   rgw_realm_reloader.cc
   rgw_rest_config.cc
+  rgw_rest_features.cc
   rgw_rest_info.cc
   rgw_rest_dedup.cc
   rgw_rest_metadata.cc

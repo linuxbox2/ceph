@@ -9326,6 +9326,34 @@ std::unique_ptr<LCSerializer> NSFSLifecycle::get_serializer(const std::string& l
   return std::make_unique<LCNSFSSerializer>(driver, oid, lock_name, cookie);
 }
 
+void NSFSDriver::get_features(std::map<std::string, std::string>& features)
+{
+  /* Each of these is something the driver knows and a client cannot work
+   * out without reading a failed operation as a defect.  Meanings, since
+   * this is where these names are first defined:
+   *
+   *   fsio            the driver implements the FSIO interfaces -- rgw_open2
+   *                   and the shadow model.  A suite written against them
+   *                   is testing nothing on a driver which answers no.
+   *   strategy        which FSStrategy was selected by probing at startup.
+   *   can_rename      a rename moves the name.  When false, RGWLibFS::rename
+   *                   emulates it by copy-and-delete, so the object does not
+   *                   keep its inode and history does not move.
+   *   rename_enabled  rgw_nsfs_enable_rename;  the same outcome by config
+   *                   rather than by backend.
+   *   shares_extents  copy_file_range clones rather than copies, measured
+   *                   at mount.  When false a copy costs its own size. */
+  features["fsio"] = "true";
+  if (fs_strategy) {
+    features["strategy"] = fs_strategy->name();
+    features["can_rename"] = fs_strategy->can_rename() ? "true" : "false";
+    features["shares_extents"] =
+      fs_strategy->shares_extents() ? "true" : "false";
+  }
+  features["rename_enabled"] =
+    ctx()->_conf->rgw_nsfs_enable_rename ? "true" : "false";
+}
+
 void NSFSDriver::register_admin_apis(RGWRESTMgr* mgr)
 {
   mgr->register_resource("user", new RGWRESTMgr_User);
@@ -9408,27 +9436,14 @@ int NSFSDriver::driver_hint(const DoutPrefixProvider* dpp,
     return 0;
   }
 
-  if (hint == "fs-capabilities") {
-    /* What this deployment can do, asked once so that a test states its
-     * expectations as a function of the backend rather than carrying a list
-     * of names known to fail somewhere.  Read-only:  no params.
-     *
-     * Every value here is something the driver already knows and a test
-     * cannot reliably work out for itself -- can_rename is a strategy
-     * decision, and extent sharing was measured at mount. */
+  if (hint == "fs-features") {
+    /* the same set GET /admin/features reports, for a test which holds the
+     * driver rather than a socket */
     if (! out) {
       return -EINVAL;
     }
-    if (! fs_strategy) {
-      return -EINVAL;
-    }
-    (*out)["strategy"] = fs_strategy->name();
-    (*out)["can_rename"] = fs_strategy->can_rename() ? "true" : "false";
-    (*out)["shares_extents"] =
-      fs_strategy->shares_extents() ? "true" : "false";
-    (*out)["rename_enabled"] =
-      ctx()->_conf->rgw_nsfs_enable_rename ? "true" : "false";
-    return 0;
+    get_features(*out);
+    return out->empty() ? -EINVAL : 0;
   }
 
   if (hint == "inject-buffered-copy") {
