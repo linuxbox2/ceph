@@ -94,7 +94,7 @@ they may reappear.
 | Content-Encoding | `user.noobaa.content_encoding` | `user.nsfs.rgw.content_encoding` | same divergence |
 | Version ID | `user.noobaa.version_id` | `user.nsfs.version_id` | NooBaa: string; Ceph: encoded |
 | Delete marker | `user.noobaa.delete_marker` | `user.nsfs.delete_marker` | NooBaa: string; Ceph: encoded |
-| Dir content | `user.noobaa.dir_content` | N/A (we use `.folder` sentinel differently) | — |
+| Dir content | `user.noobaa.dir_content` (marker *in addition to* `.folder`) | N/A | see section 1.1 -- the sentinel is shared, this marker is not |
 | Object tags | `user.noobaa.tag.<tagkey>` (one per tag) | `user.nsfs.rgw.x-amz-tagging` (single blob) | completely different structure |
 | Legal hold | `user.noobaa.legal_hold` | `user.nsfs.rgw.obj-legal-hold-status` | different key and encoding |
 | Retention mode | `user.noobaa.retention_mode` | `user.nsfs.rgw.obj-retention` | different key and encoding |
@@ -142,6 +142,67 @@ for sideloaded files, matching NooBaa's precedence.
 **Corrective action:** Audit all `synthesize_etag` call sites in cache
 population paths (`fill_cache`, `add_entry` in multipart complete, copy,
 versioned demote) and prefer the xattr-stored etag when available.
+
+---
+
+## 1.1 Object naming
+
+Not previously covered here, and it is where the next round of work lands,
+so it is recorded with a decision per row.
+
+**Ordinary keys are already identical.**  A key which does not begin with
+`_`, does not end in `/` and carries no namespace is stored verbatim by
+both, byte for byte.  That is the overwhelming majority of objects.
+
+**Leading underscore — we diverge, and ours is the accident.**
+`get_key_fname()` goes through `rgw_obj_key::get_index_key_name()`
+(`rgw_obj_types.h:192`), which doubles a leading underscore:  the key
+`_foo` becomes the file `__foo`, where NooBaa writes `_foo`.  The doubling
+exists because a rados bucket index shares a keyspace with entries spelled
+`_<ns>_<name>`, so a key beginning `_` would collide.  A directory has no
+such keyspace, so on a filesystem it buys nothing and makes the object
+misnamed to the other gateway.
+
+It is symmetric -- `parse_raw_oid()` (`rgw_obj_types.h:285`) undoes it --
+and that symmetry is load-bearing:  writing `_foo` bare while still
+parsing with `parse_raw_oid()` would send `_foo_bar` down the namespace
+branch and mis-split it into namespace `foo`, name `bar`.  Both halves
+have to change together, which is why they now live on one object
+(`PathStrategy`).
+
+**Decided 2026-09-23:  drop the doubling for nsfs, in favour of NooBaa
+compatibility.**  Nothing is in the field.  Scoped to
+`src/rgw/driver/nsfs/`;  the posix driver keeps its own naming and is not
+touched.
+
+**Directory objects — we already agree, except when empty.**  An earlier
+revision of this document said we "use the `.folder` sentinel
+differently".  That is wrong.  NooBaa uses the same sentinel with the same
+spelling:  `config.NSFS_FOLDER_OBJECT_NAME = '.folder'` (`config.js:848`),
+appended to any key ending in `/` (`namespace_fs.js:2662`), and stripped
+back off in listings (`:944`).  A `.folder` we write is listed correctly
+by NooBaa.
+
+The real divergence is one optimization.  `XATTR_DIR_CONTENT` is an
+*additional* marker on the directory holding the content length, and for
+an **empty** directory object with versioning disabled
+`_create_empty_dir_content()` writes the metadata as xattrs on the
+directory and then unlinks `.folder`.  When the marker is not `'0'` the
+content is read from `.folder`, as we do.
+
+So the asymmetry is one-way:  NooBaa's empty directory object has no
+sentinel and is invisible to us;  ours keeps a zero-length `.folder` and
+stays visible to them.
+
+**Decided 2026-09-23:  follow NooBaa.**  Recognising
+`user.noobaa.dir_content` on read is what stops an empty directory object
+being invisible, and is separable from whether we adopt the
+unlink-on-empty behaviour on write -- that second half is the only part
+which changes what we produce.
+
+**Namespaced keys** (`_<ns>_<name>`, prefixed with `.`) are multipart
+staging metadata.  They belong to `MPUStrategy`, whose divergence is
+section 2.
 
 ---
 
