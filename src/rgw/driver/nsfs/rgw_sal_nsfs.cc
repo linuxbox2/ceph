@@ -3450,7 +3450,11 @@ int NSFSDriver::list_buckets(const DoutPrefixProvider* dpp, const rgw_owner& own
     }
     RGWBucketEnt ent;
     ent.bucket.name = entry->d_name;
-    ent.creation_time = ceph::real_clock::from_time_t(stx.stx_btime.tv_sec);
+    /* from the bucket we just loaded, not from stx_btime again:  the
+     * birth time is optional and a filesystem which does not report it
+     * -- GPFS -- leaves it zeroed, and load_bucket() has already decided
+     * what this bucket's creation time is. */
+    ent.creation_time = bucket->get_creation_time();
     // TODO: ent.size and ent.count
 
     result.buckets.push_back(std::move(ent));
@@ -4512,7 +4516,17 @@ int NSFSBucket::load_bucket(const DoutPrefixProvider* dpp, optional_yield y)
   }
 
   mtime = ceph::real_clock::from_time_t(dir->get_stx().stx_mtime.tv_sec);
-  info.creation_time = ceph::real_clock::from_time_t(dir->get_stx().stx_btime.tv_sec);
+
+  /* STATX_BTIME is optional and a filesystem which does not report it
+   * leaves stx_btime zeroed rather than saying so -- GPFS is one, and a
+   * bucket there listed with a creation date of the epoch.  Consult the
+   * mask, and fall back to mtime, which is wrong but plausible;  this is
+   * only a seed for a tree we did not create, since the authoritative
+   * value arrives with the stored RGWBucketInfo below. */
+  const auto& bstx = dir->get_stx();
+  info.creation_time = ceph::real_clock::from_time_t(
+    (bstx.stx_mask & STATX_BTIME) ? bstx.stx_btime.tv_sec
+				  : bstx.stx_mtime.tv_sec);
 
   ret = dir->open(dpp);
   if (ret < 0) {
