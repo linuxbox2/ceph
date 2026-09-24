@@ -13,6 +13,66 @@ The focus is on **multipart upload** state, where the divergence is
 most consequential for in-flight operations, but the xattr and encoding
 divergence affects all objects.
 
+## Which NooBaa this describes
+
+Every claim here about NooBaa's behaviour was read from **noobaa-core
+`68ca22d33` (master, 2026-05-27)**, checked out at
+`~/dev/noobaa-core`.  Cite that revision, not "NooBaa", when relying on
+anything below.
+
+This matters more than it usually would.  NooBaa is under active
+development, and Spectrum Scale has its own aspiration toward
+high-fidelity S3 -- so the claims most likely to go stale are precisely
+the ones this document uses to describe what NooBaa *cannot* do:  that it
+has no owner record, no S3 ACL vocabulary, and stores no part count or
+part sizes on a completed object.  Absences are what a fidelity PR fills
+in.  The on-disk conventions in the other direction -- the `.folder`
+sentinel, the version path layout, the staging tree -- have data written
+in that shape in the field and are far less likely to move.
+
+Re-read the revision before treating an absence here as a design
+premise.
+
+### Upstream survey, 2026-09-24
+
+`origin/master` is **377 commits** ahead of our snapshot and its head is
+one day old.  What that changed, for the claims here:
+
+**The xattr key set is unchanged.**  The only difference between
+`68ca22d33` and `origin/master` in the constants block is a refactor
+introducing `XATTR_RETENTION_PREFIX`, which yields the same two retention
+keys.  No ACL, owner, or part-count attribute has appeared.  So the
+absences this document relies on still hold in merged code.
+
+**But fidelity is actively being closed**, in exactly those areas:
+object lock (#9881, #9896, #10051), bucket policy and ARNs (#10052),
+conditional request metadata (`eadecc66e`), and MPU error semantics --
+`a91d56f99` makes CompleteMultipartUpload surface InvalidPart rather than
+InternalError, which is the same conformance point we were failing until
+`7331428e9c3`.  Treat "NooBaa cannot" as a statement with a date on it.
+
+**#10049 does NOT affect us**, despite its title.  "MPU performance
+improvement - Defer parts DB ops" touches `object_services/*` and
+`md_store.js` -- the containerized metadata store -- and not
+`namespace_fs.js`.  The NSFS staging layout section 2 describes is
+unaffected, and S5's target does not move.
+
+**#10071 is the one to read.**  "Implement atomic if-none-match for POSIX
+and GPFS" changes `namespace_fs.js` to publish with
+`linkfileat(..., should_not_override=true)`, so a put-if-absent fails
+with EEXIST instead of racing, and it ships a five-writer concurrency
+test.  It also *removes* entries from the Ceph s3-tests pending lists --
+NooBaa measures NSFS fidelity against the same suite we do.
+
+That last one reflects back on us.  `FSStrategy::link_temp_file()`
+publishes with `gpfs_linkat(AT_EMPTY_PATH)`, which atomically *replaces*;
+we have no link-if-absent variant on the publish path, and
+`GPFSStrategy::clone_file(excl)` still does faccessat-then-act, which its
+own comment admits narrows the race without closing it.  We already bind
+and use `gpfs_linkatif` for CAS links (`fs_strategy.cc:689`), so the
+primitive is in hand.  Whether our If-None-Match path has the race they
+are closing is worth checking directly.
+
 ---
 
 ## 1. xattr namespace and encoding
