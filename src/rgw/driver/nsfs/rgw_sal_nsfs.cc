@@ -1261,8 +1261,14 @@ static inline bool get_attr(Attrs& attrs, const char* name, bufferlist& bl)
   return true;
 }
 
+/* Returns TRUE on success, like get_attr() above -- not an errno.
+ * Four callers once tested it as an int:  one inverted the sense and
+ * discarded every part's metadata read from disk, and three wrote
+ * `if (ret < 0)`, which a bool never satisfies, so their failure
+ * handling was dead code and a failed decode read as success with a
+ * default-constructed result. */
 template <typename F>
-static bool decode_attr(Attrs &attrs, const char *name, F &f) {
+[[nodiscard]] static bool decode_attr(Attrs &attrs, const char *name, F &f) {
   bufferlist bl;
   if (!get_attr(attrs, name, bl)) {
     return false;
@@ -2432,7 +2438,7 @@ int Directory::get_ent(const DoutPrefixProvider *dpp, optional_yield y, const st
     if (tmpfd >= 0) {
       ret = get_x_attrs(y, dpp, tmpfd, attrs, name, xattr_strategy);
       if (ret >= 0) {
-        decode_attr(attrs, RGW_NSFS_ATTR_OBJECT_TYPE, type);
+        (void) decode_attr(attrs, RGW_NSFS_ATTR_OBJECT_TYPE, type);
       }
       ::close(tmpfd);
     }
@@ -4526,8 +4532,7 @@ int NSFSBucket::load_bucket(const DoutPrefixProvider* dpp, optional_yield y)
 
   RGWBucketInfo bak_info = info;;
   const char* bi_key = driver->get_xattr_strategy()->bucket_info_key();
-  ret = decode_attr(attrs, bi_key, info);
-  if (ret < 0) {
+  if (!decode_attr(attrs, bi_key, info)) {
     // TODO dang: fake info up (UID to owner conversion?)
     info = bak_info;
   } else {
@@ -8261,10 +8266,9 @@ int NSFSMultipartPart::load(const DoutPrefixProvider* dpp, optional_yield y,
     return ret;
   }
 
-  ret = decode_attr(attrs, RGW_NSFS_ATTR_MPUPLOAD, info);
-  if (ret < 0) {
+  if (!decode_attr(attrs, RGW_NSFS_ATTR_MPUPLOAD, info)) {
     ldpp_dout(dpp, 0) << "ERROR: " << __func__ << ": failed to decode part info: " << key << dendl;
-    return ret;
+    return -EIO;
   }
 
   return 0;
@@ -8416,7 +8420,7 @@ int NSFSMultipartUpload::list_parts(const DoutPrefixProvider *dpp, CephContext *
 	  Attrs attrs;
 	  if (pf->read_attrs(dpp, y, attrs) == 0) {
 	    NSFSUploadPartInfo upi;
-	    if (decode_attr(attrs, RGW_NSFS_ATTR_MPUPLOAD, upi) == 0) {
+	    if (decode_attr(attrs, RGW_NSFS_ATTR_MPUPLOAD, upi)) {
 	      pi.etag = std::move(upi.etag);
 	      pi.mtime = upi.mtime;
 	      pi.cksum = std::move(upi.cksum);
@@ -8897,11 +8901,10 @@ int NSFSMultipartUpload::get_info(const DoutPrefixProvider *dpp, optional_yield 
                           << get_key() << dendl;
         return ret;
       }
-      ret = decode_attr(meta_obj->get_attrs(), RGW_NSFS_ATTR_MPUPLOAD, mp_obj);
-      if (ret < 0) {
+      if (!decode_attr(meta_obj->get_attrs(), RGW_NSFS_ATTR_MPUPLOAD, mp_obj)) {
 	ldpp_dout(dpp, 0) << " ERROR: could not get meta object attrs for mp upload "
 	  << get_key() << dendl;
-	return ret;
+	return -EIO;
       }
     }
     *rule = &mp_obj.upload_info.dest_placement;
