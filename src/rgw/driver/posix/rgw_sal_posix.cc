@@ -893,7 +893,7 @@ int File::remove(const DoutPrefixProvider* dpp, optional_yield y, bool delete_ch
   return 0;
 }
 
-int File::link_temp_file(const DoutPrefixProvider *dpp, optional_yield y, std::string temp_fname)
+int File::link_temp_file(const DoutPrefixProvider *dpp, optional_yield y, std::string temp_fname, bool excl)
 {
   if (fd < 0) {
     return 0;
@@ -902,6 +902,25 @@ int File::link_temp_file(const DoutPrefixProvider *dpp, optional_yield y, std::s
   char temp_file_path[PATH_MAX];
   // Only works on Linux - Non-portable
   snprintf(temp_file_path, PATH_MAX,  "/proc/self/fd/%d", fd);
+
+  if (excl) {
+    /* Publish only if the name is free.  linkat(2) cannot replace, which
+     * is why the ordinary path below links to a temp name and renames --
+     * and exactly why If-None-Match: * wants this one instead.  Deciding
+     * from an earlier stat and then replacing lets two writers both find
+     * the name free and both succeed. */
+    int eret = linkat(AT_FDCWD, temp_file_path, parent->get_fd(),
+		      get_name().c_str(), AT_SYMLINK_FOLLOW);
+    if (eret < 0) {
+      eret = errno;
+      if (eret != EEXIST) {
+	ldpp_dout(dpp, 0) << "ERROR: exclusive linkat for temp file: "
+	  << cpp_strerror(eret) << dendl;
+      }
+      return -eret;
+    }
+    return stat(dpp);
+  }
 
   int ret = linkat(AT_FDCWD, temp_file_path, parent->get_fd(), temp_fname.c_str(), AT_SYMLINK_FOLLOW);
   if(ret < 0) {
@@ -1048,7 +1067,7 @@ int Directory::read(int64_t ofs, int64_t left, bufferlist &bl,
 }
 
 int Directory::link_temp_file(const DoutPrefixProvider *dpp, optional_yield y,
-                              std::string temp_fname)
+                              std::string temp_fname, bool excl)
 {
   return -EINVAL;
 }
@@ -1468,7 +1487,7 @@ int MPDirectory::read(int64_t ofs, int64_t left, bufferlist &bl,
 }
 
 int MPDirectory::link_temp_file(const DoutPrefixProvider *dpp, optional_yield y,
-                                std::string temp_fname)
+                                std::string temp_fname, bool excl)
 {
   if (tmpname.empty()) {
     return 0;
@@ -1784,7 +1803,7 @@ int VersionedDirectory::read(int64_t ofs, int64_t left, bufferlist &bl,
 }
 
 int VersionedDirectory::link_temp_file(const DoutPrefixProvider *dpp, optional_yield y,
-                              std::string temp_fname)
+                              std::string temp_fname, bool excl)
 {
   if (!cur_version)
     return -EINVAL;
@@ -4903,10 +4922,10 @@ int POSIXObject::open(const DoutPrefixProvider* dpp, bool create, bool temp_file
   return ent->open(dpp);
 }
 
-int POSIXObject::link_temp_file(const DoutPrefixProvider *dpp, optional_yield y)
+int POSIXObject::link_temp_file(const DoutPrefixProvider *dpp, optional_yield y, bool excl)
 {
   std::string temp_fname = gen_temp_fname();
-  int ret = ent->link_temp_file(dpp, y, temp_fname);
+  int ret = ent->link_temp_file(dpp, y, temp_fname, excl);
   if (ret < 0)
     return ret;
 
@@ -6138,6 +6157,13 @@ int POSIXAtomicWriter::complete(size_t accounted_size, const std::string& etag,
       }
     }
   }
+  /* If-None-Match: * is decided by the publish, not here.  `exists` came
+   * from a stat taken before the attributes were written, so two writers
+   * can both see the name free;  the exclusive link below is what makes
+   * exactly one of them win.  This check is kept so the uncontended case
+   * fails before doing the work. */
+  const bool excl_publish = if_nomatch && (strcmp(if_nomatch, "*") == 0);
+
   if (if_nomatch) {
     if (strcmp(if_nomatch, "*") == 0) {
       if (exists) {
@@ -6164,7 +6190,11 @@ int POSIXAtomicWriter::complete(size_t accounted_size, const std::string& etag,
     return ret;
   }
 
-  ret = obj->link_temp_file(rctx.dpp, rctx.y);
+  ret = obj->link_temp_file(rctx.dpp, rctx.y, excl_publish);
+  if (ret == -EEXIST && excl_publish) {
+    /* somebody else took the name between the check above and the link */
+    return -ERR_PRECONDITION_FAILED;
+  }
   if (ret < 0) {
     ldpp_dout(dpp, 20) << "ERROR: POSIXAtomicWriter failed writing temp file" << dendl;
     return ret;
