@@ -266,6 +266,71 @@ section 2.
 
 ---
 
+## 1.2 Bucket-level state lives outside the tree
+
+Sections 1 and 1.1 are about objects.  Bucket-level state is a different
+problem, and the more consequential one.
+
+**NooBaa keeps all of it in a config store, not in the data tree.**  The
+NC bucket record (`src/server/system_services/schemas/nsfs_bucket_schema.js`)
+holds:
+
+    owner_account, bucket_owner, tag, versioning, path, creation_date,
+    s3_policy, encryption, website, force_md5_etag, logging,
+    lifecycle_configuration_rules, notifications, object_lock_configuration
+
+That is a JSON file under their config directory, read, parsed and
+schema-validated per access by `config_fs.js`.  In the non-containerized
+deployment -- the one Scale ships -- it is not a serialization of
+anything;  it IS the runtime representation.  Containerized NooBaa uses
+PostgreSQL instead, through `system_store.js`.
+
+**We keep the same facts in `user.nsfs.bucket_info` and the bucket
+directory's attributes**, which is why our tree is self-describing and
+theirs is not:  move a NooBaa bucket's path and it is separated from its
+own configuration, while ours travels with the directory.
+
+**The consequence for a NooBaa-format bucket.**  Our S3 interface has no
+*feature* deficit -- RGW-on-nsfs implements versioning, bucket policy,
+lifecycle, notifications and object lock, and the suites exercise them.
+The deficit is that on an unmarked tree there is nowhere to put any of
+it.  It is not a list of missing features;  it is the whole bucket-level
+surface, unreachable for want of a place to write.  Object-level state
+is the opposite case:  retention, legal hold, tags, content type and
+etag are xattrs on both sides, so they are a naming-and-encoding problem
+the strategies can solve.
+
+So serving an unmarked bucket faithfully requires reading their config
+store, and handing a tree back requires writing it.  That adapter, not
+the strategies, is the real cost of the unmarked profile.  It is a
+migration-lifetime adapter and not an architecture:  RGW has durable,
+transactional metadata on every backend already, and a second store for
+the same facts is the one-fact-in-two-places failure this document keeps
+finding.
+
+## 1.3 S3 Vectors:  same engine, different binding
+
+Both projects are building S3 Vectors, and both embed **LanceDB** --
+noobaa-core carries `@lancedb/lancedb` as a direct dependency with a REST
+surface under `src/endpoint/vector/` and its own
+`nsfs_vector_bucket_schema` in the config store.  Earlier reading
+suggested they intended a passthrough to other implementations;  current
+master does not do that.
+
+The difference is where the facility lives.  RGW embeds LanceDB in the
+gateway, converged and resident on whichever backend the instance runs.
+A NooBaa vector bucket is bound to a namespace store -- there is a commit
+preventing deletion of an NSS while a vector bucket uses it.
+
+Two things follow.  Whether the two write compatible Lance datasets is a
+concrete question nobody has looked at, and it belongs in this document
+once someone does.  And a vector bucket writes structures plain NSFS
+knows nothing about, which makes it a marked-profile feature by
+construction -- a whole bucket *type* rather than an extra file beside an
+object, and a better argument for the marker than the shadow tree is.
+
+---
+
 ## 2. Multipart staging directory layout
 
 ### Directory structure comparison
