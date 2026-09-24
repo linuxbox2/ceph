@@ -71,30 +71,12 @@ const int64_t READ_SIZE = 128 * 1024;
 // required alignment for O_DIRECT reads/writes (rgw_nsfs_direct_io)
 const int64_t DIRECT_IO_ALIGN = 4096;
 
-static const std::string NSFS_XATTR_PREFIX = "user.nsfs.";
-static const std::string NSFS_RGW_XATTR_PREFIX = "user.nsfs.rgw.";
-static const std::string RGW_ATTR_PFX = "user.rgw.";
+/* The on-disk spelling of an attribute, and which attributes are ours to
+ * read at all, belong to XattrStrategy (xattr_strategy.h). */
 
-static inline std::string make_xattr_name(const std::string& key) {
-  if (key.compare(0, RGW_ATTR_PFX.size(), RGW_ATTR_PFX) == 0) {
-    return NSFS_RGW_XATTR_PREFIX + key.substr(RGW_ATTR_PFX.size());
-  }
-  return NSFS_XATTR_PREFIX + key;
-}
-
-static inline bool parse_xattr_name(const std::string& xattr, std::string& key) {
-  if (xattr.compare(0, NSFS_RGW_XATTR_PREFIX.size(), NSFS_RGW_XATTR_PREFIX) == 0) {
-    key = RGW_ATTR_PFX + xattr.substr(NSFS_RGW_XATTR_PREFIX.size());
-    return true;
-  }
-  if (xattr.compare(0, NSFS_XATTR_PREFIX.size(), NSFS_XATTR_PREFIX) == 0) {
-    key = xattr.substr(NSFS_XATTR_PREFIX.size());
-    return true;
-  }
-  return false;
-}
-
-#define RGW_NSFS_ATTR_BUCKET_INFO "bucket_info"
+/* the bucket_info attribute's name is XattrStrategy::bucket_info_key();
+ * both formats answer it the same way, and the method exists so that the
+ * decision is stated once */
 #define RGW_NSFS_ATTR_MPUPLOAD "mp_upload"
 #define RGW_NSFS_ATTR_OBJECT_TYPE "object_type"
 #define RGW_NSFS_ATTR_MULTIPART_PART_COUNT "multipart_part_count"
@@ -324,10 +306,10 @@ static bool nsfs_parse_version_id(const std::string& version_id,
          from_base36(ino_str, info.ino);
 }
 
-static bool is_null_version_fd(int fd)
+static bool is_null_version_fd(int fd, const nsfs::XattrStrategy* xs)
 {
   char buf[256];
-  std::string vid_xattr = NSFS_XATTR_PREFIX + RGW_NSFS_ATTR_VERSION_ID;
+  std::string vid_xattr = xs->disk_name(RGW_NSFS_ATTR_VERSION_ID);
   ssize_t len = ::fgetxattr(fd, vid_xattr.c_str(), buf, sizeof(buf));
   if (len <= 0) {
     return true;
@@ -342,10 +324,10 @@ static bool is_null_version_fd(int fd)
  * contains dashes, which S3 SDKs read as "multipart, do not validate", so
  * the disagreement silently disables the client's integrity check rather
  * than merely looking untidy. */
-static std::string etag_from_fd(int fd)
+static std::string etag_from_fd(int fd, const nsfs::XattrStrategy* xs)
 {
   char buf[128];
-  std::string xattr = make_xattr_name(RGW_ATTR_ETAG);
+  std::string xattr = xs->disk_name(RGW_ATTR_ETAG);
   ssize_t len = ::fgetxattr(fd, xattr.c_str(), buf, sizeof(buf));
   if (len <= 0) {
     return {};
@@ -368,7 +350,8 @@ static std::string synthesize_etag(const struct statx& stx)
 /* rgw_non_md5_etag on NSFS: use the same mtime-ino string as version ids
  * (filesystem inode from this file's stat), not the generic req-id form. */
 static bool nsfs_apply_non_md5_etag(const DoutPrefixProvider* dpp, int fd,
-                                    const struct statx& stx, Attrs& attrs)
+                                    const struct statx& stx, Attrs& attrs,
+                                    const nsfs::XattrStrategy* xs)
 {
   if (!dpp->get_cct()->_conf->rgw_non_md5_etag) {
     return false;
@@ -378,7 +361,7 @@ static bool nsfs_apply_non_md5_etag(const DoutPrefixProvider* dpp, int fd,
   bl.append(etag);
   attrs[RGW_ATTR_ETAG] = std::move(bl);
   if (fd >= 0) {
-    std::string xattr = make_xattr_name(RGW_ATTR_ETAG);
+    std::string xattr = xs->disk_name(RGW_ATTR_ETAG);
     ::fsetxattr(fd, xattr.c_str(), etag.c_str(), etag.size(), 0);
   }
   return true;
@@ -472,6 +455,7 @@ struct PromoteResult {
 static void promote_version(int parent_fd, const std::string& leaf,
                             const DoutPrefixProvider* dpp,
                             FSStrategy* fs_strategy,
+                            const nsfs::XattrStrategy* xs,
                             PromoteResult* out = nullptr)
 {
   ldpp_dout(dpp, 10) << "promote_version: enter leaf=" << leaf
@@ -564,10 +548,10 @@ static void promote_version(int parent_fd, const std::string& leaf,
       /* remove non_current_timestamp on the promoted file */
       int pfd = ::openat(parent_fd, leaf.c_str(), O_RDONLY);
       if (pfd >= 0) {
-        std::string ts_x = NSFS_XATTR_PREFIX + RGW_NSFS_ATTR_NON_CURRENT_TS;
+        std::string ts_x = xs->disk_name(RGW_NSFS_ATTR_NON_CURRENT_TS);
         ::fremovexattr(pfd, ts_x.c_str());
         if (out) {
-          out->etag = etag_from_fd(pfd);
+          out->etag = etag_from_fd(pfd, xs);
         }
         ::close(pfd);
       }
@@ -679,12 +663,13 @@ struct RenameIntent {
   bool slice{false};
 };
 
-static std::string rename_intent_xattr()
+static std::string rename_intent_xattr(const nsfs::XattrStrategy* xs)
 {
-  return NSFS_XATTR_PREFIX + std::string("rename_intent");
+  return xs->disk_name("rename_intent");
 }
 
-static int write_rename_intent(int src_parent_fd, const std::string& leaf,
+static int write_rename_intent(const nsfs::XattrStrategy* xs,
+			       int src_parent_fd, const std::string& leaf,
 			       const std::string& dst_tenant,
 			       const std::string& dst_bucket,
 			       const std::string& dst_key,
@@ -706,7 +691,7 @@ static int write_rename_intent(int src_parent_fd, const std::string& leaf,
   if (slice) {
     rec.push_back('s');
   }
-  std::string name = rename_intent_xattr();
+  std::string name = rename_intent_xattr(xs);
   int ret = ::fsetxattr(vfd, name.c_str(), rec.data(), rec.size(), 0);
   int err = ret < 0 ? -errno : 0;
   ::close(vfd);
@@ -737,23 +722,25 @@ static bool parse_rename_intent(const std::string& rec, RenameIntent& out)
   return ! out.leaf.empty() && ! out.bucket.empty() && ! out.key.empty();
 }
 
-static void clear_rename_intent(int src_parent_fd)
+static void clear_rename_intent(const nsfs::XattrStrategy* xs,
+				int src_parent_fd)
 {
   int vfd = ::openat(src_parent_fd, HIDDEN_VERSIONS_PATH.c_str(),
 		     O_RDONLY | O_DIRECTORY);
   if (vfd < 0) {
     return;
   }
-  std::string name = rename_intent_xattr();
+  std::string name = rename_intent_xattr(xs);
   (void) ::fremovexattr(vfd, name.c_str());
   ::close(vfd);
 }
 
 /* takes the .versions/ descriptor, for callers which already have one open */
-static bool rename_intent_present_at(int vfd, std::string& rec)
+static bool rename_intent_present_at(const nsfs::XattrStrategy* xs,
+				     int vfd, std::string& rec)
 {
   char buf[1024];
-  std::string name = rename_intent_xattr();
+  std::string name = rename_intent_xattr(xs);
   ssize_t len = ::fgetxattr(vfd, name.c_str(), buf, sizeof(buf));
   if (len <= 0) {
     return false;
@@ -762,14 +749,15 @@ static bool rename_intent_present_at(int vfd, std::string& rec)
   return true;
 }
 
-static bool rename_intent_present(int src_parent_fd, std::string& rec)
+static bool rename_intent_present(const nsfs::XattrStrategy* xs,
+				  int src_parent_fd, std::string& rec)
 {
   int vfd = ::openat(src_parent_fd, HIDDEN_VERSIONS_PATH.c_str(),
 		     O_RDONLY | O_DIRECTORY);
   if (vfd < 0) {
     return false;
   }
-  bool present = rename_intent_present_at(vfd, rec);
+  bool present = rename_intent_present_at(xs, vfd, rec);
   ::close(vfd);
   return present;
 }
@@ -793,7 +781,8 @@ static bool rename_intent_present(int src_parent_fd, std::string& rec)
  *
  * The caller must hold the source version lock.
  */
-static int recover_rename_intent(const DoutPrefixProvider* dpp,
+static int recover_rename_intent(const nsfs::XattrStrategy* xs,
+				 const DoutPrefixProvider* dpp,
 				 NSFSDriver* driver,
 				 const std::string& src_bucket_name,
 				 int src_parent_fd, const RenameIntent& in)
@@ -935,7 +924,7 @@ static int recover_rename_intent(const DoutPrefixProvider* dpp,
   }
 
   ::close(src_vfd);
-  clear_rename_intent(src_parent_fd);
+  clear_rename_intent(xs, src_parent_fd);
 
   /* The cache cannot describe what recovery just changed:  a rekey expresses
    * a whole move, and this was half of one.  Drop the filled flag on both
@@ -996,7 +985,7 @@ version_lock_recovering(const DoutPrefixProvider* dpp, NSFSDriver* driver,
   }
 
   std::string rec;
-  if (! rename_intent_present(parent_fd, rec)) {
+  if (! rename_intent_present(driver->get_xattr_strategy(), parent_fd, rec)) {
     return vlock;
   }
 
@@ -1013,7 +1002,8 @@ version_lock_recovering(const DoutPrefixProvider* dpp, NSFSDriver* driver,
 
   ldpp_dout(dpp, 1) << "an earlier move of " << in.leaf << " out of this "
     << "directory did not complete;  recovering it" << dendl;
-  int ret = recover_rename_intent(dpp, driver, bucket_name, parent_fd, in);
+  int ret = recover_rename_intent(driver->get_xattr_strategy(), dpp, driver,
+				  bucket_name, parent_fd, in);
   if (ret < 0) {
     ldpp_dout(dpp, 0) << "ERROR: recovering the interrupted move of "
       << in.leaf << " failed: " << cpp_strerror(-ret) << ";  the record "
@@ -1043,6 +1033,7 @@ struct DemoteResult {
  */
 static int demote_current_version(const DoutPrefixProvider* dpp,
 				  FSStrategy* fs_strategy,
+				  const nsfs::XattrStrategy* xs,
 				  int parent_fd,
 				  const std::string& leaf,
 				  bool ver_enabled,
@@ -1069,7 +1060,7 @@ static int demote_current_version(const DoutPrefixProvider* dpp,
   {
     int chk_fd = ::openat(parent_fd, leaf.c_str(), O_RDONLY);
     if (chk_fd >= 0) {
-      cur_is_null = is_null_version_fd(chk_fd);
+      cur_is_null = is_null_version_fd(chk_fd, xs);
       ::close(chk_fd);
     }
   }
@@ -1095,7 +1086,7 @@ static int demote_current_version(const DoutPrefixProvider* dpp,
 	std::chrono::duration_cast<std::chrono::milliseconds>(
 	  std::chrono::system_clock::now().time_since_epoch()).count());
       std::string ts_x =
-	NSFS_XATTR_PREFIX + RGW_NSFS_ATTR_NON_CURRENT_TS;
+	xs->disk_name(RGW_NSFS_ATTR_NON_CURRENT_TS);
       ::fsetxattr(demoted_fd, ts_x.c_str(),
 		  now_ms.c_str(), now_ms.size(), 0);
       ::close(demoted_fd);
@@ -1294,22 +1285,13 @@ static inline rgw_obj_key decode_obj_key(const std::string& fname)
   return key;
 }
 
-static int decode_acl_owner(Attrs& attrs, ACLOwner& owner)
-{
-  auto i = attrs.find(RGW_ATTR_ACL);
-  if (i == attrs.end()) {
-    return -EINVAL;
-  }
-  RGWAccessControlPolicy policy;
-  try {
-    auto bp = i->second.cbegin();
-    policy.decode(bp);
-  } catch (const buffer::error&) {
-    return -EIO;
-  }
-  owner = policy.get_owner();
-  return 0;
-}
+/* Ownership is XattrStrategy::object_owner() now -- a question about the
+ * object rather than a decode of one attribute, because in the noobaa
+ * format there is no owner attribute and the file's uid is the answer.
+ *
+ * Callers which have a statx in hand pass it;  the rest pass nullptr, and
+ * a format which needs the inode fails there rather than guessing.  Those
+ * call sites are where S5 has work to do. */
 
 static inline ceph::real_time from_statx_timestamp(const struct statx_timestamp& xts)
 {
@@ -1323,7 +1305,8 @@ static inline int copy_dir_fd(int old_fd)
 }
 
 static int get_x_attrs(optional_yield y, const DoutPrefixProvider* dpp, int fd,
-		       Attrs& attrs, const std::string& display)
+		       Attrs& attrs, const std::string& display,
+		       const nsfs::XattrStrategy* xs)
 {
   /* large enough for every attribute an object carries in practice;  the
    * biggest is the encoded ACL at a couple of hundred bytes */
@@ -1350,7 +1333,7 @@ static int get_x_attrs(optional_yield y, const DoutPrefixProvider* dpp, int fd,
     std::string xattr_name(keyptr);
     std::string key;
 
-    if (!parse_xattr_name(xattr_name, key)) {
+    if (!xs->parse_disk_name(xattr_name, key)) {
       buflen -= keylen;
       keyptr += keylen;
       continue;
@@ -1393,12 +1376,13 @@ static int get_x_attrs(optional_yield y, const DoutPrefixProvider* dpp, int fd,
 
 static int write_x_attr(const DoutPrefixProvider* dpp, optional_yield y, int fd,
 			const std::string& key, bufferlist& value,
-			const std::string& display)
+			const std::string& display,
+			const nsfs::XattrStrategy* xs)
 {
   int ret;
   std::string attrname;
 
-  attrname = make_xattr_name(key);
+  attrname = xs->disk_name(key);
 
   ret = fsetxattr(fd, attrname.c_str(), value.c_str(), value.length(), 0);
   if (ret < 0) {
@@ -1412,10 +1396,11 @@ static int write_x_attr(const DoutPrefixProvider* dpp, optional_yield y, int fd,
 
 static int remove_x_attr(const DoutPrefixProvider *dpp, optional_yield y,
                          int fd, const std::string &key,
-                         const std::string &display)
+                         const std::string &display,
+                         const nsfs::XattrStrategy* xs)
 {
   int ret;
-  std::string attrname{make_xattr_name(key)};
+  std::string attrname{xs->disk_name(key)};
 
   ret = fremovexattr(fd, attrname.c_str());
   if (ret < 0) {
@@ -1522,13 +1507,15 @@ namespace nsfs {
 FSEnt::FSEnt(std::string _name, Directory* _parent, CephContext* _ctx, FSStrategy* _strat)
   : fname(_name), parent(_parent), ctx(_ctx),
     fs_strategy(_strat ? _strat : (_parent ? _parent->fs_strategy : nullptr)),
-    mpu_strategy(_parent ? _parent->mpu_strategy : nullptr)
+    mpu_strategy(_parent ? _parent->mpu_strategy : nullptr),
+    xattr_strategy(_parent ? _parent->xattr_strategy : nullptr)
 {}
 
 FSEnt::FSEnt(std::string _name, Directory* _parent, struct statx& _stx, CephContext* _ctx, FSStrategy* _strat)
   : fname(_name), parent(_parent), exist(true), stx(_stx), stat_done(true), ctx(_ctx),
     fs_strategy(_strat ? _strat : (_parent ? _parent->fs_strategy : nullptr)),
-    mpu_strategy(_parent ? _parent->mpu_strategy : nullptr)
+    mpu_strategy(_parent ? _parent->mpu_strategy : nullptr),
+    xattr_strategy(_parent ? _parent->xattr_strategy : nullptr)
 {}
 
 int FSEnt::stat(const DoutPrefixProvider* dpp, bool force)
@@ -1585,14 +1572,14 @@ int FSEnt::write_attrs(const DoutPrefixProvider* dpp, optional_yield y, Attrs& a
         if (skip_empty && !bl.length()) {
           continue;
         }
-        to_write.try_emplace(make_xattr_name(key), bl.to_str());
+        to_write.try_emplace(xattr_strategy->disk_name(key), bl.to_str());
       }
     }
     for (auto& [key, bl] : attrs) {
       if (skip_empty && !bl.length()) {
         continue;
       }
-      to_write.try_emplace(make_xattr_name(key), bl.to_str());
+      to_write.try_emplace(xattr_strategy->disk_name(key), bl.to_str());
     }
 
     std::vector<std::string> to_remove;
@@ -1601,8 +1588,8 @@ int FSEnt::write_attrs(const DoutPrefixProvider* dpp, optional_yield y, Attrs& a
       fs_strategy->get_xattrs(dpp, fd, old_raw);
 
       for (auto& [disk_name, _] : old_raw) {
-        if (disk_name.compare(0, NSFS_XATTR_PREFIX.size(),
-                              NSFS_XATTR_PREFIX) != 0) {
+        std::string logical;
+        if (!xattr_strategy->parse_disk_name(disk_name, logical)) {
           continue;
         }
         if (to_write.find(disk_name) == to_write.end()) {
@@ -1611,7 +1598,7 @@ int FSEnt::write_attrs(const DoutPrefixProvider* dpp, optional_yield y, Attrs& a
       }
     } else if (rmattrs) {
       for (auto& key : *rmattrs) {
-        std::string disk_name{make_xattr_name(key)};
+        std::string disk_name{xattr_strategy->disk_name(key)};
         if (to_write.find(disk_name) == to_write.end()) {
           to_remove.push_back(std::move(disk_name));
         }
@@ -1631,12 +1618,12 @@ int FSEnt::write_attrs(const DoutPrefixProvider* dpp, optional_yield y, Attrs& a
   /* per-attr syscalls */
   if (mode == AttrWriteMode::REPLACE_ALL) {
     Attrs old_attrs;
-    ret = get_x_attrs(y, dpp, fd, old_attrs, get_name());
+    ret = get_x_attrs(y, dpp, fd, old_attrs, get_name(), xattr_strategy);
     if (ret >= 0) {
       for (auto& it : old_attrs) {
         if (attrs.find(it.first) == attrs.end() &&
             (!extra_attrs || extra_attrs->find(it.first) == extra_attrs->end())) {
-          remove_x_attr(dpp, y, fd, it.first, get_name());
+          remove_x_attr(dpp, y, fd, it.first, get_name(), xattr_strategy);
         }
       }
     }
@@ -1644,7 +1631,7 @@ int FSEnt::write_attrs(const DoutPrefixProvider* dpp, optional_yield y, Attrs& a
     for (auto& key : *rmattrs) {
       if (attrs.find(key) == attrs.end() &&
           (!extra_attrs || extra_attrs->find(key) == extra_attrs->end())) {
-        remove_x_attr(dpp, y, fd, key, get_name());
+        remove_x_attr(dpp, y, fd, key, get_name(), xattr_strategy);
       }
     }
   }
@@ -1654,7 +1641,7 @@ int FSEnt::write_attrs(const DoutPrefixProvider* dpp, optional_yield y, Attrs& a
       if (skip_empty && !it.second.length()) {
         continue;
       }
-      ret = write_x_attr(dpp, y, fd, it.first, it.second, get_name());
+      ret = write_x_attr(dpp, y, fd, it.first, it.second, get_name(), xattr_strategy);
       if (ret < 0) {
         return ret;
       }
@@ -1665,7 +1652,7 @@ int FSEnt::write_attrs(const DoutPrefixProvider* dpp, optional_yield y, Attrs& a
     if (skip_empty && !it.second.length()) {
       continue;
     }
-    ret = write_x_attr(dpp, y, fd, it.first, it.second, get_name());
+    ret = write_x_attr(dpp, y, fd, it.first, it.second, get_name(), xattr_strategy);
     if (ret < 0) {
       return ret;
     }
@@ -1681,7 +1668,7 @@ int FSEnt::read_attrs(const DoutPrefixProvider* dpp, optional_yield y, Attrs& at
     return ret;
   }
 
-  return get_x_attrs(y, dpp, get_fd(), attrs, get_name());
+  return get_x_attrs(y, dpp, get_fd(), attrs, get_name(), xattr_strategy);
 }
 
 int FSEnt::fill_cache(const DoutPrefixProvider *dpp, optional_yield y, fill_cache_cb_t& cb, uint32_t flags, const std::string& path_prefix)
@@ -1724,12 +1711,12 @@ int FSEnt::make_dir_entry(const DoutPrefixProvider *dpp, optional_yield y,
   if (ret < 0)
     return ret;
 
-  ret = get_x_attrs(y, dpp, get_fd(), attrs, get_name());
+  ret = get_x_attrs(y, dpp, get_fd(), attrs, get_name(), xattr_strategy);
   if (ret < 0)
     return ret;
 
   ACLOwner acl_owner;
-  ret = decode_acl_owner(attrs, acl_owner);
+  ret = xattr_strategy->object_owner(attrs, &stx, acl_owner);
   if (ret < 0) {
     bde.meta.owner = "unknown";
     bde.meta.owner_display_name = "unknown";
@@ -1752,7 +1739,7 @@ int FSEnt::make_dir_entry(const DoutPrefixProvider *dpp, optional_yield y,
 
   if (flags & FLAG_LIST_VERSIONS) {
     std::string ver_id;
-    if (is_null_version_fd(get_fd())) {
+    if (is_null_version_fd(get_fd(), xattr_strategy)) {
       ver_id = NULL_VERSION_ID;
     } else {
       ver_id = nsfs_version_id_from_statx(stx);
@@ -1760,7 +1747,7 @@ int FSEnt::make_dir_entry(const DoutPrefixProvider *dpp, optional_yield y,
     bde.key.instance = ver_id;
     bde.flags = rgw_bucket_dir_entry::FLAG_VER |
                 rgw_bucket_dir_entry::FLAG_CURRENT;
-    std::string dm_xattr = NSFS_XATTR_PREFIX + RGW_NSFS_ATTR_DELETE_MARKER;
+    std::string dm_xattr = xattr_strategy->disk_name(RGW_NSFS_ATTR_DELETE_MARKER);
     char dm_buf[8];
     ssize_t dm_len = ::fgetxattr(get_fd(), dm_xattr.c_str(),
                                  dm_buf, sizeof(dm_buf));
@@ -2443,7 +2430,7 @@ int Directory::get_ent(const DoutPrefixProvider *dpp, optional_yield y, const st
 
     tmpfd = openat(get_fd(), name.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
     if (tmpfd >= 0) {
-      ret = get_x_attrs(y, dpp, tmpfd, attrs, name);
+      ret = get_x_attrs(y, dpp, tmpfd, attrs, name, xattr_strategy);
       if (ret >= 0) {
         decode_attr(attrs, RGW_NSFS_ATTR_OBJECT_TYPE, type);
       }
@@ -2503,12 +2490,12 @@ int Directory::fill_cache(const DoutPrefixProvider *dpp, optional_yield y,
         return ret;
 
       Attrs attrs;
-      ret = get_x_attrs(y, dpp, ent->get_fd(), attrs, ent->get_name());
+      ret = get_x_attrs(y, dpp, ent->get_fd(), attrs, ent->get_name(), xattr_strategy);
       if (ret < 0)
         return ret;
 
       ACLOwner acl_owner;
-      if (decode_acl_owner(attrs, acl_owner) >= 0) {
+      if (xattr_strategy->object_owner(attrs, nullptr, acl_owner) >= 0) {
         bde.meta.owner = to_string(acl_owner.id);
         bde.meta.owner_display_name = acl_owner.display_name;
       } else {
@@ -2564,7 +2551,7 @@ int Directory::fill_cache(const DoutPrefixProvider *dpp, optional_yield y,
        * it -- see version_lock_recovering().  Until then this listing is
        * where the delta shows, so it is worth saying so. */
       std::string irec;
-      if (rename_intent_present_at(vfd, irec)) {
+      if (rename_intent_present_at(xattr_strategy, vfd, irec)) {
         RenameIntent in;
         if (parse_rename_intent(irec, in)) {
           ldpp_dout(dpp, 0) << "WARNING: listing " << get_name()
@@ -2623,7 +2610,7 @@ int Directory::fill_cache(const DoutPrefixProvider *dpp, optional_yield y,
           int tfd = ::openat(vfd, de->d_name, O_RDONLY);
           if (tfd >= 0) {
             char buf[8];
-            std::string dm_xattr = NSFS_XATTR_PREFIX + RGW_NSFS_ATTR_DELETE_MARKER;
+            std::string dm_xattr = xattr_strategy->disk_name(RGW_NSFS_ATTR_DELETE_MARKER);
             ssize_t xlen = ::fgetxattr(tfd, dm_xattr.c_str(), buf, sizeof(buf));
             if (xlen > 0) {
               bde.flags |= rgw_bucket_dir_entry::FLAG_DELETE_MARKER;
@@ -2633,10 +2620,10 @@ int Directory::fill_cache(const DoutPrefixProvider *dpp, optional_yield y,
             }
 
             Attrs attrs;
-            ret = get_x_attrs(y, dpp, tfd, attrs, vname);
+            ret = get_x_attrs(y, dpp, tfd, attrs, vname, xattr_strategy);
 
             ACLOwner acl_owner;
-            if (decode_acl_owner(attrs, acl_owner) >= 0) {
+            if (xattr_strategy->object_owner(attrs, nullptr, acl_owner) >= 0) {
               bde.meta.owner = to_string(acl_owner.id);
               bde.meta.owner_display_name = acl_owner.display_name;
             }
@@ -2935,6 +2922,10 @@ int NSFSDriver::initialize(CephContext *cct, const DoutPrefixProvider *dpp)
    * what decides whether assembling from per-part files is free */
   mpu_strategy = std::make_unique<nsfs::RGWMPUStrategy>();
 
+  /* one implementation today;  the second is selected by the bucket's
+   * recorded format, which S4 adds */
+  xattr_strategy = std::make_unique<nsfs::RGWXattrStrategy>();
+
   /* ordered listing cache */
   bucket_cache.reset(
     new BucketCache(
@@ -2985,7 +2976,7 @@ int NSFSDriver::initialize(CephContext *cct, const DoutPrefixProvider *dpp)
 	  upi.cksum = pi.cksum;
 	  bufferlist bl;
 	  encode(upi, bl);
-	  std::string xn = std::string(NSFS_XATTR_PREFIX) + RGW_NSFS_ATTR_MPUPLOAD;
+	  std::string xn = xattr_strategy->disk_name(RGW_NSFS_ATTR_MPUPLOAD);
 	  ::fsetxattr(pfd, xn.c_str(), bl.c_str(), bl.length(), 0);
 	  ::close(pfd);
 	}
@@ -3004,6 +2995,7 @@ int NSFSDriver::initialize(CephContext *cct, const DoutPrefixProvider *dpp)
 
   root_dir = std::make_unique<Directory>(base_path, nullptr, ctx(), fs_strategy.get());
   root_dir->set_mpu_strategy(mpu_strategy.get());
+  root_dir->set_xattr_strategy(xattr_strategy.get());
   ret = root_dir->open(dpp);
   if (ret < 0) {
     if (ret == -ENOTDIR) {
@@ -4533,13 +4525,14 @@ int NSFSBucket::load_bucket(const DoutPrefixProvider* dpp, optional_yield y)
   }
 
   RGWBucketInfo bak_info = info;;
-  ret = decode_attr(attrs, RGW_NSFS_ATTR_BUCKET_INFO, info);
+  const char* bi_key = driver->get_xattr_strategy()->bucket_info_key();
+  ret = decode_attr(attrs, bi_key, info);
   if (ret < 0) {
     // TODO dang: fake info up (UID to owner conversion?)
     info = bak_info;
   } else {
     // Don't leave info visible in attributes
-    attrs.erase(RGW_NSFS_ATTR_BUCKET_INFO);
+    attrs.erase(bi_key);
   }
 
   return 0;
@@ -4661,7 +4654,7 @@ int NSFSBucket::write_attrs(const DoutPrefixProvider* dpp, optional_yield y)
   bufferlist bl;
   encode(info, bl);
   Attrs extra_attrs;
-  extra_attrs[RGW_NSFS_ATTR_BUCKET_INFO] = bl;
+  extra_attrs[driver->get_xattr_strategy()->bucket_info_key()] = bl;
 
   return dir->write_attrs(dpp, y, attrs, &extra_attrs);
 }
@@ -5038,7 +5031,7 @@ int NSFSObject::rename(const DoutPrefixProvider* dpp, optional_yield y,
   }
   const bool slicing = (! versions.empty() && ! dst_holds_history && slice);
 
-  ret = write_rename_intent(src_parent_fd, src_leaf, db->get_tenant(),
+  ret = write_rename_intent(driver->get_xattr_strategy(), src_parent_fd, src_leaf, db->get_tenant(),
 			    db->get_name(), dest_key.name, slicing);
   if (ret < 0) {
     return ret;
@@ -5070,7 +5063,7 @@ int NSFSObject::rename(const DoutPrefixProvider* dpp, optional_yield y,
       ret = (dst_vfd < 0) ? dst_vfd : -errno;
       if (dst_vfd >= 0) { ::close(dst_vfd); }
       if (src_vfd >= 0) { ::close(src_vfd); }
-      clear_rename_intent(src_parent_fd);
+      clear_rename_intent(driver->get_xattr_strategy(), src_parent_fd);
       return ret;
     }
 
@@ -5090,7 +5083,7 @@ int NSFSObject::rename(const DoutPrefixProvider* dpp, optional_yield y,
 	ldpp_dout(dpp, 4) << "rename: injected failure after " << moved
 	  << " version(s);  rolling back" << dendl;
 	if (roll_back()) {
-	  clear_rename_intent(src_parent_fd);
+	  clear_rename_intent(driver->get_xattr_strategy(), src_parent_fd);
 	}
 	::close(src_vfd);
 	::close(dst_vfd);
@@ -5103,7 +5096,7 @@ int NSFSObject::rename(const DoutPrefixProvider* dpp, optional_yield y,
 	  << versions[moved].entry << " failed: " << cpp_strerror(-ret)
 	  << ";  rolling back" << dendl;
 	if (roll_back()) {
-	  clear_rename_intent(src_parent_fd);
+	  clear_rename_intent(driver->get_xattr_strategy(), src_parent_fd);
 	}
 	::close(src_vfd);
 	::close(dst_vfd);
@@ -5118,7 +5111,7 @@ int NSFSObject::rename(const DoutPrefixProvider* dpp, optional_yield y,
     ldpp_dout(dpp, 0) << "ERROR: rename: moving " << src_leaf
       << " failed: " << cpp_strerror(-ret) << ";  rolling back" << dendl;
     if (roll_back()) {
-      clear_rename_intent(src_parent_fd);
+      clear_rename_intent(driver->get_xattr_strategy(), src_parent_fd);
     }
     if (src_vfd >= 0) { ::close(src_vfd); }
     if (dst_vfd >= 0) { ::close(dst_vfd); }
@@ -5151,7 +5144,7 @@ int NSFSObject::rename(const DoutPrefixProvider* dpp, optional_yield y,
     }
   }
 
-  clear_rename_intent(src_parent_fd);
+  clear_rename_intent(driver->get_xattr_strategy(), src_parent_fd);
   if (src_vfd >= 0) { ::close(src_vfd); }
   if (dst_vfd >= 0) { ::close(dst_vfd); }
 
@@ -5323,6 +5316,7 @@ int NSFSObject::copy_object(const ACLOwner& owner,
 				      dest_parent_fd);
 
       int dret2 = demote_current_version(dpp, driver->get_fs_strategy(),
+			   driver->get_xattr_strategy(),
 					 dest_parent_fd, dest_leaf,
 					 dest_ver_enabled, demote);
       if (dret2 < 0) {
@@ -5443,7 +5437,7 @@ int NSFSObject::copy_object(const ACLOwner& owner,
     }
     int obj_fd = dobj->get_fsent()->get_fd();
     if (obj_fd >= 0) {
-      std::string vid_xattr = NSFS_XATTR_PREFIX + RGW_NSFS_ATTR_VERSION_ID;
+      std::string vid_xattr = driver->get_xattr_strategy()->disk_name(RGW_NSFS_ATTR_VERSION_ID);
       ::fsetxattr(obj_fd, vid_xattr.c_str(),
                   new_ver_id.c_str(), new_ver_id.size(), 0);
     }
@@ -5467,7 +5461,7 @@ int NSFSObject::copy_object(const ACLOwner& owner,
       dem_bde.flags = rgw_bucket_dir_entry::FLAG_VER;
       {
         ACLOwner acl_owner;
-        if (decode_acl_owner(dobj->get_attrs(), acl_owner) >= 0) {
+        if (driver->get_xattr_strategy()->object_owner(dobj->get_attrs(), nullptr, acl_owner) >= 0) {
           dem_bde.meta.owner = to_string(acl_owner.id);
           dem_bde.meta.owner_display_name = acl_owner.display_name;
         }
@@ -5495,7 +5489,7 @@ int NSFSObject::copy_object(const ACLOwner& owner,
                     rgw_bucket_dir_entry::FLAG_CURRENT;
     {
       ACLOwner acl_owner;
-      if (decode_acl_owner(dobj->get_attrs(), acl_owner) >= 0) {
+      if (driver->get_xattr_strategy()->object_owner(dobj->get_attrs(), nullptr, acl_owner) >= 0) {
         new_bde.meta.owner = to_string(acl_owner.id);
         new_bde.meta.owner_display_name = acl_owner.display_name;
       }
@@ -5659,7 +5653,7 @@ int NSFSObject::stat_fsio_view(const DoutPrefixProvider* dpp,
       ret = -errno;
       goto out;
     }
-    ret = get_x_attrs(null_yield, dpp, fd, *attrs, attr_path);
+    ret = get_x_attrs(null_yield, dpp, fd, *attrs, attr_path, driver->get_xattr_strategy());
     ::close(fd);
   } else if (!st) {
     /* existence only */
@@ -5687,7 +5681,8 @@ static std::atomic<uint64_t> fsio_build_seq{0};
  * atime and mtime (set_common_verifier()) and compares tv_sec back exactly,
  * and RGWFileHandle::stat() reports mtime from the inode whenever a handle
  * is live, so the inode is what has to hold it. */
-static int apply_create_spec(const DoutPrefixProvider* dpp,
+static int apply_create_spec(const nsfs::XattrStrategy* xs,
+			     const DoutPrefixProvider* dpp,
 			     NSFSDriver* driver, int fd,
 			     const Object::FSIOCreateSpec* spec)
 {
@@ -5709,7 +5704,7 @@ static int apply_create_spec(const DoutPrefixProvider* dpp,
       if (! bl.length()) {
 	continue; /* empty value means "leave this attr alone" */
       }
-      std::string xname = make_xattr_name(key);
+      std::string xname = xs->disk_name(key);
       if (::fsetxattr(fd, xname.c_str(), bl.c_str(), bl.length(), 0) < 0) {
 	return -errno;
       }
@@ -5915,7 +5910,7 @@ Object::FSIOResult NSFSObject::get_fsio_handle(const DoutPrefixProvider* dpp,
 				    acl_owner.display_name);
     bufferlist acl_bl;
     policy.encode(acl_bl);
-    std::string xname = make_xattr_name(RGW_ATTR_ACL);
+    std::string xname = driver->get_xattr_strategy()->disk_name(RGW_ATTR_ACL);
     if (::fsetxattr(build_fd, xname.c_str(),
 		    acl_bl.c_str(), acl_bl.length(), 0) < 0) {
       int err = -errno;
@@ -5931,7 +5926,8 @@ Object::FSIOResult NSFSObject::get_fsio_handle(const DoutPrefixProvider* dpp,
   /* whatever the caller wants set at create, applied before the name
    * exists rather than by a second call afterwards */
   {
-    int ret = apply_create_spec(dpp, driver, build_fd, spec);
+    int ret = apply_create_spec(driver->get_xattr_strategy(), dpp, driver,
+				build_fd, spec);
     if (ret < 0) {
       ::close(build_fd);
       if ((! tmp_name.empty()) &&
@@ -6112,6 +6108,7 @@ int NSFSObject::NSFSFSIOObject::publish(const DoutPrefixProvider* dpp, uint32_t 
 					parent_fd);
 
     demote_current_version(dpp, driver->get_fs_strategy(),
+			   driver->get_xattr_strategy(),
 			   parent_fd, leaf_name,
 			   binfo.versioning_enabled(), demote);
   }
@@ -6142,7 +6139,7 @@ int NSFSObject::NSFSFSIOObject::publish(const DoutPrefixProvider* dpp, uint32_t 
 	statx(shadow_fd, "", AT_EMPTY_PATH, STATX_ALL, &vstx) == 0) {
       ver_id = nsfs_version_id_from_statx(vstx);
     }
-    std::string vid_x = NSFS_XATTR_PREFIX + RGW_NSFS_ATTR_VERSION_ID;
+    std::string vid_x = driver->get_xattr_strategy()->disk_name(RGW_NSFS_ATTR_VERSION_ID);
     ::fsetxattr(shadow_fd, vid_x.c_str(), ver_id.c_str(), ver_id.size(), 0);
     src_obj->set_instance(ver_id);
   }
@@ -6177,7 +6174,7 @@ int NSFSObject::NSFSFSIOObject::publish(const DoutPrefixProvider* dpp, uint32_t 
 	Attrs shadow_attrs;
 	if (fgetattrs(dpp, shadow_attrs, 0) == 0) {
 	  ACLOwner acl_owner;
-	  if (decode_acl_owner(shadow_attrs, acl_owner) >= 0) {
+	  if (driver->get_xattr_strategy()->object_owner(shadow_attrs, nullptr, acl_owner) >= 0) {
 	    bde.meta.owner = to_string(acl_owner.id);
 	    bde.meta.owner_display_name = acl_owner.display_name;
 	  }
@@ -6318,7 +6315,7 @@ int NSFSObject::NSFSFSIOObject::fgetattr(const DoutPrefixProvider* dpp, const st
   if (shadow_fd < 0) {
     return -EBADF;
   }
-  std::string xname = make_xattr_name(name);
+  std::string xname = driver->get_xattr_strategy()->disk_name(name);
   ssize_t len = ::fgetxattr(shadow_fd, xname.c_str(), nullptr, 0);
   if (len < 0) {
     return -errno;
@@ -6351,7 +6348,7 @@ int NSFSObject::NSFSFSIOObject::fsetattr(const DoutPrefixProvider* dpp, const st
      * decode -- which is how an empty ACL became EIO. */
     return 0;
   }
-  std::string xname = make_xattr_name(name);
+  std::string xname = driver->get_xattr_strategy()->disk_name(name);
   std::string sval = val.to_str();
   if (::fsetxattr(shadow_fd, xname.c_str(),
 		   sval.c_str(), sval.length(), 0) < 0) {
@@ -6365,7 +6362,7 @@ int NSFSObject::NSFSFSIOObject::fgetattrs(const DoutPrefixProvider* dpp, Attrs& 
   if (shadow_fd < 0) {
     return -EBADF;
   }
-  return get_x_attrs(null_yield, dpp, shadow_fd, attrs, shadow_name);
+  return get_x_attrs(null_yield, dpp, shadow_fd, attrs, shadow_name, driver->get_xattr_strategy());
 }
 
 int NSFSObject::NSFSFSIOObject::fsetattrs(const DoutPrefixProvider* dpp, Attrs& attrs, uint32_t flags)
@@ -6377,7 +6374,7 @@ int NSFSObject::NSFSFSIOObject::fsetattrs(const DoutPrefixProvider* dpp, Attrs& 
     if (!bl.length()) {
       continue; /* empty value means "leave this attr alone" */
     }
-    std::string xname = make_xattr_name(key);
+    std::string xname = driver->get_xattr_strategy()->disk_name(key);
     if (::fsetxattr(shadow_fd, xname.c_str(),
 		     bl.c_str(), bl.length(), 0) < 0) {
       return -errno;
@@ -6392,7 +6389,7 @@ int NSFSObject::NSFSFSIOObject::fremovexattr(const DoutPrefixProvider* dpp, cons
   if (shadow_fd < 0) {
     return -EBADF;
   }
-  std::string xname = make_xattr_name(name);
+  std::string xname = driver->get_xattr_strategy()->disk_name(name);
   if (::fremovexattr(shadow_fd, xname.c_str()) < 0) {
     return -errno;
   }
@@ -6567,7 +6564,7 @@ int NSFSObject::delete_obj_attrs(const DoutPrefixProvider* dpp, const char* attr
     return ret;
   }
 
-  ret = remove_x_attr(dpp, y, ent->get_fd(), attr_name, get_name());
+  ret = remove_x_attr(dpp, y, ent->get_fd(), attr_name, get_name(), driver->get_xattr_strategy());
   if (ret < 0) {
     ret = errno;
     ldpp_dout(dpp, 0) << "ERROR: could not remover attribute " << attr_name << " for " << get_name() << ": " << cpp_strerror(ret) << dendl;
@@ -6764,7 +6761,7 @@ int NSFSObject::stat(const DoutPrefixProvider* dpp)
             ent->open(dpp);
             chk_fd = ent->get_fd();
           }
-          cur_matches = (chk_fd >= 0 && is_null_version_fd(chk_fd));
+          cur_matches = (chk_fd >= 0 && is_null_version_fd(chk_fd, driver->get_xattr_strategy()));
         } else {
           std::string cur_ver = nsfs_version_id_from_statx(ent->get_stx());
           cur_matches = (cur_ver == req_ver);
@@ -6865,7 +6862,7 @@ int NSFSObject::stat(const DoutPrefixProvider* dpp)
                 if (dm_fd >= 0) {
                   char buf[8];
                   std::string dm_xattr =
-                    NSFS_XATTR_PREFIX + RGW_NSFS_ATTR_DELETE_MARKER;
+                    driver->get_xattr_strategy()->disk_name(RGW_NSFS_ATTR_DELETE_MARKER);
                   ssize_t xlen = ::fgetxattr(
                     dm_fd, dm_xattr.c_str(), buf, sizeof(buf));
                   if (xlen > 0) {
@@ -6933,7 +6930,7 @@ int NSFSObject::stat(const DoutPrefixProvider* dpp)
       int tfd = ::openat(pfd, ent->get_name().c_str(), O_RDONLY);
       if (tfd >= 0) {
         char buf[8];
-        std::string dm_xattr = NSFS_XATTR_PREFIX + RGW_NSFS_ATTR_DELETE_MARKER;
+        std::string dm_xattr = driver->get_xattr_strategy()->disk_name(RGW_NSFS_ATTR_DELETE_MARKER);
         ssize_t xlen = ::fgetxattr(tfd, dm_xattr.c_str(), buf, sizeof(buf));
         state.is_dm = (xlen > 0);
         ::close(tfd);
@@ -6980,7 +6977,7 @@ int NSFSObject::make_ent(ObjectType type)
 int NSFSObject::get_owner(const DoutPrefixProvider *dpp, optional_yield y, std::unique_ptr<User> *owner)
 {
   ACLOwner acl_owner;
-  int ret = decode_acl_owner(get_attrs(), acl_owner);
+  int ret = driver->get_xattr_strategy()->object_owner(get_attrs(), nullptr, acl_owner);
   if (ret < 0) {
     ldpp_dout(dpp, 0) << "ERROR: " << __func__
         << ": No " RGW_ATTR_ACL " attr" << dendl;
@@ -7062,7 +7059,8 @@ int NSFSObject::link_temp_file(const DoutPrefixProvider *dpp, optional_yield y)
     return ret;
   }
 
-  nsfs_apply_non_md5_etag(dpp, ent->get_fd(), ent->get_stx(), get_attrs());
+  nsfs_apply_non_md5_etag(dpp, ent->get_fd(), ent->get_stx(), get_attrs(),
+			  driver->get_xattr_strategy());
 
   uint32_t flags = FSEnt::FLAG_NONE;
   const auto& binfo = b->get_info();
@@ -7072,7 +7070,7 @@ int NSFSObject::link_temp_file(const DoutPrefixProvider *dpp, optional_yield y)
       const struct statx& stx = ent->get_stx();
       std::string ver_id = binfo.versioning_enabled()
         ? nsfs_version_id_from_statx(stx) : NULL_VERSION_ID;
-      std::string xattr = NSFS_XATTR_PREFIX + RGW_NSFS_ATTR_VERSION_ID;
+      std::string xattr = driver->get_xattr_strategy()->disk_name(RGW_NSFS_ATTR_VERSION_ID);
       ::fsetxattr(fd, xattr.c_str(), ver_id.c_str(), ver_id.size(), 0);
       set_instance(ver_id);
     }
@@ -7283,7 +7281,8 @@ int NSFSObject::generate_etag(const DoutPrefixProvider* dpp, optional_yield y)
    *
    * fd -1: write_attrs() persists the map, so the helper need not set the
    * xattr itself. */
-  if (ent && nsfs_apply_non_md5_etag(dpp, -1, ent->get_stx(), get_attrs())) {
+  if (ent && nsfs_apply_non_md5_etag(dpp, -1, ent->get_stx(), get_attrs(),
+				     driver->get_xattr_strategy())) {
     return write_attrs(dpp, y);
   }
 
@@ -7547,15 +7546,17 @@ static void cache_promoted_current(NSFSDriver* driver,
                                    PromoteResult& promoted,
                                    const struct statx& pstx)
 {
-  /* One descriptor, one attribute sweep.  get_x_attrs() lists and reads
-   * every xattr on the file, and parse_xattr_name() accepts both the
+  /* One descriptor, one attribute sweep.  get_x_attrs(xs) lists and reads
+   * every xattr on the file, and XattrStrategy::parse_disk_name() accepts
+   * both the
    * user.nsfs.rgw. and user.nsfs. prefixes -- so the digest, the version
    * id and the delete-marker flag all arrive in pattrs, and the separate
    * fgetxattr() for each is redundant with the sweep. */
   Attrs pattrs;
   int fd = ::openat(parent_fd, leaf.c_str(), O_RDONLY);
   if (fd >= 0) {
-    get_x_attrs(null_yield, dpp, fd, pattrs, leaf);
+    get_x_attrs(null_yield, dpp, fd, pattrs, leaf,
+		driver->get_xattr_strategy());
     ::close(fd);
   }
 
@@ -7568,7 +7569,7 @@ static void cache_promoted_current(NSFSDriver* driver,
      * a surplus version in the listing. */
     auto vit = pattrs.find(RGW_NSFS_ATTR_VERSION_ID);
     /* absent or empty reads as the null version, matching
-     * is_null_version_fd()'s len <= 0 case */
+     * is_null_version_fd(xs)'s len <= 0 case */
     bool is_null = (vit == pattrs.end()) || (vit->second.length() == 0) ||
                    (vit->second.to_str() == NULL_VERSION_ID);
     promoted_ver = is_null ? NULL_VERSION_ID
@@ -7601,7 +7602,7 @@ static void cache_promoted_current(NSFSDriver* driver,
     bde.flags |= rgw_bucket_dir_entry::FLAG_DELETE_MARKER;
   }
   ACLOwner acl_owner;
-  if (decode_acl_owner(pattrs, acl_owner) >= 0) {
+  if (driver->get_xattr_strategy()->object_owner(pattrs, nullptr, acl_owner) >= 0) {
     bde.meta.owner = to_string(acl_owner.id);
     bde.meta.owner_display_name = acl_owner.display_name;
   }
@@ -7730,7 +7731,7 @@ int NSFSObject::NSFSDeleteOp::delete_obj(const DoutPrefixProvider* dpp,
           ent->open(dpp);
           chk_fd = ent->get_fd();
         }
-        cur_match = (chk_fd >= 0 && is_null_version_fd(chk_fd));
+        cur_match = (chk_fd >= 0 && is_null_version_fd(chk_fd, source->driver->get_xattr_strategy()));
         ldpp_dout(dpp, 20) << "delete_obj: null version check is_null="
           << cur_match << dendl;
       } else {
@@ -7785,7 +7786,8 @@ int NSFSObject::NSFSDeleteOp::delete_obj(const DoutPrefixProvider* dpp,
             << promote_leaf << dendl;
           PromoteResult promoted;
           promote_version(promote_fd, promote_leaf, dpp,
-                          source->driver->get_fs_strategy(), &promoted);
+                          source->driver->get_fs_strategy(),
+			  source->driver->get_xattr_strategy(), &promoted);
           struct statx pstx;
           if (statx(promote_fd, promote_leaf.c_str(),
                     AT_SYMLINK_NOFOLLOW, STATX_ALL, &pstx) == 0) {
@@ -7848,7 +7850,7 @@ int NSFSObject::NSFSDeleteOp::delete_obj(const DoutPrefixProvider* dpp,
         {
           char buf[8];
           std::string dm_xattr =
-            NSFS_XATTR_PREFIX + RGW_NSFS_ATTR_DELETE_MARKER;
+            source->driver->get_xattr_strategy()->disk_name(RGW_NSFS_ATTR_DELETE_MARKER);
           ssize_t xlen = ::fgetxattr(ver_fd, dm_xattr.c_str(),
                                      buf, sizeof(buf));
           if (xlen > 0) {
@@ -7872,7 +7874,7 @@ int NSFSObject::NSFSDeleteOp::delete_obj(const DoutPrefixProvider* dpp,
           /* read etag xattr if not a delete marker */
           if (!is_dm) {
             char ebuf[256];
-            std::string etag_x = make_xattr_name(RGW_ATTR_ETAG);
+            std::string etag_x = source->driver->get_xattr_strategy()->disk_name(RGW_ATTR_ETAG);
             ssize_t elen = ::fgetxattr(ver_fd, etag_x.c_str(),
                                        ebuf, sizeof(ebuf));
             if (elen > 0) {
@@ -7908,7 +7910,8 @@ int NSFSObject::NSFSDeleteOp::delete_obj(const DoutPrefixProvider* dpp,
         if (is_dm && parent_fd >= 0) {
           PromoteResult promoted;
           promote_version(parent_fd, leaf_name, dpp,
-                          source->driver->get_fs_strategy(), &promoted);
+                          source->driver->get_fs_strategy(),
+			  source->driver->get_xattr_strategy(), &promoted);
           /* update cache for the promoted version */
           struct statx pstx;
           if (statx(parent_fd, leaf_name.c_str(),
@@ -8015,7 +8018,7 @@ int NSFSObject::NSFSDeleteOp::delete_obj(const DoutPrefixProvider* dpp,
       chk_fd = ent->get_fd();
     }
     if (chk_fd >= 0) {
-      cur_is_null = is_null_version_fd(chk_fd);
+      cur_is_null = is_null_version_fd(chk_fd, source->driver->get_xattr_strategy());
     }
   }
 
@@ -8055,7 +8058,7 @@ int NSFSObject::NSFSDeleteOp::delete_obj(const DoutPrefixProvider* dpp,
           auto now_ms = std::to_string(
             std::chrono::duration_cast<std::chrono::milliseconds>(
               std::chrono::system_clock::now().time_since_epoch()).count());
-          std::string ts_x = NSFS_XATTR_PREFIX + RGW_NSFS_ATTR_NON_CURRENT_TS;
+          std::string ts_x = source->driver->get_xattr_strategy()->disk_name(RGW_NSFS_ATTR_NON_CURRENT_TS);
           ::fsetxattr(demoted_fd, ts_x.c_str(),
                       now_ms.c_str(), now_ms.size(), 0);
           ::close(demoted_fd);
@@ -8095,7 +8098,7 @@ int NSFSObject::NSFSDeleteOp::delete_obj(const DoutPrefixProvider* dpp,
                        O_WRONLY | O_CREAT | O_EXCL, 0600);
   if (dm_fd >= 0) {
     /* set delete_marker xattr */
-    std::string dm_xattr = NSFS_XATTR_PREFIX + RGW_NSFS_ATTR_DELETE_MARKER;
+    std::string dm_xattr = source->driver->get_xattr_strategy()->disk_name(RGW_NSFS_ATTR_DELETE_MARKER);
     std::string dm_val = "true";
     ::fsetxattr(dm_fd, dm_xattr.c_str(), dm_val.c_str(), dm_val.size(), 0);
 
@@ -8111,14 +8114,14 @@ int NSFSObject::NSFSDeleteOp::delete_obj(const DoutPrefixProvider* dpp,
     }
 
     /* set version_id xattr */
-    std::string vid_xattr = NSFS_XATTR_PREFIX + RGW_NSFS_ATTR_VERSION_ID;
+    std::string vid_xattr = source->driver->get_xattr_strategy()->disk_name(RGW_NSFS_ATTR_VERSION_ID);
     ::fsetxattr(dm_fd, vid_xattr.c_str(),
                 dm_ver_id.c_str(), dm_ver_id.size(), 0);
 
     /* copy ACL from the source object so the DM has owner info */
     bufferlist acl_bl;
     if (rgw::sal::get_attr(source->get_attrs(), RGW_ATTR_ACL, acl_bl)) {
-      std::string acl_xattr = make_xattr_name(RGW_ATTR_ACL);
+      std::string acl_xattr = source->driver->get_xattr_strategy()->disk_name(RGW_ATTR_ACL);
       ::fsetxattr(dm_fd, acl_xattr.c_str(),
                   acl_bl.c_str(), acl_bl.length(), 0);
     }
@@ -8169,7 +8172,7 @@ int NSFSObject::NSFSDeleteOp::delete_obj(const DoutPrefixProvider* dpp,
     dem_bde.flags = rgw_bucket_dir_entry::FLAG_VER;
     {
       ACLOwner acl_owner;
-      if (decode_acl_owner(source->get_attrs(), acl_owner) >= 0) {
+      if (source->driver->get_xattr_strategy()->object_owner(source->get_attrs(), nullptr, acl_owner) >= 0) {
         dem_bde.meta.owner = to_string(acl_owner.id);
         dem_bde.meta.owner_display_name = acl_owner.display_name;
       }
@@ -8195,7 +8198,7 @@ int NSFSObject::NSFSDeleteOp::delete_obj(const DoutPrefixProvider* dpp,
                    rgw_bucket_dir_entry::FLAG_DELETE_MARKER;
     {
       ACLOwner acl_owner;
-      if (decode_acl_owner(source->get_attrs(), acl_owner) >= 0) {
+      if (source->driver->get_xattr_strategy()->object_owner(source->get_attrs(), nullptr, acl_owner) >= 0) {
         dm_bde.meta.owner = to_string(acl_owner.id);
         dm_bde.meta.owner_display_name = acl_owner.display_name;
       }
@@ -8636,7 +8639,7 @@ int NSFSMultipartUpload::complete(const DoutPrefixProvider *dpp,
   attrs[RGW_NSFS_ATTR_OBJECT_TYPE] = std::move(type_bl);
 
   for (auto& [k, v] : attrs) {
-    std::string xattr_name = make_xattr_name(k);
+    std::string xattr_name = driver->get_xattr_strategy()->disk_name(k);
     ret = fsetxattr(afd, xattr_name.c_str(), v.c_str(), v.length(), 0);
     if (ret < 0) {
       ::close(afd);
@@ -8668,7 +8671,7 @@ int NSFSMultipartUpload::complete(const DoutPrefixProvider *dpp,
     std::string existing_etag;
     if (target_exists) {
       char buf[256];
-      std::string xattr_name = make_xattr_name(RGW_ATTR_ETAG);
+      std::string xattr_name = driver->get_xattr_strategy()->disk_name(RGW_ATTR_ETAG);
       ssize_t len = ::fgetxattr(existing_fd, xattr_name.c_str(),
                                 buf, sizeof(buf));
       if (len > 0) {
@@ -8713,6 +8716,7 @@ int NSFSMultipartUpload::complete(const DoutPrefixProvider *dpp,
 					->get_name(), leaf_fd);
 
     int dret = demote_current_version(dpp, driver->get_fs_strategy(),
+			   driver->get_xattr_strategy(),
 				      leaf_fd, leaf_name,
 				      ver_enabled, demote);
     if (dret < 0) {
@@ -8743,7 +8747,7 @@ int NSFSMultipartUpload::complete(const DoutPrefixProvider *dpp,
       target_obj->set_instance(new_ver_id);
       int obj_fd = ::openat(leaf_fd, leaf_name.c_str(), O_RDONLY);
       if (obj_fd >= 0) {
-        std::string vid_xattr = NSFS_XATTR_PREFIX + RGW_NSFS_ATTR_VERSION_ID;
+        std::string vid_xattr = driver->get_xattr_strategy()->disk_name(RGW_NSFS_ATTR_VERSION_ID);
         ::fsetxattr(obj_fd, vid_xattr.c_str(),
                     new_ver_id.c_str(), new_ver_id.size(), 0);
         ::close(obj_fd);
@@ -8768,7 +8772,7 @@ int NSFSMultipartUpload::complete(const DoutPrefixProvider *dpp,
         dem_bde.flags = rgw_bucket_dir_entry::FLAG_VER;
         {
           ACLOwner acl_owner;
-          if (decode_acl_owner(target_obj->get_attrs(), acl_owner) >= 0) {
+          if (driver->get_xattr_strategy()->object_owner(target_obj->get_attrs(), nullptr, acl_owner) >= 0) {
             dem_bde.meta.owner = to_string(acl_owner.id);
             dem_bde.meta.owner_display_name = acl_owner.display_name;
           }
@@ -8797,7 +8801,7 @@ int NSFSMultipartUpload::complete(const DoutPrefixProvider *dpp,
                       rgw_bucket_dir_entry::FLAG_CURRENT;
       {
         ACLOwner acl_owner;
-        if (decode_acl_owner(target_obj->get_attrs(), acl_owner) >= 0) {
+        if (driver->get_xattr_strategy()->object_owner(target_obj->get_attrs(), nullptr, acl_owner) >= 0) {
           new_bde.meta.owner = to_string(acl_owner.id);
           new_bde.meta.owner_display_name = acl_owner.display_name;
         }
@@ -8828,7 +8832,7 @@ int NSFSMultipartUpload::complete(const DoutPrefixProvider *dpp,
 	? eit2->second.to_str() : synthesize_etag(new_stx);
       {
         ACLOwner acl_owner;
-        if (decode_acl_owner(target_obj->get_attrs(), acl_owner) >= 0) {
+        if (driver->get_xattr_strategy()->object_owner(target_obj->get_attrs(), nullptr, acl_owner) >= 0) {
           bde.meta.owner = to_string(acl_owner.id);
           bde.meta.owner_display_name = acl_owner.display_name;
         }
@@ -9030,7 +9034,8 @@ int NSFSMultipartWriter::complete(
     /* fd -1: part_file->write_attrs() below persists this same map, so
      * the helper's own fsetxattr() would only write the etag twice */
     if (sret == 0 && nsfs_apply_non_md5_etag(dpp, -1,
-                                             part_file->get_stx(), attrs)) {
+                                             part_file->get_stx(), attrs,
+                                             driver->get_xattr_strategy())) {
       bufferlist bl;
       if (get_attr(attrs, RGW_ATTR_ETAG, bl)) {
         part_etag.assign(bl.c_str(), bl.length());
@@ -9209,6 +9214,7 @@ int NSFSAtomicWriter::complete(size_t accounted_size, const std::string& etag,
 					  parent_fd);
 
       int dret = demote_current_version(dpp, driver->get_fs_strategy(),
+			   driver->get_xattr_strategy(),
 					parent_fd,
 					obj->get_fsent()->get_name(),
 					ver_enabled, demote);

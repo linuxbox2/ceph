@@ -31,6 +31,7 @@
 #include "../posix/posix_io_uring.h"
 #include "fs_strategy.h"
 #include "mpu_strategy.h"
+#include "xattr_strategy.h"
 
 class RGWLC;
 
@@ -134,6 +135,10 @@ protected:
    * fs_strategy:  an MPDirectory has to name and enumerate parts, and is
    * built from its parent rather than from the driver */
   MPUStrategy* mpu_strategy{nullptr};
+  /* selected by the bucket's recorded format;  carried here for the same
+   * reason as the others -- an FSEnt reads and writes attributes and is
+   * built from its parent */
+  XattrStrategy* xattr_strategy{nullptr};
 
 public:
   static constexpr uint32_t FLAG_NONE =      0x0;
@@ -150,7 +155,8 @@ public:
     stat_done(_ent.stat_done),
     ctx(_ent.ctx),
     fs_strategy(_ent.fs_strategy),
-    mpu_strategy(_ent.mpu_strategy)
+    mpu_strategy(_ent.mpu_strategy),
+    xattr_strategy(_ent.xattr_strategy)
   { }
 
   virtual ~FSEnt() { }
@@ -160,6 +166,8 @@ public:
    * through the constructors above */
   void set_mpu_strategy(MPUStrategy* s) { mpu_strategy = s; }
   MPUStrategy* get_mpu_strategy() const { return mpu_strategy; }
+  void set_xattr_strategy(XattrStrategy* s) { xattr_strategy = s; }
+  XattrStrategy* get_xattr_strategy() const { return xattr_strategy; }
   void set_sync_on_close(bool sync) { need_fsync = sync; }
   std::string& get_name() { return fname; }
   Directory* get_parent() { return parent; }
@@ -446,6 +454,7 @@ protected:
   UserCache user_cache;
   std::unique_ptr<nsfs::FSStrategy> fs_strategy;
   std::unique_ptr<nsfs::MPUStrategy> mpu_strategy;
+  std::unique_ptr<nsfs::XattrStrategy> xattr_strategy;
   std::string base_path;
   std::unique_ptr<nsfs::Directory> root_dir;
   int root_fd;
@@ -828,6 +837,7 @@ public:
   UserCache& get_user_cache() { return user_cache; }
   nsfs::FSStrategy* get_fs_strategy() { return fs_strategy.get(); }
   nsfs::MPUStrategy* get_mpu_strategy() { return mpu_strategy.get(); }
+  nsfs::XattrStrategy* get_xattr_strategy() { return xattr_strategy.get(); }
 
   /* called by nsfs::BucketCache layer when a new object is discovered
    * by inotify or similar */
