@@ -179,6 +179,26 @@ bool probe_shares_extents(const DoutPrefixProvider* dpp,
 }
 
 
+int FSStrategy::link_temp_file_excl(int temp_fd, int dir_fd,
+				    const std::string& name,
+				    const DoutPrefixProvider* dpp)
+{
+  char temp_file_path[PATH_MAX];
+  snprintf(temp_file_path, PATH_MAX, "/proc/self/fd/%d", temp_fd);
+
+  int ret = ::linkat(AT_FDCWD, temp_file_path, dir_fd, name.c_str(),
+		     AT_SYMLINK_FOLLOW);
+  if (ret < 0) {
+    ret = errno;
+    if (ret != EEXIST) {
+      ldpp_dout(dpp, 0) << "ERROR: exclusive linkat for temp file: "
+	<< cpp_strerror(ret) << dendl;
+    }
+    return -ret;
+  }
+  return 0;
+}
+
 size_t FSStrategy::preferred_io_size(int fd) const
 {
   struct stat st;

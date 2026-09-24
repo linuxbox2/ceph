@@ -2068,14 +2068,15 @@ int File::remove(const DoutPrefixProvider* dpp, optional_yield y, bool delete_ch
   return 0;
 }
 
-int File::link_temp_file(const DoutPrefixProvider *dpp, optional_yield y, std::string temp_fname)
+int File::link_temp_file(const DoutPrefixProvider *dpp, optional_yield y, std::string temp_fname, bool excl)
 {
   if (fd < 0) {
     return 0;
   }
 
-  int ret = fs_strategy->link_temp_file(fd, parent->get_fd(),
-                                        get_name(), dpp);
+  int ret = excl
+    ? fs_strategy->link_temp_file_excl(fd, parent->get_fd(), get_name(), dpp)
+    : fs_strategy->link_temp_file(fd, parent->get_fd(), get_name(), dpp);
   if (ret < 0) {
     return ret;
   }
@@ -2197,7 +2198,7 @@ int Directory::read(int64_t ofs, int64_t left, bufferlist &bl,
 }
 
 int Directory::link_temp_file(const DoutPrefixProvider *dpp, optional_yield y,
-                              std::string temp_fname)
+                              std::string temp_fname, bool excl)
 {
   return -EINVAL;
 }
@@ -2690,7 +2691,7 @@ int MPDirectory::read(int64_t ofs, int64_t left, bufferlist &bl,
 }
 
 int MPDirectory::link_temp_file(const DoutPrefixProvider *dpp, optional_yield y,
-                                std::string temp_fname)
+                                std::string temp_fname, bool excl)
 {
   if (tmpname.empty()) {
     return 0;
@@ -7029,10 +7030,10 @@ int NSFSObject::open(const DoutPrefixProvider* dpp, bool create, bool temp_file)
   return ent->open(dpp);
 }
 
-int NSFSObject::link_temp_file(const DoutPrefixProvider *dpp, optional_yield y)
+int NSFSObject::link_temp_file(const DoutPrefixProvider *dpp, optional_yield y, bool excl)
 {
   std::string temp_fname = gen_temp_fname();
-  int ret = ent->link_temp_file(dpp, y, temp_fname);
+  int ret = ent->link_temp_file(dpp, y, temp_fname, excl);
   if (ret < 0)
     return ret;
 
@@ -9156,6 +9157,13 @@ int NSFSAtomicWriter::complete(size_t accounted_size, const std::string& etag,
       }
     }
   }
+  /* If-None-Match: * is decided by the publish, not here.  `exists` came
+   * from a stat taken before the attributes were written, so two writers
+   * can both see the name free;  the exclusive link below is what makes
+   * exactly one of them win.  This early check is kept only so the
+   * uncontended case fails before doing the work. */
+  const bool excl_publish = if_nomatch && (strcmp(if_nomatch, "*") == 0);
+
   if (if_nomatch) {
     if (strcmp(if_nomatch, "*") == 0) {
       if (exists) {
@@ -9221,14 +9229,19 @@ int NSFSAtomicWriter::complete(size_t accounted_size, const std::string& etag,
         return dret;
       }
 
-      ret = obj->link_temp_file(rctx.dpp, rctx.y);
+      ret = obj->link_temp_file(rctx.dpp, rctx.y, excl_publish);
     } else {
-      ret = obj->link_temp_file(rctx.dpp, rctx.y);
+      ret = obj->link_temp_file(rctx.dpp, rctx.y, excl_publish);
     }
   } else {
-    ret = obj->link_temp_file(rctx.dpp, rctx.y);
+    ret = obj->link_temp_file(rctx.dpp, rctx.y, excl_publish);
   }
 
+  if (ret == -EEXIST && excl_publish) {
+    /* somebody else took the name between the check above and the link;
+     * that is the case this publish exists to catch */
+    return -ERR_PRECONDITION_FAILED;
+  }
   if (ret < 0) {
     ldpp_dout(dpp, 20) << "ERROR: NSFSAtomicWriter failed writing temp file"
                        << dendl;
