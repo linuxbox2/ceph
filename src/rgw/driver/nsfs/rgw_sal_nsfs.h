@@ -32,6 +32,7 @@
 #include "fs_strategy.h"
 #include "mpu_strategy.h"
 #include "xattr_strategy.h"
+#include "path_strategy.h"
 
 class RGWLC;
 
@@ -139,6 +140,11 @@ protected:
    * reason as the others -- an FSEnt reads and writes attributes and is
    * built from its parent */
   XattrStrategy* xattr_strategy{nullptr};
+  PathStrategy* path_strategy{nullptr};
+  /* the union of what every strategy calls its own scaffolding, assembled
+   * once by the driver.  Carried rather than asked for, because the
+   * listing paths test it per directory entry. */
+  const ReservedNames* reserved_names{nullptr};
 
 public:
   static constexpr uint32_t FLAG_NONE =      0x0;
@@ -156,7 +162,9 @@ public:
     ctx(_ent.ctx),
     fs_strategy(_ent.fs_strategy),
     mpu_strategy(_ent.mpu_strategy),
-    xattr_strategy(_ent.xattr_strategy)
+    xattr_strategy(_ent.xattr_strategy),
+    path_strategy(_ent.path_strategy),
+    reserved_names(_ent.reserved_names)
   { }
 
   virtual ~FSEnt() { }
@@ -168,6 +176,10 @@ public:
   MPUStrategy* get_mpu_strategy() const { return mpu_strategy; }
   void set_xattr_strategy(XattrStrategy* s) { xattr_strategy = s; }
   XattrStrategy* get_xattr_strategy() const { return xattr_strategy; }
+  void set_path_strategy(PathStrategy* s) { path_strategy = s; }
+  PathStrategy* get_path_strategy() const { return path_strategy; }
+  void set_reserved_names(const ReservedNames* r) { reserved_names = r; }
+  const ReservedNames* get_reserved_names() const { return reserved_names; }
   void set_sync_on_close(bool sync) { need_fsync = sync; }
   std::string& get_name() { return fname; }
   Directory* get_parent() { return parent; }
@@ -311,7 +323,6 @@ public:
   virtual int fill_cache(const DoutPrefixProvider* dpp, optional_yield y, fill_cache_cb_t& cb, uint32_t flags, const std::string& path_prefix = "") override;
 };
 
-std::string get_key_fname(rgw_obj_key& key, bool use_version);
 
 int resolve_path(const DoutPrefixProvider* dpp,
                  Directory* root,
@@ -455,6 +466,8 @@ protected:
   std::unique_ptr<nsfs::FSStrategy> fs_strategy;
   std::unique_ptr<nsfs::MPUStrategy> mpu_strategy;
   std::unique_ptr<nsfs::XattrStrategy> xattr_strategy;
+  std::unique_ptr<nsfs::PathStrategy> path_strategy;
+  nsfs::ReservedNames reserved_names;
   std::string base_path;
   std::unique_ptr<nsfs::Directory> root_dir;
   int root_fd;
@@ -838,6 +851,8 @@ public:
   nsfs::FSStrategy* get_fs_strategy() { return fs_strategy.get(); }
   nsfs::MPUStrategy* get_mpu_strategy() { return mpu_strategy.get(); }
   nsfs::XattrStrategy* get_xattr_strategy() { return xattr_strategy.get(); }
+  nsfs::PathStrategy* get_path_strategy() { return path_strategy.get(); }
+  const nsfs::ReservedNames& get_reserved_names() const { return reserved_names; }
 
   /* called by nsfs::BucketCache layer when a new object is discovered
    * by inotify or similar */
@@ -1560,7 +1575,9 @@ public:
     ptail_placement_rule(_ptail_placement_rule),
     part_num(_part_num),
     upload_dir(_shadow_bucket->get_dir()->clone()),
-    part_file(std::make_unique<nsfs::File>(nsfs::get_key_fname(_key, false), upload_dir.get(), _driver->ctx())),
+    part_file(std::make_unique<nsfs::File>(
+		_driver->get_path_strategy()->object_name(_key, false),
+		upload_dir.get(), _driver->ctx())),
     mp_cache_key(std::move(_mp_cache_key)),
     yield(y)
   { upload_dir->open(dpp); }

@@ -86,8 +86,8 @@ const int64_t DIRECT_IO_ALIGN = 4096;
 #define RGW_NSFS_ATTR_DELETE_MARKER "delete_marker"
 #define RGW_NSFS_ATTR_NON_CURRENT_TS "non_current_timestamp"
 
-static const std::string HIDDEN_VERSIONS_PATH = ".versions";
-static const std::string HIDDEN_SHADOW_PATH = ".shadow";
+static const std::string HIDDEN_VERSIONS_PATH{nsfs::VERSIONS_DIR};
+static const std::string HIDDEN_SHADOW_PATH{nsfs::SHADOW_DIR};
 static const std::string NULL_VERSION_ID = "null";
 
 static constexpr int NSFS_VERSION_RETRIES = 5;
@@ -98,40 +98,36 @@ static const std::string VERSIONS_LOCKFILE = ".versions/.lock";
  * LWE cluster-wide right on GPFS. */
 
 const std::string mp_ns = "multipart";
-const std::string NSFS_FOLDER_OBJECT_NAME = ".folder";
+/* Object naming -- the file name for a key, its inverse, the bucket
+ * directory and the directory-object sentinel -- belongs to PathStrategy
+ * (path_strategy.h). */
 
 /* The multipart staging layout -- where an in-flight upload's parts live
  * and what they are called -- now belongs to MPUStrategy (mpu_strategy.h),
  * because it is the part of nsfs that has to differ from NooBaa's and,
  * separately, has to differ on a filesystem which cannot share extents.
  * See DESIGN.md. */
-static const std::string VERSIONS_LOCK_NAME = ".lock";
+static const std::string VERSIONS_LOCK_NAME{nsfs::VERSIONS_LOCK};
 
 /* Names this driver creates on disk which are not objects.  Listing
  * paths suppress exactly these;  every other dot-prefixed name is an
  * ordinary object.  Hiding all of them is a client convention -- ls
  * filters, readdir(3) does not -- and a server which drops them from
  * the listing leaves a namespace a client cannot see or empty. */
-/* the names a layout contributes, or none.  Fetched once by a caller and
- * held across its loop:  the virtual call belongs outside the readdir,
- * not once per directory entry. */
-static const nsfs::ReservedNames& reserved_of(const nsfs::MPUStrategy* mpu)
+/* the carried aggregate, or an empty set for an FSEnt built without a
+ * parent.  Held by a caller across its loop. */
+static const nsfs::ReservedNames& reserved_or_none(
+    const nsfs::ReservedNames* rn)
 {
   static const nsfs::ReservedNames none{};
-  return mpu ? mpu->reserved_names() : none;
+  return rn ? *rn : none;
 }
 
+/* Matched against the driver's assembled set rather than asked of any
+ * strategy:  this runs per directory entry. */
 static bool is_reserved_name(std::string_view name,
 			     const nsfs::ReservedNames& rn)
 {
-  if ((name == HIDDEN_SHADOW_PATH) ||
-      (name == HIDDEN_VERSIONS_PATH) ||
-      (name == NSFS_FOLDER_OBJECT_NAME) ||
-      (name == VERSIONS_LOCK_NAME)) {
-    return true;
-  }
-  /* the layout's own scaffolding, matched against its names rather than
-   * asked of it:  this runs per directory entry */
   for (const auto& e : rn.exact) {
     if (name == e) {
       return true;
@@ -147,9 +143,7 @@ static bool is_reserved_name(std::string_view name,
       return true;
     }
   }
-  return name.starts_with(nsfs::TMP_LINK_PREFIX) ||
-	 name.starts_with(nsfs::UNLINK_TMP_PREFIX) ||
-	 name.starts_with(nsfs::CLONE_PARENT_PREFIX);
+  return false;
 }
 
 /* Does an on-disk entry count as *content*, for deciding whether a bucket
@@ -221,8 +215,10 @@ static bool entry_is_content(int parent_fd, std::string_view name,
   if (name == HIDDEN_SHADOW_PATH) {
     return dir_has_content(parent_fd, std::string(name).c_str());
   }
-  if (name == NSFS_FOLDER_OBJECT_NAME) {
-    return true; /* the sentinel of a directory object */
+  for (const auto& e : rn.content_exact) {
+    if (name == e) {
+      return true; /* the sentinel of a directory object */
+    }
   }
   for (const auto& p : rn.staging_prefixes) {
     if (name.starts_with(p)) {
@@ -1159,26 +1155,6 @@ static int copy_xattrs_fd(const DoutPrefixProvider* dpp, int src_fd, int dst_fd)
 
 namespace nsfs {
 
-std::string get_key_fname(rgw_obj_key& key, bool use_version)
-{
-  std::string fname;
-  if (use_version) {
-    fname = key.get_oid();
-  } else {
-    fname = key.get_index_key_name();
-  }
-
-  if (!key.get_ns().empty()) {
-    fname.insert(0, 1, '.');
-  }
-
-  if (!fname.empty() && fname.back() == '/') {
-    fname += NSFS_FOLDER_OBJECT_NAME;
-  }
-
-  return fname;
-}
-
 int resolve_path(const DoutPrefixProvider* dpp,
                  Directory* root,
                  const std::string& key_path,
@@ -1243,13 +1219,6 @@ static inline std::string gen_rand_instance_name()
   return buf;
 }
 
-static inline std::string bucket_fname(std::string name, std::optional<std::string>& ns)
-{
-  if (ns)
-    return "." + *ns + "_" + name;
-  return name;
-}
-
 static inline bool get_attr(Attrs& attrs, const char* name, bufferlist& bl)
 {
   auto iter = attrs.find(name);
@@ -1283,13 +1252,6 @@ template <typename F>
   return true;
 }
 
-
-static inline rgw_obj_key decode_obj_key(const std::string& fname)
-{
-  rgw_obj_key key;
-  rgw_obj_key::parse_raw_oid(fname, &key);
-  return key;
-}
 
 /* Ownership is XattrStrategy::object_owner() now -- a question about the
  * object rather than a decode of one attribute, because in the noobaa
@@ -1514,14 +1476,18 @@ FSEnt::FSEnt(std::string _name, Directory* _parent, CephContext* _ctx, FSStrateg
   : fname(_name), parent(_parent), ctx(_ctx),
     fs_strategy(_strat ? _strat : (_parent ? _parent->fs_strategy : nullptr)),
     mpu_strategy(_parent ? _parent->mpu_strategy : nullptr),
-    xattr_strategy(_parent ? _parent->xattr_strategy : nullptr)
+    xattr_strategy(_parent ? _parent->xattr_strategy : nullptr),
+    path_strategy(_parent ? _parent->path_strategy : nullptr),
+    reserved_names(_parent ? _parent->reserved_names : nullptr)
 {}
 
 FSEnt::FSEnt(std::string _name, Directory* _parent, struct statx& _stx, CephContext* _ctx, FSStrategy* _strat)
   : fname(_name), parent(_parent), exist(true), stx(_stx), stat_done(true), ctx(_ctx),
     fs_strategy(_strat ? _strat : (_parent ? _parent->fs_strategy : nullptr)),
     mpu_strategy(_parent ? _parent->mpu_strategy : nullptr),
-    xattr_strategy(_parent ? _parent->xattr_strategy : nullptr)
+    xattr_strategy(_parent ? _parent->xattr_strategy : nullptr),
+    path_strategy(_parent ? _parent->path_strategy : nullptr),
+    reserved_names(_parent ? _parent->reserved_names : nullptr)
 {}
 
 int FSEnt::stat(const DoutPrefixProvider* dpp, bool force)
@@ -1681,7 +1647,7 @@ int FSEnt::fill_cache(const DoutPrefixProvider *dpp, optional_yield y, fill_cach
 {
   rgw_bucket_dir_entry bde{};
 
-  rgw_obj_key key = decode_obj_key(path_prefix + get_name());
+  rgw_obj_key key = path_strategy->key_from_name(path_prefix + get_name());
 
   int ret = make_dir_entry(dpp, y, key, flags, bde);
   if (ret < 0) {
@@ -2215,7 +2181,7 @@ int Directory::stat(const DoutPrefixProvider* dpp, bool force)
 int Directory::remove(const DoutPrefixProvider* dpp, optional_yield y, bool delete_children)
 {
   return delete_directory(parent->get_fd(), fname.c_str(), delete_children,
-			  dpp, reserved_of(mpu_strategy));
+			  dpp, reserved_or_none(reserved_names));
 }
 
 int Directory::write(int64_t ofs, bufferlist& bl, const DoutPrefixProvider* dpp,
@@ -2337,7 +2303,7 @@ int Directory::rename(const DoutPrefixProvider* dpp, optional_yield y, Directory
     ret = unlinkat(parent_fd, src_name.c_str(), 0);
   } else if (S_ISDIR(stx.stx_mode)) {
     ret = delete_directory(parent_fd, src_name.c_str(), true, dpp,
-			   reserved_of(mpu_strategy));
+			   reserved_or_none(reserved_names));
   }
   if (ret < 0) {
     ret = errno;
@@ -2391,7 +2357,7 @@ int Directory::copy(const DoutPrefixProvider *dpp, optional_yield y,
     return ret;
   }
 
-  const auto& rn = reserved_of(mpu_strategy);
+  const auto& rn = reserved_or_none(reserved_names);
   ret = for_each(dpp, [this, &dest, &dpp, &y, &rn](const char* name) {
     std::unique_ptr<FSEnt> sobj;
 
@@ -2465,13 +2431,13 @@ int Directory::fill_cache(const DoutPrefixProvider *dpp, optional_yield y,
                           fill_cache_cb_t &cb, uint32_t flags,
                           const std::string& path_prefix)
 {
-  const auto& rn = reserved_of(mpu_strategy);
+  const auto& rn = reserved_or_none(reserved_names);
   int ret = for_each(dpp, [this, &cb, &dpp, &y, &path_prefix, flags,
 			   &rn](const char *name) {
     std::unique_ptr<FSEnt> ent;
 
     if (is_reserved_name(name, rn) &&
-	name != NSFS_FOLDER_OBJECT_NAME) {
+	!path_strategy->names_directory_object(name)) {
       return 0;
     }
 
@@ -2481,11 +2447,11 @@ int Directory::fill_cache(const DoutPrefixProvider *dpp, optional_yield y,
 
     ent->stat(dpp);
 
-    if (name == NSFS_FOLDER_OBJECT_NAME) {
+    if (path_strategy->names_directory_object(name)) {
       // directory object sentinel: emit with key = path_prefix
       // path_prefix is already "photos/" when inside photos/
       rgw_bucket_dir_entry bde{};
-      rgw_obj_key key = decode_obj_key(path_prefix);
+      rgw_obj_key key = path_strategy->key_from_name(path_prefix);
       key.get_index_key(&bde.key);
       bde.ver.pool = 1;
       bde.ver.epoch = 1;
@@ -2931,6 +2897,30 @@ int NSFSDriver::initialize(CephContext *cct, const DoutPrefixProvider *dpp)
   /* one implementation today;  the second is selected by the bucket's
    * recorded format, which S4 adds */
   xattr_strategy = std::make_unique<nsfs::RGWXattrStrategy>();
+  path_strategy = std::make_unique<nsfs::RGWPathStrategy>();
+
+  /* Every strategy names some scaffolding, and the listing paths test one
+   * name at a time;  assemble the union once so that no strategy is
+   * consulted per directory entry.  The mechanism's own temporaries come
+   * from fs_strategy.h -- they are not a format's to choose. */
+  {
+    auto add = [this](const nsfs::ReservedNames& r) {
+      auto& a = reserved_names;
+      a.exact.insert(a.exact.end(), r.exact.begin(), r.exact.end());
+      a.prefixes.insert(a.prefixes.end(), r.prefixes.begin(),
+			r.prefixes.end());
+      a.staging_prefixes.insert(a.staging_prefixes.end(),
+				r.staging_prefixes.begin(),
+				r.staging_prefixes.end());
+      a.content_exact.insert(a.content_exact.end(),
+			     r.content_exact.begin(), r.content_exact.end());
+    };
+    add(path_strategy->reserved_names());
+    add(mpu_strategy->reserved_names());
+    reserved_names.prefixes.emplace_back(nsfs::TMP_LINK_PREFIX);
+    reserved_names.prefixes.emplace_back(nsfs::UNLINK_TMP_PREFIX);
+    reserved_names.prefixes.emplace_back(nsfs::CLONE_PARENT_PREFIX);
+  }
 
   /* ordered listing cache */
   bucket_cache.reset(
@@ -2964,7 +2954,8 @@ int NSFSDriver::initialize(CephContext *cct, const DoutPrefixProvider *dpp)
 	  const boost::container::flat_map<uint32_t,
 	    file::listing::MultipartPartInfo>& parts) {
 	std::optional<std::string> ns{mp_ns};
-	auto staging_name = bucket_fname(key.upload_meta, ns);
+	auto staging_name =
+	  path_strategy->bucket_dir_name(key.upload_meta, ns);
 	int dir_fd = ::openat(root_fd, (key.bucket_name + "/" +
 	  staging_name).c_str(), O_RDONLY | O_DIRECTORY);
 	if (dir_fd < 0) {
@@ -3002,6 +2993,8 @@ int NSFSDriver::initialize(CephContext *cct, const DoutPrefixProvider *dpp)
   root_dir = std::make_unique<Directory>(base_path, nullptr, ctx(), fs_strategy.get());
   root_dir->set_mpu_strategy(mpu_strategy.get());
   root_dir->set_xattr_strategy(xattr_strategy.get());
+  root_dir->set_path_strategy(path_strategy.get());
+  root_dir->set_reserved_names(&reserved_names);
   ret = root_dir->open(dpp);
   if (ret < 0) {
     if (ret == -ENOTDIR) {
@@ -3646,7 +3639,7 @@ int NSFSDriver::mint_listing_entry(const std::string &bname,
     if (ret < 0)
       return ret;
 
-    obj = b->get_object(decode_obj_key(bde.key.name));
+    obj = b->get_object(path_strategy->key_from_name(bde.key.name));
     pobj = static_cast<NSFSObject *>(obj.get());
 
     if (!pobj->check_exists(nullptr)) {
@@ -4567,7 +4560,7 @@ int NSFSBucket::read_stats(const DoutPrefixProvider *dpp, optional_yield y,
   auto& main = stats[RGWObjCategory::Main];
 
   // TODO: bucket stats shouldn't have to list all objects
-  const auto& rn = reserved_of(driver->get_mpu_strategy());
+  const auto& rn = driver->get_reserved_names();
   return dir->for_each(dpp, [this, dpp, y, &main, &rn] (const char* name) {
     if (is_reserved_name(name, rn)) {
       return 0;
@@ -4667,7 +4660,7 @@ int NSFSBucket::write_attrs(const DoutPrefixProvider* dpp, optional_yield y)
 int NSFSBucket::check_empty(const DoutPrefixProvider* dpp, optional_yield y)
 {
   int bucket_fd = dir->get_fd();
-  const auto& rn = reserved_of(driver->get_mpu_strategy());
+  const auto& rn = driver->get_reserved_names();
   return dir->for_each(dpp, [bucket_fd, &rn](const char* name) {
     /* for_each filters out "." and ".." */
     if (entry_is_content(bucket_fd, name, rn)) {
@@ -4818,7 +4811,7 @@ int NSFSBucket::create(const DoutPrefixProvider* dpp, optional_yield y, bool* ex
 
 std::string NSFSBucket::get_fname()
 {
-  return bucket_fname(get_name(), ns);
+  return driver->get_path_strategy()->bucket_dir_name(get_name(), ns);
 }
 
 int NSFSBucket::rename(const DoutPrefixProvider* dpp, optional_yield y, Object* target_obj)
@@ -5346,7 +5339,7 @@ int NSFSObject::copy_object(const ACLOwner& owner,
     nsfs::Directory* dst_leaf_dir = nullptr;
     std::string dst_leaf_name;
     ret = nsfs::resolve_path(dpp, db->get_dir(),
-        get_key_fname(dst_key, /*use_version=*/false),
+        driver->get_path_strategy()->object_name(dst_key, false),
         /*create_dirs=*/true, driver->ctx(),
         dst_chain, dst_leaf_dir, dst_leaf_name);
     if (ret < 0) {
@@ -5645,7 +5638,7 @@ int NSFSObject::stat_fsio_view(const DoutPrefixProvider* dpp,
     std::string attr_path{leaf};
     if (st && S_ISDIR(st->st_mode)) {
       attr_path += "/";
-      attr_path += NSFS_FOLDER_OBJECT_NAME;
+      attr_path += driver->get_path_strategy()->folder_object_name();
     }
 
     /* xattrs need a descriptor;  it is transient, unlike the ones an
@@ -7328,7 +7321,8 @@ int NSFSObject::generate_etag(const DoutPrefixProvider* dpp, optional_yield y)
 
 const std::string NSFSObject::get_fname(bool use_version)
 {
-  return get_key_fname(state.obj.key, use_version);
+  return driver->get_path_strategy()->object_name(state.obj.key,
+						  use_version);
 }
 
 std::string NSFSObject::gen_temp_fname()
@@ -8224,7 +8218,7 @@ int NSFSObject::copy(const DoutPrefixProvider *dpp, optional_yield y,
   Directory* dst_leaf_dir;
   std::string dst_leaf_name;
   int ret = resolve_path(dpp, db->get_dir(),
-      get_key_fname(dst_key, /*use_version=*/false),
+      driver->get_path_strategy()->object_name(dst_key, false),
       /*create_dirs=*/true, driver->ctx(),
       dst_chain, dst_leaf_dir, dst_leaf_name);
   if (ret < 0)
@@ -8252,7 +8246,9 @@ int NSFSMultipartPart::load(const DoutPrefixProvider* dpp, optional_yield y,
     return 0;
   }
 
-  part_file = std::make_unique<File>(get_key_fname(key, false), upload->get_shadow()->get_dir(), driver->ctx());
+  part_file = std::make_unique<File>(
+      driver->get_path_strategy()->object_name(key, false),
+      upload->get_shadow()->get_dir(), driver->ctx());
 
   // Stat the part_file object to get things like size
   int ret = part_file->stat(dpp, y);
@@ -8852,7 +8848,7 @@ int NSFSMultipartUpload::complete(const DoutPrefixProvider *dpp,
   shadow->get_dir()->close();
   delete_directory(pb->get_dir()->get_fd(),
                    get_fname().c_str(), true, dpp,
-                   reserved_of(driver->get_mpu_strategy()));
+                   driver->get_reserved_names());
 
   // update bucket cache
   target_obj->set_obj_size(ofs);

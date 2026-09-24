@@ -23,33 +23,11 @@
 
 #include <sys/types.h>
 
+#include "fs_strategy.h"
+
 class DoutPrefixProvider;
 
 namespace rgw { namespace sal { namespace nsfs {
-
-class FSStrategy;
-
-/* The names a layout creates which are not objects.
- *
- * Handed over as data rather than answered one name at a time, because
- * the listing paths ask per directory entry:  a virtual call there would
- * sit in the readdir loop, where this is a few string_view compares the
- * compiler can inline.  The caller fetches this once and matches against
- * it, so the format still owns what its scaffolding is called.
- *
- * Being able to enumerate them is worth something on its own -- anything
- * that has to recognise another gateway's names needs the list, not a
- * predicate bound to one implementation. */
-struct ReservedNames {
-  /* matched exactly */
-  std::vector<std::string> exact;
-  /* any name with this prefix */
-  std::vector<std::string> prefixes;
-  /* prefixes naming an upload in flight.  Separated because they are
-   * scaffolding to a listing and *content* to S3, which reports
-   * incomplete uploads and must not call such a bucket empty. */
-  std::vector<std::string> staging_prefixes;
-};
 
 /* Where a multipart upload's parts live while it is in flight, what they
  * are called, and what completing it does.

@@ -56,6 +56,32 @@ inline constexpr size_t MAX_COPY_IO_SIZE = 4u << 20;
 bool probe_shares_extents(const DoutPrefixProvider* dpp,
                           const std::string& dir);
 
+/* The names a layout creates which are not objects.
+ *
+ * Handed over as data rather than answered one name at a time, because
+ * the listing paths ask per directory entry:  a virtual call there would
+ * sit in the readdir loop, where this is a few string_view compares the
+ * compiler can inline.  The caller fetches this once and matches against
+ * it, so the format still owns what its scaffolding is called.
+ *
+ * Being able to enumerate them is worth something on its own -- anything
+ * that has to recognise another gateway's names needs the list, not a
+ * predicate bound to one implementation. */
+struct ReservedNames {
+  /* matched exactly */
+  std::vector<std::string> exact;
+  /* any name with this prefix */
+  std::vector<std::string> prefixes;
+  /* prefixes naming an upload in flight.  Separated because they are
+   * scaffolding to a listing and *content* to S3, which reports
+   * incomplete uploads and must not call such a bucket empty. */
+  std::vector<std::string> staging_prefixes;
+  /* names which are scaffolding to a listing but mean the object exists
+   * -- the sentinel inside a directory which is itself an object.  Same
+   * split as staging_prefixes, matched exactly. */
+  std::vector<std::string> content_exact;
+};
+
 enum class SafeResult {
   OK = 0,
   MISMATCH = 1,
