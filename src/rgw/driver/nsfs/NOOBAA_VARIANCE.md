@@ -48,15 +48,48 @@ const XATTR_VERSION_ID   = XATTR_NOOBAA_INTERNAL_PREFIX + 'version_id';
 ### Value encoding
 
 NooBaa stores all xattr values as **UTF-8 strings** — numbers are
-decimal strings, structured data is JSON.  Our driver uses **Ceph
-binary encoding** (`ENCODE_START`/`ENCODE_FINISH` with bufferlist
-serialization).  These are completely incompatible wire formats.
+decimal strings, structured data is JSON.
+
+Our side is **not one thing**, and the original claim here — that we use
+Ceph binary encoding throughout, making the wire formats "completely
+incompatible" — was too strong.  `write_x_attr()` writes the bufferlist's
+raw bytes, and what is in the bufferlist depends on the attribute and on
+the code path that filled it:
+
+- **Plain strings.**  `RGW_ATTR_ETAG` holds bare hex;  on disk an object
+  carries `user.nsfs.rgw.etag = "e14316878dab30f766e8d8119fdc92da"` as 32
+  ASCII bytes, verified by `getfattr -e hex` (2026-09-23).  Content type
+  and user metadata are strings too.  These differ from NooBaa in the
+  *key* only.
+- **Ceph-encoded structures.**  `RGW_ATTR_ACL`, retention, and the
+  multipart part-size vector really are `ENCODE_START` payloads, and
+  those need a codec or -- better -- to disappear behind a question on
+  XattrStrategy, as ownership already has.
+- **Counted strings including the terminator.**  RGW's convention for
+  request metadata is `bl.append(v.c_str(), v.size() + 1)`
+  (`rgw_op.h:2478`, `rgw_op.cc:3861`, `rgw_op.cc:5545`), so the trailing
+  NUL is part of the value and lands on disk.  NooBaa writes no
+  terminator.
+
+**And we do not apply that convention uniformly.**  The librgw paths
+append `xattr.val.len` verbatim (`rgw_file.cc:1493`, `:1519`), so the same
+key holds `round` (5 bytes) when set over NFS and `round\0` (6 bytes) when
+set by an S3 PUT.  Two consequences beyond migration:  a `noobaa` format
+must *normalize* values rather than rename them, and an object PUT over S3
+and read back with `getxattr` over NFS hands the client a trailing NUL.
+
+**Etag quoting is a related, recurring hazard.**  nsfs stored the etag
+*with its surrounding quotes* until `15386ec4a26` ("rgw/nsfs: store etags
+as bare hex"), and `856e91963c4` / `79f77ca016a` had to unquote on the
+comparison side in nsfs and posix.  The quotes belong to the HTTP
+representation;  anything reasoning about the stored value has to assume
+they may reappear.
 
 ### Complete attribute mapping
 
 | Attribute | NooBaa xattr | Ceph NSFS xattr | Value format |
 |-----------|-------------|-----------------|--------------|
-| ETag | `user.content_md5` (no `noobaa.` prefix!) | `user.nsfs.rgw.etag` | NooBaa: hex string; Ceph: binary blob |
+| ETag | `user.content_md5` (no `noobaa.` prefix!) | `user.nsfs.rgw.etag` | both bare hex strings -- the key differs, the value does not (see above) |
 | Content-Type | `user.noobaa.content_type` | `user.nsfs.rgw.content_type` | NooBaa: string; Ceph: encoded string |
 | Content-Encoding | `user.noobaa.content_encoding` | `user.nsfs.rgw.content_encoding` | same divergence |
 | Version ID | `user.noobaa.version_id` | `user.nsfs.version_id` | NooBaa: string; Ceph: encoded |
@@ -67,16 +100,19 @@ serialization).  These are completely incompatible wire formats.
 | Retention mode | `user.noobaa.retention_mode` | `user.nsfs.rgw.obj-retention` | different key and encoding |
 | Retention date | `user.noobaa.retention_date` | (embedded in retention blob) | — |
 | Non-current timestamp | `user.noobaa.non_current_timestamp` | `user.nsfs.non_current_timestamp` | NooBaa: string; Ceph: encoded |
-| User metadata | `user.<key>` (raw, no prefix) | `user.nsfs.rgw.<key>` | NooBaa: passthrough; Ceph: prefix-swapped |
-| ACL | (not stored as xattr by NooBaa) | `user.nsfs.x-rgw-acl` | Ceph-specific |
+| User metadata | `user.<key>` (raw, no prefix) | `user.nsfs.rgw.<key>` | NooBaa: passthrough, no terminator; Ceph: prefix-swapped, terminator present or not depending on the writing path |
+| ACL | (not stored as xattr by NooBaa) | `user.nsfs.rgw.acl` | Ceph-specific, ceph-encoded |
 | Object type | (inferred from stat) | `user.nsfs.object_type` | Ceph-specific enum |
 | Multipart part count | (not stored on final) | `user.nsfs.multipart_part_count` | Ceph: encoded uint16 |
 | Multipart part sizes | (not stored on final) | `user.nsfs.multipart_part_sizes` | Ceph: encoded vector<uint64_t> |
 | GPFS DMAPI | `dmapi.IBM*` (4 attrs) | N/A (not yet integrated) | — |
 | GPFS encryption | `gpfs.Encryption` | N/A (not yet integrated) | — |
 
-**Impact:** A completed NooBaa object's xattrs are unreadable by our
-driver.  Our driver would treat NooBaa objects as having no metadata
+**Impact:** A completed NooBaa object's xattrs are largely unreadable by
+our driver -- though less uniformly than this document first claimed:  the
+etag, content type and user metadata differ in key and terminator rather
+than in encoding, while the ACL and the object-lock attributes differ in
+kind.  Our driver would treat NooBaa objects as having no metadata
 (no content-type, no etag, no user metadata, no tags).  The reverse
 is equally true.
 
