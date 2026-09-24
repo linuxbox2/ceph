@@ -1777,6 +1777,49 @@ TEST(OPEN2, XATTR_PERSIST)
   o2h->close(open1);
 }
 
+/* An attribute set over NFS must land in the same bytes as the same
+ * attribute set over S3.
+ *
+ * RGW stores request metadata as a counted string whose length includes
+ * the terminator (rgw_get_request_metadata, rgw_op.h) so that a reader can
+ * treat the value as a C string.  On rados that is invisible;  on a
+ * filesystem backend the bufferlist's bytes ARE the file's xattr, so the
+ * convention becomes on-disk format and the two protocols have to agree
+ * about an object they both see.
+ *
+ * Checked on the file rather than through the API, because the API round
+ * trip passes either way -- setxattrs appends the terminator and
+ * getxattrs takes it off, so only the disk can say whether it is
+ * there. */
+TEST(OPEN2, XATTR_STORED_AS_S3_STORES_IT)
+{
+  if (! have_fs_layout()) {
+    GTEST_SKIP() << "not a filesystem-backed driver";
+  }
+  const auto path = published_path("xattrtest1");
+  const std::string disk_key{"user.nsfs.rgw.x-amz-meta-shape"};
+
+  char buf[64];
+  ssize_t len = ::getxattr(path.c_str(), disk_key.c_str(), buf, sizeof(buf));
+  ASSERT_GT(len, 0) << "no " << disk_key << " on " << path
+		    << ";  the attribute this reasons about is not there";
+
+  const std::string stored(buf, len);
+  EXPECT_EQ(stored, std::string("round\0", 6))
+      << "stored " << len << " bytes, expected the value plus a terminator"
+	 " -- an attribute set over NFS is not landing as S3 stores it";
+
+  /* and the terminator must not reach a client:  an S3 client never sees
+   * it, because the HTTP layer reads with c_str() */
+  Open2Helper o2h(fs, bucket_fh);
+  ASSERT_EQ(get<0>(o2h.lookup("xattrtest1")), 0);
+  auto gr = o2h.getxattr("shape");
+  ASSERT_EQ(get<0>(gr), 0);
+  EXPECT_EQ(get<1>(gr), "round")
+      << "getxattrs handed the terminator to the caller";
+  EXPECT_EQ(get<1>(gr).length(), 5u);
+}
+
 TEST(OPEN2, XATTR_LIST)
 {
   /* list xattrs on an open handle */

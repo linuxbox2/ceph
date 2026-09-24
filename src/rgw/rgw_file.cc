@@ -1297,7 +1297,15 @@ namespace rgw {
 	  continue;
 	}
 
+	/* The terminator is representation, not value.  An S3 client never
+	 * sees it, because the HTTP layer reads the attribute with
+	 * c_str();  an NFS client should not see it either.  Values
+	 * written before this was stored consistently simply do not have
+	 * one, and are unaffected. */
 	std::string val = bl.to_str();
+	if (!val.empty() && (val.back() == '\0')) {
+	  val.pop_back();
+	}
 	rgw_xattrstr xattr_k = { const_cast<char*>(svk.data()),
 				  uint32_t(svk.length()) };
 	rgw_xattrstr xattr_v = { const_cast<char*>(val.c_str()),
@@ -1370,9 +1378,14 @@ namespace rgw {
 
 	rgw_xattrstr xattr_k = { const_cast<char*>(svk.data()),
 				 uint32_t(svk.length())};
-	rgw_xattrstr xattr_v =
-	  {const_cast<char*>(const_cast<buffer::list&>(v).c_str()),
-	   uint32_t(v.length())};
+	/* the terminator is representation, not value -- see the FSIO
+	 * branch above */
+	std::string val = const_cast<buffer::list&>(v).to_str();
+	if (!val.empty() && (val.back() == '\0')) {
+	  val.pop_back();
+	}
+	rgw_xattrstr xattr_v = { const_cast<char*>(val.c_str()),
+				 uint32_t(val.length()) };
 	rgw_xattr xattr = { xattr_k, xattr_v };
 	rgw_xattrlist xattrlist = { &xattr, 1 };
 
@@ -1490,7 +1503,15 @@ namespace rgw {
 	}
 	string k = prefix_xattr_keystr(xattr.key);
 	bufferlist bl;
+	/* Store it as S3 would.  rgw_get_request_metadata() appends the
+	 * terminator and counts it, so that a reader can treat the value
+	 * as a C string;  on a filesystem backend the bufferlist's bytes
+	 * are the file's xattr, so the same metadata set over NFS has to
+	 * land in the same bytes as it would over S3, or the two protocols
+	 * disagree about an object they both see.  getxattrs() takes the
+	 * terminator back off. */
 	bl.append(xattr.val.val, xattr.val.len);
+	bl.append('\0');
 	int rc = f->fsio_hdl->fsetattr(&xdp, k, bl, 0);
 	if (rc < 0) {
 	  return rc;
@@ -1516,7 +1537,9 @@ namespace rgw {
 	continue;
 
       string k = prefix_xattr_keystr(xattr.key);
+      /* terminated and counted, as above */
       attr_bl.append(xattr.val.val, xattr.val.len);
+      attr_bl.append('\0');
       req.emplace_attr(k.c_str(), std::move(attr_bl));
     }
 
