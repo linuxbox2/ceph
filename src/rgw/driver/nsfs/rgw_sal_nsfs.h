@@ -33,6 +33,7 @@
 #include "mpu_strategy.h"
 #include "xattr_strategy.h"
 #include "path_strategy.h"
+#include "bucket_profile.h"
 
 class RGWLC;
 
@@ -468,6 +469,10 @@ protected:
   std::unique_ptr<nsfs::MPUStrategy> mpu_strategy;
   std::unique_ptr<nsfs::XattrStrategy> xattr_strategy;
   std::unique_ptr<nsfs::PathStrategy> path_strategy;
+  /* what a bucket's extensions marker resolves to;  both resolve to the
+   * same strategy instances until S5 supplies the noobaa ones */
+  nsfs::BucketProfile base_profile;
+  nsfs::BucketProfile extended_profile;
   nsfs::ReservedNames reserved_names;
   std::string base_path;
   std::unique_ptr<nsfs::Directory> root_dir;
@@ -855,6 +860,34 @@ public:
   nsfs::PathStrategy* get_path_strategy() { return path_strategy.get(); }
   const nsfs::ReservedNames& get_reserved_names() const { return reserved_names; }
 
+  /* The profile a marker value selects, or nullptr for a value this
+   * build does not implement -- which is refused rather than guessed. */
+  const nsfs::BucketProfile* resolve_profile(uint32_t extensions) const {
+    if (extensions == nsfs::EXTENSIONS_NONE) {
+      return &base_profile;
+    }
+    if (extensions == nsfs::EXTENSIONS_VERSION) {
+      return &extended_profile;
+    }
+    return nullptr;
+  }
+  const nsfs::BucketProfile* get_base_profile() const { return &base_profile; }
+
+  /* Whether a bucket created here is marked.
+   *
+   * False is reversible mode:  the deployment intends to be able to hand
+   * the tree back to NooBaa, so nothing may acquire structure NooBaa
+   * cannot represent.  It also refuses adoption, since adopting is the
+   * one other way to mark. */
+  bool extensions_enabled() {
+    return ctx()->_conf->rgw_nsfs_extensions;
+  }
+
+  /* Write the marker onto an existing bucket directory.  Idempotent for a
+   * bucket already at this version. */
+  int adopt_bucket(const DoutPrefixProvider* dpp, optional_yield y,
+		   const std::string& name, uint32_t* had /* OUT */);
+
   /* called by nsfs::BucketCache layer when a new object is discovered
    * by inotify or similar */
   int mint_listing_entry(
@@ -945,6 +978,8 @@ private:
   RGWAccessControlPolicy acls;
   std::optional<std::string> ns{std::nullopt};
   std::unique_ptr<nsfs::Directory> dir;
+  /* resolved from the extensions marker;  null until it has been read */
+  const nsfs::BucketProfile* profile{nullptr};
 
 public:
   NSFSBucket(NSFSDriver *_dr, nsfs::Directory* _p_dir, const rgw_bucket& _b, std::optional<std::string> _ns = std::nullopt)
@@ -975,7 +1010,8 @@ public:
     StoreBucket(_b),
     driver(_b.driver),
     acls(_b.acls),
-    ns(_b.ns)
+    ns(_b.ns),
+    profile(_b.profile)
     {
       dir = _b.dir->clone_dir();
     }
@@ -997,6 +1033,24 @@ public:
 		     const CreateParams& params,
 		     optional_yield y) override;
   virtual int load_bucket(const DoutPrefixProvider* dpp, optional_yield y) override;
+
+  /* Read the extensions marker and resolve it, if that has not happened
+   * already.  Returns -ENOTSUP for a marker this build does not
+   * implement:  a bucket written by a newer gateway is refused, not
+   * served on the assumption that its additions are ignorable. */
+  int resolve_profile(const DoutPrefixProvider* dpp);
+  const nsfs::BucketProfile* get_profile() const { return profile; }
+
+  /* Whether this bucket carries our extensions.  Unresolved reads as
+   * base, which is the safe direction:  the interlocks refuse. */
+  bool extended() const { return profile && profile->extended(); }
+
+  /* Write the marker.  Called at creation when the deployment stamps,
+   * and by adoption. */
+  int mark_extensions(const DoutPrefixProvider* dpp, uint32_t version);
+
+  /* test support only -- reachable through the unmark-bucket hint */
+  int unmark_extensions(const DoutPrefixProvider* dpp);
   virtual RGWAccessControlPolicy& get_acl(void) override { return acls; }
   virtual int set_acl(const DoutPrefixProvider* dpp, RGWAccessControlPolicy& acl,
 		      optional_yield y) override;
@@ -1173,6 +1227,9 @@ public:
   FSIOResult get_fsio_handle(const DoutPrefixProvider* dpp,
 			     uint32_t flags = FSIOObject::OPEN_FLAG_NONE,
 			     const FSIOCreateSpec* spec = nullptr) override;
+
+  /* whether this object's bucket carries the extensions FSIO needs */
+  int check_fsio_allowed(const DoutPrefixProvider* dpp);
 
   int stat_fsio_view(const DoutPrefixProvider* dpp, struct stat* st,
 		     Attrs* attrs, uint32_t flags) override;

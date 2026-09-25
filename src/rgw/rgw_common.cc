@@ -2197,7 +2197,8 @@ bool RGWUserCaps::is_valid_cap_type(const string& tp)
                                     "ratelimit",
                                     "accounts",
                                     "dedup",
-                                    "driver-hint"};
+                                    "driver-hint",
+                                    "nsfs"};
 
   for (unsigned int i = 0; i < sizeof(cap_type) / sizeof(char *); ++i) {
     if (tp.compare(cap_type[i]) == 0) {

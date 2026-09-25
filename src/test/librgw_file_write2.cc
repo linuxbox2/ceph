@@ -5505,6 +5505,72 @@ TEST(OPEN2, VER_TIMER_LONGER_IN_VERSIONED_BUCKET)
   g_conf().apply_changes(nullptr);
 }
 
+/* FSIO is an extension, so an unmarked bucket does not serve it.
+ *
+ * Both polarities, because the refusing branch is otherwise unreachable:
+ * every bucket a gateway creates carries the marker, so there is no
+ * unmarked bucket to try until the hint takes one away.  Without the
+ * first leg this would pass against an open2 that was broken outright.
+ *
+ * Its own bucket, since unmarking the suite's shared one would take FSIO
+ * away from every test after it. */
+TEST(OPEN2, EXT_FSIO_REFUSED_ON_UNMARKED_BUCKET)
+{
+  const DoutPrefix dp(g_ceph_context, dout_subsys, "write2 test: ");
+  auto* driver = rgw::g_rgwlib->get_driver();
+
+  const std::string bname{"s4unmarked"};
+
+  /* Leave nothing behind from a previous run.  This test unmarks its
+   * bucket, so a leftover would be unmarked too and the first leg would
+   * fail for the wrong reason. */
+  {
+    struct rgw_file_handle* old{nullptr};
+    if (rgw_lookup(fs, fs->root_fh, bname.c_str(), &old, nullptr, 0,
+		   RGW_LOOKUP_FLAG_NONE) == 0) {
+      (void) rgw_unlink(fs, old, "ext1", RGW_UNLINK_FLAG_NONE);
+      (void) rgw_unlink(fs, old, "ext2", RGW_UNLINK_FLAG_NONE);
+      (void) rgw_fh_rele(fs, old, RGW_FH_RELE_FLAG_NONE);
+      (void) rgw_unlink(fs, fs->root_fh, bname.c_str(),
+			RGW_UNLINK_FLAG_NONE);
+    }
+  }
+
+  struct stat st;
+  struct rgw_file_handle* bfh{nullptr};
+  ASSERT_EQ(rgw_mkdir(fs, fs->root_fh, bname.c_str(), &st, create_mask,
+		      &bfh, RGW_MKDIR_FLAG_NONE), 0);
+
+  /* marked, because this gateway made it */
+  {
+    Open2Helper o2h(fs, bfh);
+    ASSERT_EQ(std::get<0>(o2h.lookup("ext1")), 0);
+    auto ofr = o2h.open(O_RDWR, RGW_OPEN_FLAG_CREATE);
+    ASSERT_EQ(std::get<0>(ofr), 0)
+      << "FSIO refused on a bucket this gateway created and marked";
+    ASSERT_EQ(o2h.close(std::get<1>(ofr)), 0);
+  }
+
+  std::map<std::string, std::string> out;
+  ASSERT_EQ(driver->driver_hint(&dp, "unmark-bucket",
+				{{"bucket", bname}}, &out), 0);
+  ASSERT_EQ(out["unmarked"], std::string("true"));
+
+  /* and now it reads as NooBaa wrote it, so it must not acquire a shadow */
+  {
+    Open2Helper o2h(fs, bfh);
+    ASSERT_EQ(std::get<0>(o2h.lookup("ext2")), 0);
+    auto ofr = o2h.open(O_RDWR, RGW_OPEN_FLAG_CREATE);
+    ASSERT_EQ(std::get<0>(ofr), -ENOTSUP)
+      << "FSIO served on an unmarked bucket";
+  }
+
+  (void) rgw_unlink(fs, bfh, "ext1", RGW_UNLINK_FLAG_NONE);
+  (void) rgw_unlink(fs, bfh, "ext2", RGW_UNLINK_FLAG_NONE);
+  ASSERT_EQ(rgw_fh_rele(fs, bfh, RGW_FH_RELE_FLAG_NONE), 0);
+  (void) rgw_unlink(fs, fs->root_fh, bname.c_str(), RGW_UNLINK_FLAG_NONE);
+}
+
 TEST(OPEN2, DELETE_BUCKET) {
   if (do_delete) {
     int ret = rgw_unlink(fs, fs->root_fh, bucket_name.c_str(),
