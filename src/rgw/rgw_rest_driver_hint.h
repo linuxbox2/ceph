@@ -38,9 +38,33 @@ public:
 
     ldpp_dout(s, 10) << "driver_hint: hint=" << hint
       << " params=" << params.size() << dendl;
-    op_ret = driver->driver_hint(s, hint, params);
+    std::map<std::string, std::string> out;
+    op_ret = driver->driver_hint(s, hint, params, &out);
     ldpp_dout(s, 10) << "driver_hint: hint=" << hint
-      << " ret=" << op_ret << dendl;
+      << " ret=" << op_ret << " results=" << out.size() << dendl;
+    if (op_ret < 0) {
+      return;
+    }
+
+    /* A hint which reports driver state is the half that lets a test
+     * assert rather than assume -- whether the buffered copy actually
+     * ran, how many bytes it moved.  Discarding out would leave the
+     * interface able to act and unable to answer. */
+    Formatter* f = flusher.get_formatter();
+    flusher.start(0);
+    f->open_object_section("dummy");   /* outermost is not rendered */
+    f->dump_string("hint", hint);
+    f->open_object_section("results");
+    for (const auto& [k, v] : out) {
+      if ((v == "true") || (v == "false")) {
+        f->dump_bool(k.c_str(), (v == "true"));
+      } else {
+        f->dump_string(k.c_str(), v);
+      }
+    }
+    f->close_section();
+    f->close_section();
+    flusher.flush();
   }
 
   const char* name() const override { return "driver_hint"; }
