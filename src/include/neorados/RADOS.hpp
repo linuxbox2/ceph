@@ -19,6 +19,7 @@
 
 #include <concepts>
 #include <cstddef>
+#include <map>
 #include <memory>
 #include <optional>
 #include <tuple>
@@ -835,6 +836,19 @@ public:
   WriteOp& create(bool exclusive) &;
   WriteOp&& create(bool exclusive) && {
     return std::move(create(exclusive));
+  }
+  /// Clone this object to a sibling in its PG (same locator key and
+  /// hash);  dest must sort after this object's name.  User xattrs
+  /// beginning with a drop_attr_prefixes entry are not carried over;
+  /// set_attrs are then set on the sibling.
+  WriteOp& clone_to(std::string dest,
+                    std::vector<std::string> drop_attr_prefixes = {},
+                    std::map<std::string, ceph::buffer::list> set_attrs = {}) &;
+  WriteOp&& clone_to(std::string dest,
+                     std::vector<std::string> drop_attr_prefixes = {},
+                     std::map<std::string, ceph::buffer::list> set_attrs = {}) && {
+    return std::move(clone_to(std::move(dest), std::move(drop_attr_prefixes),
+                              std::move(set_attrs)));
   }
   WriteOp& write(uint64_t off, ceph::buffer::list bl) &;
   WriteOp&& write(uint64_t off, ceph::buffer::list bl) && {

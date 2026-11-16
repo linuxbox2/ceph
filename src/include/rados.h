@@ -295,6 +295,7 @@ extern const char *ceph_osd_state_name(int s);
 									    \
 	f(CREATE,	__CEPH_OSD_OP(WR, DATA, 13),	"create")	    \
 	f(ROLLBACK,	__CEPH_OSD_OP(WR, DATA, 14),	"rollback")	    \
+	f(CLONE_TO,	__CEPH_OSD_OP(WR, DATA, 46),	"clone-to")	    \
 									    \
 	f(WATCH,	__CEPH_OSD_OP(WR, DATA, 15),	"watch")	    \
 									    \

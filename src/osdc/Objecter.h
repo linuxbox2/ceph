@@ -353,6 +353,14 @@ struct ObjectOperation {
     o.op.flags = (excl ? CEPH_OSD_OP_FLAG_EXCL : 0);
   }
 
+  void clone_to(std::string dest, std::vector<std::string> drop_attr_prefixes,
+                std::map<std::string, ceph::buffer::list> set_attrs) {
+    OSDOp& o = add_op(CEPH_OSD_OP_CLONE_TO);
+    clone_to_op_t cto{std::move(dest), std::move(drop_attr_prefixes),
+                      std::move(set_attrs)};
+    encode(cto, o.indata);
+  }
+
   struct CB_ObjectOperation_stat {
     ceph::buffer::list bl;
     uint64_t *psize;

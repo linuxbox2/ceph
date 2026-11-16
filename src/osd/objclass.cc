@@ -139,6 +139,18 @@ int cls_cxx_create(cls_method_context_t hctx, bool exclusive)
   return (*pctx)->pg->do_osd_ops(*pctx, ops);
 }
 
+int cls_cxx_clone_to(cls_method_context_t hctx, const std::string& dest,
+                     const std::vector<std::string>& drop_attr_prefixes,
+                     const std::map<std::string, ceph::buffer::list>& set_attrs)
+{
+  PrimaryLogPG::OpContext **pctx = (PrimaryLogPG::OpContext **)hctx;
+  vector<OSDOp> ops(1);
+  ops[0].op.op = CEPH_OSD_OP_CLONE_TO;
+  clone_to_op_t cto{dest, drop_attr_prefixes, set_attrs};
+  encode(cto, ops[0].indata);
+  return (*pctx)->pg->do_osd_ops(*pctx, ops);
+}
+
 int cls_cxx_remove(cls_method_context_t hctx)
 {
   PrimaryLogPG::OpContext **pctx = (PrimaryLogPG::OpContext **)hctx;

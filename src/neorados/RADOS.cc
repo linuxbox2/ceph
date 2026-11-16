@@ -721,6 +721,15 @@ WriteOp& WriteOp::create(bool exclusive) & {
   return *this;
 }
 
+WriteOp& WriteOp::clone_to(std::string dest,
+                           std::vector<std::string> drop_attr_prefixes,
+                           std::map<std::string, bufferlist> set_attrs) & {
+  reinterpret_cast<OpImpl*>(&impl)->op.clone_to(std::move(dest),
+                                                std::move(drop_attr_prefixes),
+                                                std::move(set_attrs));
+  return *this;
+}
+
 WriteOp& WriteOp::write(uint64_t off, bufferlist bl) & {
   reinterpret_cast<OpImpl*>(&impl)->op.write(off, std::move(bl));
   return *this;

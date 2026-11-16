@@ -5313,6 +5313,34 @@ struct object_copy_cursor_t {
 WRITE_CLASS_ENCODER(object_copy_cursor_t)
 
 /**
+ * CEPH_OSD_OP_CLONE_TO payload:  clone the target object to a sibling in
+ * the same PG.  The destination takes the source's locator key, hash,
+ * pool and namespace;  only its name is given.  User xattrs whose names
+ * begin with one of drop_attr_prefixes are not carried over.
+ */
+struct clone_to_op_t {
+  std::string dest;
+  std::vector<std::string> drop_attr_prefixes;
+  std::map<std::string, ceph::buffer::list> set_attrs;
+
+  void encode(ceph::buffer::list& bl) const {
+    ENCODE_START(1, 1, bl);
+    encode(dest, bl);
+    encode(drop_attr_prefixes, bl);
+    encode(set_attrs, bl);
+    ENCODE_FINISH(bl);
+  }
+  void decode(ceph::buffer::list::const_iterator& bl) {
+    DECODE_START(1, bl);
+    decode(dest, bl);
+    decode(drop_attr_prefixes, bl);
+    decode(set_attrs, bl);
+    DECODE_FINISH(bl);
+  }
+};
+WRITE_CLASS_ENCODER(clone_to_op_t)
+
+/**
  * object_copy_data_t
  *
  * Return data from a copy request. The semantics are a little strange

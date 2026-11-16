@@ -201,3 +201,172 @@ CORO_TEST_F(NeoRadosWriteOps, Cancel, NeoRadosTest) {
   co_await (execute(oid, WriteOp{}.write_full(std::move(bl))) || wait_for(1us));
   co_return;
 }
+
+/* CEPH_OSD_OP_CLONE_TO:  the destination is a sibling named <oid>~<id>, and
+ * it is reached with oid as its locator key */
+static std::string sibling_name(std::string_view anchor, std::uint64_t counter)
+{
+  return fmt::format("{}~{:016x}{:016x}", anchor, counter,
+		     std::uint64_t{0xfeedfacecafebeef});
+}
+
+static neorados::IOContext keyed(const neorados::IOContext& pool,
+				 std::string_view key)
+{
+  auto ioc = pool;
+  ioc.set_key(std::string{key});
+  return ioc;
+}
+
+CORO_TEST_F(NeoRadosWriteOps, CloneTo, NeoRadosTest) {
+  const auto dest = sibling_name(oid, 1);
+  co_await execute(oid, WriteOp{}
+		   .create(true)
+		   .write_full(to_buffer_list("hello, sibling"))
+		   .setxattr("keep", to_buffer_list("k"))
+		   .setxattr("fsio.open", to_buffer_list("x")));
+  co_await execute(oid, WriteOp{}.clone_to(dest, {"fsio."}));
+
+  const auto dioc = keyed(pool(), oid);
+  ceph::buffer::list got;
+  co_await execute(dest, ReadOp{}.read(0, 0, &got), dioc);
+  EXPECT_EQ("hello, sibling", got.to_str());
+
+  /* a kept attribute follows the clone;  a dropped one does not */
+  ceph::buffer::list kv;
+  co_await execute(dest, ReadOp{}.get_xattr("keep", &kv), dioc);
+  EXPECT_EQ("k", kv.to_str());
+  kv.clear();
+  co_await expect_error_code(
+    execute(dest, ReadOp{}.get_xattr("fsio.open", &kv), dioc),
+    sys::errc::no_message_available);
+
+  /* the clone is independent of its source */
+  co_await execute(oid, WriteOp{}.write_full(to_buffer_list("changed")));
+  got.clear();
+  co_await execute(dest, ReadOp{}.read(0, 0, &got), dioc);
+  EXPECT_EQ("hello, sibling", got.to_str());
+  co_return;
+}
+
+/* set_attrs land on the destination after the drops, so one under a
+ * dropped prefix is kept;  the source is untouched */
+CORO_TEST_F(NeoRadosWriteOps, CloneToSetAttrs, NeoRadosTest) {
+  const auto dest = sibling_name(oid, 1);
+  co_await execute(oid, WriteOp{}
+		   .create(true)
+		   .write_full(to_buffer_list("a"))
+		   .setxattr("fsio.hdr", to_buffer_list("h")));
+  co_await execute(oid, WriteOp{}.clone_to(
+		     dest, {"fsio."},
+		     {{"fsio.gen", to_buffer_list("g")},
+		      {"other", to_buffer_list("o")}}));
+
+  const auto dioc = keyed(pool(), oid);
+  ceph::buffer::list v;
+  co_await execute(dest, ReadOp{}.get_xattr("fsio.gen", &v), dioc);
+  EXPECT_EQ("g", v.to_str());
+  v.clear();
+  co_await execute(dest, ReadOp{}.get_xattr("other", &v), dioc);
+  EXPECT_EQ("o", v.to_str());
+  v.clear();
+  co_await expect_error_code(
+    execute(dest, ReadOp{}.get_xattr("fsio.hdr", &v), dioc),
+    sys::errc::no_message_available);
+
+  v.clear();
+  co_await execute(oid, ReadOp{}.get_xattr("fsio.hdr", &v));
+  EXPECT_EQ("h", v.to_str());
+  v.clear();
+  co_await expect_error_code(
+    execute(oid, ReadOp{}.get_xattr("fsio.gen", &v)),
+    sys::errc::no_message_available);
+  co_return;
+}
+
+CORO_TEST_F(NeoRadosWriteOps, CloneToSetAttrsNameTooLong, NeoRadosTest) {
+  const auto dest = sibling_name(oid, 1);
+  co_await execute(oid, WriteOp{}.create(true).write_full(to_buffer_list("a")));
+  co_await expect_error_code(
+    execute(oid, WriteOp{}.clone_to(
+	      dest, {}, {{std::string(4096, 'n'), to_buffer_list("v")}})),
+    sys::errc::filename_too_long);
+  /* nothing was cloned */
+  std::uint64_t size = 0;
+  co_await expect_error_code(
+    execute(dest, ReadOp{}.stat(&size, nullptr), keyed(pool(), oid)),
+    sys::errc::no_such_file_or_directory);
+  co_return;
+}
+
+/* a destination name over osd_max_object_name_len fails as do_op() fails
+ * an op's own target name, and nothing is created */
+CORO_TEST_F(NeoRadosWriteOps, CloneToDestNameTooLong, NeoRadosTest) {
+  const auto maxlen = rados().cct()->_conf->osd_max_object_name_len;
+  /* oid's name as a prefix, so the destination still sorts after it */
+  const auto dest = std::string{oid} + std::string(maxlen + 1 - oid.size(), 'z');
+  co_await execute(oid, WriteOp{}.create(true).write_full(to_buffer_list("a")));
+  co_await expect_error_code(
+    execute(oid, WriteOp{}.clone_to(dest, {}, {})),
+    sys::errc::filename_too_long);
+  co_return;
+}
+
+/* two clones to one destination in one op fail with EINVAL, not an OSD
+ * assert */
+CORO_TEST_F(NeoRadosWriteOps, CloneToTwiceInOneOp, NeoRadosTest) {
+  const auto dest = sibling_name(oid, 1);
+  co_await execute(oid, WriteOp{}.create(true).write_full(to_buffer_list("a")));
+  co_await expect_error_code(
+    execute(oid, WriteOp{}.clone_to(dest).clone_to(dest)),
+    sys::errc::invalid_argument);
+  std::uint64_t size = 0;
+  co_await expect_error_code(
+    execute(dest, ReadOp{}.stat(&size, nullptr), keyed(pool(), oid)),
+    sys::errc::no_such_file_or_directory);
+  co_return;
+}
+
+/* the destination is the source as it was before the op:  its data and
+ * its object info agree, whatever earlier ops in the same op did */
+CORO_TEST_F(NeoRadosWriteOps, CloneToAfterWriteInOneOp, NeoRadosTest) {
+  const auto dest = sibling_name(oid, 1);
+  co_await execute(oid, WriteOp{}.create(true).write_full(to_buffer_list("before")));
+  co_await execute(oid, WriteOp{}
+		   .write_full(to_buffer_list("after, and longer"))
+		   .clone_to(dest));
+  const auto dioc = keyed(pool(), oid);
+  ceph::buffer::list got;
+  co_await execute(dest, ReadOp{}.read(0, 0, &got), dioc);
+  EXPECT_EQ("before", got.to_str());
+  std::uint64_t size = 0;
+  co_await execute(dest, ReadOp{}.stat(&size, nullptr), dioc);
+  EXPECT_EQ(6u, size);
+  co_return;
+}
+
+CORO_TEST_F(NeoRadosWriteOps, CloneToExists, NeoRadosTest) {
+  const auto dest = sibling_name(oid, 1);
+  co_await execute(oid, WriteOp{}.create(true).write_full(to_buffer_list("a")));
+  co_await execute(oid, WriteOp{}.clone_to(dest));
+  co_await expect_error_code(execute(oid, WriteOp{}.clone_to(dest)),
+			     sys::errc::file_exists);
+  co_return;
+}
+
+/* a destination that sorts before its source could be left missing on a
+ * backfill target, so the OSD returns EINVAL */
+CORO_TEST_F(NeoRadosWriteOps, CloneToSortsFirst, NeoRadosTest) {
+  co_await execute(oid, WriteOp{}.create(true).write_full(to_buffer_list("a")));
+  const std::string before{oid.substr(0, oid.size() - 1)};
+  co_await expect_error_code(execute(oid, WriteOp{}.clone_to(before)),
+			     sys::errc::invalid_argument);
+  co_return;
+}
+
+CORO_TEST_F(NeoRadosWriteOps, CloneToNoSource, NeoRadosTest) {
+  co_await expect_error_code(
+    execute(oid, WriteOp{}.clone_to(sibling_name(oid, 1))),
+    sys::errc::no_such_file_or_directory);
+  co_return;
+}

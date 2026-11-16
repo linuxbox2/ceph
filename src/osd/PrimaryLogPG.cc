@@ -7141,6 +7141,178 @@ int PrimaryLogPG::do_osd_ops(OpContext *ctx, vector<OSDOp>& ops)
       }
       break;
 
+    case CEPH_OSD_OP_CLONE_TO:
+      ++ctx->num_write;
+      {
+	clone_to_op_t cto;
+	try {
+	  auto p = osd_op.indata.cbegin();
+	  decode(cto, p);
+	} catch (ceph::buffer::error&) {
+	  result = -EINVAL;
+	  break;
+	}
+	/* the destination is a second object this op creates:  its name
+	 * gets do_op()'s limit;  its key is the source's, already checked */
+	if (cto.dest.size() > cct->_conf->osd_max_object_name_len) {
+	  result = -ENAMETOOLONG;
+	  break;
+	}
+	{
+	  const unsigned max_name_len =
+	    std::min<uint64_t>(osd->store->get_max_attr_name_length(),
+			       cct->_conf->osd_max_attr_name_len);
+	  for (const auto& [name, val] : cto.set_attrs) {
+	    if (cct->_conf->osd_max_attr_size > 0 &&
+		val.length() > cct->_conf->osd_max_attr_size) {
+	      result = -EFBIG;
+	      break;
+	    }
+	    if (name.length() > max_name_len) {
+	      result = -ENAMETOOLONG;
+	      break;
+	    }
+	  }
+	  if (result < 0) {
+	    break;
+	  }
+	}
+	/* the store clones the source as it was before this op
+	 * (PGTransaction applies a clone before its source's own updates),
+	 * so the destination is built from the pre-op state, not from
+	 * earlier ops' changes in this one */
+	const ObjectState& src_obs = *ctx->obs;
+	if (!src_obs.exists || src_obs.oi.is_whiteout() ||
+	    soid.snap != CEPH_NOSNAP) {
+	  result = -ENOENT;
+	  break;
+	}
+	/* RADOS manifest objects are not used by RGW;  erasure-coded pools
+	 * need the destination's attr cache filled, as make_writeable() does,
+	 * and come after replicated pools */
+	if (src_obs.oi.has_manifest() || pool.info.is_erasure()) {
+	  result = -EOPNOTSUPP;
+	  break;
+	}
+	/* same key, hash, pool and namespace as the source:  the clone lands
+	 * in this PG, and BlueStore's _clone requires equal hashes */
+	hobject_t dest(object_t(cto.dest), soid.get_effective_key(),
+		       CEPH_NOSNAP, soid.get_hash(), soid.pool,
+		       soid.get_namespace());
+	/* backfill ships a transaction by its target object;  a destination
+	 * sorting before the source could be left missing on a backfill
+	 * target */
+	if (dest <= soid) {
+	  result = -EINVAL;
+	  break;
+	}
+	/* one clone per destination per op:  a second would take the
+	 * destination's write lock again and clone onto a pending clone,
+	 * both of which assert */
+	if (t->op_map.count(dest)) {
+	  result = -EINVAL;
+	  break;
+	}
+	if (is_degraded_or_backfilling_object(dest) ||
+	    is_degraded_on_async_recovery_target(dest)) {
+	  wait_for_degraded_object(dest, ctx->op);
+	  result = -EAGAIN;
+	  break;
+	}
+	/* do_op() checks scrub's write block for the source, the op's
+	 * target;  the destination is a second object this op writes, and
+	 * a scrub covering its range must not see it change mid-chunk */
+	if (m_scrubber->write_blocked_by_scrub(dest)) {
+	  dout(20) << __func__ << ": clone_to destination " << dest
+		   << " waiting for scrub" << dendl;
+	  waiting_for_scrub.push_back(ctx->op);
+	  ctx->op->mark_delayed("waiting for scrub");
+	  result = -EAGAIN;
+	  break;
+	}
+	ObjectContextRef dobc = get_object_context(dest, true);
+	if (!dobc) {
+	  result = -EINVAL;
+	  break;
+	}
+	/* try-lock, never wait:  the destination is a fresh name, so its lock
+	 * is free in practice, and no op waits on a second lock */
+	if (!ctx->lock_manager.get_write_greedy(dest, dobc, OpRequestRef())) {
+	  result = -EBUSY;
+	  break;
+	}
+	if (dobc->obs.exists && !dobc->obs.oi.is_whiteout()) {
+	  result = -EEXIST;
+	  break;
+	}
+	object_info_t doi(dest);
+	doi.copy_user_bits(src_obs.oi);
+	doi.clear_flag(object_info_t::FLAG_WHITEOUT);
+	doi.version = ctx->at_version;
+	doi.prior_version =
+	  dobc->obs.exists ? dobc->obs.oi.version : eversion_t();
+	bufferlist oibl;
+	encode(doi, oibl,
+	       get_osdmap()->get_features(CEPH_ENTITY_TYPE_OSD, nullptr));
+	/* the destination is a head, which carries a SnapSet */
+	SnapSet dss;
+	dss.seq = ctx->new_snapset.seq;
+	bufferlist ssbl;
+	encode(dss, ssbl);
+
+	t->clone(dest, soid);
+	t->add_obc(dobc);
+	t->setattr(dest, OI_ATTR, oibl);
+	t->setattr(dest, SS_ATTR, ssbl);
+	if (!cto.drop_attr_prefixes.empty()) {
+	  map<string, bufferlist, less<>> attrs;
+	  result = getattrs_maybe_cache(ctx->obc, &attrs);
+	  if (result < 0) {
+	    break;
+	  }
+	  for (const auto& [name, val] : attrs) {
+	    for (const auto& pfx : cto.drop_attr_prefixes) {
+	      if (name.starts_with(pfx)) {
+		t->rmattr(dest, "_" + name);
+		break;
+	      }
+	    }
+	  }
+	}
+	/* after the drops, so a set attribute under a dropped prefix is
+	 * what the destination keeps */
+	for (auto& [name, val] : cto.set_attrs) {
+	  t->setattr(dest, "_" + name, val);
+	}
+	ctx->log.push_back(pg_log_entry_t(pg_log_entry_t::MODIFY, dest,
+					  ctx->at_version, doi.prior_version,
+					  doi.user_version, osd_reqid_t(),
+					  ctx->mtime, 0));
+	ctx->at_version.version++;
+	ctx->delta_stats.num_objects++;
+	ctx->delta_stats.num_bytes += doi.size;
+	/* the flags copy_user_bits() carried over count as make_writeable()
+	 * counts a snapshot clone's */
+	if (doi.is_dirty()) {
+	  ctx->delta_stats.num_objects_dirty++;
+	}
+	if (doi.is_omap()) {
+	  ctx->delta_stats.num_objects_omap++;
+	}
+	if (doi.is_cache_pinned()) {
+	  ctx->delta_stats.num_objects_pinned++;
+	}
+	/* a later sub-op may still fail the whole op, so the in-memory
+	 * context changes only on success, as make_writeable() changes the
+	 * clone's after do_osd_ops() */
+	ctx->register_on_success([dobc, doi]() mutable {
+	  dobc->obs.oi = std::move(doi);
+	  dobc->obs.exists = true;
+	});
+	result = 0;
+      }
+      break;
+
     case CEPH_OSD_OP_TRIMTRUNC:
       op.extent.offset = op.extent.truncate_size;
       // falling through

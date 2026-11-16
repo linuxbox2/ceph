@@ -90,6 +90,18 @@ extern int cls_cxx_read2(cls_method_context_t hctx, int ofs, int len,
                          ceph::buffer::list *bl, uint32_t op_flags);
 extern int cls_cxx_write2(cls_method_context_t hctx, int ofs, int len,
                           ceph::buffer::list *bl, uint32_t op_flags);
+/**
+ * Clone this object to a sibling in the same PG (CEPH_OSD_OP_CLONE_TO).
+ * The sibling takes this object's locator key, hash, pool and namespace;
+ * dest is its name, which must sort after this object's name.  User
+ * xattrs whose names begin with one of drop_attr_prefixes are not carried
+ * over;  set_attrs are then set on the sibling, so one under a dropped
+ * prefix is kept.  Fails with -EEXIST if dest exists, -EINVAL if it sorts
+ * first.
+ */
+extern int cls_cxx_clone_to(cls_method_context_t hctx, const std::string& dest,
+                            const std::vector<std::string>& drop_attr_prefixes,
+                            const std::map<std::string, ceph::buffer::list>& set_attrs = {});
 extern int cls_cxx_write_full(cls_method_context_t hctx, ceph::buffer::list *bl);
 extern int cls_cxx_getxattrs(cls_method_context_t hctx, std::map<std::string,
 			     ceph::buffer::list> *attrset);

@@ -98,6 +98,15 @@ int cls_cxx_create(cls_method_context_t hctx, const bool exclusive)
   return execute_osd_op(hctx, op);
 }
 
+int cls_cxx_clone_to(cls_method_context_t hctx, const std::string& dest,
+                     const std::vector<std::string>& drop_attr_prefixes,
+                     const std::map<std::string, ceph::buffer::list>& set_attrs)
+{
+  /* the Crimson OSD has no CEPH_OSD_OP_CLONE_TO yet, and its op switch
+   * throws on an unknown op, so do not issue it */
+  return -EOPNOTSUPP;
+}
+
 int cls_cxx_remove(cls_method_context_t hctx)
 {
   OSDOp op{CEPH_OSD_OP_DELETE};
