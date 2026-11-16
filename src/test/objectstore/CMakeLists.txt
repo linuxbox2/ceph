@@ -121,6 +121,11 @@ if(WITH_BLUESTORE)
     Allocator_aging_fragmentation.cc)
   target_link_libraries(unittest_alloc_aging os global GTest::Main)
 
+  # what a clone into a same-hash sibling costs (CEPH_OSD_OP_CLONE_TO)
+  add_executable(ceph_bench_bluestore_clone EXCLUDE_FROM_ALL
+    bluestore_clone_bench.cc)
+  target_link_libraries(ceph_bench_bluestore_clone os global)
+
   # unittest_bluefs
   add_executable(unittest_bluefs
     test_bluefs.cc
