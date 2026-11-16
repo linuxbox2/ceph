@@ -12509,6 +12509,183 @@ TEST_P(UnsharingBlobsOnRemove, UnshareOnPartial) {
   cleanup_store();
 }
 
+/* The fixture's collection is pg 1234.1:  its listing range holds hashes
+ * with the low bit set, so the sibling tests use an odd hash.  Their
+ * objects must be listable, since unsharing finds a survivor by listing. */
+static constexpr uint32_t kSiblingHash = 0x12345679;
+
+/* A clone into a named sibling:  <anchor>~<counter><nonce>, carrying the
+ * anchor as its locator key and the anchor's hash, as an FSIO shadow
+ * chunk is named.  The rename precedes set_key(), which clears a key equal
+ * to the object's name. */
+static ghobject_t make_sibling(const ghobject_t& anchor,
+                               uint64_t counter, uint64_t nonce)
+{
+  ghobject_t sib = anchor;
+  sib.hobj.oid.name = fmt::format("{}~{:016x}{:016x}",
+                                  anchor.hobj.oid.name, counter, nonce);
+  sib.hobj.set_key(anchor.hobj.get_effective_key());
+  return sib;
+}
+
+/* Does the store list a keyed sibling in hobject_t order relative to its
+ * unkeyed anchor?  Backfill scans in store order and compares in hobject_t
+ * order, so the two must agree. */
+TEST_P(UnsharingBlobsOnRemove, SiblingListOrder) {
+  SetVal(g_conf(), "bluestore_debug_inject_allocation_from_file_failure", "0");
+  prepare_store();
+
+  mount();
+  ch = store->create_new_collection(cid);
+  ghobject_t hoid_head(hobject_t(
+    sobject_t("LoremIpsum", CEPH_NOSNAP), "", kSiblingHash, poolid, ""));
+  write_object(hoid_head, 0x0, 0x1000);
+  ghobject_t hoid_sib = make_sibling(hoid_head, 1, 0xfeedfacecafebeef);
+  t.clone(cid, hoid_head, hoid_sib);
+  commit_transaction();
+
+  vector<ghobject_t> ls;
+  int r = collection_list(store, ch, ghobject_t(), ghobject_t::get_max(),
+			  10, &ls, nullptr, true);
+  ASSERT_EQ(r, 0);
+  for (const auto& o : ls) {
+    cerr << "listed " << o << std::endl;
+  }
+  ASSERT_TRUE(std::is_sorted(ls.begin(), ls.end()));
+  cerr << "hobject_t order:  head " << (hoid_head < hoid_sib ? "<" : ">")
+       << " sibling" << std::endl;
+
+  t.remove(cid, hoid_head);
+  t.remove(cid, hoid_sib);
+  commit_transaction();
+  umount();
+  cleanup_store();
+}
+
+/* The sibling is removed (a discarded shadow);  the source survives and
+ * must be unshared, though it is neither a snap nor a generation of the
+ * removed object. */
+TEST_P(UnsharingBlobsOnRemove, SiblingCloneEraseClone) {
+  SetVal(g_conf(), "bluestore_debug_inject_allocation_from_file_failure", "0");
+  prepare_store();
+
+  mount();
+  ch = store->create_new_collection(cid);
+  ghobject_t hoid_head(hobject_t(
+    sobject_t("LoremIpsum", CEPH_NOSNAP), "", kSiblingHash, poolid, ""));
+
+  write_object(hoid_head, 0x0, 0x10000);
+
+  ghobject_t hoid_sib = make_sibling(hoid_head, 1, 0xfeedfacecafebeef);
+  ASSERT_EQ(hoid_sib.hobj.get_hash(), hoid_head.hobj.get_hash());
+  ASSERT_GT(hoid_sib, hoid_head);
+
+  t.clone(cid, hoid_head, hoid_sib);
+  commit_transaction();
+
+  BlueStore::OnodeRef oo = get_onode(cid, hoid_head);
+  EXPECT_GE(count_shared_blobs(oo), 1);
+  EXPECT_GE(count_shared_blob_trackers(), 1);
+
+  t.remove(cid, hoid_sib);
+  commit_transaction();
+
+  EXPECT_EQ(count_shared_blobs(oo), 0);
+  EXPECT_EQ(count_shared_blob_trackers(), 0);
+  oo.reset();
+
+  t.remove(cid, hoid_head);
+  commit_transaction();
+  umount();
+  cleanup_store();
+}
+
+/* The source is removed (a published generation's old chunk);  the
+ * sibling survives and must be unshared. */
+TEST_P(UnsharingBlobsOnRemove, SiblingCloneEraseSource) {
+  SetVal(g_conf(), "bluestore_debug_inject_allocation_from_file_failure", "0");
+  prepare_store();
+
+  mount();
+  ch = store->create_new_collection(cid);
+  ghobject_t hoid_head(hobject_t(
+    sobject_t("LoremIpsum", CEPH_NOSNAP), "", kSiblingHash, poolid, ""));
+
+  write_object(hoid_head, 0x0, 0x10000);
+
+  ghobject_t hoid_sib = make_sibling(hoid_head, 1, 0xfeedfacecafebeef);
+  ASSERT_EQ(hoid_sib.hobj.get_hash(), hoid_head.hobj.get_hash());
+  ASSERT_GT(hoid_sib, hoid_head);
+
+  t.clone(cid, hoid_head, hoid_sib);
+  commit_transaction();
+
+  BlueStore::OnodeRef os = get_onode(cid, hoid_sib);
+  EXPECT_GE(count_shared_blobs(os), 1);
+  EXPECT_GE(count_shared_blob_trackers(), 1);
+
+  t.remove(cid, hoid_head);
+  commit_transaction();
+
+  EXPECT_EQ(count_shared_blobs(os), 0);
+  EXPECT_EQ(count_shared_blob_trackers(), 0);
+  os.reset();
+
+  t.remove(cid, hoid_sib);
+  commit_transaction();
+  umount();
+  cleanup_store();
+}
+
+/* Three sharers (a reclone after publish):  removing one leaves the blobs
+ * shared by the other two;  removing a second unshares the last. */
+TEST_P(UnsharingBlobsOnRemove, SiblingChainUnsharesLastSurvivor) {
+  SetVal(g_conf(), "bluestore_debug_inject_allocation_from_file_failure", "0");
+  prepare_store();
+
+  mount();
+  ch = store->create_new_collection(cid);
+  ghobject_t hoid_head(hobject_t(
+    sobject_t("LoremIpsum", CEPH_NOSNAP), "", kSiblingHash, poolid, ""));
+
+  write_object(hoid_head, 0x0, 0x10000);
+
+  ghobject_t hoid_sib1 = make_sibling(hoid_head, 1, 0xfeedfacecafebeef);
+  ghobject_t hoid_sib2 = make_sibling(hoid_head, 2, 0xfeedfacecafebeef);
+  ASSERT_GT(hoid_sib1, hoid_head);
+  ASSERT_GT(hoid_sib2, hoid_sib1);
+
+  t.clone(cid, hoid_head, hoid_sib1);
+  commit_transaction();
+  t.clone(cid, hoid_sib1, hoid_sib2);
+  commit_transaction();
+
+  BlueStore::OnodeRef oh = get_onode(cid, hoid_head);
+  BlueStore::OnodeRef os2 = get_onode(cid, hoid_sib2);
+  EXPECT_GE(count_shared_blobs(oh), 1);
+  EXPECT_GE(count_shared_blobs(os2), 1);
+
+  t.remove(cid, hoid_sib1);
+  commit_transaction();
+
+  EXPECT_GE(count_shared_blobs(oh), 1);
+  EXPECT_GE(count_shared_blobs(os2), 1);
+  EXPECT_GE(count_shared_blob_trackers(), 1);
+
+  t.remove(cid, hoid_head);
+  commit_transaction();
+
+  EXPECT_EQ(count_shared_blobs(os2), 0);
+  EXPECT_EQ(count_shared_blob_trackers(), 0);
+  oh.reset();
+  os2.reset();
+
+  t.remove(cid, hoid_sib2);
+  commit_transaction();
+  umount();
+  cleanup_store();
+}
+
 #endif // WITH_BLUESTORE
 
 TEST_P(StoreTestSpecificAUSize, BluestoreEnforceHWSettingsHdd) {

@@ -14702,7 +14702,7 @@ int BlueStore::_do_remove(
   set<SharedBlob*> maybe_unshared_blobs;
   bool is_gen = !o->oid.is_no_gen();
   bool is_snap = o->oid.hobj.is_snap();
-  _do_truncate(txc, c, o, 0, (is_gen || is_snap) ? &maybe_unshared_blobs : nullptr);
+  _do_truncate(txc, c, o, 0, &maybe_unshared_blobs);
   if (o->onode.has_omap()) {
     o->flush();
     _do_omap_clear(txc, o);
@@ -14726,6 +14726,10 @@ int BlueStore::_do_remove(
 
   if (maybe_unshared_blobs.empty()) {
     return 0;
+  }
+  if (!is_gen && !is_snap) {
+    return _maybe_unshare_on_remove_siblings(txc, c, o->oid,
+                                             std::move(maybe_unshared_blobs));
   }
 
   // see if we can unshare blobs still referenced by the head
@@ -14815,6 +14819,51 @@ int BlueStore::_maybe_unshare_on_remove(
   }
   txc->write_onode(h);
 
+  return 0;
+}
+
+/* A removed head may have shared blobs with a sibling:  an object in the
+ * same collection with the same hash, namespace and effective key, under
+ * another name (an FSIO shadow chunk, named <anchor>~<id> with the anchor
+ * as its locator key).  Those siblings sort together, so list that range
+ * and offer each head among them to _maybe_unshare_on_remove(), which
+ * unshares only where one object's use equals the whole ref_map. */
+int BlueStore::_maybe_unshare_on_remove_siblings(
+  TransContext *txc,
+  CollectionRef& c,
+  const ghobject_t& removed,
+  std::set<SharedBlob*>&& maybe_unshared_blobs)
+{
+  dout(10) << __func__ << " " << removed << " maybe_unshared_blobs "
+	   << maybe_unshared_blobs << dendl;
+  const hobject_t& ho = removed.hobj;
+  const std::string& ekey = ho.get_effective_key();
+  ghobject_t start(hobject_t(object_t(), ekey, 0, ho.get_hash(), ho.pool,
+			     ho.nspace),
+		   ghobject_t::NO_GEN, removed.shard_id);
+  ghobject_t end(hobject_t(object_t(), ekey + '\0', 0, ho.get_hash(), ho.pool,
+			   ho.nspace),
+		 ghobject_t::NO_GEN, removed.shard_id);
+  ghobject_t next = start;
+  while (!maybe_unshared_blobs.empty() && next < end) {
+    vector<ghobject_t> ls;
+    int r = _collection_list(c.get(), next, end, 64, false, &ls, &next);
+    if (r < 0 || ls.empty()) {
+      break;
+    }
+    for (const auto& oid : ls) {
+      if (oid == removed || !oid.is_no_gen() || oid.hobj.is_snap()) {
+	continue;
+      }
+      OnodeRef h = c->get_onode(oid, false);
+      if (h && h->exists) {
+	_maybe_unshare_on_remove(txc, c, h, std::move(maybe_unshared_blobs));
+	if (maybe_unshared_blobs.empty()) {
+	  break;
+	}
+      }
+    }
+  }
   return 0;
 }
 

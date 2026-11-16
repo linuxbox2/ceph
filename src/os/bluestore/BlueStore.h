@@ -2384,6 +2384,10 @@ private:
                                CollectionRef& c,
                                OnodeRef& head_o,
                                std::set<SharedBlob*>&& maybe_unshared_blobs);
+  int _maybe_unshare_on_remove_siblings(TransContext *txc,
+                                        CollectionRef& c,
+                                        const ghobject_t& removed,
+                                        std::set<SharedBlob*>&& maybe_unshared_blobs);
   int _setattr(TransContext *txc,
 	       CollectionRef& c,
 	       OnodeRef& o,
