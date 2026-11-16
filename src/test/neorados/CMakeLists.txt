@@ -25,6 +25,11 @@ install(TARGETS
   ceph_test_neorados_completions
   DESTINATION ${CMAKE_INSTALL_BINDIR})
 
+# the latency of CEPH_OSD_OP_CLONE_TO through the OSD;  built only by name
+add_executable(ceph_bench_neorados_clone_to EXCLUDE_FROM_ALL clone_to_bench.cc)
+target_link_libraries(ceph_bench_neorados_clone_to
+  libneorados global ${FMT_LIB})
+
 add_executable(ceph_test_neorados_list_pool list_pool.cc)
 target_link_libraries(ceph_test_neorados_list_pool
   libneorados neoradostest-support global ${FMT_LIB} ${unittest_libs})
