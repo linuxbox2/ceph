@@ -20,6 +20,18 @@ target_link_libraries(ceph_test_cls_rgw_stats cls_rgw_client global
   librados ${UNITTEST_LIBS} radostest-cxx)
 install(TARGETS ceph_test_cls_rgw_stats DESTINATION ${CMAKE_INSTALL_BINDIR})
 
+# a model checker for FSIO's head protocol;  built only on request
+add_executable(ceph_test_cls_rgw_fsio_model EXCLUDE_FROM_ALL
+  fsio_model.cc
+  ${CMAKE_SOURCE_DIR}/src/cls/rgw/cls_rgw_fsio.cc)
+target_link_libraries(ceph_test_cls_rgw_fsio_model
+  ceph-common
+  ${UNITTEST_LIBS})
+# the explorer visits millions of states;  optimized even in a debug build
+target_compile_options(ceph_test_cls_rgw_fsio_model PRIVATE -O2)
+target_compile_definitions(ceph_test_cls_rgw_fsio_model PRIVATE
+  CLS_RGW_FSIO_SKIP_CHECKS)
+
 add_executable(unittest_cls_rgw_fsio
   test_cls_rgw_fsio.cc
   ${CMAKE_SOURCE_DIR}/src/cls/rgw/cls_rgw_fsio.cc)
