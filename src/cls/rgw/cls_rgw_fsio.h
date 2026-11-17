@@ -49,6 +49,9 @@ enum class cls_rgw_fsio_check : uint8_t {
   V3_FINALIZER_HINTS_PLACEHOLDER,      // the expirer's versioned finalize (model)
   V4_HINT_WAITS_FOR_GRACE,             // the expirer's instance-head hint (model)
   V4_PUBLISHER_KEEPS_HINT,             // the gateway's failed instance write (model)
+  NULL_IS_HEAD,                        // fsio_join, published_chunk_set:  null is the head's content
+  NULL_REMOVAL_RETIRES,                // fsio_replace_head, remove-null mode
+  PUBLISH_FOLLOWS_STATE,               // the gateway's publish, suspended bucket (model)
 };
 
 #ifdef CLS_RGW_FSIO_SKIP_CHECKS
@@ -487,7 +490,8 @@ int rebind(cls_rgw_fsio_head& h, uint64_t incarnation,
 	   const cls_rgw_fsio_id& from, const cls_rgw_fsio_id& to,
 	   uint32_t readers);
 
-enum class replace_mode { SUPERSEDE, DELETE, PUBLISH };
+enum class replace_mode { SUPERSEDE, DELETE, PUBLISH,
+  REMOVE_NULL };                   // version removal of the null version (§2.5a)
 struct replace_in {
   replace_mode mode = replace_mode::SUPERSEDE;
   cls_rgw_fsio_id r;

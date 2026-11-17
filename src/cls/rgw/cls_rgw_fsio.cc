@@ -73,12 +73,36 @@ namespace {
 using state = cls_rgw_fsio_cs_state;
 using at = cls_rgw_fsio_manifest_at;
 
-/* the published chunk set:  the entry at HEAD, or at INSTANCE for the
- * bound version in a versioned bucket (§2.2) */
-cls_rgw_fsio_chunk_set* published_of(cls_rgw_fsio_hdr& hdr)
+/* §2.5a:  an empty instance and null are the same version, the head's own
+ * content */
+bool is_null(const std::string& instance)
+{
+  return instance.empty() ||
+    (instance == "null" && !FSIO_SKIP_CHECK(NULL_IS_HEAD));
+}
+
+bool same_instance(const std::string& a, const std::string& b)
+{
+  return a == b || (is_null(a) && is_null(b));
+}
+
+/* the chunk set the head object's own content is:  the entry at HEAD */
+cls_rgw_fsio_chunk_set* head_chunk_set(cls_rgw_fsio_hdr& hdr)
 {
   for (auto& cs : hdr.chunk_sets) {
-    if (hdr.cur_instance.empty() ? cs.manifest_at == at::HEAD :
+    if (cs.manifest_at == at::HEAD) {
+      return &cs;
+    }
+  }
+  return nullptr;
+}
+
+/* the published chunk set:  the entry at HEAD, or at INSTANCE for a
+ * bound non-null version in a versioned bucket (§2.2, §2.5a) */
+cls_rgw_fsio_chunk_set* published_chunk_set(cls_rgw_fsio_hdr& hdr)
+{
+  for (auto& cs : hdr.chunk_sets) {
+    if (is_null(hdr.cur_instance) ? cs.manifest_at == at::HEAD :
 	(cs.manifest_at == at::INSTANCE && cs.state == state::PUBLISHED &&
 	 cs.instance == hdr.cur_instance)) {
       return &cs;
@@ -185,10 +209,11 @@ int join(cls_rgw_fsio_head& h, const join_in& in, join_out& out,
     h.hdr->cur_instance = in.instance;
   }
   auto& hdr = *h.hdr;
-  const bool versioned = !in.instance.empty();
+  /* §2.5a:  joining the null version is the unversioned join */
+  const bool versioned = !is_null(in.instance);
   /* 4. versioned:  the OLH names another instance, a new current
    * generation;  the old version's published entry stays at INSTANCE */
-  if (versioned && in.instance != hdr.cur_instance) {
+  if (!in.instance.empty() && !same_instance(in.instance, hdr.cur_instance)) {
     hdr.cur_instance = in.instance;
     hdr.cur_shadow.reset();
   }
@@ -206,7 +231,7 @@ int join(cls_rgw_fsio_head& h, const join_in& in, join_out& out,
   /* 6., 7. */
   cls_rgw_fsio_id bind;
   if (!in.writer) {
-    auto* p = published_of(hdr);
+    auto* p = published_chunk_set(hdr);
     if (!p) {
       cls_rgw_fsio_chunk_set cs;
       cs.id = hdr.draw();
@@ -476,8 +501,9 @@ int replace_head(cls_rgw_fsio_head& h, const replace_in& in, replace_out& out,
       return -CLS_RGW_ERR_FSIO_CONFLICT;
     }
     const auto sh_id = sh->id;
-    /* the previous published chunk set */
-    auto* prev = published_of(hdr);
+    /* the previous published chunk set:  the head's content, which the
+     * publish replaces (§3.5;  the null version when suspended, §2.5a) */
+    auto* prev = head_chunk_set(hdr);
     fx.clones.push_back(
       cls_rgw_fsio_clone{in.r, 'g', record_of_head(h)});
     if (prev && prev->id != sh_id) {
@@ -527,13 +553,39 @@ int replace_head(cls_rgw_fsio_head& h, const replace_in& in, replace_out& out,
     return 0;
   }
 
-  /* SUPERSEDE, DELETE */
+  /* REMOVE_NULL (§2.5a):  the null version removed from the head object;
+   * its readers are the HEAD entry's, so the header's mechanism retires
+   * it, and no open count is involved */
+  if (in.mode == replace_mode::REMOVE_NULL) {
+    out.keep_tail = false;
+    if (!h.hdr || FSIO_SKIP_CHECK(NULL_REMOVAL_RETIRES)) {
+      return 0;
+    }
+    auto& hdr = *h.hdr;
+    if (auto* p = head_chunk_set(hdr)) {
+      auto b = h.bound(p->id);
+      if (b.readers || b.writers) {
+	fx.clones.push_back(
+	  cls_rgw_fsio_clone{in.r, 'g', record_of_head(h)});
+	p->state = state::RETIRED;
+	p->manifest_at = at::CLONE;
+	p->clone = in.r;
+	out.keep_tail = true;
+      }
+    }
+    if (is_null(hdr.cur_instance)) {
+      hdr.cur_shadow.reset();        // the current version gone
+    }
+    return 0;
+  }
+
+  /* SUPERSEDE, DELETE:  the head object's content replaced */
   if (!h.hdr) {
     out.keep_tail = false;
     return 0;
   }
   auto& hdr = *h.hdr;
-  auto* p = published_of(hdr);
+  auto* p = head_chunk_set(hdr);
   bool kept = false;
   if (p) {
     auto b = h.bound(p->id);
