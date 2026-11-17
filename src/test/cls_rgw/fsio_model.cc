@@ -36,6 +36,10 @@
  * write, link, fsio_publish);  the expirer resolves a dead publisher by
  * the claim (abort and a versioned fenced finalize, or complete), and
  * applies §4.3's publish-hint rule to instance-head hints as written.
+ * Versioning may be suspended and enabled again (an S3 operation each);
+ * a suspended bucket writes the null version in place, on the head
+ * (§2.5a).  FSIO_MODEL_VSTART=null starts with versioning just enabled
+ * over content FSIO has open, the head holding the null version.
  * FSIO_MODEL_SHORTEST=1 searches by iterative deepening:  depth-first to
  * a bound raised one step at a time, so the first violation found has the
  * shortest trace;  for STOP_AT_FIRST and skipped-check runs. */
@@ -145,6 +149,7 @@ struct Gw {
   std::set<std::string> vhints;  // publish hints naming instance heads
   std::set<uint64_t> pub_incs;   // the incarnations it read (§4.2 step 3)
   uint64_t pub_epoch = 0;
+  bool pub_began_suspended = false;  // the bucket's state when the publish began
   void encode(ceph::buffer::list& bl) const {
     using ceph::encode;
     encode(inc, bl); encode(alive, bl);
@@ -157,6 +162,7 @@ struct Gw {
     encode(pending, bl); encode(pending_writer, bl); encode(counted, bl);
     encode(step_inst, bl); encode(pub_instance, bl); encode(pub_incs, bl);
     encode(pub_epoch, bl); encode(pub_token, bl); encode(vhints, bl);
+    encode(pub_began_suspended, bl);
   }
 };
 
@@ -166,6 +172,7 @@ struct Config {
   int zombies = 1;
   int expirer_crashes = 1;
   int versioned = 0;
+  bool vstart_null = false;      // FSIO_MODEL_VSTART=null
 };
 
 /* versioned:  one instance head and what it holds */
@@ -214,6 +221,7 @@ struct World {
   std::map<std::string, uint64_t> ex_vhints;     // its publish hints on instance
 						 // heads, by owning incarnation (V3)
   std::set<uint64_t> graced;                     // incarnations past their grace (§4.3)
+  bool suspended = false;                        // versioning suspended (§2.5a)
   uint64_t olh_epoch = 0, next_i = 2, next_epoch = 1;
 
   /* a gateway passes a fresh nonce with every join, used only if the join
@@ -247,7 +255,7 @@ struct World {
     }
     encode(olh_cur, bl); encode(olh_epoch, bl); encode(next_i, bl);
     encode(ex_inst, bl); encode(ex_token, bl); encode(ex_aborted, bl);
-    encode(ex_vhints, bl); encode(graced, bl);
+    encode(ex_vhints, bl); encode(graced, bl); encode(suspended, bl);
     encode(next_epoch, bl);
     return bl.to_str();
   }
@@ -343,6 +351,21 @@ std::vector<std::string> drain_objects(const World& w,
   return {};
 }
 
+/* §2.5a:  a suspended bucket's write replaces the null version on the head
+ * and makes it current */
+void set_null_version(World& w, const std::string& tail)
+{
+  Version v;
+  v.ih.exists = true;
+  v.ih.id_tag = w.head.id_tag;
+  v.ih.manifest = tok_bl(tail);
+  v.tail = tail;
+  v.epoch = w.next_epoch++;
+  w.versions["null"] = v;
+  w.olh_cur = "null";
+  w.olh_epoch = v.epoch;
+}
+
 /* a gateway's death or partition, at any point, a protocol step pending
  * included */
 void fail_actions(const Gw& g, size_t gi, std::vector<Action>& acts)
@@ -436,6 +459,9 @@ void gw_actions(const World& w0, size_t gi, std::vector<Action>& acts)
 	    w.head.exists = true;
 	    w.head.manifest = tok_bl(s);
 	    w.head.id_tag = fmt::format("t{}", w.next_tag++);
+	    if (cfg.versioned) {
+	      set_null_version(w, s);        // suspended:  the null version (§2.5a)
+	    }
 	    if (++w.published[s] > 1) {
 	      return fmt::format("{} published twice", s);
 	    }
@@ -626,6 +652,13 @@ std::string entry_tail(const World& w, const cls_rgw_fsio_chunk_set& e)
     auto v = w.versions.find(*e.instance);
     return v == w.versions.end() ? std::string{} : v->second.tail;
   }
+  if (e.manifest_at == at::HEAD) {
+    return w.head_tok();                 // the head's own content (§2.5a)
+  }
+  if (e.manifest_at == at::CLONE && e.clone) {
+    auto r = w.records.find(rname(*e.clone));
+    return r == w.records.end() ? std::string{} : r->second;
+  }
   return sname(e.id);
 }
 
@@ -643,6 +676,9 @@ std::string open_version(const World& w, const LOpen& o)
   }
   if (e->publishing) {
     return e->publishing->instance;
+  }
+  if (e->manifest_at == at::HEAD) {
+    return "null";                       // the head's content (§2.5a)
   }
   return {};
 }
@@ -695,6 +731,11 @@ void gw_actions_v(const World& w0, size_t gi, std::vector<Action>& acts)
   if (g.zombie && w0.graced.count(g.inc)) {
     return;                  // the lease:  stopped, its ops timed out (§4.3)
   }
+  if (g.step == PUBLISH_HINT || g.step == PUBLISH_WRITE ||
+      g.step == PUBLISH_GC) {
+    gw_actions(w0, gi, acts);  // a suspended bucket's publish (§2.5a)
+    return;
+  }
   auto inc = g.inc;
   if (g.step != NONE) {
     switch (g.step) {
@@ -746,6 +787,7 @@ void gw_actions_v(const World& w0, size_t gi, std::vector<Action>& acts)
 	    }
 	    auto sn = sname(out.bound);
 	    g.opens.push_back(LOpen{true, out.bound, sn, g.pending});
+	    apply_clones(w, fx, w.head_tok());   // the null version's (§2.5a)
 	    if (out.construct) {
 	      /* §4.1:  the gateway clones the instance head, its manifest the
 	       * pseudo-manifest */
@@ -823,6 +865,10 @@ void gw_actions_v(const World& w0, size_t gi, std::vector<Action>& acts)
 	    }
 	    if (auto v = check_manifest(w, g.step_cs, "publish")) {
 	      return v;
+	    }
+	    if (g.pub_began_suspended) {
+	      return fmt::format("a publish begun in a suspended bucket made "
+				 "version {}", g.pub_instance);
 	    }
 	    Version v;
 	    v.ih.exists = true;
@@ -1029,7 +1075,10 @@ void gw_actions_v(const World& w0, size_t gi, std::vector<Action>& acts)
 	  }
 	  g.pending = w.olh_cur;
 	  g.pending_writer = writer;
-	  g.step = V_COUNT;
+	  /* §2.5a:  the null version has no open count;  the join is the
+	   * unversioned join */
+	  g.step = w.olh_cur == "null" && !FSIO_SKIP_CHECK(NULL_IS_HEAD) ?
+	    V_JOIN : V_COUNT;
 	  return std::nullopt;
 	}});
   }
@@ -1083,10 +1132,30 @@ void gw_actions_v(const World& w0, size_t gi, std::vector<Action>& acts)
 	  auto& g = w.gws[gi];
 	  auto o = g.opens[oi];
 	  g.opens.erase(g.opens.begin() + oi);
-	  if (o.writer) {
-	    /* §4.2 step 1:  the claim comes before the leave */
+	  if (o.writer && !(w.suspended &&
+			    !FSIO_SKIP_CHECK(PUBLISH_FOLLOWS_STATE))) {
+	    /* §4.2 step 1:  the claim comes before the leave;  a publish
+	     * keeps the versioning state it began with, as an RGW PUT does */
 	    g.step = V_PUB_HINT;
 	    g.step_cs = o.cs;
+	    g.pub_began_suspended = w.suspended;
+	    return std::nullopt;
+	  }
+	  if (o.writer) {
+	    /* §2.5a:  suspended, a publish overwrites the null version:  the
+	     * unversioned publish */
+	    fsio::leave_out out;
+	    cls_rgw_fsio_effects fx;
+	    auto save = w.head;
+	    if (fsio::leave(w.head, inc, o.cs, true, w.dead(), out, fx) < 0) {
+	      w.head = save;
+	      return std::nullopt;
+	    }
+	    apply_remove_head(w, fx);
+	    if (out.publishing) {
+	      g.step = PUBLISH_HINT;
+	      g.step_cs = o.cs;
+	    }
 	    return std::nullopt;
 	  }
 	  fsio::leave_out out;
@@ -1313,6 +1382,9 @@ void expirer_actions(const World& w0, std::vector<Action>& acts)
 	  w.head.exists = true;
 	  w.head.manifest = tok_bl(s);
 	  w.head.id_tag = fmt::format("t{}", w.next_tag++);
+	  if (cfg.versioned) {
+	    set_null_version(w, s);          // suspended:  the null version (§2.5a)
+	  }
 	  if (out.born_drained) {
 	    auto rn = rname(in.r);
 	    std::vector<std::string> v{rn};
@@ -1468,33 +1540,99 @@ void expirer_actions(const World& w0, std::vector<Action>& acts)
 
 /* a versioned bucket's S3:  a PUT makes a new version, a DELETE a delete
  * marker, DELETE ?versionId= removes one (§2.5) */
+/* §2.5a:  the null version removed from the head object (DELETE
+ * ?versionId=null, or a suspended bucket's DELETE):  the remove-null mode */
+void remove_null(World& w)
+{
+  auto vi = w.versions.find("null");
+  if (vi == w.versions.end()) {
+    return;
+  }
+  auto old = w.head_tok();
+  fsio::replace_in in;
+  in.mode = fsio::replace_mode::REMOVE_NULL;
+  in.r = fid_t{w.next_r++, 0};
+  fsio::replace_out out;
+  cls_rgw_fsio_effects fx;
+  fsio::replace_head(w.head, in, out, fx);
+  apply_clones(w, fx, old);
+  if (!out.keep_tail) {
+    w.gcq.push_back({vi->second.tail});
+  }
+  w.head.id_tag.clear();                 // the OLH stays, without content
+  w.head.manifest.clear();
+  w.versions.erase(vi);
+  if (w.olh_cur == "null") {
+    relink(w);
+  }
+}
+
+/* a versioned bucket's S3:  enabled, a PUT makes a new version and a
+ * DELETE a delete marker;  suspended, both act on the null version, in
+ * place (§2.5a);  DELETE ?versionId= removes one;  versioning may be
+ * suspended and enabled again */
 void s3_actions_v(const World& w0, std::vector<Action>& acts)
 {
   if (w0.s3_budget <= 0) {
     return;
   }
-  acts.push_back({"s3 put",
+  if (!w0.suspended) {
+    acts.push_back({"s3 put",
+	[](World& w) -> std::optional<std::string> {
+	  --w.s3_budget;
+	  auto inst = fmt::format("I{}", w.next_i++);
+	  auto c = fmt::format("C{}", w.next_c++);
+	  w.storage.insert(c);
+	  Version v;
+	  v.ih.exists = true;
+	  v.ih.id_tag = fmt::format("i{}", w.next_tag++);
+	  v.ih.manifest = tok_bl(c);
+	  v.tail = c;
+	  v.epoch = w.next_epoch++;
+	  w.versions[inst] = v;
+	  w.olh_cur = inst;
+	  w.olh_epoch = v.epoch;
+	  return std::nullopt;
+	}});
+  } else {
+    acts.push_back({"s3 put (suspended)",
+	[](World& w) -> std::optional<std::string> {
+	  /* overwrites the null version on the head:  a supersede */
+	  --w.s3_budget;
+	  auto c = fmt::format("C{}", w.next_c++);
+	  w.storage.insert(c);
+	  auto old = w.versions.count("null") ? w.head_tok() : std::string{};
+	  fsio::replace_in in;
+	  in.mode = fsio::replace_mode::SUPERSEDE;
+	  in.r = fid_t{w.next_r++, 0};
+	  fsio::replace_out out;
+	  cls_rgw_fsio_effects fx;
+	  fsio::replace_head(w.head, in, out, fx);
+	  apply_clones(w, fx, old);
+	  if (!out.keep_tail && !old.empty()) {
+	    w.gcq.push_back({old});
+	  }
+	  w.head.exists = true;
+	  w.head.manifest = tok_bl(c);
+	  w.head.id_tag = fmt::format("t{}", w.next_tag++);
+	  set_null_version(w, c);
+	  return std::nullopt;
+	}});
+  }
+  acts.push_back({w0.suspended ? "s3 delete (suspended)" : "s3 delete",
       [](World& w) -> std::optional<std::string> {
 	--w.s3_budget;
-	auto inst = fmt::format("I{}", w.next_i++);
-	auto c = fmt::format("C{}", w.next_c++);
-	w.storage.insert(c);
-	Version v;
-	v.ih.exists = true;
-	v.ih.id_tag = fmt::format("i{}", w.next_tag++);
-	v.ih.manifest = tok_bl(c);
-	v.tail = c;
-	v.epoch = w.next_epoch++;
-	w.versions[inst] = v;
-	w.olh_cur = inst;
-	w.olh_epoch = v.epoch;
-	return std::nullopt;
-      }});
-  acts.push_back({"s3 delete",
-      [](World& w) -> std::optional<std::string> {
-	--w.s3_budget;
+	if (w.suspended) {
+	  remove_null(w);                    // the null version goes too
+	}
 	w.olh_cur.clear();                   // a delete marker
 	w.olh_epoch = w.next_epoch++;
+	return std::nullopt;
+      }});
+  acts.push_back({w0.suspended ? "s3 enable-versioning" : "s3 suspend-versioning",
+      [](World& w) -> std::optional<std::string> {
+	--w.s3_budget;
+	w.suspended = !w.suspended;
 	return std::nullopt;
       }});
   for (const auto& [i, v] : w0.versions) {
@@ -1505,6 +1643,10 @@ void s3_actions_v(const World& w0, std::vector<Action>& acts)
     acts.push_back({fmt::format("s3 delete-version {}", inst),
 	[inst](World& w) -> std::optional<std::string> {
 	  --w.s3_budget;
+	  if (inst == "null") {
+	    remove_null(w);
+	    return std::nullopt;
+	  }
 	  auto& v = w.versions.at(inst);
 	  fsio::remove_out out;
 	  cls_rgw_fsio_effects fx;
@@ -1839,8 +1981,14 @@ void expirer_actions_v(const World& w0, std::vector<Action>& acts)
   /* a recorded finalize whose finalizer died:  resumed by takeover */
   for (const auto& ff : w0.head.hdr->fenced_finalizes) {
     auto from = ff.from;
+    const auto* t = w0.head.hdr->find(ff.to);
+    const bool versioned = t && t->publishing &&
+      !t->publishing->instance.empty();
     acts.push_back({fmt::format("expirer resume-finalize {}", sname(from)),
-	[from, dead](World& w) -> std::optional<std::string> {
+	[from, dead, versioned](World& w) -> std::optional<std::string> {
+	  if (!versioned) {
+	    return start_finalize(w, from, dead);   // a suspended bucket's
+	  }
 	  fid_t to;
 	  if (fsio::fenced_finalize(w.head, w.ex_inc, from, dead, to) < 0) {
 	    return std::nullopt;
@@ -1865,7 +2013,21 @@ void expirer_actions_v(const World& w0, std::vector<Action>& acts)
       }
     }
     auto from = e.id;
+    /* a suspended bucket's shadow publishes over the null version:  the
+     * unversioned fenced finalize (§2.5a) */
+    auto decide_unversioned = [&acts, from]() {
+      acts.push_back({fmt::format("expirer decide-finalize {}", sname(from)),
+	  [from](World& w) -> std::optional<std::string> {
+	    w.ex = EX_FF_DECIDED;
+	    w.ex_from = from;
+	    return std::nullopt;
+	  }});
+    };
     if (e.state == state::READY && b.writers && !live_writer) {
+      if (w0.suspended) {
+	decide_unversioned();
+	continue;
+      }
       acts.push_back({fmt::format("expirer decide-finalize {}", sname(from)),
 	  [from](World& w) -> std::optional<std::string> {
 	    w.ex = VF_DECIDED;
@@ -1878,6 +2040,10 @@ void expirer_actions_v(const World& w0, std::vector<Action>& acts)
     if (e.state != state::PUBLISHING || !e.publishing ||
 	!(dead.count(e.publishing->incarnation) ||
 	  e.publishing->incarnation == w0.ex_inc)) {
+      continue;
+    }
+    if (e.publishing->instance.empty()) {
+      decide_unversioned();                // an unversioned publish's
       continue;
     }
     const auto inst = e.publishing->instance;
@@ -1983,6 +2149,16 @@ std::optional<std::string> check_state(const World& w)
       }
       if (e.state == state::PUBLISHED && e.manifest_at == at::HEAD) {
 	++at_head;
+      }
+      if (cfg.versioned && e.state == state::PUBLISHED) {
+	for (const auto& f : w.head.hdr->chunk_sets) {
+	  if (f.id != e.id && f.state == state::PUBLISHED &&
+	      entry_tail(w, f) == entry_tail(w, e) &&
+	      !entry_tail(w, e).empty()) {
+	    return fmt::format("two chunk-set entries publish {}",
+			       entry_tail(w, e));
+	  }
+	}
       }
       if (e.state == state::PUBLISHED && e.manifest_at == at::INSTANCE) {
 	for (const auto& f : w.head.hdr->chunk_sets) {
@@ -2193,7 +2369,21 @@ World initial(const std::string& roles, int s3_ops)
 {
   World w;
   w.storage.insert("C0");
-  if (cfg.versioned) {
+  if (cfg.versioned && cfg.vstart_null) {
+    /* versioning just enabled over the head's content:  the null version,
+     * on the head itself (§2.5a) */
+    w.head.exists = true;
+    w.head.olh = true;
+    w.head.id_tag = "t0";
+    w.head.manifest = tok_bl("C0");
+    Version v;
+    v.ih.exists = true;
+    v.ih.id_tag = "t0";
+    v.ih.manifest = tok_bl("C0");
+    v.tail = "C0";
+    w.versions["null"] = v;
+    w.olh_cur = "null";
+  } else if (cfg.versioned) {
     w.head.exists = true;                  // the OLH:  no content of its own
     w.head.olh = true;
     Version v;
@@ -2259,6 +2449,9 @@ TEST(FSIOModel, Explore)
        cls_rgw_fsio_check::V3_FINALIZER_HINTS_PLACEHOLDER},
       {"V4_HINT_WAITS_FOR_GRACE", cls_rgw_fsio_check::V4_HINT_WAITS_FOR_GRACE},
       {"V4_PUBLISHER_KEEPS_HINT", cls_rgw_fsio_check::V4_PUBLISHER_KEEPS_HINT},
+      {"NULL_IS_HEAD", cls_rgw_fsio_check::NULL_IS_HEAD},
+      {"NULL_REMOVAL_RETIRES", cls_rgw_fsio_check::NULL_REMOVAL_RETIRES},
+      {"PUBLISH_FOLLOWS_STATE", cls_rgw_fsio_check::PUBLISH_FOLLOWS_STATE},
     };
     auto i = checks.find(c);
     ASSERT_NE(i, checks.end()) << "unknown check " << c;
@@ -2269,6 +2462,9 @@ TEST(FSIOModel, Explore)
   cfg.zombies = env_int("FSIO_MODEL_ZOMBIES", 1);
   cfg.expirer_crashes = env_int("FSIO_MODEL_EXPIRER_CRASHES", 1);
   cfg.versioned = env_int("FSIO_MODEL_VERSIONED", 0);
+  if (auto v = std::getenv("FSIO_MODEL_VSTART")) {
+    cfg.vstart_null = std::string(v) == "null";
+  }
   std::string roles(env_int("FSIO_MODEL_GATEWAYS", 2), 'f');
   if (auto r = std::getenv("FSIO_MODEL_ROLES")) {
     roles = r;
