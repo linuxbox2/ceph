@@ -651,6 +651,57 @@ TEST(cls_rgw_fsio_versioned, V2_complete_after_takeover_removes_the_dead_writer)
   v2_complete_after_takeover_removes_the_dead_writer();
 }
 
+/* §2.5a:  versioning enabled over content FSIO has open makes it the null
+ * version in place:  a join naming null binds to the same chunk-set entry
+ * at HEAD and starts no generation */
+void null_is_the_heads_content()
+{
+  auto h = head("C0");
+  h.olh = true;
+  auto s = construct(h, GW1);                      // unversioned:  no instance
+  auto c0 = join_reader(h, GW1);
+  auto c0n = join_reader(h, GW2, "null");          // versioning now enabled
+  EXPECT_EQ(c0, c0n);
+  ASSERT_TRUE(h.hdr->cur_shadow);
+  EXPECT_EQ(s, *h.hdr->cur_shadow);                // no new generation
+  int published = 0;
+  for (const auto& e : h.hdr->chunk_sets) {
+    published += e.state == state::PUBLISHED;
+  }
+  EXPECT_EQ(1, published);
+}
+
+TEST(cls_rgw_fsio_versioned, null_is_the_heads_content)
+{
+  null_is_the_heads_content();
+}
+
+/* §2.5a:  removing the null version with readers bound retires the HEAD
+ * chunk-set entry with a leaf clone and keeps the tail */
+void null_removal_retires_the_head_chunk_set()
+{
+  auto h = head("C0");
+  h.olh = true;
+  auto c0 = join_reader(h, GW1, "null");
+  fsio::replace_in in;
+  in.mode = fsio::replace_mode::REMOVE_NULL;
+  in.r = cls_rgw_fsio_id{3000, 0};
+  fsio::replace_out out;
+  cls_rgw_fsio_effects fx;
+  ASSERT_EQ(0, fsio::replace_head(h, in, out, fx));
+  EXPECT_TRUE(out.keep_tail);
+  EXPECT_EQ(1u, fx.clones.size());                 // the leaf clone
+  const auto* e = h.hdr->find(c0);
+  ASSERT_TRUE(e);
+  EXPECT_EQ(state::RETIRED, e->state);
+  EXPECT_EQ(cls_rgw_fsio_manifest_at::CLONE, e->manifest_at);
+}
+
+TEST(cls_rgw_fsio_versioned, null_removal_retires_the_head_chunk_set)
+{
+  null_removal_retires_the_head_chunk_set();
+}
+
 /* every check's tests fail without it */
 TEST(cls_rgw_fsio, each_check_is_detected)
 {
@@ -672,6 +723,9 @@ TEST(cls_rgw_fsio, each_check_is_detected)
      v1_finalize_requires_the_aborted_claim},
     {cls_rgw_fsio_check::V2_COMPLETE_REMOVES_DEAD_WRITERS,
      v2_complete_after_takeover_removes_the_dead_writer},
+    {cls_rgw_fsio_check::NULL_IS_HEAD, null_is_the_heads_content},
+    {cls_rgw_fsio_check::NULL_REMOVAL_RETIRES,
+     null_removal_retires_the_head_chunk_set},
   };
   for (const auto& [check, body] : table) {
     fsio::skipped_check = check;
