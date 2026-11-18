@@ -52,6 +52,16 @@ enum class cls_rgw_fsio_check : uint8_t {
   NULL_IS_HEAD,                        // fsio_join, published_chunk_set:  null is the head's content
   NULL_REMOVAL_RETIRES,                // fsio_replace_head, remove-null mode
   PUBLISH_FOLLOWS_STATE,               // the gateway's publish, suspended bucket (model)
+  PRESENCE_HINT_BEFORE_JOIN,           // the gateway's head presence hint (model)
+  PRESENCE_HINT_BEFORE_OCNT,           // the gateway's instance-head presence hint (model)
+  PRESENCE_HINT_HELD_UNTIL_RELEASED,   // the gateway's head presence hint (model)
+  H1_FAILED_RELEASE_KEEPS_HINT,        // the gateway's head presence hint (model)
+  H2_HINT_DROPPED_AFTER_GRACE,         // the expirer's presence-hint drop (model)
+  H3_PUBLISHER_HINTS_READERS,          // the gateway's versioned publish (model)
+  H3_TRACKING_ONLY_IS_REMOVED,         // the expirer's claim resolution (model)
+  H3_HINT_WAITS_FOR_LIVE_CLAIM,        // the expirer's presence-hint drop (model)
+  H3_PUBLISH_HINT_REMOVES_READER_HINTS, // the expirer's publish-hint rule (model)
+  H3_PUBLISHER_CLEANUP_REMOVES_READER_HINTS,  // the gateway's aborted-placeholder cleanup (model)
 };
 
 #ifdef CLS_RGW_FSIO_SKIP_CHECKS

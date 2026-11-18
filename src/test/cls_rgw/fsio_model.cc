@@ -11,13 +11,16 @@
  *   - no shadow is published twice;
  *   - a shadow's manifest can be found when it is needed;
  *   - at the end:  nothing leaks, no FSIO state is left, and every
- *     acknowledged write was published.
+ *     acknowledged write was published;  no FSIO open hint is left.
  * Storage is abstract:  a published object's tail is one object "C<n>", a
  * shadow's chunks one object "S<counter>", a record clone "R<counter>".
- * Unversioned buckets only.  A gateway either crashes (a true death,
- * presumed at once) or is partitioned (presumed dead, still running:  a
- * zombie);  the FSIO expirer decides a fenced finalize from one read and
- * calls it in a later step.
+ * Each gateway hints what it holds state on, and the FSIO expirer
+ * reaches a head or an instance head only through a dead incarnation's
+ * hint, by §4.3's rule for its kind and target.  A gateway either
+ * crashes (a true death, presumed at once) or is partitioned (presumed
+ * dead, still running:  a zombie, which stops once its grace has
+ * elapsed);  the FSIO expirer decides a fenced finalize from one read
+ * and calls it in a later step.
  *
  * The environment bounds a run:  FSIO_MODEL_GATEWAYS, or FSIO_MODEL_ROLES
  * with one letter per gateway (f full, w writer only, r reader only);
@@ -42,11 +45,19 @@
  * over content FSIO has open, the head holding the null version.
  * FSIO_MODEL_SHORTEST=1 searches by iterative deepening:  depth-first to
  * a bound raised one step at a time, so the first violation found has the
- * shortest trace;  for STOP_AT_FIRST and skipped-check runs. */
+ * shortest trace;  for STOP_AT_FIRST and skipped-check runs.
+ * FSIO_MODEL_LIMIT (2,000,000) caps the states a run visits;  a run
+ * that reaches it is a partial sample.  FSIO_MODEL_PROGRESS (100,000)
+ * prints a progress line every that many states.  FSIO_MODEL_PREFIX
+ * names a vector, one action name per line as traces print them ('#',
+ * blank and "=>" lines skipped):  the search takes those actions in
+ * order, then goes on from where they lead, or stops there with
+ * FSIO_MODEL_PREFIX_ONLY=1.  fsio_vectors/ holds the vectors. */
 
 #include <algorithm>
 #include <chrono>
 #include <cstdlib>
+#include <fstream>
 #include <functional>
 #include <iostream>
 #include <optional>
@@ -111,6 +122,40 @@ struct LOpen {
   }
 };
 
+/* a hint (§2.7):  cls_rgw_fsio_hint, its target by name rather than by
+ * bucket and key;  one shard, since each hint is handled on its own */
+enum class HintKind : uint8_t { PRESENCE = 1, PUBLISH = 2 };
+enum class HintTarget : uint8_t { HEAD = 1, INSTANCE_HEAD = 2 };
+struct Hint {
+  HintKind kind;
+  HintTarget target;
+  std::string instance;          // INSTANCE_HEAD:  "I2";  empty for HEAD
+  uint64_t incarnation = 0;
+  std::optional<fid_t> r;        // PUBLISH on a HEAD:  the leaf clone
+  auto operator<=>(const Hint&) const = default;
+  void encode(ceph::buffer::list& bl) const {
+    using ceph::encode;
+    encode((uint8_t)kind, bl); encode((uint8_t)target, bl);
+    encode(instance, bl); encode(incarnation, bl); encode(r, bl);
+  }
+};
+Hint presence_head(uint64_t inc)
+{
+  return Hint{HintKind::PRESENCE, HintTarget::HEAD, {}, inc};
+}
+Hint presence_ih(const std::string& inst, uint64_t inc)
+{
+  return Hint{HintKind::PRESENCE, HintTarget::INSTANCE_HEAD, inst, inc};
+}
+Hint publish_head(uint64_t inc, const fid_t& r)
+{
+  return Hint{HintKind::PUBLISH, HintTarget::HEAD, {}, inc, r};
+}
+Hint publish_ih(const std::string& inst, uint64_t inc)
+{
+  return Hint{HintKind::PUBLISH, HintTarget::INSTANCE_HEAD, inst, inc};
+}
+
 enum Step : uint8_t { NONE, CONSTRUCT, PUBLISH_WRITE, PUBLISH_GC, DRAIN_SEND,
   PUBLISH_HINT,
   /* versioned (stage A) */
@@ -118,12 +163,6 @@ enum Step : uint8_t { NONE, CONSTRUCT, PUBLISH_WRITE, PUBLISH_GC, DRAIN_SEND,
   V_PUB_PUBLISH,
   /* versioned (stage B):  the claim */
   V_PUB_HINT, V_PLACE, V_LEAVE, V_UNPLACE, V_PUB_UNHINT, V_PUB_CLEANUP };
-
-bool publishing_step(Step s)
-{
-  return (s >= V_PUB_READ && s <= V_PUB_PUBLISH) ||
-    (s >= V_PUB_HINT && s <= V_PUB_UNHINT);
-}
 
 struct Gw {
   uint64_t inc = 0;
@@ -138,7 +177,9 @@ struct Gw {
   fid_t step_r;
   bool step_born = false;
   std::optional<fid_t> step_drained;
-  std::vector<fid_t> hints;      // publish hints, by r
+  uint8_t owe_head_hint = 0;     // PRESENCE_HINT_BEFORE_JOIN skipped:  to add
+  uint8_t release_failed = 0;    // a release call failed:  keeps its hint (H1)
+  std::string owe_ih_hint;       // PRESENCE_HINT_BEFORE_OCNT skipped:  to add
   /* versioned */
   std::string pending;           // the instance an open in progress read
   bool pending_writer = false;
@@ -146,7 +187,6 @@ struct Gw {
   std::string step_inst;         // V_OCNT_SEND:  that instance
   std::string pub_instance;      // the publish's new version
   std::string pub_token;         // its claim (§4.2 step 1)
-  std::set<std::string> vhints;  // publish hints naming instance heads
   std::set<uint64_t> pub_incs;   // the incarnations it read (§4.2 step 3)
   uint64_t pub_epoch = 0;
   bool pub_began_suspended = false;  // the bucket's state when the publish began
@@ -158,10 +198,12 @@ struct Gw {
     encode(did_read, bl); encode(did_write, bl); encode(did_io, bl);
     encode(did_follow, bl); encode(did_crash, bl); encode(zombie, bl);
     encode((uint8_t)step, bl); encode(step_cs, bl); encode(step_r, bl);
-    encode(step_born, bl); encode(step_drained, bl); encode(hints, bl);
+    encode(step_born, bl); encode(step_drained, bl);
+    encode(owe_head_hint, bl); encode(owe_ih_hint, bl);
+    encode(release_failed, bl);
     encode(pending, bl); encode(pending_writer, bl); encode(counted, bl);
     encode(step_inst, bl); encode(pub_instance, bl); encode(pub_incs, bl);
-    encode(pub_epoch, bl); encode(pub_token, bl); encode(vhints, bl);
+    encode(pub_epoch, bl); encode(pub_token, bl);
     encode(pub_began_suspended, bl);
   }
 };
@@ -218,8 +260,7 @@ struct World {
   std::string olh_cur;                           // "" a delete marker
   std::string ex_inst, ex_token;                 // a versioned finalize's `to`
   std::string ex_aborted;                        // the claim it aborted (V1)
-  std::map<std::string, uint64_t> ex_vhints;     // its publish hints on instance
-						 // heads, by owning incarnation (V3)
+  std::set<Hint> hints;                          // the FSIO open hints (§2.7)
   std::set<uint64_t> graced;                     // incarnations past their grace (§4.3)
   bool suspended = false;                        // versioning suspended (§2.5a)
   uint64_t olh_epoch = 0, next_i = 2, next_epoch = 1;
@@ -255,7 +296,9 @@ struct World {
     }
     encode(olh_cur, bl); encode(olh_epoch, bl); encode(next_i, bl);
     encode(ex_inst, bl); encode(ex_token, bl); encode(ex_aborted, bl);
-    encode(ex_vhints, bl); encode(graced, bl); encode(suspended, bl);
+    encode((uint32_t)hints.size(), bl);
+    for (const auto& h : hints) h.encode(bl);
+    encode(graced, bl); encode(suspended, bl);
     encode(next_epoch, bl);
     return bl.to_str();
   }
@@ -278,6 +321,43 @@ struct Action {
   std::string name;
   std::function<std::optional<std::string>(World&)> run;  // a violation, if any
   bool failure = false;          // a crash or partition:  optional, never work
+  bool pass = false;             // the expirer's pass on the head (§4.3)
+};
+
+/* §4.3:  what a gateway holds on the head, which its presence hint
+ * covers:  opens, and a step under way (a publish, a drain) until the
+ * call that releases it */
+bool holds_head(const Gw& g)
+{
+  if (FSIO_SKIP_CHECK(PRESENCE_HINT_HELD_UNTIL_RELEASED)) {
+    return !g.opens.empty();
+  }
+  return !g.opens.empty() || g.step != NONE;
+}
+
+/* the dead incarnations whose hints lead the expirer to the head:  any on
+ * the head, and publish hints on instance heads, whose rule runs
+ * fsio_expire on the OLH first (§4.3) */
+bool head_reached(const World& w, const fsio::expired_t& dead)
+{
+  for (const auto& h : w.hints) {
+    if (dead.count(h.incarnation) &&
+	(h.target == HintTarget::HEAD || h.kind == HintKind::PUBLISH)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/* the actions added from here to the end of scope are the pass's */
+struct MarkPass {
+  std::vector<Action>& acts;
+  size_t from;
+  ~MarkPass() {
+    for (auto i = from; i < acts.size(); ++i) {
+      acts[i].pass = true;
+    }
+  }
 };
 
 /* the manifest a shadow's chunks are named by, found as the design says
@@ -401,6 +481,9 @@ void gw_actions(const World& w0, size_t gi, std::vector<Action>& acts)
   if (!g.alive) {
     return;
   }
+  if (g.zombie && w0.graced.count(g.inc)) {
+    return;                  // the lease:  stopped, its ops timed out (§4.3)
+  }
   auto inc = g.inc;
   if (g.step != NONE) {
     switch (g.step) {
@@ -419,7 +502,7 @@ void gw_actions(const World& w0, size_t gi, std::vector<Action>& acts)
 	  [gi](World& w) -> std::optional<std::string> {
 	    auto& g = w.gws[gi];
 	    g.step_r = fid_t{w.next_r++, 0};
-	    g.hints.push_back(g.step_r);
+	    w.hints.insert(publish_head(g.inc, g.step_r));
 	    g.step = PUBLISH_WRITE;
 	    return std::nullopt;
 	  }});
@@ -433,7 +516,8 @@ void gw_actions(const World& w0, size_t gi, std::vector<Action>& acts)
 	    const auto* e = w.head.hdr ? w.head.hdr->find(g.step_cs) : nullptr;
 	    if (!e || e->state != state::PUBLISHING || !e->publishing ||
 		e->publishing->incarnation != inc) {
-	      std::erase(g.hints, g.step_r);
+	      w.hints.erase(publish_head(g.inc, g.step_r));
+	      g.release_failed = 1;           // keeps its hint (H1)
 	      g.step = NONE;
 	      return std::nullopt;
 	    }
@@ -450,7 +534,8 @@ void gw_actions(const World& w0, size_t gi, std::vector<Action>& acts)
 	    cls_rgw_fsio_effects fx;
 	    int r = fsio::replace_head(w.head, in, out, fx);
 	    if (r < 0) {
-	      std::erase(g.hints, g.step_r);
+	      w.hints.erase(publish_head(g.inc, g.step_r));
+	      g.release_failed = 1;           // keeps its hint (H1)
 	      g.step = NONE;
 	      return std::nullopt;
 	    }
@@ -484,7 +569,7 @@ void gw_actions(const World& w0, size_t gi, std::vector<Action>& acts)
 	      }
 	      w.gcq.push_back(v);
 	    }
-	    std::erase(g.hints, g.step_r);
+	    w.hints.erase(publish_head(g.inc, g.step_r));
 	    if (g.step_drained) {
 	      g.step = DRAIN_SEND;
 	      g.step_cs = *g.step_drained;
@@ -629,6 +714,7 @@ void gw_actions(const World& w0, size_t gi, std::vector<Action>& acts)
 	  auto save = w.head;
 	  if (fsio::leave(w.head, inc, o.cs, o.writer, w.dead(), out, fx) < 0) {
 	    w.head = save;
+	    g.release_failed = 1;         // keeps its hint (H1)
 	    return std::nullopt;
 	  }
 	  apply_remove_head(w, fx);
@@ -743,9 +829,22 @@ void gw_actions_v(const World& w0, size_t gi, std::vector<Action>& acts)
       acts.push_back({fmt::format("gw{} count {}", inc, g.pending),
 	  [gi, inc](World& w) -> std::optional<std::string> {
 	    auto& g = w.gws[gi];
+	    /* §4.3:  the presence hint on the instance head comes first */
+	    const bool had = g.counted.count(g.pending);
+	    if (!had) {
+	      if (FSIO_SKIP_CHECK(PRESENCE_HINT_BEFORE_OCNT)) {
+		g.owe_ih_hint = g.pending;   // in a step of its own, after
+	      } else {
+		w.hints.insert(presence_ih(g.pending, inc));
+	      }
+	    }
 	    auto v = w.versions.find(g.pending);
 	    if (v == w.versions.end() ||
 		fsio::ocnt_add(v->second.ih, inc) < 0) {
+	      if (!had) {
+		w.hints.erase(presence_ih(g.pending, inc));
+		g.owe_ih_hint.clear();
+	      }
 	      g.step = NONE;                 // the open fails
 	      return std::nullopt;
 	    }
@@ -818,6 +917,7 @@ void gw_actions_v(const World& w0, size_t gi, std::vector<Action>& acts)
 	  [gi](World& w) -> std::optional<std::string> {
 	    auto& g = w.gws[gi];
 	    ocnt_send(w, g.step_inst);
+	    w.hints.erase(presence_ih(g.step_inst, g.inc));
 	    g.step = NONE;
 	    return std::nullopt;
 	  }});
@@ -838,6 +938,13 @@ void gw_actions_v(const World& w0, size_t gi, std::vector<Action>& acts)
 		g.pub_incs.insert(i);       // readers only (§4.2 step 3, W7)
 	      }
 	    }
+	    /* §4.2 step 3:  a presence hint on the new instance head for
+	     * each, keyed by its incarnation (H3) */
+	    if (!FSIO_SKIP_CHECK(H3_PUBLISHER_HINTS_READERS)) {
+	      for (auto i : g.pub_incs) {
+		w.hints.insert(presence_ih(g.pub_instance, i));
+	      }
+	    }
 	    g.step = V_PUB_WRITE;
 	    return std::nullopt;
 	  }});
@@ -854,12 +961,13 @@ void gw_actions_v(const World& w0, size_t gi, std::vector<Action>& acts)
 	     * expirer owns the shadow (§4.2) */
 	    auto vi = w.versions.find(g.pub_instance);
 	    if (vi == w.versions.end() || vi->second.claim != g.pub_token) {
+	      g.release_failed = 1;          // the publish failed (H1)
 	      if (vi != w.versions.end() && vi->second.claim == "aborted" &&
 		  !FSIO_SKIP_CHECK(V4_PUBLISHER_KEEPS_HINT)) {
 		g.step = V_PUB_CLEANUP;      // keeps its hint (§4.2, V4)
 		return std::nullopt;
 	      }
-	      g.vhints.erase(g.pub_instance);
+	      w.hints.erase(publish_ih(g.pub_instance, g.inc));
 	      g.step = NONE;
 	      return std::nullopt;
 	    }
@@ -915,7 +1023,8 @@ void gw_actions_v(const World& w0, size_t gi, std::vector<Action>& acts)
 	    auto save = w.head;
 	    if (fsio::replace_head(w.head, in, out, fx) < 0) {
 	      w.head = save;
-	      g.vhints.erase(g.pub_instance);
+	      w.hints.erase(publish_ih(g.pub_instance, g.inc));
+	      g.release_failed = 1;           // keeps its hint (H1)
 	      g.step = NONE;
 	      return std::nullopt;
 	    }
@@ -933,7 +1042,7 @@ void gw_actions_v(const World& w0, size_t gi, std::vector<Action>& acts)
 	    auto& g = w.gws[gi];
 	    g.pub_instance = fmt::format("I{}", w.next_i++);
 	    g.pub_token = fmt::format("k{}", w.next_tag++);
-	    g.vhints.insert(g.pub_instance);
+	    w.hints.insert(publish_ih(g.pub_instance, g.inc));
 	    g.step = V_PLACE;
 	    return std::nullopt;
 	  }});
@@ -964,6 +1073,7 @@ void gw_actions_v(const World& w0, size_t gi, std::vector<Action>& acts)
 	    if (fsio::leave(w.head, inc, g.step_cs, true, w.dead(), out, fx,
 			    &intent) < 0) {
 	      w.head = save;
+	      g.release_failed = 1;         // keeps its hint (H1)
 	      g.step = V_UNPLACE;
 	      return std::nullopt;
 	    }
@@ -990,7 +1100,7 @@ void gw_actions_v(const World& w0, size_t gi, std::vector<Action>& acts)
 		vi->second.ih.id_tag.empty()) {
 	      w.versions.erase(vi);            // guarded:  claim == token
 	    }
-	    g.vhints.erase(g.pub_instance);
+	    w.hints.erase(publish_ih(g.pub_instance, g.inc));
 	    g.step = NONE;
 	    return std::nullopt;
 	  }});
@@ -1000,7 +1110,7 @@ void gw_actions_v(const World& w0, size_t gi, std::vector<Action>& acts)
 				  g.pub_instance),
 	  [gi](World& w) -> std::optional<std::string> {
 	    auto& g = w.gws[gi];
-	    g.vhints.erase(g.pub_instance);
+	    w.hints.erase(publish_ih(g.pub_instance, g.inc));
 	    if (g.step_drained) {
 	      g.step = DRAIN_SEND;
 	      g.step_cs = *g.step_drained;
@@ -1041,12 +1151,18 @@ void gw_actions_v(const World& w0, size_t gi, std::vector<Action>& acts)
 				    g.pub_instance),
 	    [gi](World& w) -> std::optional<std::string> {
 	      auto& g = w.gws[gi];
+	      /* first the presence hints it wrote for its readers (H3f) */
+	      if (!FSIO_SKIP_CHECK(H3_PUBLISHER_CLEANUP_REMOVES_READER_HINTS)) {
+		for (auto i : g.pub_incs) {
+		  w.hints.erase(presence_ih(g.pub_instance, i));
+		}
+	      }
 	      auto vi = w.versions.find(g.pub_instance);
 	      if (vi != w.versions.end() && vi->second.claim == "aborted" &&
 		  vi->second.ih.id_tag.empty()) {
 		w.versions.erase(vi);
 	      }
-	      g.vhints.erase(g.pub_instance);
+	      w.hints.erase(publish_ih(g.pub_instance, g.inc));
 	      g.step = NONE;
 	      return std::nullopt;
 	    }});
@@ -1149,6 +1265,7 @@ void gw_actions_v(const World& w0, size_t gi, std::vector<Action>& acts)
 	    auto save = w.head;
 	    if (fsio::leave(w.head, inc, o.cs, true, w.dead(), out, fx) < 0) {
 	      w.head = save;
+	      g.release_failed = 1;         // keeps its hint (H1)
 	      return std::nullopt;
 	    }
 	    apply_remove_head(w, fx);
@@ -1163,6 +1280,7 @@ void gw_actions_v(const World& w0, size_t gi, std::vector<Action>& acts)
 	  auto save = w.head;
 	  if (fsio::leave(w.head, inc, o.cs, false, w.dead(), out, fx) < 0) {
 	    w.head = save;
+	    g.release_failed = 1;         // keeps its hint (H1)
 	    return std::nullopt;
 	  }
 	  apply_remove_head(w, fx);
@@ -1177,7 +1295,8 @@ void gw_actions_v(const World& w0, size_t gi, std::vector<Action>& acts)
 	}});
   }
   /* §2.5:  a version none of the gateway's opens reads any more;  one
-   * whose publish is in flight is removed from once it exists */
+   * whose instance head is a placeholder with a live claim is removed
+   * from once written (H3c) */
   for (const auto& inst : g.counted) {
     bool bound = false;
     for (const auto& o : g.opens) {
@@ -1187,17 +1306,13 @@ void gw_actions_v(const World& w0, size_t gi, std::vector<Action>& acts)
       continue;
     }
     {
-      /* written:  remove now;  a placeholder still claimed, or a publish
-       * about to place it:  wait;  aborted or never placed:  nothing to
-       * remove */
+      /* written:  remove now;  a placeholder with a live claim:  wait;
+       * aborted or absent:  nothing to remove (H3c:  the placeholder
+       * precedes the leave's intent, so an absent one cannot appear) */
       auto vi = w0.versions.find(inst);
       bool wait = false;
       if (vi != w0.versions.end()) {
 	wait = vi->second.placeholder() && *vi->second.claim != "aborted";
-      } else {
-	for (const auto& p : w0.gws) {
-	  wait |= p.pub_instance == inst && publishing_step(p.step);
-	}
       }
       if (wait) {
 	continue;
@@ -1209,13 +1324,16 @@ void gw_actions_v(const World& w0, size_t gi, std::vector<Action>& acts)
 	  g.counted.erase(inst);
 	  auto v = w.versions.find(inst);
 	  if (v == w.versions.end()) {
+	    w.hints.erase(presence_ih(inst, inc));
 	    return std::nullopt;
 	  }
 	  fsio::ocnt_drain d;
 	  fsio::ocnt_remove(v->second.ih, inc, d);
 	  if (d.drained) {
-	    g.step = V_OCNT_SEND;
+	    g.step = V_OCNT_SEND;            // the hint goes after the send
 	    g.step_inst = inst;
+	  } else {
+	    w.hints.erase(presence_ih(inst, inc));
 	  }
 	  return std::nullopt;
 	}});
@@ -1401,6 +1519,22 @@ void expirer_actions(const World& w0, std::vector<Action>& acts)
 	}});
     return;
   }
+  /* grace (§4.3):  rgw_fsio_op_timeout after presumption;  after it a
+   * presumed-dead incarnation can do nothing more */
+  for (auto inc : dead) {
+    if (w0.graced.count(inc)) continue;
+    acts.push_back({fmt::format("expirer grace {}", inc),
+	[inc](World& w) -> std::optional<std::string> {
+	  w.graced.insert(inc);
+	  return std::nullopt;
+	}});
+  }
+  /* the pass (§4.3):  only a dead incarnation's hint leads the expirer to
+   * the head;  everything below is the pass's work */
+  if (!head_reached(w0, dead)) {
+    return;
+  }
+  MarkPass mark{acts, acts.size()};
   /* reader expiry, and the drains it causes */
   bool has_dead_opens = false;
   for (auto inc : dead) {
@@ -1449,13 +1583,16 @@ void expirer_actions(const World& w0, std::vector<Action>& acts)
 	  return std::nullopt;
 	}});
   }
-  /* dead gateways' publish hints (§4.3 step 1) */
-  for (size_t gi = 0; gi < w0.gws.size(); ++gi) {
-    const auto& g = w0.gws[gi];
-    if (g.alive && !g.zombie) continue;
-    for (auto r : g.hints) {
+  /* dead incarnations' publish hints on the head (§4.3 step 1) */
+  for (const auto& h : w0.hints) {
+    if (h.kind != HintKind::PUBLISH || h.target != HintTarget::HEAD ||
+	!dead.count(h.incarnation)) {
+      continue;
+    }
+    {
+      auto r = *h.r;
       acts.push_back({fmt::format("expirer hint {}", rname(r)),
-	  [gi, r, dead](World& w) -> std::optional<std::string> {
+	  [h, r, dead](World& w) -> std::optional<std::string> {
 	    /* §4.3 step 1:  fsio_expire first, taking over the dead
 	     * incarnation's publishes in flight, then the head, then the
 	     * hint */
@@ -1465,8 +1602,7 @@ void expirer_actions(const World& w0, std::vector<Action>& acts)
 	      fsio::expire(w.head, w.ex_inc, dead, std::nullopt, out, fx);
 	      apply_remove_head(w, fx);
 	    }
-	    auto& g = w.gws[gi];
-	    std::erase(g.hints, r);
+	    w.hints.erase(h);
 	    if (w.head.hdr) {
 	      for (auto& e : w.head.hdr->chunk_sets) {
 		if (e.clone && *e.clone == r) {
@@ -1715,7 +1851,7 @@ void expirer_actions_v(const World& w0, std::vector<Action>& acts)
 	    w.ex_inst = fmt::format("I{}", w.next_i++);
 	    w.ex_token = fmt::format("k{}", w.next_tag++);
 	    if (!FSIO_SKIP_CHECK(V3_FINALIZER_HINTS_PLACEHOLDER)) {
-	      w.ex_vhints[w.ex_inst] = w.ex_inc;
+	      w.hints.insert(publish_ih(w.ex_inst, w.ex_inc));
 	    }
 	    w.ex = VF_PLACE;
 	    return std::nullopt;
@@ -1744,7 +1880,7 @@ void expirer_actions_v(const World& w0, std::vector<Action>& acts)
 	      if (vi != w.versions.end() && vi->second.claim == w.ex_token) {
 		w.versions.erase(vi);        // its own placeholder
 	      }
-	      w.ex_vhints.erase(w.ex_inst);
+	      w.hints.erase(publish_ih(w.ex_inst, w.ex_inc));
 	      w.ex = EX_IDLE;
 	      return std::nullopt;
 	    }
@@ -1843,10 +1979,7 @@ void expirer_actions_v(const World& w0, std::vector<Action>& acts)
 				 sname(w.ex_to), r);
 	    }
 	    apply_remove_head(w, fx);
-	    if (auto h = w.ex_vhints.find(w.ex_inst);
-		h != w.ex_vhints.end() && h->second == w.ex_inc) {
-	      w.ex_vhints.erase(h);          // its own hint, after `to` (V3)
-	    }
+	    w.hints.erase(publish_ih(w.ex_inst, w.ex_inc));   // its own (V3)
 	    w.ex = EX_IDLE;
 	    return std::nullopt;
 	  }});
@@ -1860,37 +1993,35 @@ void expirer_actions_v(const World& w0, std::vector<Action>& acts)
   if (w0.ex != EX_IDLE) {
     return;
   }
-  /* grace (§4.3):  rgw_fsio_op_timeout after presumption;  after it a
-   * presumed-dead incarnation can do nothing more */
-  for (auto inc : dead) {
-    if (w0.graced.count(inc)) continue;
-    acts.push_back({fmt::format("expirer grace {}", inc),
-	[inc](World& w) -> std::optional<std::string> {
-	  w.graced.insert(inc);
-	  return std::nullopt;
-	}});
-  }
-  /* each version's open count */
-  for (const auto& [i, v] : w0.versions) {
-    if (!v.ih.ocnt) {
+  /* a dead incarnation's presence hints on instance heads (§4.3):
+   * ocnt_expire, the drain's send, and the hint dropped once the open
+   * count no longer holds the incarnation */
+  for (const auto& h : w0.hints) {
+    if (h.kind != HintKind::PRESENCE ||
+	h.target != HintTarget::INSTANCE_HEAD || !dead.count(h.incarnation)) {
       continue;
     }
-    bool has_dead = false;
-    for (auto inc : v.ih.ocnt->incarnations) {
-      has_dead |= dead.count(inc) > 0;
-    }
-    bool stranded = v.ih.ocnt->incarnations.empty();   // drained, unsent
-    if (!has_dead && !stranded) {
-      continue;
-    }
-    auto inst = i;
-    acts.push_back({fmt::format("expirer ocnt {}", inst),
-	[inst, dead](World& w) -> std::optional<std::string> {
-	  fsio::ocnt_drain d;
-	  fsio::ocnt_expire(w.versions.at(inst).ih, dead, d);
-	  const auto& ih = w.versions.at(inst).ih;
-	  if (ih.ocnt && ih.ocnt->incarnations.empty()) {
-	    ocnt_send(w, inst);
+    acts.push_back({fmt::format("expirer ocnt {} for {}", h.instance,
+				h.incarnation),
+	[h, dead](World& w) -> std::optional<std::string> {
+	  auto vi = w.versions.find(h.instance);
+	  if (vi != w.versions.end() && vi->second.ih.ocnt) {
+	    fsio::ocnt_drain d;
+	    fsio::ocnt_expire(vi->second.ih, dead, d);
+	    if (vi->second.ih.ocnt && vi->second.ih.ocnt->incarnations.empty()) {
+	      ocnt_send(w, h.instance);
+	    }
+	  }
+	  vi = w.versions.find(h.instance);
+	  const bool live_claim = vi != w.versions.end() &&
+	    vi->second.placeholder() && *vi->second.claim != "aborted" &&
+	    !FSIO_SKIP_CHECK(H3_HINT_WAITS_FOR_LIVE_CLAIM);
+	  if (!live_claim &&            // a publish may still set it (H3b)
+	      (vi == w.versions.end() || !vi->second.ih.ocnt ||
+	       !vi->second.ih.ocnt->incarnations.count(h.incarnation)) &&
+	      (w.graced.count(h.incarnation) ||
+	       FSIO_SKIP_CHECK(H2_HINT_DROPPED_AFTER_GRACE))) {
+	    w.hints.erase(h);              // after grace (H2)
 	  }
 	  return std::nullopt;
 	}});
@@ -1918,9 +2049,21 @@ void expirer_actions_v(const World& w0, std::vector<Action>& acts)
     }
     const bool graced = w.graced.count(owner) ||
       FSIO_SKIP_CHECK(V4_HINT_WAITS_FOR_GRACE);
+    /* 4., 5.:  the presence hints the publisher wrote for its readers
+     * (§4.2 step 3) cover nothing once the claim is aborted (H3d, H3e) */
+    auto drop_presence = [&inst](World& w) {
+      if (FSIO_SKIP_CHECK(H3_PUBLISH_HINT_REMOVES_READER_HINTS)) {
+	return;
+      }
+      std::erase_if(w.hints, [&inst](const Hint& p) {
+	return p.kind == HintKind::PRESENCE &&
+	  p.target == HintTarget::INSTANCE_HEAD && p.instance == inst;
+      });
+    };
     auto vi = w.versions.find(inst);
     if (vi == w.versions.end()) {
       if (graced) {
+	drop_presence(w);
 	drop(w);                           // 5., after grace (V4)
       }
       return;
@@ -1947,34 +2090,30 @@ void expirer_actions_v(const World& w0, std::vector<Action>& acts)
       }
     } else if (!graced) {
       return;                              // 4. waits for grace (V4)
+    } else {
+      drop_presence(w);                    // 4.
     }
     w.versions.erase(vi);                  // 3., 4.
     drop(w);
   };
-  for (size_t gi = 0; gi < w0.gws.size(); ++gi) {
-    const auto& g = w0.gws[gi];
-    if (g.alive && !g.zombie) continue;
-    for (const auto& inst : g.vhints) {
-      auto owner = g.inc;
-      acts.push_back({fmt::format("expirer hint {}", inst),
-	  [gi, inst, owner, hint_rule](World& w) -> std::optional<std::string> {
-	    hint_rule(w, inst, owner, [gi, inst](World& w) {
-	      w.gws[gi].vhints.erase(inst);
-	    });
-	    return std::nullopt;
-	  }});
+  for (const auto& h : w0.hints) {
+    if (h.kind != HintKind::PUBLISH ||
+	h.target != HintTarget::INSTANCE_HEAD || !dead.count(h.incarnation)) {
+      continue;
     }
-  }
-  for (const auto& [inst_, owner] : w0.ex_vhints) {
-    if (!dead.count(owner)) continue;
-    auto inst = inst_;
-    auto own = owner;
-    acts.push_back({fmt::format("expirer hint {} (finalizer)", inst),
-	[inst, own, hint_rule](World& w) -> std::optional<std::string> {
-	  hint_rule(w, inst, own, [inst](World& w) { w.ex_vhints.erase(inst); });
+    acts.push_back({fmt::format("expirer hint {} for {}", h.instance,
+				h.incarnation),
+	[h, hint_rule](World& w) -> std::optional<std::string> {
+	  hint_rule(w, h.instance, h.incarnation,
+		    [h](World& w) { w.hints.erase(h); });
 	  return std::nullopt;
 	}});
   }
+  /* the pass's versioned work on the OLH head, reached by a hint (§4.3) */
+  if (!head_reached(w0, dead)) {
+    return;
+  }
+  MarkPass mark{acts, acts.size()};
   if (!w0.head.hdr) {
     return;
   }
@@ -2073,8 +2212,10 @@ void expirer_actions_v(const World& w0, std::vector<Action>& acts)
       apply_remove_head(w, fx);
       return std::nullopt;
     };
-    if (vi == w0.versions.end()) {
-      /* written, then removed (§4.2) */
+    if (vi == w0.versions.end() ||
+	(!vi->second.claim && vi->second.ih.id_tag.empty() &&
+	 !FSIO_SKIP_CHECK(H3_TRACKING_ONLY_IS_REMOVED))) {
+      /* written, then removed (§4.2):  absent, or tracking-only (H3) */
       acts.push_back({fmt::format("expirer complete-removed {}", sname(from)),
 	  [complete](World& w) { return complete(w, false); }});
     } else if (vi->second.placeholder() && *vi->second.claim == token) {
@@ -2095,6 +2236,94 @@ void expirer_actions_v(const World& w0, std::vector<Action>& acts)
       acts.push_back({fmt::format("expirer complete {}", inst),
 	  [complete](World& w) { return complete(w, true); }});
     }
+  }
+}
+
+/* §4.3:  a gateway's presence hint on the head, added before the call
+ * that creates its first state there and removed after the call that
+ * releases its last;  folded into those actions.  With
+ * PRESENCE_HINT_BEFORE_JOIN skipped, it is added in a step of its own
+ * after the call */
+void presence_hints(const World& w0, size_t gi, std::vector<Action>& acts,
+		    size_t first)
+{
+  for (auto i = first; i < acts.size(); ++i) {
+    if (acts[i].failure) {
+      continue;
+    }
+    auto inner = std::move(acts[i].run);
+    acts[i].run = [gi, inner](World& w) -> std::optional<std::string> {
+      const auto h = presence_head(w.gws[gi].inc);
+      const bool before = holds_head(w.gws[gi]);
+      if (!before && !FSIO_SKIP_CHECK(PRESENCE_HINT_BEFORE_JOIN)) {
+	w.hints.insert(h);
+      }
+      auto v = inner(w);
+      auto& g = w.gws[gi];
+      if (!holds_head(g) &&
+	  !(g.release_failed && !FSIO_SKIP_CHECK(H1_FAILED_RELEASE_KEEPS_HINT))) {
+	w.hints.erase(h);
+	g.owe_head_hint = 0;
+      } else if (!before && FSIO_SKIP_CHECK(PRESENCE_HINT_BEFORE_JOIN)) {
+	g.owe_head_hint = 1;
+      }
+      return v;
+    };
+  }
+  const auto& g = w0.gws[gi];
+  if (!g.alive || (g.zombie && w0.graced.count(g.inc))) {
+    return;
+  }
+  if (g.owe_head_hint) {
+    acts.push_back({fmt::format("gw{} presence-hint", g.inc),
+	[gi](World& w) -> std::optional<std::string> {
+	  auto& g = w.gws[gi];
+	  w.hints.insert(presence_head(g.inc));
+	  g.owe_head_hint = 0;
+	  return std::nullopt;
+	}});
+  }
+  if (!g.owe_ih_hint.empty()) {
+    acts.push_back({fmt::format("gw{} presence-hint {}", g.inc, g.owe_ih_hint),
+	[gi](World& w) -> std::optional<std::string> {
+	  auto& g = w.gws[gi];
+	  if (g.counted.count(g.owe_ih_hint)) {
+	    w.hints.insert(presence_ih(g.owe_ih_hint, g.inc));
+	  }
+	  g.owe_ih_hint.clear();
+	  return std::nullopt;
+	}});
+  }
+}
+
+/* §4.3 step 6:  the pass done, a dead incarnation's presence hint on the
+ * head is dropped:  no pass work is left, and the head holds no opens of
+ * that incarnation */
+void drop_presence_hints(const World& w0, std::vector<Action>& acts)
+{
+  if (w0.ex != EX_IDLE) {
+    return;
+  }
+  for (const auto& a : acts) {
+    if (a.pass) {
+      return;
+    }
+  }
+  const auto dead = w0.dead();
+  for (const auto& h : w0.hints) {
+    if (h.kind != HintKind::PRESENCE || h.target != HintTarget::HEAD ||
+	!dead.count(h.incarnation) || w0.head.opens.count(h.incarnation)) {
+      continue;
+    }
+    if (!w0.graced.count(h.incarnation) &&
+	!FSIO_SKIP_CHECK(H2_HINT_DROPPED_AFTER_GRACE)) {
+      continue;                  // a late call may still land (H2)
+    }
+    acts.push_back({fmt::format("expirer drop-hint {}", h.incarnation),
+	[h](World& w) -> std::optional<std::string> {
+	  w.hints.erase(h);
+	  return std::nullopt;
+	}});
   }
 }
 
@@ -2184,6 +2413,12 @@ std::optional<std::string> check_state(const World& w)
 
 std::optional<std::string> check_end(const World& w)
 {
+  for (const auto& h : w.hints) {
+    return fmt::format("hint left at the end:  {} on {} of {}",
+		       h.kind == HintKind::PRESENCE ? "presence" : "publish",
+		       h.target == HintTarget::HEAD ? "the head" : h.instance,
+		       h.incarnation);
+  }
   if (w.head.hdr || !w.head.opens.empty()) {
     ceph::buffer::list bl;
     return fmt::format("FSIO state left at the end ({} entries, {} "
@@ -2254,6 +2489,12 @@ struct Explorer {
   uint64_t progress = 100'000;
   size_t max_depth = 200;
   bool stop_at_first = false;
+  /* FSIO_MODEL_PREFIX:  a vector, one action name per line as traces
+   * print them;  step i takes only the action named on line i, then the
+   * search goes on from where it leads (or stops, FSIO_MODEL_PREFIX_ONLY) */
+  std::vector<std::string> prefix;
+  bool prefix_only = false;
+  bool prefix_missed = false;
   std::chrono::steady_clock::time_point start =
     std::chrono::steady_clock::now();
 
@@ -2314,15 +2555,23 @@ struct Explorer {
       status();
     }
     std::vector<Action> acts;
+    for (size_t gi = 0; gi < w.gws.size(); ++gi) {
+      auto first = acts.size();
+      if (cfg.versioned) {
+	gw_actions_v(w, gi, acts);
+      } else {
+	gw_actions(w, gi, acts);
+      }
+      presence_hints(w, gi, acts, first);
+    }
     if (cfg.versioned) {
-      for (size_t gi = 0; gi < w.gws.size(); ++gi) gw_actions_v(w, gi, acts);
       s3_actions_v(w, acts);
       expirer_actions_v(w, acts);
     } else {
-      for (size_t gi = 0; gi < w.gws.size(); ++gi) gw_actions(w, gi, acts);
       s3_actions(w, acts);
       expirer_actions(w, acts);
     }
+    drop_presence_hints(w, acts);
     gc_actions(w, acts);
     /* terminal:  nothing left to do but fail.  With no action at all,
      * everyone failed and recovery ran;  with only failures left, the
@@ -2335,6 +2584,29 @@ struct Explorer {
       if (acts.empty()) {
 	return;
       }
+    }
+    if (path.size() < prefix.size()) {
+      const auto& want = prefix[path.size()];
+      auto i = std::find_if(acts.begin(), acts.end(),
+			    [&](const Action& a) { return a.name == want; });
+      if (i == acts.end()) {
+	if (!prefix_missed) {
+	  std::cerr << fmt::format("[fsio-model] prefix step {} \"{}\" is not "
+				   "available;  the actions are:\n",
+				   path.size() + 1, want);
+	  for (const auto& a : acts) {
+	    std::cerr << "    " << a.name << "\n";
+	  }
+	  std::cerr << std::flush;
+	}
+	prefix_missed = true;
+	return;
+      }
+      auto a = std::move(*i);
+      acts.clear();
+      acts.push_back(std::move(a));
+    } else if (prefix_only && !prefix.empty()) {
+      return;
     }
     for (auto& a : acts) {
       World n = w;
@@ -2452,6 +2724,24 @@ TEST(FSIOModel, Explore)
       {"NULL_IS_HEAD", cls_rgw_fsio_check::NULL_IS_HEAD},
       {"NULL_REMOVAL_RETIRES", cls_rgw_fsio_check::NULL_REMOVAL_RETIRES},
       {"PUBLISH_FOLLOWS_STATE", cls_rgw_fsio_check::PUBLISH_FOLLOWS_STATE},
+      {"PRESENCE_HINT_BEFORE_JOIN", cls_rgw_fsio_check::PRESENCE_HINT_BEFORE_JOIN},
+      {"PRESENCE_HINT_BEFORE_OCNT", cls_rgw_fsio_check::PRESENCE_HINT_BEFORE_OCNT},
+      {"PRESENCE_HINT_HELD_UNTIL_RELEASED",
+       cls_rgw_fsio_check::PRESENCE_HINT_HELD_UNTIL_RELEASED},
+      {"H1_FAILED_RELEASE_KEEPS_HINT",
+       cls_rgw_fsio_check::H1_FAILED_RELEASE_KEEPS_HINT},
+      {"H2_HINT_DROPPED_AFTER_GRACE",
+       cls_rgw_fsio_check::H2_HINT_DROPPED_AFTER_GRACE},
+      {"H3_PUBLISHER_HINTS_READERS",
+       cls_rgw_fsio_check::H3_PUBLISHER_HINTS_READERS},
+      {"H3_TRACKING_ONLY_IS_REMOVED",
+       cls_rgw_fsio_check::H3_TRACKING_ONLY_IS_REMOVED},
+      {"H3_HINT_WAITS_FOR_LIVE_CLAIM",
+       cls_rgw_fsio_check::H3_HINT_WAITS_FOR_LIVE_CLAIM},
+      {"H3_PUBLISH_HINT_REMOVES_READER_HINTS",
+       cls_rgw_fsio_check::H3_PUBLISH_HINT_REMOVES_READER_HINTS},
+      {"H3_PUBLISHER_CLEANUP_REMOVES_READER_HINTS",
+       cls_rgw_fsio_check::H3_PUBLISHER_CLEANUP_REMOVES_READER_HINTS},
     };
     auto i = checks.find(c);
     ASSERT_NE(i, checks.end()) << "unknown check " << c;
@@ -2475,6 +2765,22 @@ TEST(FSIOModel, Explore)
 			   cfg.zombies, cfg.expirer_crashes,
 			   cfg.versioned ? ", versioned" : "");
   x.shortest = env_int("FSIO_MODEL_SHORTEST", 0);
+  if (auto p = std::getenv("FSIO_MODEL_PREFIX")) {
+    /* a trace pasted as is:  leading blanks and its "=>" line ignored */
+    std::ifstream f(p);
+    ASSERT_TRUE(f) << "cannot read " << p;
+    for (std::string l; std::getline(f, l); ) {
+      auto b = l.find_first_not_of(" \t");
+      if (b == std::string::npos || l.compare(b, 2, "=>") == 0 ||
+	  l[b] == '#') {
+	continue;
+      }
+      x.prefix.push_back(l.substr(b));
+    }
+    x.prefix_only = env_int("FSIO_MODEL_PREFIX_ONLY", 0);
+    std::cout << fmt::format("prefix:  {} steps{}\n", x.prefix.size(),
+			     x.prefix_only ? ", replayed only" : "");
+  }
   if (x.shortest) {
     deepen(x, initial(roles, env_int("FSIO_MODEL_S3_OPS", 2)));
   } else {
@@ -2495,5 +2801,6 @@ TEST(FSIOModel, Explore)
       std::cout << "    " << s << "\n";
     }
   }
+  EXPECT_FALSE(x.prefix_missed) << "the prefix did not apply";
   EXPECT_TRUE(x.found.empty());
 }

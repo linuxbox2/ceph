@@ -1,0 +1,32 @@
+# H3 (design §4.2 step 3):  a reader the publisher put in I2's open count
+# dies before removing itself;  without the publisher's hint nothing
+# leads the expirer to the count ("I2's open count left at the end").
+# Run (the search goes on from the prefix, so the fix's own steps are
+# explored;  FSIO_MODEL_PREFIX_ONLY=1 replays only):
+#   FSIO_MODEL_VERSIONED=1 FSIO_MODEL_VSTART=null FSIO_MODEL_ROLES=wr
+#   FSIO_MODEL_S3_OPS=1 FSIO_MODEL_SHORTEST=1 FSIO_MODEL_PREFIX=<this file>
+# Skip H3_PUBLISHER_HINTS_READERS to see it fail.
+gw1 read-olh-write
+gw1 open-write null
+gw1 ready S1.10
+gw1 write S1.10
+gw1 close-write S1.10
+gw1 publish-hint
+gw1 placeholder I2
+gw1 partition
+gw2 read-olh-read
+gw2 open-read null
+gw2 follow S1.10
+gw1 close-leave S1.10
+gw1 publish-read S1.10
+gw1 instance-write I2
+gw1 link I2
+gw1 publish S1.10
+gw1 publish-unhint I2
+gw1 uncount I2
+gw1 crash
+gw2 close-read S1.10
+gw2 crash
+s3 put
+expirer grace 1
+expirer grace 2
