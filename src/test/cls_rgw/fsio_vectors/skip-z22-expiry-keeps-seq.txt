@@ -1,0 +1,19 @@
+# Z22_EXPIRY_KEEPS_SEQ:  the shortest trace the search finds with the
+# check skipped (877455 states over 13 passes, 2026-11-19);  random
+# walks miss it (sample-skips, 200000 walks), so it is kept as a vector.
+# skip: Z22_EXPIRY_KEEPS_SEQ
+# env: FSIO_MODEL_ROLES=wr FSIO_MODEL_S3_OPS=0
+gw1 open-write
+gw1 ready S1.10
+gw1 partition
+gw2 open-read
+gw2 follow S1.10
+expirer decide-finalize S1.10
+expirer fenced-finalize S1.10
+expirer reclone S1.12
+expirer publish S1.12
+gw2 close-read S1.10
+expirer expire
+gw1 resend join
+gw2 drain S1.10
+# => drain: manifest for S1.10 is S1.12, chunks named from C0
