@@ -7110,19 +7110,44 @@ void RGWRados::remove_rgw_head_obj(ObjectWriteOperation& op)
 
 void RGWRados::Object::replace_head(const DoutPrefixProvider *dpp,
                                     ObjectWriteOperation& op,
-                                    optional_yield y)
+                                    optional_yield y, head_op kind,
+                                    const std::string* delete_id_tag)
 {
   if (!store->fsio_enabled(dpp, bucket_info, y)) {
     store->remove_rgw_head_obj(op);
     return;
   }
-  /* FSIO_RADOS_DESIGN.md §3.6:  the supersede, in place of
-   * cls_rgw_remove_obj, keeping the OLH attributes as it does;  the leaf
-   * clone's r drawn at random */
+  const cls_rgw_fsio_id r{ceph::util::generate_random_number<uint64_t>(),
+                          ceph::util::generate_random_number<uint64_t>()};
+  /* §2.5:  a version's removal on its instance head, whose open count
+   * may keep its content for readers */
+  if (kind == head_op::REMOVE_VERSION) {
+    cls_rgw_fsio_remove_version_op call;
+    call.r = r;
+    call.marker = bucket_info.bucket.marker;
+    fsio_replaced.emplace();
+    fsio_replaced->version_removal = true;
+    cls_rgw_fsio_remove_version(op, call, &fsio_replaced->out,
+                                &fsio_replaced->rval);
+    return;
+  }
+  /* §3.6, §2.5a:  the supersede, a DELETE checking the ID tag it read, or
+   * the null version's removal, in place of cls_rgw_remove_obj, keeping
+   * the OLH attributes as it does;  the leaf clone's r drawn at random */
   cls_rgw_fsio_replace_op call;
-  call.mode = static_cast<uint8_t>(cls_rgw_fsio::replace_mode::SUPERSEDE);
-  call.r = {ceph::util::generate_random_number<uint64_t>(),
-            ceph::util::generate_random_number<uint64_t>()};
+  switch (kind) {
+  case head_op::DELETE:
+    call.mode = static_cast<uint8_t>(cls_rgw_fsio::replace_mode::DELETE);
+    call.expected_id_tag = delete_id_tag ? *delete_id_tag : std::string{};
+    break;
+  case head_op::REMOVE_NULL:
+    call.mode = static_cast<uint8_t>(cls_rgw_fsio::replace_mode::REMOVE_NULL);
+    break;
+  default:
+    call.mode = static_cast<uint8_t>(cls_rgw_fsio::replace_mode::SUPERSEDE);
+    break;
+  }
+  call.r = r;
   call.keep_attr_prefixes = {RGW_ATTR_OLH_PREFIX};
   call.marker = bucket_info.bucket.marker;
   fsio_replaced.emplace();
@@ -7136,8 +7161,13 @@ bool RGWRados::Object::fsio_keep_tail() const
     return false;
   }
   try {
-    cls_rgw_fsio_replace_ret ret;
     auto it = fsio_replaced->out.cbegin();
+    if (fsio_replaced->version_removal) {
+      cls_rgw_fsio_remove_version_ret ret;
+      decode(ret, it);
+      return ret.keep_tail;
+    }
+    cls_rgw_fsio_replace_ret ret;
     decode(ret, it);
     return ret.keep_tail;
   } catch (const ceph::buffer::error&) {
@@ -7327,6 +7357,10 @@ int RGWRados::Object::Delete::delete_obj(optional_yield y,
     return r;
   }
 
+  /* §3.6, W19:  a DELETE whose ID tag no longer matches the head re-reads
+   * it and tries again, as many times as RGW waits on a reshard */
+  int fsio_conflicts = 0;
+fsio_retry:
   RGWObjState *state;
   RGWObjManifest *manifest = nullptr;
   r = target->get_state(dpp, &state, &manifest, false, y);
@@ -7427,7 +7461,17 @@ int RGWRados::Object::Delete::delete_obj(optional_yield y,
     return r;
   }
 
-  store->remove_rgw_head_obj(op);
+  {
+    const auto tag = state->obj_tag.to_str();
+    target->fsio_replaced.reset();
+    /* a version's removal (DELETE ?versionId=, noncurrent expiration,
+     * apply_olh_log()) reaches here for its instance, or, in a bucket
+     * that has had versioning, for the null version on the plain head
+     * with its instance cleared (§2.5, §2.5a) */
+    const auto kind = !obj.key.instance.empty() ? head_op::REMOVE_VERSION :
+      bucket_info.versioned() ? head_op::REMOVE_NULL : head_op::DELETE;
+    target->replace_head(dpp, op, y, kind, &tag);
+  }
 
   if (params.check_objv != nullptr) {
     cls_version_check(op, *params.check_objv, VER_COND_EQ);
@@ -7436,7 +7480,16 @@ int RGWRados::Object::Delete::delete_obj(optional_yield y,
   auto& ioctx = ref.ioctx;
   ioctx.set_pool_full_try(); // allow deletion at pool quota limit
   version_t epoch = 0;
-  r = rgw_rados_operate(dpp, ioctx, ref.obj.oid, std::move(op), y, 0, nullptr, &epoch);
+  r = rgw_rados_operate(dpp, ioctx, ref.obj.oid, std::move(op), y,
+                        target->fsio_replaced ? librados::OPERATION_RETURNVEC : 0,
+                        nullptr, &epoch);
+  if (r == -ERR_FSIO_CONFLICT && ++fsio_conflicts < 10) {
+    ldpp_dout(dpp, 10) << "FSIO: DELETE of " << obj
+                       << " raced a head write;  re-reading" << dendl;
+    index_op.cancel(dpp, params.remove_objs, y, log_op);
+    target->invalidate_state();
+    goto fsio_retry;
+  }
 
   /* raced with another operation, object state is indeterminate */
   const bool need_invalidate = (r == -ECANCELED);
@@ -7454,7 +7507,9 @@ int RGWRados::Object::Delete::delete_obj(optional_yield y,
     }
     r = index_op.complete_del(dpp, poolid, epoch, state->mtime, params.remove_objs, y, log_op);
 
-    int ret = target->complete_atomic_modification(dpp, false, y);
+    /* a tail an FSIO reader holds through the leaf clone stays (§3.6) */
+    int ret = target->complete_atomic_modification(
+      dpp, r >= 0 && target->fsio_keep_tail(), y);
     if (ret < 0) {
       ldpp_dout(dpp, 0) << "ERROR: complete_atomic_modification returned ret=" << ret << dendl;
     }

@@ -6,7 +6,11 @@
  * reader on a head between the two.  With the fsio zonegroup feature
  * enabled, an overwrite under a reader leaves the leaf clone and keeps
  * the old tail out of GC;  without a reader, the tail goes to GC as
- * today.  With --fsio-off (the feature disabled), no leaf clone at all.
+ * today.  In a versioned bucket, a version's removal under an open
+ * count resets its instance head and keeps its tail (§2.5);  the null
+ * version's removal under a reader retires it with a leaf clone and
+ * keeps the plain head as the OLH (§2.5a).  With
+ * --fsio-off (the feature disabled), no leaf clone at all.
  *
  *   ceph_test_librgw_file_fsio_put [--fsio-off] [--data-pool P]
  *     [--gc-pool P] [--gc-ns N] [--gc-shards N]
@@ -15,6 +19,7 @@
 
 #include <cstdint>
 #include <iostream>
+#include <optional>
 #include <set>
 #include <string>
 #include <vector>
@@ -39,10 +44,14 @@ namespace {
 librgw_t lrgw = nullptr;
 struct rgw_fs* fs = nullptr;
 struct rgw_file_handle* bucket_fh = nullptr;
+struct rgw_file_handle* versioned_fh = nullptr;
+struct rgw_file_handle* null_fh = nullptr;
 
 std::string uid("testid");
 std::string access_key, secret_key;
 std::string bucket_name = fmt::format("fsio-put-{}", getpid());
+std::string versioned_name = fmt::format("fsio-ver-{}", getpid());
+std::string null_name = fmt::format("fsio-null-{}", getpid());
 std::string data_pool = "default.rgw.buckets.data";
 std::string gc_pool = "default.rgw.log";
 std::string gc_ns = "gc";
@@ -55,6 +64,7 @@ IoCtx data;
 
 constexpr size_t SIZE = 8 << 20;     // past the 4 MiB head:  a tail
 constexpr cls_rgw_fsio_handle GW{0x7e57, 1};
+constexpr cls_rgw_fsio_handle GW2{0x7e58, 1};   // a second gateway
 
 struct {
   int argc;
@@ -64,11 +74,12 @@ struct {
 /* write `fill` over the whole object through librgw:  RGW's PUT.  The
  * data pool exists once RGW has written an object, so it is opened
  * after the first */
-void put(const std::string& name, char fill)
+void put(const std::string& name, char fill,
+	 struct rgw_file_handle* parent = nullptr)
 {
   struct rgw_file_handle* fh = nullptr;
-  ASSERT_EQ(0, rgw_lookup(fs, bucket_fh, name.c_str(), &fh, nullptr, 0,
-			  RGW_LOOKUP_FLAG_CREATE));
+  ASSERT_EQ(0, rgw_lookup(fs, parent ? parent : bucket_fh, name.c_str(), &fh,
+			  nullptr, 0, RGW_LOOKUP_FLAG_CREATE));
   ASSERT_EQ(0, rgw_open(fs, fh, 0, 0));
   const std::string chunk(1 << 20, fill);
   for (size_t off = 0; off < SIZE; off += chunk.size()) {
@@ -118,8 +129,11 @@ std::set<std::string> all_tails()
   if (!data.is_valid()) {
     return s;
   }
+  /* <marker>__shadow_<prefix>_<n>, or a version's
+   * <marker>__shadow:<instance>_<prefix>_<n> */
   for (const auto& [oid, loc] : objects()) {
-    if (oid.find("__shadow_") != std::string::npos) {
+    if (oid.find("__shadow_") != std::string::npos ||
+	oid.find("__shadow:") != std::string::npos) {
       s.insert(oid);
     }
   }
@@ -250,6 +264,15 @@ TEST(FsioPut, INIT) {
   ASSERT_EQ(0, rgw_mkdir(fs, fs->root_fh, bucket_name.c_str(), &st,
 			 RGW_SETATTR_MODE, &fh, RGW_MKDIR_FLAG_NONE));
   bucket_fh = fh;
+  fh = nullptr;
+  ASSERT_EQ(0, rgw_mkdir(fs, fs->root_fh, versioned_name.c_str(), &st,
+			 RGW_SETATTR_MODE, &fh, RGW_MKDIR_FLAG_NONE));
+  versioned_fh = fh;
+  ASSERT_EQ(0, rgw_set_versioning(fs, versioned_fh, RGW_VERSIONING_ENABLED, 0));
+  fh = nullptr;
+  ASSERT_EQ(0, rgw_mkdir(fs, fs->root_fh, null_name.c_str(), &st,
+			 RGW_SETATTR_MODE, &fh, RGW_MKDIR_FLAG_NONE));
+  null_fh = fh;
   ASSERT_EQ(0, rados.init_with_context(g_ceph_context));
   ASSERT_EQ(0, rados.connect());
   /* open now if an earlier run created it, so the first test's snapshot
@@ -319,10 +342,400 @@ TEST(FsioPut, OverwriteWithNoReader) {
   }
 }
 
+void remove(const std::string& name)
+{
+  ASSERT_EQ(0, rgw_unlink(fs, bucket_fh, name.c_str(), RGW_UNLINK_FLAG_NONE));
+}
+
+/* a DELETE under an FSIO reader:  the head stays, tracking-only, and the
+ * tail the reader holds through the leaf clone is not collected (§3.6) */
+TEST(FsioPut, DeleteUnderAReader) {
+  if (!ready) {
+    GTEST_SKIP() << "INIT failed";
+  }
+  const auto name = fmt::format("delete-under-reader-{}", getpid());
+  const auto before = all_tails();
+  put(name, 'a');
+  const auto head = head_of(name);
+  ASSERT_FALSE(head.empty());
+  const auto marker = marker_of(head, name);
+  const auto tails = written_tails(before);
+  ASSERT_FALSE(tails.empty());
+  join_reader(head, marker);
+  remove(name);
+  const auto gc = in_gc();
+  report(head, tails);
+  if (fsio_off) {
+    EXPECT_FALSE(exists(head));        // the gate off:  today's path
+    return;
+  }
+  ASSERT_TRUE(exists(head));
+  bufferlist bl;
+  EXPECT_EQ(-ENODATA, data.getxattr(head, "user.rgw.idtag", bl));
+  EXPECT_EQ(-ENODATA, data.getxattr(head, "user.rgw.manifest", bl));
+  EXPECT_LE(0, data.getxattr(head, "user.rgw.fsio.hdr", bl));
+  EXPECT_EQ(1u, leaf_clones_of(marker, name).size());
+  for (const auto& t : tails) {
+    EXPECT_TRUE(exists(t) && !gc.count(t)) << t << " collected under a reader";
+  }
+}
+
+/* a DELETE with no FSIO open:  the head goes, the tail is collected */
+TEST(FsioPut, DeleteWithNoReader) {
+  if (!ready) {
+    GTEST_SKIP() << "INIT failed";
+  }
+  const auto name = fmt::format("delete-no-reader-{}", getpid());
+  const auto before = all_tails();
+  put(name, 'a');
+  const auto head = head_of(name);
+  ASSERT_FALSE(head.empty());
+  const auto tails = written_tails(before);
+  ASSERT_FALSE(tails.empty());
+  remove(name);
+  const auto gc = in_gc();
+  report(head, tails);
+  EXPECT_FALSE(exists(head));
+  for (const auto& t : tails) {
+    EXPECT_TRUE(!exists(t) || gc.count(t)) << t << " not collected";
+  }
+}
+
+namespace {
+
+struct version {
+  std::string id;
+  bool latest;
+};
+
+/* the versions of `name`, newest first, through rgw_list_versions, one
+ * entry a page to cross its markers */
+std::vector<version> versions_of(const std::string& name,
+				 struct rgw_file_handle* bucket = nullptr)
+{
+  std::vector<version> v;
+  std::string key_marker, vid_marker;
+  bool truncated = true;
+  while (truncated) {
+    struct arg_t {
+      std::vector<version>* v;
+      std::string* km;
+      std::string* vm;
+      std::string name;
+    } arg{&v, &key_marker, &vid_marker, name};
+    const int r = rgw_list_versions(
+      fs, bucket ? bucket : versioned_fh, name.c_str(), nullptr,
+      key_marker.empty() ? nullptr : key_marker.c_str(),
+      vid_marker.empty() ? nullptr : vid_marker.c_str(), 1,
+      [](const char* n, const char* vid, bool latest, bool, uint64_t,
+	 void* a) {
+	auto* p = static_cast<arg_t*>(a);
+	*p->km = n;
+	*p->vm = vid;
+	if (p->name == n) {
+	  p->v->push_back(version{vid, latest});
+	}
+	return true;
+      }, nullptr, &arg, &truncated, 0);
+    EXPECT_EQ(0, r);
+    if (r < 0) {
+      break;
+    }
+  }
+  return v;
+}
+
+/* a version's instance head:  <marker>__:<instance>_<name> */
+std::string instance_head_of(const std::string& name, const std::string& vid)
+{
+  const auto suffix = "__:" + vid + "_" + name;
+  for (const auto& [oid, loc] : objects()) {
+    if (oid.ends_with(suffix) && oid.find('~') == std::string::npos) {
+      return oid;
+    }
+  }
+  return {};
+}
+
+/* the sibling clones of an instance head (§2.7):
+ * <marker>~fsio_G<id>_<key part> */
+std::set<std::string> siblings_of(const std::string& ih)
+{
+  const auto at = ih.find("__:");
+  const auto marker = ih.substr(0, at);
+  const auto key_part = ih.substr(at + 1);
+  std::set<std::string> s;
+  for (const auto& [oid, loc] : objects()) {
+    if (oid.starts_with(marker + "~fsio_G") && oid.ends_with(key_part)) {
+      s.insert(oid);
+    }
+  }
+  return s;
+}
+
+/* an FSIO open counts the version, as a gateway's open of it would */
+void count_open(const std::string& ih)
+{
+  cls_rgw_fsio_ocnt_op op;
+  op.holder = GW;
+  bufferlist in, out;
+  encode(op, in);
+  int rval = 0;
+  ObjectWriteOperation w;
+  w.exec(cls::rgw::method::fsio_ocnt_add, in, &out, &rval);
+  ASSERT_EQ(0, data.operate(ih, &w, OPERATION_RETURNVEC));
+}
+
+/* two versions of `name`:  returns the older's id and the tails it
+ * alone holds */
+void two_versions(const std::string& name, std::string& older,
+		  std::set<std::string>& tails)
+{
+  const auto before = all_tails();
+  put(name, 'a', versioned_fh);
+  tails = written_tails(before);
+  put(name, 'b', versioned_fh);
+  const auto v = versions_of(name);
+  ASSERT_EQ(2u, v.size());
+  EXPECT_TRUE(v[0].latest);
+  EXPECT_FALSE(v[1].latest);
+  older = v[1].id;
+}
+
+} // anonymous namespace
+
+/* the version calls themselves:  listing in pages, removing "null" of
+ * a key with none */
+TEST(FsioPut, VersionCalls) {
+  if (!ready) {
+    GTEST_SKIP() << "INIT failed";
+  }
+  const auto name = fmt::format("calls-{}", getpid());
+  std::string older;
+  std::set<std::string> tails;
+  two_versions(name, older, tails);
+  EXPECT_NE("null", older);
+  EXPECT_EQ(-ENOENT, rgw_unlink_version(fs, versioned_fh, "no-such-key",
+					"no-such-version", 0));
+}
+
+/* a version's removal under an open count:  the instance head reset to
+ * its open count, the version's content on the sibling, its tail kept
+ * (§2.5) */
+TEST(FsioPut, RemoveVersionUnderAReader) {
+  if (!ready) {
+    GTEST_SKIP() << "INIT failed";
+  }
+  const auto name = fmt::format("version-under-reader-{}", getpid());
+  std::string older;
+  std::set<std::string> tails;
+  two_versions(name, older, tails);
+  ASSERT_FALSE(tails.empty());
+  const auto ih = instance_head_of(name, older);
+  ASSERT_FALSE(ih.empty());
+  count_open(ih);
+  ASSERT_EQ(0, rgw_unlink_version(fs, versioned_fh, name.c_str(),
+				  older.c_str(), 0));
+  const auto gc = in_gc();
+  report(ih, tails);
+  const auto v = versions_of(name);
+  ASSERT_EQ(1u, v.size());             // the version gone from the index
+  EXPECT_NE(older, v[0].id);
+  if (fsio_off) {
+    EXPECT_FALSE(exists(ih));          // the gate off:  today's path
+    return;
+  }
+  ASSERT_TRUE(exists(ih));
+  bufferlist bl;
+  EXPECT_EQ(-ENODATA, data.getxattr(ih, "user.rgw.idtag", bl));
+  EXPECT_EQ(-ENODATA, data.getxattr(ih, "user.rgw.manifest", bl));
+  EXPECT_LE(0, data.getxattr(ih, "user.rgw.fsio.ocnt", bl));
+  const auto sibs = siblings_of(ih);
+  ASSERT_EQ(1u, sibs.size());
+  IoCtx keyed;
+  keyed.dup(data);
+  keyed.locator_set_key(ih);
+  bl.clear();
+  ASSERT_LE(0, keyed.read(*sibs.begin(), bl, 1, 0));
+  EXPECT_EQ('a', bl[0]);               // the removed version's content
+  for (const auto& t : tails) {
+    EXPECT_TRUE(exists(t) && !gc.count(t)) << t << " collected under a reader";
+  }
+}
+
+/* a version's removal with no open count:  it goes, as it always has */
+TEST(FsioPut, RemoveVersionWithNoReader) {
+  if (!ready) {
+    GTEST_SKIP() << "INIT failed";
+  }
+  const auto name = fmt::format("version-no-reader-{}", getpid());
+  std::string older;
+  std::set<std::string> tails;
+  two_versions(name, older, tails);
+  ASSERT_FALSE(tails.empty());
+  const auto ih = instance_head_of(name, older);
+  ASSERT_FALSE(ih.empty());
+  ASSERT_EQ(0, rgw_unlink_version(fs, versioned_fh, name.c_str(),
+				  older.c_str(), 0));
+  const auto gc = in_gc();
+  report(ih, tails);
+  EXPECT_FALSE(exists(ih));
+  EXPECT_TRUE(siblings_of(ih).empty());
+  for (const auto& t : tails) {
+    EXPECT_TRUE(!exists(t) || gc.count(t)) << t << " not collected";
+  }
+}
+
+namespace {
+
+/* a noncurrent null version of `name` under a current instance:  'a'
+ * written suspended, on the plain head;  'b' written enabled.  Returns
+ * the plain head and the tails the null version alone holds */
+void null_under_a_version(const std::string& name, std::string& head,
+			  std::set<std::string>& tails,
+			  std::string* current = nullptr)
+{
+  ASSERT_EQ(0, rgw_set_versioning(fs, null_fh, RGW_VERSIONING_SUSPENDED, 0));
+  const auto before = all_tails();
+  put(name, 'a', null_fh);
+  tails = written_tails(before);
+  head = head_of(name);
+  ASSERT_EQ(0, rgw_set_versioning(fs, null_fh, RGW_VERSIONING_ENABLED, 0));
+  put(name, 'b', null_fh);
+  const auto v = versions_of(name, null_fh);
+  ASSERT_EQ(2u, v.size());
+  EXPECT_NE("null", v[0].id);
+  EXPECT_EQ("null", v[1].id);
+  if (current) {
+    *current = v[0].id;
+  }
+}
+
+/* an FSIO writer joins the current instance, from a second gateway:
+ * its shadow becomes the header's cur_shadow */
+cls_rgw_fsio_id join_writer(const std::string& head, const std::string& marker,
+			    const std::string& instance)
+{
+  cls_rgw_fsio_join_op op;
+  op.caller = GW2;
+  op.seq = 1;
+  op.writer = true;
+  op.instance = instance;
+  op.nonce = 2;
+  op.counter_seed = 20;
+  op.marker = marker;
+  bufferlist in, out;
+  encode(op, in);
+  int rval = 0;
+  ObjectWriteOperation w;
+  w.exec(cls::rgw::method::fsio_join, in, &out, &rval);
+  EXPECT_EQ(0, data.operate(head, &w, OPERATION_RETURNVEC));
+  cls_rgw_fsio_join_ret ret;
+  auto it = out.cbegin();
+  decode(ret, it);
+  return ret.bound;
+}
+
+std::optional<cls_rgw_fsio_id> cur_shadow_of(const std::string& head)
+{
+  bufferlist bl;
+  if (data.getxattr(head, "user.rgw.fsio.hdr", bl) < 0) {
+    return std::nullopt;
+  }
+  cls_rgw_fsio_hdr hdr;
+  auto it = bl.cbegin();
+  decode(hdr, it);
+  return hdr.cur_shadow;
+}
+
+} // anonymous namespace
+
+/* the null version's removal under an FSIO reader:  the HEAD chunk set
+ * retired with a leaf clone, its tail kept, the plain head kept as the
+ * OLH (§2.5a).  A writer on the current version keeps its shadow:  the
+ * null version's removal leaves the current generation, where the
+ * delete would start a new one */
+TEST(FsioPut, RemoveNullVersionUnderAReader) {
+  if (!ready) {
+    GTEST_SKIP() << "INIT failed";
+  }
+  const auto name = fmt::format("null-under-reader-{}", getpid());
+  std::string head, current;
+  std::set<std::string> tails;
+  null_under_a_version(name, head, tails, &current);
+  ASSERT_FALSE(head.empty());
+  ASSERT_FALSE(tails.empty());
+  const auto marker = marker_of(head, name);
+  std::optional<cls_rgw_fsio_id> shadow;
+  if (!fsio_off) {
+    shadow = join_writer(head, marker, current);
+    ASSERT_EQ(shadow, cur_shadow_of(head));
+  }
+  join_reader(head, marker);
+  ASSERT_EQ(0, rgw_unlink_version(fs, null_fh, name.c_str(), "null", 0));
+  const auto gc = in_gc();
+  report(head, tails);
+  const auto v = versions_of(name, null_fh);
+  ASSERT_EQ(1u, v.size());             // the null version gone from the index
+  EXPECT_NE("null", v[0].id);
+  ASSERT_TRUE(exists(head));           // the OLH
+  bufferlist bl;
+  EXPECT_LE(0, data.getxattr(head, "user.rgw.olh.info", bl));
+  if (fsio_off) {
+    EXPECT_TRUE(leaf_clones_of(marker, name).empty());
+    return;
+  }
+  EXPECT_EQ(-ENODATA, data.getxattr(head, "user.rgw.idtag", bl));
+  EXPECT_EQ(-ENODATA, data.getxattr(head, "user.rgw.manifest", bl));
+  EXPECT_LE(0, data.getxattr(head, "user.rgw.fsio.hdr", bl));
+  EXPECT_EQ(shadow, cur_shadow_of(head)) << "the current generation reset";
+  const auto leaves = leaf_clones_of(marker, name);
+  ASSERT_EQ(1u, leaves.size());
+  IoCtx keyed;
+  keyed.dup(data);
+  keyed.locator_set_key(head);
+  bl.clear();
+  ASSERT_LE(0, keyed.read(*leaves.begin(), bl, 1, 0));
+  EXPECT_EQ('a', bl[0]);               // the null version's content
+  for (const auto& t : tails) {
+    EXPECT_TRUE(exists(t) && !gc.count(t)) << t << " collected under a reader";
+  }
+}
+
+/* the null version's removal with no FSIO open:  collected as usual,
+ * the plain head kept as the OLH */
+TEST(FsioPut, RemoveNullVersionWithNoReader) {
+  if (!ready) {
+    GTEST_SKIP() << "INIT failed";
+  }
+  const auto name = fmt::format("null-no-reader-{}", getpid());
+  std::string head;
+  std::set<std::string> tails;
+  null_under_a_version(name, head, tails);
+  ASSERT_FALSE(head.empty());
+  ASSERT_FALSE(tails.empty());
+  const auto marker = marker_of(head, name);
+  ASSERT_EQ(0, rgw_unlink_version(fs, null_fh, name.c_str(), "null", 0));
+  const auto gc = in_gc();
+  report(head, tails);
+  const auto v = versions_of(name, null_fh);
+  ASSERT_EQ(1u, v.size());
+  EXPECT_NE("null", v[0].id);
+  ASSERT_TRUE(exists(head));
+  bufferlist bl;
+  EXPECT_LE(0, data.getxattr(head, "user.rgw.olh.info", bl));
+  EXPECT_TRUE(leaf_clones_of(marker, name).empty());
+  for (const auto& t : tails) {
+    EXPECT_TRUE(!exists(t) || gc.count(t)) << t << " not collected";
+  }
+}
+
 TEST(FsioPut, SHUTDOWN) {
   if (!ready) {
     GTEST_SKIP() << "INIT failed";
   }
+  rgw_fh_rele(fs, null_fh, 0);
+  rgw_fh_rele(fs, versioned_fh, 0);
   rgw_fh_rele(fs, bucket_fh, 0);
   rgw_umount(fs, RGW_UMOUNT_FLAG_NONE);
   librgw_shutdown(lrgw);

@@ -370,6 +370,10 @@ inline constexpr const char* RGW_REST_STS_XMLNS =
 #define ERR_NO_SUCH_ENTITY       2301
 #define ERR_LIMIT_EXCEEDED       2302
 #define ERR_CONCURRENT_MODIFICATION 2303
+// FSIO's head methods (FSIO_RADOS_DESIGN.md §3, error codes);  also in
+// cls_rgw_fsio.h, don't change!
+#define ERR_FSIO_BUSY            2310
+#define ERR_FSIO_CONFLICT        2311
 
 // STS Errors
 #define ERR_PACKED_POLICY_TOO_LARGE 2400

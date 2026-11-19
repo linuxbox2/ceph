@@ -223,6 +223,27 @@ TEST_F(FsioHead, DeleteWithReaderLeavesTrackingOnly)
   EXPECT_LE(0, getxattr(head, HDR));
 }
 
+/* Z7:  a DELETE that read another ID tag than the head's changes nothing
+ * and returns ERR_FSIO_CONFLICT, for its caller to re-read */
+TEST_F(FsioHead, DeleteWithStaleIdTagConflicts)
+{
+  std::string key;
+  const auto head = make_head(key);
+  join(head, 1, false);
+  ObjectWriteOperation op;
+  bufferlist out;
+  int rval = 0;
+  auto in = replace(fsio::replace_mode::DELETE, 1006);
+  in.expected_id_tag = "stale";
+  cls_rgw_fsio_replace_head(op, in, &out, &rval);
+  EXPECT_EQ(-CLS_RGW_ERR_FSIO_CONFLICT,
+	    ioctx.operate(head, &op, OPERATION_RETURNVEC));
+  std::string v;
+  ASSERT_LE(0, getxattr(head, "user.rgw.idtag", &v));
+  EXPECT_EQ("t0", v);                  // the head as it was
+  EXPECT_EQ("old", read(head, ioctx));
+}
+
 namespace {
 /* a version's instance head:  <marker>__:<instance>_<key> */
 std::string instance_of(const std::string& key)

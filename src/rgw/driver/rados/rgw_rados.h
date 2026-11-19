@@ -774,13 +774,19 @@ public:
     struct fsio_reply {
       bufferlist out;
       int rval;
-      fsio_reply() : rval(0) {}
+      bool version_removal;         // fsio_remove_version's reply, not replace's
+      fsio_reply() : rval(0), version_removal(false) {}
     };
     std::optional<fsio_reply> fsio_replaced;
+    /* how a head write replaces the head (FSIO_RADOS_DESIGN.md §3.6,
+     * §2.5, §2.5a) */
+    enum class head_op { SUPERSEDE, DELETE, REMOVE_VERSION, REMOVE_NULL };
     /* the head's replacement in a head write:  FSIO's in an FSIO-enabled
-     * bucket, else remove_rgw_head_obj() */
+     * bucket, else remove_rgw_head_obj();  a DELETE names the ID tag it
+     * read (Z7) */
     void replace_head(const DoutPrefixProvider *dpp, librados::ObjectWriteOperation& op,
-                      optional_yield y);
+                      optional_yield y, head_op kind = head_op::SUPERSEDE,
+                      const std::string* delete_id_tag = nullptr);
     /* the reply's keep_tail;  false without one */
     bool fsio_keep_tail() const;
 
