@@ -193,6 +193,10 @@ class Cluster {
     }
   }
 
+  /* the calls that succeeded on the cluster, by method (and replace
+   * mode):  the tier's reach */
+  std::map<std::string, uint64_t> calls;
+
 public:
   bool on = false;
   std::string marker;            // per walk
@@ -270,6 +274,9 @@ public:
   void check(const char* method, const std::string& oid, int r_core,
 	     int r_cls, const Obj& pre, const Obj& want,
 	     const cls_rgw_fsio_effects& fx) {
+    if (r_cls == 0) {
+      ++calls[method];
+    }
     if (divergence) {
       return;
     }
@@ -348,6 +355,19 @@ public:
 	return;
       }
     }
+  }
+
+  /* a finer count of a call that succeeded, as fsio_replace_head's modes */
+  void count(const std::string& what) {
+    ++calls[what];
+  }
+
+  std::string reach() const {
+    std::string s;
+    for (const auto& [k, n] : calls) {
+      s += fmt::format("  {:<44} {}\n", k, n);
+    }
+    return s;
   }
 
   void reply_mismatch(const char* method, const std::string& what) {

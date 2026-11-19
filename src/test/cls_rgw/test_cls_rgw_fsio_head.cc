@@ -74,11 +74,13 @@ protected:
   }
 
   cls_rgw_fsio_join_ret join(const std::string& head, uint64_t seq,
-			     bool writer, cls_rgw_fsio_handle caller = GW1) {
+			     bool writer, cls_rgw_fsio_handle caller = GW1,
+			     const std::string& instance = {}) {
     cls_rgw_fsio_join_op op;
     op.caller = caller;
     op.seq = seq;
     op.writer = writer;
+    op.instance = instance;
     op.nonce = 1;
     op.counter_seed = 10;
     op.marker = MARKER;
@@ -379,6 +381,73 @@ TEST_F(FsioHead, RemoveUncountedVersionRemovesIt)
   uint64_t size;
   time_t mtime;
   EXPECT_EQ(-ENOENT, ioctx.stat(ih, &size, &mtime));
+}
+
+/* §4.2:  a versioned publish is a standalone call on the OLH head after
+ * the version is linked:  nothing is superseded or cloned, the head is
+ * not recreated, the publisher's writer open goes, and the tail is kept */
+TEST_F(FsioHead, VersionedPublish)
+{
+  const auto key = fmt::format("key{}", next++);
+  const auto head = MARKER + "_" + key;
+  {
+    ObjectWriteOperation op;
+    bufferlist olh;
+    olh.append("olh");
+    op.create(true);
+    op.setxattr("user.rgw.olh.info", olh);
+    ASSERT_EQ(0, ioctx.operate(head, &op));
+  }
+  /* GW1 joins on the OLH head as writer, the OLH naming i1;  its shadow
+   * readied, it gives up its write open with the intent for i2 */
+  const auto j = join(head, 11, true, GW1, "i1");
+  ASSERT_TRUE(j.construct);
+  cls_rgw_fsio_runs_op rop;
+  rop.caller = GW1;
+  rop.cs = j.bound;
+  rop.runs = {{0, 0}};
+  ASSERT_EQ(0, call(head, cls::rgw::method::fsio_ready, rop,
+		    (cls_rgw_fsio_flags_ret*)nullptr));
+  cls_rgw_fsio_leave_op lop;
+  lop.caller = GW1;
+  lop.seq = 12;
+  lop.cs = j.bound;
+  lop.writer = true;
+  lop.intent = cls_rgw_fsio_intent{"i2", "tok", 5};
+  cls_rgw_fsio_leave_ret lret;
+  ASSERT_EQ(0, call(head, cls::rgw::method::fsio_leave, lop, &lret));
+  ASSERT_TRUE(lret.publishing);
+  EXPECT_EQ(5u, lret.olh_epoch);
+  EXPECT_EQ("i2", lret.instance);
+
+  auto in = replace(fsio::replace_mode::PUBLISH, 1009);
+  in.caller = GW1;
+  in.shadow = j.bound;
+  in.versioned = true;
+  cls_rgw_fsio_replace_ret ret;
+  ASSERT_EQ(0, call(head, cls::rgw::method::fsio_replace_head, in, &ret));
+  EXPECT_TRUE(ret.keep_tail);          // the previous version keeps its tail
+  EXPECT_FALSE(ret.born_drained);
+
+  /* the head as it was:  the OLH, no content, no clone */
+  std::string v;
+  ASSERT_LE(0, getxattr(head, "user.rgw.olh.info", &v));
+  EXPECT_EQ("olh", v);
+  EXPECT_EQ(-ENODATA, getxattr(head, "user.rgw.idtag"));
+  EXPECT_EQ("", read(head, ioctx));
+  uint64_t size;
+  time_t mtime;
+  auto io = keyed(head);
+  EXPECT_EQ(-ENOENT, io.stat(leaf(key, 1009), &size, &mtime));
+
+  /* §2.2:  an entry lives only while opens are bound to it or it is
+   * retired;  GW1's write open was the shadow's last, so the published
+   * entry is settled away, and the header and GW1's record with it (the
+   * transition itself is the core's, checked by its unit test and the
+   * model's cluster tier) */
+  EXPECT_EQ(-ENODATA, getxattr(head, HDR));
+  EXPECT_EQ(-ENODATA, getxattr(head, fmt::format("user.rgw.fsio.m.{:016x}",
+						  GW1.incarnation)));
 }
 
 /* a DELETE with no FSIO state:  the head goes, as cls_rgw_remove_obj */

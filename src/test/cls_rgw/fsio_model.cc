@@ -626,6 +626,7 @@ int m_replace_head(cls_rgw_fsio_head& h, const fsio::replace_in& in,
   op.expired = in.expired;
   op.keep_attr_prefixes = {std::string(fc::OLH_PREFIX)};
   op.marker = cl.marker;
+
   /* §3:  a versioned publish stores the records alone;  every other mode
    * recreates the head with the kept attributes and the new records, or
    * removes it if nothing is kept */
@@ -647,6 +648,15 @@ int m_replace_head(cls_rgw_fsio_head& h, const fsio::replace_in& in,
   const auto oid = cl.head_oid();
   const int rc = cl.call(oid, pre, fx, cls::rgw::method::fsio_replace_head, enc(op), reply);
   cl.check("fsio_replace_head", oid, r, rc, pre, want, fx);
+  if (rc == 0) {
+    static const char* modes[] = {"supersede", "delete", "publish",
+				  "remove_null"};
+    const auto m = static_cast<size_t>(in.mode);
+    cl.count(fmt::format("fsio_replace_head({}{})",
+			 m < std::size(modes) ? modes[m] : "?",
+			 in.mode == fsio::replace_mode::PUBLISH && in.versioned ?
+			 ", versioned" : ""));
+  }
   if (r == 0 && rc == 0) {
     if (auto ret = dec<cls_rgw_fsio_replace_ret>("fsio_replace_head", reply);
 	ret && (ret->keep_tail != out.keep_tail ||
@@ -3974,6 +3984,9 @@ TEST(FSIOModel, Explore)
     std::cout << fmt::format("{} states (sampled by {} walks, seed {}), {} end "
 			     "states, {} kinds of violation\n", x.states,
 			     x.walks, seed, x.ends, x.found.size());
+    if (cl.on) {
+      std::cout << "calls sent to the cluster:\n" << cl.reach();
+    }
     for (const auto& [k, t] : x.found) {
       std::cout << "\n--- " << t.back().substr(3) << "\n";
       for (const auto& s : t) {
