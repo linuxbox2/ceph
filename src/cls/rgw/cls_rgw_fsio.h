@@ -607,10 +607,11 @@ void add_run(std::vector<cls_rgw_fsio_run>& extent, cls_rgw_fsio_run run,
 	     size_t max_runs);
 
 /* the constructor's clones done:  the shadow is ready, its extent the
- * runs it cloned */
+ * runs it cloned, its hint the published object's size and mtime */
 int ready(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& caller,
 	  const cls_rgw_fsio_id& cs,
 	  const std::vector<cls_rgw_fsio_run>& runs,
+	  uint64_t size = 0, ceph::real_time mtime = {},
 	  size_t max_runs = extent_max_runs);
 
 /* a writer reserves a run before creating a chunk in it */

@@ -1095,6 +1095,20 @@ TEST(cls_rgw_fsio_repeat, ready_repeat_changes_nothing)
   EXPECT_EQ(extent, h.hdr->find(s)->shadow->extent);
 }
 
+/* §3.2, A20:  fsio_ready sets the starting hint, the published
+ * object's size and mtime, which a writer joining the shadow is told */
+TEST(cls_rgw_fsio_repeat, ready_sets_the_starting_hint)
+{
+  auto h = head("C0");
+  fsio::join_out out;
+  cls_rgw_fsio_effects fx;
+  ASSERT_EQ(0, fsio::join(h, {GW1, next_seq(), true, 1, 10, {}}, out, fx));
+  ASSERT_EQ(0, fsio::ready(h, GW1, out.bound, {{0, 0}}, 42, secs(9)));
+  const auto& sh = *h.hdr->find(out.bound)->shadow;
+  EXPECT_EQ(42u, sh.size_hint);
+  EXPECT_EQ(secs(9), sh.mtime_hint);
+}
+
 /* …but a shadow that has moved on is a stale view:  EINVAL */
 TEST(cls_rgw_fsio_repeat, ready_after_freezing_is_einval)
 {

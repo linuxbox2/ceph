@@ -360,7 +360,7 @@ int rgw_fsio_ready(cls_method_context_t hctx, ceph::buffer::list* in,
     return r;
   }
   return on_head(hctx, {}, [&](auto& h, auto&) {
-    return fsio::ready(h, op.caller, op.cs, op.runs);
+    return fsio::ready(h, op.caller, op.cs, op.runs, op.size, op.mtime);
   });
 }
 

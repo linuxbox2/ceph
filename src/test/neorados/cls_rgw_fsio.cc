@@ -387,6 +387,8 @@ CORO_TEST_F(NeoRadosClsRgwFsio, ReadyAndReleaseRepeat, NeoRadosTest) {
   rop.caller = GW1;
   rop.cs = jret.bound;
   rop.runs = {{0, 0}};
+  rop.size = 42;                       // A20:  the starting hint
+  rop.mtime = ceph::real_time(std::chrono::seconds(9));
   co_await execute(head, WriteOp{}.exec(f::ready(rop)));
   co_await execute(head, WriteOp{}.exec(f::ready(rop)));   // a repeat:  0
 
@@ -416,5 +418,7 @@ CORO_TEST_F(NeoRadosClsRgwFsio, ReadyAndReleaseRepeat, NeoRadosTest) {
   }
   EXPECT_EQ(cls_rgw_fsio_cs_state::READY, e->state);
   EXPECT_FALSE(e->publishing);
+  EXPECT_EQ(42u, e->shadow->size_hint);
+  EXPECT_EQ(ceph::real_time(std::chrono::seconds(9)), e->shadow->mtime_hint);
   co_return;
 }

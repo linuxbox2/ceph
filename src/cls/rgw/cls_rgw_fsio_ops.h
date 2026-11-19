@@ -111,12 +111,16 @@ struct cls_rgw_fsio_runs_op {
   cls_rgw_fsio_handle caller;
   cls_rgw_fsio_id cs;
   std::vector<cls_rgw_fsio_run> runs;   // ready:  the runs cloned;  extend:  one
+  uint64_t size = 0;                    // ready:  the starting hint (§3.2)
+  ceph::real_time mtime;
 
   void encode(ceph::buffer::list& bl) const {
     ENCODE_START(1, 1, bl);
     encode(caller, bl);
     encode(cs, bl);
     encode(runs, bl);
+    encode(size, bl);
+    encode(mtime, bl);
     ENCODE_FINISH(bl);
   }
   void decode(ceph::buffer::list::const_iterator& bl) {
@@ -124,6 +128,8 @@ struct cls_rgw_fsio_runs_op {
     decode(caller, bl);
     decode(cs, bl);
     decode(runs, bl);
+    decode(size, bl);
+    decode(mtime, bl);
     DECODE_FINISH(bl);
   }
 };

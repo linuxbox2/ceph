@@ -466,7 +466,8 @@ void add_run(std::vector<cls_rgw_fsio_run>& extent, cls_rgw_fsio_run run,
 
 int ready(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& caller,
 	  const cls_rgw_fsio_id& cs,
-	  const std::vector<cls_rgw_fsio_run>& runs, size_t max_runs)
+	  const std::vector<cls_rgw_fsio_run>& runs,
+	  uint64_t size, ceph::real_time mtime, size_t max_runs)
 {
   if (!h.hdr) {
     return -EINVAL;
@@ -489,6 +490,8 @@ int ready(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& caller,
     return -EINVAL;
   }
   e->state = state::READY;
+  e->shadow->size_hint = size;       // §3.2:  the published object's
+  e->shadow->mtime_hint = mtime;
   e->shadow->extent.clear();
   for (const auto& r : runs) {
     add_run(e->shadow->extent, r, max_runs);
