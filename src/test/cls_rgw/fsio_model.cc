@@ -81,6 +81,50 @@ namespace {
 
 namespace fsio = cls_rgw_fsio;
 using fid_t = cls_rgw_fsio_id;
+
+/* FSIO state is keyed by handle (design §2.7, Z4).  Each gateway here
+ * holds one FSIOObject per head, handle 1;  the FSIO expirer is handle 0 */
+cls_rgw_fsio_handle gh(uint64_t inc) { return {inc, 1}; }
+cls_rgw_fsio_handle xh(uint64_t inc) { return {inc, 0}; }
+
+/* an incarnation's counts by chunk set, summed over its handles */
+std::map<fid_t, cls_rgw_fsio_counts>
+inc_chunk_sets(const cls_rgw_fsio_opens& o)
+{
+  std::map<fid_t, cls_rgw_fsio_counts> m;
+  for (const auto& [hd, ho] : o.handles) {
+    for (const auto& [cs, c] : ho.chunk_sets) {
+      m[cs].readers += c.readers;
+      m[cs].writers += c.writers;
+    }
+  }
+  return m;
+}
+
+/* the open count as incarnations:  whether one holds it, and which do */
+bool ocnt_holds(const cls_rgw_fsio_ocnt& n, uint64_t inc)
+{
+  return std::any_of(n.holders.begin(), n.holders.end(),
+		     [inc](const cls_rgw_fsio_handle& c) {
+		       return c.incarnation == inc;
+		     });
+}
+std::set<uint64_t> ocnt_incs(const cls_rgw_fsio_ocnt& n)
+{
+  std::set<uint64_t> s;
+  for (const auto& c : n.holders) {
+    s.insert(c.incarnation);
+  }
+  return s;
+}
+std::set<cls_rgw_fsio_handle> holders_of(const std::set<uint64_t>& incs)
+{
+  std::set<cls_rgw_fsio_handle> s;
+  for (auto i : incs) {
+    s.insert(gh(i));
+  }
+  return s;
+}
 using state = cls_rgw_fsio_cs_state;
 using at = cls_rgw_fsio_manifest_at;
 
@@ -157,12 +201,14 @@ Hint publish_ih(const std::string& inst, uint64_t inc)
 }
 
 enum Step : uint8_t { NONE, CONSTRUCT, PUBLISH_WRITE, PUBLISH_GC, DRAIN_SEND,
-  PUBLISH_HINT,
+  PUBLISH_HINT, CONSTRUCT_LEAVE,
   /* versioned (stage A) */
   V_COUNT, V_JOIN, V_OCNT_SEND, V_PUB_READ, V_PUB_WRITE, V_PUB_LINK,
   V_PUB_PUBLISH,
   /* versioned (stage B):  the claim */
-  V_PUB_HINT, V_PLACE, V_LEAVE, V_UNPLACE, V_PUB_UNHINT, V_PUB_CLEANUP };
+  V_PUB_HINT, V_PLACE, V_LEAVE, V_UNPLACE, V_PUB_UNHINT, V_PUB_CLEANUP,
+  /* a publisher that cannot proceed (§4.2, W10) */
+  V_REL_RELEASE };
 
 struct Gw {
   uint64_t inc = 0;
@@ -190,6 +236,9 @@ struct Gw {
   std::set<uint64_t> pub_incs;   // the incarnations it read (§4.2 step 3)
   uint64_t pub_epoch = 0;
   bool pub_began_suspended = false;  // the bucket's state when the publish began
+  uint8_t released = 0;          // released once:  a bound, else release and
+				 // retry would cycle, each drawing a new instance
+  uint8_t pub_retry = 0;         // released:  publishes again after the cleanup
   void encode(ceph::buffer::list& bl) const {
     using ceph::encode;
     encode(inc, bl); encode(alive, bl);
@@ -204,6 +253,7 @@ struct Gw {
     encode(pending, bl); encode(pending_writer, bl); encode(counted, bl);
     encode(step_inst, bl); encode(pub_instance, bl); encode(pub_incs, bl);
     encode(pub_epoch, bl); encode(pub_token, bl);
+    encode(released, bl); encode(pub_retry, bl);
     encode(pub_began_suspended, bl);
   }
 };
@@ -266,7 +316,7 @@ struct World {
   uint64_t olh_epoch = 0, next_i = 2, next_epoch = 1;
 
   /* a gateway passes a fresh nonce with every join, used only if the join
-   * creates the header (§2.2, §3.1):  the next one is offered, and taken
+   * creates the header (§2.2, §3.1):  the next one is available, and taken
    * when it was used */
   uint64_t nonce_for_join() const { return next_nonce; }
   void took_nonce() {
@@ -397,7 +447,7 @@ void apply_clones(World& w, const cls_rgw_fsio_effects& fx,
 		  const std::string& head_tok)
 {
   for (const auto& c : fx.clones) {
-    if (c.role == 'g') {
+    if (c.role == 'G') {
       auto rn = rname(c.r);
       w.storage.insert(rn);
       w.records[rn] = head_tok;
@@ -448,6 +498,45 @@ void set_null_version(World& w, const std::string& tail)
 
 /* a gateway's death or partition, at any point, a protocol step pending
  * included */
+/* §3.4:  a constructor that gives up sends the shadow's GC entry, then
+ * abandons it with its leave (W15) */
+void construct_abandon_actions(const Gw& g, size_t gi, uint64_t inc,
+			       std::vector<Action>& acts)
+{
+  if (g.step == CONSTRUCT) {
+    acts.push_back({fmt::format("gw{} construct-gc {}", inc, sname(g.step_cs)),
+	[gi](World& w) -> std::optional<std::string> {
+	  auto& g = w.gws[gi];
+	  /* giving up fails the open (EAGAIN):  it serves no more I/O, so
+	   * the gateway drops it before the GC entry can run */
+	  auto& os = g.opens;
+	  os.erase(std::remove_if(os.begin(), os.end(), [&](const LOpen& o) {
+		     return o.writer && o.cs == g.step_cs;
+		   }), os.end());
+	  w.gcq.push_back({sname(g.step_cs)});
+	  g.step = CONSTRUCT_LEAVE;
+	  return std::nullopt;
+	}});
+    return;
+  }
+  acts.push_back({fmt::format("gw{} construct-leave {}", inc, sname(g.step_cs)),
+      [gi, inc](World& w) -> std::optional<std::string> {
+	auto& g = w.gws[gi];
+	fsio::leave_out out;
+	cls_rgw_fsio_effects fx;
+	auto save = w.head;
+	if (fsio::leave(w.head, gh(inc), g.step_cs, true, w.dead(), out, fx,
+			nullptr) < 0 || !out.abandoned) {
+	  w.head = save;                 // as first written:  no exit
+	  g.step = NONE;
+	  return std::nullopt;
+	}
+	apply_remove_head(w, fx);
+	g.step = NONE;                   // the open failed:  EAGAIN
+	return std::nullopt;
+      }});
+}
+
 void fail_actions(const Gw& g, size_t gi, std::vector<Action>& acts)
 {
   const auto inc = g.inc;
@@ -491,10 +580,14 @@ void gw_actions(const World& w0, size_t gi, std::vector<Action>& acts)
       acts.push_back({fmt::format("gw{} ready {}", inc, sname(g.step_cs)),
 	  [gi, inc](World& w) -> std::optional<std::string> {
 	    auto& g = w.gws[gi];
-	    fsio::ready(w.head, inc, g.step_cs, 1);
+	    fsio::ready(w.head, gh(inc), g.step_cs, 1);
 	    g.step = NONE;
 	    return std::nullopt;
 	  }});
+      construct_abandon_actions(g, gi, inc, acts);
+      break;
+    case CONSTRUCT_LEAVE:
+      construct_abandon_actions(g, gi, inc, acts);
       break;
     case PUBLISH_HINT:
       /* §3.5:  the hint naming f(head, r) is added before the publish */
@@ -515,7 +608,7 @@ void gw_actions(const World& w0, size_t gi, std::vector<Action>& acts)
 	     * finalized fails here, before it reads anything */
 	    const auto* e = w.head.hdr ? w.head.hdr->find(g.step_cs) : nullptr;
 	    if (!e || e->state != state::PUBLISHING || !e->publishing ||
-		e->publishing->incarnation != inc) {
+		e->publishing->publisher.incarnation != inc) {
 	      w.hints.erase(publish_head(g.inc, g.step_r));
 	      g.release_failed = 1;           // keeps its hint (H1)
 	      g.step = NONE;
@@ -528,7 +621,7 @@ void gw_actions(const World& w0, size_t gi, std::vector<Action>& acts)
 	    fsio::replace_in in;
 	    in.mode = fsio::replace_mode::PUBLISH;
 	    in.r = g.step_r;
-	    in.incarnation = inc;
+	    in.caller = gh(inc);
 	    in.shadow = g.step_cs;
 	    fsio::replace_out out;
 	    cls_rgw_fsio_effects fx;
@@ -612,7 +705,7 @@ void gw_actions(const World& w0, size_t gi, std::vector<Action>& acts)
 	[gi, inc](World& w) -> std::optional<std::string> {
 	  auto& g = w.gws[gi];
 	  g.did_read = 1;
-	  fsio::join_in in{inc, false, w.nonce_for_join(), 10, w.dead()};
+	  fsio::join_in in{gh(inc), false, w.nonce_for_join(), 10, w.dead()};
 	  fsio::join_out out;
 	  cls_rgw_fsio_effects fx;
 	  auto save = w.head;
@@ -630,7 +723,7 @@ void gw_actions(const World& w0, size_t gi, std::vector<Action>& acts)
 	[gi, inc](World& w) -> std::optional<std::string> {
 	  auto& g = w.gws[gi];
 	  g.did_write = 1;
-	  fsio::join_in in{inc, true, w.nonce_for_join(), 10, w.dead()};
+	  fsio::join_in in{gh(inc), true, w.nonce_for_join(), 10, w.dead()};
 	  fsio::join_out out;
 	  cls_rgw_fsio_effects fx;
 	  auto save = w.head;
@@ -693,7 +786,7 @@ void gw_actions(const World& w0, size_t gi, std::vector<Action>& acts)
 		  auto& g = w.gws[gi];
 		  g.did_follow = 1;
 		  auto& o = g.opens[oi];
-		  if (fsio::rebind(w.head, inc, o.cs, to, 1) == 0) {
+		  if (fsio::rebind(w.head, gh(inc), o.cs, to, 1) == 0) {
 		    o.cs = to;
 		    o.storage = sname(to);
 		  }
@@ -712,7 +805,7 @@ void gw_actions(const World& w0, size_t gi, std::vector<Action>& acts)
 	  fsio::leave_out out;
 	  cls_rgw_fsio_effects fx;
 	  auto save = w.head;
-	  if (fsio::leave(w.head, inc, o.cs, o.writer, w.dead(), out, fx) < 0) {
+	  if (fsio::leave(w.head, gh(inc), o.cs, o.writer, w.dead(), out, fx) < 0) {
 	    w.head = save;
 	    g.release_failed = 1;         // keeps its hint (H1)
 	    return std::nullopt;
@@ -840,7 +933,7 @@ void gw_actions_v(const World& w0, size_t gi, std::vector<Action>& acts)
 	    }
 	    auto v = w.versions.find(g.pending);
 	    if (v == w.versions.end() ||
-		fsio::ocnt_add(v->second.ih, inc) < 0) {
+		fsio::ocnt_add(v->second.ih, gh(inc)) < 0) {
 	      if (!had) {
 		w.hints.erase(presence_ih(g.pending, inc));
 		g.owe_ih_hint.clear();
@@ -863,7 +956,7 @@ void gw_actions_v(const World& w0, size_t gi, std::vector<Action>& acts)
 	    if (w.olh_cur != g.pending) {
 	      return std::nullopt;           // the OLH guard:  ECANCELED
 	    }
-	    fsio::join_in in{inc, g.pending_writer, w.nonce_for_join(), 10,
+	    fsio::join_in in{gh(inc), g.pending_writer, w.nonce_for_join(), 10,
 			     w.dead(), g.pending};
 	    fsio::join_out out;
 	    cls_rgw_fsio_effects fx;
@@ -907,10 +1000,14 @@ void gw_actions_v(const World& w0, size_t gi, std::vector<Action>& acts)
       acts.push_back({fmt::format("gw{} ready {}", inc, sname(g.step_cs)),
 	  [gi, inc](World& w) -> std::optional<std::string> {
 	    auto& g = w.gws[gi];
-	    fsio::ready(w.head, inc, g.step_cs, 1);
+	    fsio::ready(w.head, gh(inc), g.step_cs, 1);
 	    g.step = NONE;
 	    return std::nullopt;
 	  }});
+      construct_abandon_actions(g, gi, inc, acts);
+      break;
+    case CONSTRUCT_LEAVE:
+      construct_abandon_actions(g, gi, inc, acts);
       break;
     case V_OCNT_SEND:
       acts.push_back({fmt::format("gw{} ocnt-send {}", inc, g.step_inst),
@@ -931,8 +1028,9 @@ void gw_actions_v(const World& w0, size_t gi, std::vector<Action>& acts)
 	    auto& g = w.gws[gi];
 	    g.pub_incs.clear();
 	    for (const auto& [i, o] : w.head.opens) {
-	      auto c = o.chunk_sets.find(g.step_cs);
-	      if (c != o.chunk_sets.end() &&
+	      auto ocs = inc_chunk_sets(o);
+	      auto c = ocs.find(g.step_cs);
+	      if (c != ocs.end() &&
 		  (c->second.readers ||
 		   (FSIO_SKIP_CHECK(W7_PUBLISH_COUNTS_READERS_ONLY) && c->second.writers))) {
 		g.pub_incs.insert(i);       // readers only (§4.2 step 3, W7)
@@ -984,7 +1082,7 @@ void gw_actions_v(const World& w0, size_t gi, std::vector<Action>& acts)
 	    v.ih.manifest = tok_bl(sn);
 	    if (!g.pub_incs.empty()) {
 	      v.ih.ocnt.emplace();
-	      v.ih.ocnt->incarnations = g.pub_incs;
+	      v.ih.ocnt->holders = holders_of(g.pub_incs);
 	    }
 	    v.tail = sn;
 	    v.epoch = g.pub_epoch;
@@ -1016,7 +1114,7 @@ void gw_actions_v(const World& w0, size_t gi, std::vector<Action>& acts)
 	    fsio::replace_in in;
 	    in.mode = fsio::replace_mode::PUBLISH;
 	    in.versioned = true;
-	    in.incarnation = inc;
+	    in.caller = gh(inc);
 	    in.shadow = g.step_cs;
 	    fsio::replace_out out;
 	    cls_rgw_fsio_effects fx;
@@ -1070,7 +1168,7 @@ void gw_actions_v(const World& w0, size_t gi, std::vector<Action>& acts)
 	    fsio::publish_intent intent{g.pub_instance, g.pub_token,
 					w.next_epoch};
 	    auto save = w.head;
-	    if (fsio::leave(w.head, inc, g.step_cs, true, w.dead(), out, fx,
+	    if (fsio::leave(w.head, gh(inc), g.step_cs, true, w.dead(), out, fx,
 			    &intent) < 0) {
 	      w.head = save;
 	      g.release_failed = 1;         // keeps its hint (H1)
@@ -1163,14 +1261,60 @@ void gw_actions_v(const World& w0, size_t gi, std::vector<Action>& acts)
 		w.versions.erase(vi);
 	      }
 	      w.hints.erase(publish_ih(g.pub_instance, g.inc));
-	      g.step = NONE;
+	      g.pub_incs.clear();
+	      g.step = g.pub_retry ? V_PUB_HINT : NONE;
+	      g.pub_retry = 0;
 	      return std::nullopt;
 	    }});
       }
       break;
     }
+    case V_REL_RELEASE:
+      acts.push_back({fmt::format("gw{} publish-release {}", inc,
+				  sname(g.step_cs)),
+	  [gi](World& w) -> std::optional<std::string> {
+	    auto& g = w.gws[gi];
+	    if (fsio::publish_release(w.head, gh(g.inc), g.step_cs) < 0) {
+	      g.release_failed = 1;          // the expirer took the shadow over
+	    } else {
+	      g.pub_retry = 1;               // its idle timer publishes again
+	    }
+	    g.step = V_PUB_CLEANUP;
+	    return std::nullopt;
+	  }});
+      break;
     default:
       break;
+    }
+    /* §4.2:  a publisher that cannot proceed releases only before its
+     * instance write:  it aborts its own claim, releases, then cleans up
+     * as after a failed instance write (W10) */
+    if (!g.released &&
+	(g.step == V_PUB_READ || g.step == V_PUB_WRITE ||
+	 (FSIO_SKIP_CHECK(W10_RELEASE_ONLY_WITH_LIVE_CLAIM) &&
+	  (g.step == V_PUB_LINK || g.step == V_PUB_PUBLISH)))) {
+      acts.push_back({fmt::format("gw{} release-abort {}", inc,
+				  g.pub_instance),
+	  [gi](World& w) -> std::optional<std::string> {
+	    auto& g = w.gws[gi];
+	    auto vi = w.versions.find(g.pub_instance);
+	    g.released = 1;
+	    if (vi != w.versions.end() && vi->second.claim == g.pub_token) {
+	      if (FSIO_SKIP_CHECK(W10_RELEASE_ABORTS_CLAIM_FIRST)) {
+		w.versions.erase(vi);        // as first written:  unplace first
+	      } else {
+		vi->second.claim = "aborted";
+	      }
+	      g.step = V_REL_RELEASE;
+	    } else if (FSIO_SKIP_CHECK(W10_RELEASE_ONLY_WITH_LIVE_CLAIM) &&
+		       vi != w.versions.end() && !vi->second.claim) {
+	      g.step = V_REL_RELEASE;        // as first written:  after the write
+	    } else {
+	      g.release_failed = 1;          // already aborted:  the expirer's
+	      g.step = V_PUB_CLEANUP;
+	    }
+	    return std::nullopt;
+	  }});
     }
     fail_actions(g, gi, acts);
     return;
@@ -1233,7 +1377,7 @@ void gw_actions_v(const World& w0, size_t gi, std::vector<Action>& acts)
 	    [gi, oi, inc, to](World& w) -> std::optional<std::string> {
 	      auto& g = w.gws[gi];
 	      auto& o = g.opens[oi];
-	      if (fsio::rebind(w.head, inc, o.cs, to, 1) == 0) {
+	      if (fsio::rebind(w.head, gh(inc), o.cs, to, 1) == 0) {
 		g.did_follow = 1;
 		o.cs = to;
 		o.storage = sname(to);
@@ -1263,7 +1407,7 @@ void gw_actions_v(const World& w0, size_t gi, std::vector<Action>& acts)
 	    fsio::leave_out out;
 	    cls_rgw_fsio_effects fx;
 	    auto save = w.head;
-	    if (fsio::leave(w.head, inc, o.cs, true, w.dead(), out, fx) < 0) {
+	    if (fsio::leave(w.head, gh(inc), o.cs, true, w.dead(), out, fx) < 0) {
 	      w.head = save;
 	      g.release_failed = 1;         // keeps its hint (H1)
 	      return std::nullopt;
@@ -1278,7 +1422,7 @@ void gw_actions_v(const World& w0, size_t gi, std::vector<Action>& acts)
 	  fsio::leave_out out;
 	  cls_rgw_fsio_effects fx;
 	  auto save = w.head;
-	  if (fsio::leave(w.head, inc, o.cs, false, w.dead(), out, fx) < 0) {
+	  if (fsio::leave(w.head, gh(inc), o.cs, false, w.dead(), out, fx) < 0) {
 	    w.head = save;
 	    g.release_failed = 1;         // keeps its hint (H1)
 	    return std::nullopt;
@@ -1328,7 +1472,7 @@ void gw_actions_v(const World& w0, size_t gi, std::vector<Action>& acts)
 	    return std::nullopt;
 	  }
 	  fsio::ocnt_drain d;
-	  fsio::ocnt_remove(v->second.ih, inc, d);
+	  fsio::ocnt_remove(v->second.ih, gh(inc), d);
 	  if (d.drained) {
 	    g.step = V_OCNT_SEND;            // the hint goes after the send
 	    g.step_inst = inst;
@@ -1418,7 +1562,7 @@ std::optional<std::string> start_finalize(World& w, const fid_t& from,
 					  const fsio::expired_t& dead)
 {
   fid_t to;
-  if (fsio::fenced_finalize(w.head, w.ex_inc, from, dead, to) < 0) {
+  if (fsio::fenced_finalize(w.head, xh(w.ex_inc), from, dead, to) < 0) {
     w.ex = EX_IDLE;              // drop the decision, re-read next pass
     return std::nullopt;
   }
@@ -1481,7 +1625,7 @@ void expirer_actions(const World& w0, std::vector<Action>& acts)
 	  fsio::replace_in in;
 	  in.mode = fsio::replace_mode::PUBLISH;
 	  in.r = fid_t{w.next_r++, 0};
-	  in.incarnation = w.ex_inc;
+	  in.caller = xh(w.ex_inc);
 	  in.shadow = w.ex_to;
 	  fsio::replace_out out;
 	  cls_rgw_fsio_effects fx;
@@ -1540,7 +1684,7 @@ void expirer_actions(const World& w0, std::vector<Action>& acts)
   for (auto inc : dead) {
     auto i = w0.head.opens.find(inc);
     if (i != w0.head.opens.end()) {
-      for (auto& [cs, c] : i->second.chunk_sets) {
+      for (auto& [cs, c] : inc_chunk_sets(i->second)) {
 	if (c.readers) has_dead_opens = true;
       }
     }
@@ -1556,7 +1700,7 @@ void expirer_actions(const World& w0, std::vector<Action>& acts)
 	[dead](World& w) -> std::optional<std::string> {
 	  fsio::expire_out out;
 	  cls_rgw_fsio_effects fx;
-	  fsio::expire(w.head, w.ex_inc, dead, std::nullopt, out, fx);
+	  fsio::expire(w.head, xh(w.ex_inc), dead, std::nullopt, out, fx);
 	  std::vector<fid_t> all = out.drained;
 	  if (w.head.hdr) {
 	    for (auto& e : w.head.hdr->chunk_sets) {
@@ -1599,7 +1743,7 @@ void expirer_actions(const World& w0, std::vector<Action>& acts)
 	    {
 	      fsio::expire_out out;
 	      cls_rgw_fsio_effects fx;
-	      fsio::expire(w.head, w.ex_inc, dead, std::nullopt, out, fx);
+	      fsio::expire(w.head, xh(w.ex_inc), dead, std::nullopt, out, fx);
 	      apply_remove_head(w, fx);
 	    }
 	    w.hints.erase(h);
@@ -1627,8 +1771,9 @@ void expirer_actions(const World& w0, std::vector<Action>& acts)
     auto b = w0.head.bound(e.id);
     bool live_writer = false;
     for (auto& [inc, o] : w0.head.opens) {
-      auto c = o.chunk_sets.find(e.id);
-      if (c != o.chunk_sets.end() && c->second.writers && !dead.count(inc)) {
+      auto ocs = inc_chunk_sets(o);
+      auto c = ocs.find(e.id);
+      if (c != ocs.end() && c->second.writers && !dead.count(inc)) {
 	live_writer = true;
       }
     }
@@ -1640,7 +1785,7 @@ void expirer_actions(const World& w0, std::vector<Action>& acts)
 	    w.gcq.push_back({sname(id)});
 	    fsio::expire_out out;
 	    cls_rgw_fsio_effects fx;
-	    fsio::expire(w.head, w.ex_inc, dead, id, out, fx);
+	    fsio::expire(w.head, xh(w.ex_inc), dead, id, out, fx);
 	    apply_remove_head(w, fx);
 	    return std::nullopt;
 	  }});
@@ -1648,8 +1793,8 @@ void expirer_actions(const World& w0, std::vector<Action>& acts)
     /* fenced finalize (§3.7) */
     bool ff = (e.state == state::READY && b.writers && !live_writer) ||
       (e.state == state::PUBLISHING && e.publishing &&
-       (dead.count(e.publishing->incarnation) ||
-	e.publishing->incarnation == w0.ex_inc));
+       (dead.count(e.publishing->publisher.incarnation) ||
+	e.publishing->publisher.incarnation == w0.ex_inc));
     if (ff && !w0.head.hdr->fenced_finalizes.size() && !cfg.versioned) {
       auto from = e.id;
       acts.push_back({fmt::format("expirer decide-finalize {}", sname(from)),
@@ -1874,7 +2019,7 @@ void expirer_actions_v(const World& w0, std::vector<Action>& acts)
 	  [](World& w) -> std::optional<std::string> {
 	    fid_t to;
 	    fsio::publish_intent intent{w.ex_inst, w.ex_token, w.next_epoch};
-	    if (fsio::fenced_finalize(w.head, w.ex_inc, w.ex_from, w.dead(), to,
+	    if (fsio::fenced_finalize(w.head, xh(w.ex_inc), w.ex_from, w.dead(), to,
 				      &intent, w.ex_aborted) < 0) {
 	      auto vi = w.versions.find(w.ex_inst);
 	      if (vi != w.versions.end() && vi->second.claim == w.ex_token) {
@@ -1968,7 +2113,7 @@ void expirer_actions_v(const World& w0, std::vector<Action>& acts)
 	    fsio::replace_in in;
 	    in.mode = fsio::replace_mode::PUBLISH;
 	    in.versioned = true;
-	    in.incarnation = w.ex_inc;
+	    in.caller = xh(w.ex_inc);
 	    in.shadow = w.ex_to;
 	    fsio::replace_out out;
 	    cls_rgw_fsio_effects fx;
@@ -2008,7 +2153,7 @@ void expirer_actions_v(const World& w0, std::vector<Action>& acts)
 	  if (vi != w.versions.end() && vi->second.ih.ocnt) {
 	    fsio::ocnt_drain d;
 	    fsio::ocnt_expire(vi->second.ih, dead, d);
-	    if (vi->second.ih.ocnt && vi->second.ih.ocnt->incarnations.empty()) {
+	    if (vi->second.ih.ocnt && vi->second.ih.ocnt->holders.empty()) {
 	      ocnt_send(w, h.instance);
 	    }
 	  }
@@ -2018,7 +2163,7 @@ void expirer_actions_v(const World& w0, std::vector<Action>& acts)
 	    !FSIO_SKIP_CHECK(H3_HINT_WAITS_FOR_LIVE_CLAIM);
 	  if (!live_claim &&            // a publish may still set it (H3b)
 	      (vi == w.versions.end() || !vi->second.ih.ocnt ||
-	       !vi->second.ih.ocnt->incarnations.count(h.incarnation)) &&
+	       !ocnt_holds(*vi->second.ih.ocnt, h.incarnation)) &&
 	      (w.graced.count(h.incarnation) ||
 	       FSIO_SKIP_CHECK(H2_HINT_DROPPED_AFTER_GRACE))) {
 	    w.hints.erase(h);              // after grace (H2)
@@ -2036,7 +2181,7 @@ void expirer_actions_v(const World& w0, std::vector<Action>& acts)
     {
       fsio::expire_out out;
       cls_rgw_fsio_effects fx;
-      fsio::expire(w.head, w.ex_inc, dead, std::nullopt, out, fx);
+      fsio::expire(w.head, xh(w.ex_inc), dead, std::nullopt, out, fx);
       apply_remove_head(w, fx);
     }
     if (w.head.hdr) {
@@ -2081,7 +2226,7 @@ void expirer_actions_v(const World& w0, std::vector<Action>& acts)
       bool writer = false;
       auto o = w.head.opens.find(owner);
       if (o != w.head.opens.end()) {
-	for (const auto& [cs, c] : o->second.chunk_sets) {
+	for (const auto& [cs, c] : inc_chunk_sets(o->second)) {
 	  writer |= c.writers > 0;
 	}
       }
@@ -2129,7 +2274,7 @@ void expirer_actions_v(const World& w0, std::vector<Action>& acts)
 	    return start_finalize(w, from, dead);   // a suspended bucket's
 	  }
 	  fid_t to;
-	  if (fsio::fenced_finalize(w.head, w.ex_inc, from, dead, to) < 0) {
+	  if (fsio::fenced_finalize(w.head, xh(w.ex_inc), from, dead, to) < 0) {
 	    return std::nullopt;
 	  }
 	  w.ex_from = from;
@@ -2146,8 +2291,9 @@ void expirer_actions_v(const World& w0, std::vector<Action>& acts)
     const auto b = w0.head.bound(e.id);
     bool live_writer = false;
     for (const auto& [inc, o] : w0.head.opens) {
-      auto c = o.chunk_sets.find(e.id);
-      if (c != o.chunk_sets.end() && c->second.writers && !dead.count(inc)) {
+      auto ocs = inc_chunk_sets(o);
+      auto c = ocs.find(e.id);
+      if (c != ocs.end() && c->second.writers && !dead.count(inc)) {
 	live_writer = true;
       }
     }
@@ -2177,8 +2323,8 @@ void expirer_actions_v(const World& w0, std::vector<Action>& acts)
       continue;
     }
     if (e.state != state::PUBLISHING || !e.publishing ||
-	!(dead.count(e.publishing->incarnation) ||
-	  e.publishing->incarnation == w0.ex_inc)) {
+	!(dead.count(e.publishing->publisher.incarnation) ||
+	  e.publishing->publisher.incarnation == w0.ex_inc)) {
       continue;
     }
     if (e.publishing->instance.empty()) {
@@ -2199,7 +2345,7 @@ void expirer_actions_v(const World& w0, std::vector<Action>& acts)
       in.mode = fsio::replace_mode::PUBLISH;
       in.versioned = true;
       in.complete = true;
-      in.incarnation = w.ex_inc;
+      in.caller = xh(w.ex_inc);
       in.shadow = from;
       in.expired = dead;
       in.expired.insert(w.ex_inc);           // a publish it took over
@@ -2359,12 +2505,12 @@ std::optional<std::string> check_state(const World& w)
     if (v.ih.exists && !v.ih.id_tag.empty() && !w.storage.count(v.tail)) {
       return fmt::format("live version {}'s tail {} collected", i, v.tail);
     }
-    if (v.ih.ocnt && !v.ih.ocnt->incarnations.empty()) {
+    if (v.ih.ocnt && !v.ih.ocnt->holders.empty()) {
       for (const auto& d : v.ih.ocnt->deferred) {
 	if (!w.storage.count(tok(d.manifest))) {
 	  return fmt::format("{}'s deferred tail {} collected while its open "
 			     "count holds {}", i, tok(d.manifest),
-			     fmt::join(v.ih.ocnt->incarnations, ","));
+			     fmt::join(ocnt_incs(*v.ih.ocnt), ","));
 	}
       }
     }
@@ -2436,7 +2582,7 @@ std::optional<std::string> check_end(const World& w)
     if (v.ih.ocnt) {
       return fmt::format("{}'s open count left at the end:  incarnations "
 			 "{{{}}}, {} deferred", i,
-			 fmt::join(v.ih.ocnt->incarnations, ","),
+			 fmt::join(ocnt_incs(*v.ih.ocnt), ","),
 			 v.ih.ocnt->deferred.size());
     }
     if (v.ih.exists && !v.ih.id_tag.empty()) {
@@ -2742,6 +2888,14 @@ TEST(FSIOModel, Explore)
        cls_rgw_fsio_check::H3_PUBLISH_HINT_REMOVES_READER_HINTS},
       {"H3_PUBLISHER_CLEANUP_REMOVES_READER_HINTS",
        cls_rgw_fsio_check::H3_PUBLISHER_CLEANUP_REMOVES_READER_HINTS},
+      {"W10_RELEASE_ONLY_WITH_LIVE_CLAIM",
+       cls_rgw_fsio_check::W10_RELEASE_ONLY_WITH_LIVE_CLAIM},
+      {"W10_RELEASE_ABORTS_CLAIM_FIRST",
+       cls_rgw_fsio_check::W10_RELEASE_ABORTS_CLAIM_FIRST},
+      {"W15_CONSTRUCTOR_MAY_ABANDON",
+       cls_rgw_fsio_check::W15_CONSTRUCTOR_MAY_ABANDON},
+      {"W20_RELEASE_CHECKS_PUBLISHER",
+       cls_rgw_fsio_check::W20_RELEASE_CHECKS_PUBLISHER},
     };
     auto i = checks.find(c);
     ASSERT_NE(i, checks.end()) << "unknown check " << c;

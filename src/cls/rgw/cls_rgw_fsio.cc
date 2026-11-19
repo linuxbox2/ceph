@@ -53,13 +53,32 @@ cls_rgw_fsio_counts cls_rgw_fsio_head::bound(const cls_rgw_fsio_id& cs) const
 {
   cls_rgw_fsio_counts sum;
   for (const auto& [inc, o] : opens) {
-    auto i = o.chunk_sets.find(cs);
-    if (i != o.chunk_sets.end()) {
-      sum.readers += i->second.readers;
-      sum.writers += i->second.writers;
+    for (const auto& [hd, ho] : o.handles) {
+      auto i = ho.chunk_sets.find(cs);
+      if (i != ho.chunk_sets.end()) {
+	sum.readers += i->second.readers;
+	sum.writers += i->second.writers;
+      }
     }
   }
   return sum;
+}
+
+cls_rgw_fsio_handle_opens*
+cls_rgw_fsio_head::find(const cls_rgw_fsio_handle& c)
+{
+  auto o = opens.find(c.incarnation);
+  if (o == opens.end()) {
+    return nullptr;
+  }
+  auto ho = o->second.handles.find(c.handle);
+  return ho == o->second.handles.end() ? nullptr : &ho->second;
+}
+
+cls_rgw_fsio_counts& cls_rgw_fsio_head::counts(const cls_rgw_fsio_handle& c,
+					       const cls_rgw_fsio_id& cs)
+{
+  return opens[c.incarnation].handles[c.handle].chunk_sets[cs];
 }
 
 namespace cls_rgw_fsio {
@@ -123,15 +142,23 @@ void settle(cls_rgw_fsio_head& h, std::vector<cls_rgw_fsio_id>& drained,
 	    cls_rgw_fsio_effects& fx)
 {
   for (auto i = h.opens.begin(); i != h.opens.end(); ) {
-    auto& m = i->second.chunk_sets;
-    for (auto j = m.begin(); j != m.end(); ) {
-      if (j->second.readers == 0 && j->second.writers == 0) {
-	j = m.erase(j);
+    auto& hs = i->second.handles;
+    for (auto k = hs.begin(); k != hs.end(); ) {
+      auto& m = k->second.chunk_sets;
+      for (auto j = m.begin(); j != m.end(); ) {
+	if (j->second.readers == 0 && j->second.writers == 0) {
+	  j = m.erase(j);
+	} else {
+	  ++j;
+	}
+      }
+      if (m.empty()) {
+	k = hs.erase(k);
       } else {
-	++j;
+	++k;
       }
     }
-    if (m.empty()) {
+    if (hs.empty()) {
       i = h.opens.erase(i);
     } else {
       ++i;
@@ -168,8 +195,10 @@ void expire_readers(cls_rgw_fsio_head& h, const expired_t& expired)
     if (i == h.opens.end()) {
       continue;
     }
-    for (auto& [cs, c] : i->second.chunk_sets) {
-      c.readers = 0;
+    for (auto& [hd, ho] : i->second.handles) {    // every handle (Z4)
+      for (auto& [cs, c] : ho.chunk_sets) {
+	c.readers = 0;
+      }
     }
   }
 }
@@ -270,7 +299,7 @@ int join(cls_rgw_fsio_head& h, const join_in& in, join_out& out,
       }
     }
   }
-  auto& c = h.opens[in.incarnation].chunk_sets[bind];
+  auto& c = h.counts(in.caller, bind);
   if (in.writer) {
     ++c.writers;
   } else {
@@ -280,7 +309,7 @@ int join(cls_rgw_fsio_head& h, const join_in& in, join_out& out,
   return 0;
 }
 
-int ready(cls_rgw_fsio_head& h, uint64_t incarnation,
+int ready(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& caller,
 	  const cls_rgw_fsio_id& cs, uint64_t extent)
 {
   if (!h.hdr) {
@@ -290,9 +319,8 @@ int ready(cls_rgw_fsio_head& h, uint64_t incarnation,
   if (!e || e->state != state::CONSTRUCTING) {
     return -EINVAL;
   }
-  auto o = h.opens.find(incarnation);
-  if (o == h.opens.end() || !o->second.chunk_sets.count(cs) ||
-      o->second.chunk_sets[cs].writers == 0) {
+  auto* o = h.find(caller);
+  if (!o || !o->chunk_sets.count(cs) || o->chunk_sets[cs].writers == 0) {
     return -EINVAL;
   }
   e->state = state::READY;
@@ -300,7 +328,7 @@ int ready(cls_rgw_fsio_head& h, uint64_t incarnation,
   return 0;
 }
 
-int extend(cls_rgw_fsio_head& h, uint64_t incarnation,
+int extend(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& caller,
 	   const cls_rgw_fsio_id& cs, uint64_t extent)
 {
   if (!h.hdr) {
@@ -313,16 +341,15 @@ int extend(cls_rgw_fsio_head& h, uint64_t incarnation,
   if (e->state == state::PUBLISHING) {
     return -CLS_RGW_ERR_FSIO_BUSY;    // frozen, or a fenced finalize's (§3.7)
   }
-  auto o = h.opens.find(incarnation);
-  if (o == h.opens.end() || !o->second.chunk_sets.count(cs) ||
-      o->second.chunk_sets[cs].writers == 0) {
+  auto* o = h.find(caller);
+  if (!o || !o->chunk_sets.count(cs) || o->chunk_sets[cs].writers == 0) {
     return -EINVAL;
   }
   e->shadow->extent = std::max(e->shadow->extent, extent);
   return 0;
 }
 
-int leave(cls_rgw_fsio_head& h, uint64_t incarnation,
+int leave(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& caller,
 	  const cls_rgw_fsio_id& cs, bool writer, const expired_t& expired,
 	  leave_out& out, cls_rgw_fsio_effects& fx,
 	  const publish_intent* intent)
@@ -331,11 +358,11 @@ int leave(cls_rgw_fsio_head& h, uint64_t incarnation,
     return -EINVAL;
   }
   expire_readers(h, expired);
-  auto o = h.opens.find(incarnation);
-  if (o == h.opens.end() || !o->second.chunk_sets.count(cs)) {
+  auto* o = h.find(caller);
+  if (!o || !o->chunk_sets.count(cs)) {
     return -EINVAL;
   }
-  auto& c = o->second.chunk_sets[cs];
+  auto& c = o->chunk_sets[cs];
   auto* e = h.hdr->find(cs);
   /* versioned:  the version of the content the open read (§2.5, W7) */
   if (e && !FSIO_SKIP_CHECK(W7_LEAVE_RETURNS_VERSION_READ)) {
@@ -350,6 +377,23 @@ int leave(cls_rgw_fsio_head& h, uint64_t incarnation,
       return -EINVAL;
     }
     if (h.bound(cs).writers == 1) {
+      /* §3.4:  a constructor that gives up abandons its shadow, its GC
+       * entry already sent (W15) */
+      if (e->state == state::CONSTRUCTING &&
+	  !FSIO_SKIP_CHECK(W15_CONSTRUCTOR_MAY_ABANDON)) {
+	auto& v = h.hdr->chunk_sets;
+	v.erase(std::remove_if(v.begin(), v.end(),
+			       [&](const auto& x) { return x.id == cs; }),
+		v.end());
+	if (h.hdr->cur_shadow && *h.hdr->cur_shadow == cs) {
+	  h.hdr->cur_shadow.reset();
+	}
+	o->chunk_sets.erase(cs);
+	out.abandoned = true;
+	std::vector<cls_rgw_fsio_id> drained;
+	settle(h, drained, fx);
+	return 0;
+      }
       /* §3.4:  the last writer freezes its shadow;  only a ready shadow
        * can enter publishing (§4.2) */
       if (e->state != state::READY) {
@@ -357,7 +401,7 @@ int leave(cls_rgw_fsio_head& h, uint64_t incarnation,
       }
       e->state = state::PUBLISHING;
       e->publishing.emplace();
-      e->publishing->incarnation = incarnation;
+      e->publishing->publisher = caller;
       if (intent) {
 	/* versioned:  the claim and the OSD's epoch (§4.2 step 2) */
 	e->publishing->instance = intent->instance;
@@ -386,7 +430,7 @@ int leave(cls_rgw_fsio_head& h, uint64_t incarnation,
   return 0;
 }
 
-int rebind(cls_rgw_fsio_head& h, uint64_t incarnation,
+int rebind(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& caller,
 	   const cls_rgw_fsio_id& from, const cls_rgw_fsio_id& to,
 	   uint32_t readers)
 {
@@ -407,13 +451,13 @@ int rebind(cls_rgw_fsio_head& h, uint64_t incarnation,
       !FSIO_SKIP_CHECK(W7_REBIND_WAITS_ON_PUBLISHING)) {
     return -CLS_RGW_ERR_FSIO_BUSY;
   }
-  auto o = h.opens.find(incarnation);
-  if (o == h.opens.end() || !o->second.chunk_sets.count(from) ||
-      o->second.chunk_sets[from].readers < readers) {
+  auto* o = h.find(caller);
+  if (!o || !o->chunk_sets.count(from) ||
+      o->chunk_sets[from].readers < readers) {
     return -EINVAL;
   }
-  o->second.chunk_sets[from].readers -= readers;
-  o->second.chunk_sets[to].readers += readers;
+  o->chunk_sets[from].readers -= readers;
+  o->chunk_sets[to].readers += readers;
   std::vector<cls_rgw_fsio_id> drained;
   cls_rgw_fsio_effects fx;
   settle(h, drained, fx);
@@ -434,9 +478,9 @@ int publish_versioned(cls_rgw_fsio_head& h, const replace_in& in,
   if (!sh || sh->state != state::PUBLISHING || !sh->publishing) {
     return -CLS_RGW_ERR_FSIO_CONFLICT;
   }
-  const auto publisher = sh->publishing->incarnation;
-  if (in.complete ? !in.expired.count(publisher) :
-      publisher != in.incarnation) {
+  const auto publisher = sh->publishing->publisher;
+  if (in.complete ? !in.expired.count(publisher.incarnation) :
+      publisher != in.caller) {
     return -CLS_RGW_ERR_FSIO_CONFLICT;
   }
   const auto sh_id = sh->id;
@@ -448,14 +492,19 @@ int publish_versioned(cls_rgw_fsio_head& h, const replace_in& in,
     /* the writer opens of the dead:  the publisher's, whoever now holds
      * its publish (§4.2, V2) */
     for (auto& [inc, o] : h.opens) {
-      auto c = o.chunk_sets.find(sh_id);
-      if (c != o.chunk_sets.end() && in.expired.count(inc)) {
-	c->second.writers = 0;
+      if (!in.expired.count(inc)) {
+	continue;
+      }
+      for (auto& [hd, ho] : o.handles) {
+	auto c = ho.chunk_sets.find(sh_id);
+	if (c != ho.chunk_sets.end()) {
+	  c->second.writers = 0;
+	}
       }
     }
-  } else if (auto o = h.opens.find(publisher); o != h.opens.end()) {
-    auto c = o->second.chunk_sets.find(sh_id);
-    if (c != o->second.chunk_sets.end() && c->second.writers) {
+  } else if (auto* o = h.find(publisher)) {
+    auto c = o->chunk_sets.find(sh_id);
+    if (c != o->chunk_sets.end() && c->second.writers) {
       --c->second.writers;
     }
   }
@@ -497,7 +546,7 @@ int replace_head(cls_rgw_fsio_head& h, const replace_in& in, replace_out& out,
     auto& hdr = *h.hdr;
     auto* sh = hdr.find(in.shadow);
     if (!sh || sh->state != state::PUBLISHING || !sh->publishing ||
-	sh->publishing->incarnation != in.incarnation) {
+	sh->publishing->publisher != in.caller) {
       return -CLS_RGW_ERR_FSIO_CONFLICT;
     }
     const auto sh_id = sh->id;
@@ -505,7 +554,7 @@ int replace_head(cls_rgw_fsio_head& h, const replace_in& in, replace_out& out,
      * publish replaces (§3.5;  the null version when suspended, §2.5a) */
     auto* prev = head_chunk_set(hdr);
     fx.clones.push_back(
-      cls_rgw_fsio_clone{in.r, 'g', record_of_head(h)});
+      cls_rgw_fsio_clone{in.r, 'G', record_of_head(h)});
     if (prev && prev->id != sh_id) {
       auto b = h.bound(prev->id);
       if (b.readers || b.writers) {
@@ -522,10 +571,9 @@ int replace_head(cls_rgw_fsio_head& h, const replace_in& in, replace_out& out,
     sh->state = state::PUBLISHED;
     sh->manifest_at = at::HEAD;
     sh->publishing.reset();
-    auto o = h.opens.find(in.incarnation);
-    if (o != h.opens.end()) {
-      auto c = o->second.chunk_sets.find(sh_id);
-      if (c != o->second.chunk_sets.end() && c->second.writers) {
+    if (auto* o = h.find(in.caller)) {
+      auto c = o->chunk_sets.find(sh_id);
+      if (c != o->chunk_sets.end() && c->second.writers) {
 	--c->second.writers;
       }
     }
@@ -566,7 +614,7 @@ int replace_head(cls_rgw_fsio_head& h, const replace_in& in, replace_out& out,
       auto b = h.bound(p->id);
       if (b.readers || b.writers) {
 	fx.clones.push_back(
-	  cls_rgw_fsio_clone{in.r, 'g', record_of_head(h)});
+	  cls_rgw_fsio_clone{in.r, 'G', record_of_head(h)});
 	p->state = state::RETIRED;
 	p->manifest_at = at::CLONE;
 	p->clone = in.r;
@@ -591,7 +639,7 @@ int replace_head(cls_rgw_fsio_head& h, const replace_in& in, replace_out& out,
     auto b = h.bound(p->id);
     if (b.readers || b.writers) {
       fx.clones.push_back(
-	cls_rgw_fsio_clone{in.r, 'g', record_of_head(h)});
+	cls_rgw_fsio_clone{in.r, 'G', record_of_head(h)});
       p->state = state::RETIRED;
       p->manifest_at = at::CLONE;
       p->clone = in.r;
@@ -608,7 +656,8 @@ int replace_head(cls_rgw_fsio_head& h, const replace_in& in, replace_out& out,
   return 0;
 }
 
-int publish_release(cls_rgw_fsio_head& h, const cls_rgw_fsio_id& cs)
+int publish_release(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& caller,
+		    const cls_rgw_fsio_id& cs)
 {
   if (!h.hdr) {
     return -EINVAL;
@@ -616,6 +665,12 @@ int publish_release(cls_rgw_fsio_head& h, const cls_rgw_fsio_id& cs)
   auto* e = h.hdr->find(cs);
   if (!e || e->state != state::PUBLISHING) {
     return -EINVAL;
+  }
+  /* §3:  only the recorded publisher releases, as fsio_publish checks
+   * (W20) */
+  if ((!e->publishing || e->publishing->publisher != caller) &&
+      !FSIO_SKIP_CHECK(W20_RELEASE_CHECKS_PUBLISHER)) {
+    return -CLS_RGW_ERR_FSIO_CONFLICT;
   }
   e->state = state::READY;
   e->publishing.reset();
@@ -638,7 +693,7 @@ int forget(cls_rgw_fsio_head& h, const cls_rgw_fsio_id& cs,
   return 0;
 }
 
-int fenced_finalize(cls_rgw_fsio_head& h, uint64_t finalizer,
+int fenced_finalize(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& finalizer,
 		    const cls_rgw_fsio_id& from, const expired_t& expired,
 		    cls_rgw_fsio_id& to, const publish_intent* intent,
 		    const std::string& aborted)
@@ -653,12 +708,12 @@ int fenced_finalize(cls_rgw_fsio_head& h, uint64_t finalizer,
       return 0;
     }
     auto* t = hdr.find(ff->to);
-    const auto prev = t->publishing->incarnation;
-    if (prev != finalizer && !expired.count(prev)) {
+    const auto prev = t->publishing->publisher;
+    if (prev != finalizer && !expired.count(prev.incarnation)) {
       return -CLS_RGW_ERR_FSIO_BUSY;    // a live finalizer
     }
-    t->publishing->incarnation = finalizer;    // taken over (§3.7)
-    hdr.find(ff->from)->publishing->incarnation = finalizer;
+    t->publishing->publisher = finalizer;    // taken over (§3.7)
+    hdr.find(ff->from)->publishing->publisher = finalizer;
     to = ff->to;
     return 0;
   }
@@ -673,8 +728,9 @@ int fenced_finalize(cls_rgw_fsio_head& h, uint64_t finalizer,
       return -CLS_RGW_ERR_FSIO_CONFLICT;
     }
   } else if (f->state == state::PUBLISHING) {
-    if (!f->publishing || (!expired.count(f->publishing->incarnation) &&
-			   f->publishing->incarnation != finalizer)) {
+    if (!f->publishing ||
+	(!expired.count(f->publishing->publisher.incarnation) &&
+	 f->publishing->publisher != finalizer)) {
       return -CLS_RGW_ERR_FSIO_CONFLICT;
     }
     /* versioned:  the publisher's claim aborted first (§3.7, V1) */
@@ -686,16 +742,20 @@ int fenced_finalize(cls_rgw_fsio_head& h, uint64_t finalizer,
     return -CLS_RGW_ERR_FSIO_CONFLICT;   // constructing (§3.8), published, retired
   }
   for (const auto& [inc, o] : h.opens) {
-    auto c = o.chunk_sets.find(from);
-    if (c != o.chunk_sets.end() && c->second.writers &&
-	!expired.count(inc)) {
-      return -CLS_RGW_ERR_FSIO_CONFLICT;
+    for (const auto& [hd, ho] : o.handles) {
+      auto c = ho.chunk_sets.find(from);
+      if (c != ho.chunk_sets.end() && c->second.writers &&
+	  !expired.count(inc)) {
+	return -CLS_RGW_ERR_FSIO_CONFLICT;
+      }
     }
   }
   for (auto& [inc, o] : h.opens) {
-    auto c = o.chunk_sets.find(from);
-    if (c != o.chunk_sets.end()) {
-      c->second.writers = 0;
+    for (auto& [hd, ho] : o.handles) {
+      auto c = ho.chunk_sets.find(from);
+      if (c != ho.chunk_sets.end()) {
+	c->second.writers = 0;
+      }
     }
   }
   const auto f_extent = f->shadow ? f->shadow->extent : 0;
@@ -709,7 +769,7 @@ int fenced_finalize(cls_rgw_fsio_head& h, uint64_t finalizer,
     t.state = state::CONSTRUCTING;
   } else {
     t.publishing.emplace();
-    t.publishing->incarnation = finalizer;
+    t.publishing->publisher = finalizer;
     if (intent) {
       /* versioned:  the claim, created first (§3.7 step 1) */
       t.publishing->instance = intent->instance;
@@ -723,11 +783,12 @@ int fenced_finalize(cls_rgw_fsio_head& h, uint64_t finalizer,
   f = hdr.find(from);
   f->state = state::PUBLISHING;
   f->publishing.emplace();
-  f->publishing->incarnation = finalizer;
+  f->publishing->publisher = finalizer;
   return 0;
 }
 
-int expire(cls_rgw_fsio_head& h, uint64_t caller, const expired_t& expired,
+int expire(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& caller,
+	   const expired_t& expired,
 	   const std::optional<cls_rgw_fsio_id>& clear, expire_out& out,
 	   cls_rgw_fsio_effects& fx)
 {
@@ -736,8 +797,8 @@ int expire(cls_rgw_fsio_head& h, uint64_t caller, const expired_t& expired,
   if (h.hdr && !FSIO_SKIP_CHECK(W6_EXPIRE_TAKES_OVER_PUBLISH)) {
     for (auto& e : h.hdr->chunk_sets) {
       if (e.state == state::PUBLISHING && e.publishing &&
-	  expired.count(e.publishing->incarnation)) {
-	e.publishing->incarnation = caller;
+	  expired.count(e.publishing->publisher.incarnation)) {
+	e.publishing->publisher = caller;
       }
     }
   }
@@ -753,7 +814,9 @@ int expire(cls_rgw_fsio_head& h, uint64_t caller, const expired_t& expired,
       h.hdr->cur_shadow.reset();
     }
     for (auto& [inc, o] : h.opens) {
-      o.chunk_sets.erase(*clear);
+      for (auto& [hd, ho] : o.handles) {
+	ho.chunk_sets.erase(*clear);
+      }
     }
   }
   settle(h, out.drained, fx);
@@ -762,7 +825,7 @@ int expire(cls_rgw_fsio_head& h, uint64_t caller, const expired_t& expired,
 
 /* §2.5:  before the OLH join, a gateway adds its incarnation;  a version
  * that is gone gains no opens */
-int ocnt_add(cls_rgw_fsio_instance_head& ih, uint64_t incarnation)
+int ocnt_add(cls_rgw_fsio_instance_head& ih, const cls_rgw_fsio_handle& holder)
 {
   if (!ih.exists || ih.id_tag.empty() || (ih.ocnt && ih.ocnt->removed)) {
     return -ENOENT;
@@ -770,7 +833,7 @@ int ocnt_add(cls_rgw_fsio_instance_head& ih, uint64_t incarnation)
   if (!ih.ocnt) {
     ih.ocnt.emplace();
   }
-  ih.ocnt->incarnations.insert(incarnation);
+  ih.ocnt->holders.insert(holder);
   return 0;
 }
 
@@ -781,7 +844,7 @@ namespace {
  * nothing deferred it goes (§2.2) */
 void ocnt_settle(cls_rgw_fsio_instance_head& ih, ocnt_drain& out)
 {
-  if (!ih.ocnt || !ih.ocnt->incarnations.empty()) {
+  if (!ih.ocnt || !ih.ocnt->holders.empty()) {
     return;
   }
   if (ih.ocnt->deferred.empty() && !ih.ocnt->removed) {
@@ -796,13 +859,13 @@ void ocnt_settle(cls_rgw_fsio_instance_head& ih, ocnt_drain& out)
 } // anonymous namespace
 
 /* §2.5:  when a gateway holds no FSIO open bound to this version */
-int ocnt_remove(cls_rgw_fsio_instance_head& ih, uint64_t incarnation,
+int ocnt_remove(cls_rgw_fsio_instance_head& ih, const cls_rgw_fsio_handle& holder,
 		ocnt_drain& out)
 {
   if (!ih.ocnt) {
     return 0;
   }
-  ih.ocnt->incarnations.erase(incarnation);
+  ih.ocnt->holders.erase(holder);
   ocnt_settle(ih, out);
   return 0;
 }
@@ -814,9 +877,10 @@ int ocnt_expire(cls_rgw_fsio_instance_head& ih, const expired_t& expired,
   if (!ih.ocnt) {
     return 0;
   }
-  for (auto inc : expired) {
-    ih.ocnt->incarnations.erase(inc);
-  }
+  /* every handle of an expired incarnation (Z4) */
+  std::erase_if(ih.ocnt->holders, [&](const cls_rgw_fsio_handle& c) {
+    return expired.count(c.incarnation) > 0;
+  });
   ocnt_settle(ih, out);
   return 0;
 }
@@ -825,7 +889,7 @@ int ocnt_expire(cls_rgw_fsio_instance_head& ih, const expired_t& expired,
  * with no FSIO xattr and no ID tag, goes whole (§2.2) */
 int ocnt_forget(cls_rgw_fsio_instance_head& ih, cls_rgw_fsio_effects& fx)
 {
-  if (!ih.ocnt || !ih.ocnt->incarnations.empty()) {
+  if (!ih.ocnt || !ih.ocnt->holders.empty()) {
     return -EINVAL;
   }
   ih.ocnt.reset();
@@ -845,7 +909,7 @@ int remove_version(cls_rgw_fsio_instance_head& ih, const cls_rgw_fsio_id& r,
   if (!ih.exists || ih.id_tag.empty()) {
     return -ENOENT;
   }
-  if (!ih.ocnt || ih.ocnt->incarnations.empty()) {
+  if (!ih.ocnt || ih.ocnt->holders.empty()) {
     out.keep_tail = false;
     ih = cls_rgw_fsio_instance_head{};
     return 0;
@@ -853,7 +917,7 @@ int remove_version(cls_rgw_fsio_instance_head& ih, const cls_rgw_fsio_id& r,
   cls_rgw_fsio_gen rec;
   rec.manifest = ih.manifest;
   rec.gc_tag = ih.id_tag;
-  fx.clones.push_back(cls_rgw_fsio_clone{r, 'g', rec});
+  fx.clones.push_back(cls_rgw_fsio_clone{r, 'G', rec});
   ih.ocnt->deferred.push_back(cls_rgw_fsio_replaced{ih.manifest, ih.id_tag, r});
   ih.ocnt->removed = true;
   ih.id_tag.clear();

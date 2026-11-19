@@ -62,6 +62,10 @@ enum class cls_rgw_fsio_check : uint8_t {
   H3_HINT_WAITS_FOR_LIVE_CLAIM,        // the expirer's presence-hint drop (model)
   H3_PUBLISH_HINT_REMOVES_READER_HINTS, // the expirer's publish-hint rule (model)
   H3_PUBLISHER_CLEANUP_REMOVES_READER_HINTS,  // the gateway's aborted-placeholder cleanup (model)
+  W10_RELEASE_ONLY_WITH_LIVE_CLAIM,    // the gateway's versioned release (model)
+  W10_RELEASE_ABORTS_CLAIM_FIRST,      // the gateway's versioned release (model)
+  W15_CONSTRUCTOR_MAY_ABANDON,         // fsio_leave, a constructing shadow
+  W20_RELEASE_CHECKS_PUBLISHER,        // fsio_publish_release
 };
 
 #ifdef CLS_RGW_FSIO_SKIP_CHECKS
@@ -125,15 +129,38 @@ struct cls_rgw_fsio_shadow {
 };
 WRITE_CLASS_ENCODER(cls_rgw_fsio_shadow)
 
+/* who holds FSIO state:  one SAL FSIOObject;  liveness is its
+ * incarnation's (design §2.7, Z4) */
+struct cls_rgw_fsio_handle {
+  uint64_t incarnation = 0;    // the gateway process
+  uint64_t handle = 0;         // a per-process counter;  0 is the FSIO expirer
+
+  auto operator<=>(const cls_rgw_fsio_handle&) const = default;
+
+  void encode(ceph::buffer::list& bl) const {
+    ENCODE_START(1, 1, bl);
+    encode(incarnation, bl);
+    encode(handle, bl);
+    ENCODE_FINISH(bl);
+  }
+  void decode(ceph::buffer::list::const_iterator& bl) {
+    DECODE_START(1, bl);
+    decode(incarnation, bl);
+    decode(handle, bl);
+    DECODE_FINISH(bl);
+  }
+};
+WRITE_CLASS_ENCODER(cls_rgw_fsio_handle)
+
 struct cls_rgw_fsio_publishing {
-  uint64_t incarnation = 0;
+  cls_rgw_fsio_handle publisher;  // a writer, or a fenced finalize's finalizer
   std::string instance;
   std::string token;
   uint64_t olh_epoch = 0;
 
   void encode(ceph::buffer::list& bl) const {
     ENCODE_START(1, 1, bl);
-    encode(incarnation, bl);
+    encode(publisher, bl);
     encode(instance, bl);
     encode(token, bl);
     encode(olh_epoch, bl);
@@ -141,7 +168,7 @@ struct cls_rgw_fsio_publishing {
   }
   void decode(ceph::buffer::list::const_iterator& bl) {
     DECODE_START(1, bl);
-    decode(incarnation, bl);
+    decode(publisher, bl);
     decode(instance, bl);
     decode(token, bl);
     decode(olh_epoch, bl);
@@ -237,7 +264,7 @@ struct cls_rgw_fsio_hdr {
   std::string cur_instance;
   std::vector<cls_rgw_fsio_chunk_set> chunk_sets;
   std::vector<cls_rgw_fsio_fenced_finalize> fenced_finalizes;
-  std::optional<uint64_t> rename_hold;
+  std::optional<cls_rgw_fsio_handle> rename_hold;  // the renamer (§6.3, Z4)
 
   cls_rgw_fsio_id draw() { return cls_rgw_fsio_id{next_counter++, nonce}; }
   cls_rgw_fsio_chunk_set* find(const cls_rgw_fsio_id& id);
@@ -277,12 +304,14 @@ struct cls_rgw_fsio_counts {
   uint32_t readers = 0;
   uint32_t writers = 0;
   std::string writer_identity;
+  uint64_t joined_seq = 0;     // the header's counter at the writer join (Z14)
 
   void encode(ceph::buffer::list& bl) const {
     ENCODE_START(1, 1, bl);
     encode(readers, bl);
     encode(writers, bl);
     encode(writer_identity, bl);
+    encode(joined_seq, bl);
     ENCODE_FINISH(bl);
   }
   void decode(ceph::buffer::list::const_iterator& bl) {
@@ -290,22 +319,45 @@ struct cls_rgw_fsio_counts {
     decode(readers, bl);
     decode(writers, bl);
     decode(writer_identity, bl);
+    decode(joined_seq, bl);
     DECODE_FINISH(bl);
   }
 };
 WRITE_CLASS_ENCODER(cls_rgw_fsio_counts)
 
-struct cls_rgw_fsio_opens {
+/* one handle's FSIO opens on the head */
+struct cls_rgw_fsio_handle_opens {
+  uint64_t last_seq = 0;       // the newest counted call applied (Z22)
   std::map<cls_rgw_fsio_id, cls_rgw_fsio_counts> chunk_sets;
 
   void encode(ceph::buffer::list& bl) const {
     ENCODE_START(1, 1, bl);
+    encode(last_seq, bl);
     encode(chunk_sets, bl);
     ENCODE_FINISH(bl);
   }
   void decode(ceph::buffer::list::const_iterator& bl) {
     DECODE_START(1, bl);
+    decode(last_seq, bl);
     decode(chunk_sets, bl);
+    DECODE_FINISH(bl);
+  }
+};
+WRITE_CLASS_ENCODER(cls_rgw_fsio_handle_opens)
+
+/* user.rgw.fsio.m.<incarnation>:  one gateway incarnation's FSIO opens,
+ * by handle (Z4) */
+struct cls_rgw_fsio_opens {
+  std::map<uint64_t, cls_rgw_fsio_handle_opens> handles;
+
+  void encode(ceph::buffer::list& bl) const {
+    ENCODE_START(1, 1, bl);
+    encode(handles, bl);
+    ENCODE_FINISH(bl);
+  }
+  void decode(ceph::buffer::list::const_iterator& bl) {
+    DECODE_START(1, bl);
+    decode(handles, bl);
     DECODE_FINISH(bl);
   }
 };
@@ -343,7 +395,13 @@ struct cls_rgw_fsio_head {
 
   /* §2.2:  no ID tag and no OLH info */
   bool tracking_only() const { return exists && id_tag.empty() && !olh; }
+  /* every handle's counts bound to cs, summed */
   cls_rgw_fsio_counts bound(const cls_rgw_fsio_id& cs) const;
+  /* one handle's opens, or null */
+  cls_rgw_fsio_handle_opens* find(const cls_rgw_fsio_handle& c);
+  /* one handle's counts on cs, created if absent */
+  cls_rgw_fsio_counts& counts(const cls_rgw_fsio_handle& c,
+			      const cls_rgw_fsio_id& cs);
 
   void encode(ceph::buffer::list& bl) const {
     ENCODE_START(1, 1, bl);
@@ -393,20 +451,20 @@ WRITE_CLASS_ENCODER(cls_rgw_fsio_replaced)
 
 /* user.rgw.fsio.ocnt:  the instance-head open count (§2.5) */
 struct cls_rgw_fsio_ocnt {
-  std::set<uint64_t> incarnations;     // with FSIO opens bound to this instance
+  std::set<cls_rgw_fsio_handle> holders;  // handles with FSIO opens bound here (Z4)
   std::vector<cls_rgw_fsio_replaced> deferred;
   bool removed = false;                // the version itself is gone
 
   void encode(ceph::buffer::list& bl) const {
     ENCODE_START(1, 1, bl);
-    encode(incarnations, bl);
+    encode(holders, bl);
     encode(deferred, bl);
     encode(removed, bl);
     ENCODE_FINISH(bl);
   }
   void decode(ceph::buffer::list::const_iterator& bl) {
     DECODE_START(1, bl);
-    decode(incarnations, bl);
+    decode(holders, bl);
     decode(deferred, bl);
     decode(removed, bl);
     DECODE_FINISH(bl);
@@ -443,8 +501,8 @@ WRITE_CLASS_ENCODER(cls_rgw_fsio_instance_head)
 /* a CLONE_TO the method issues before it touches the head (§3) */
 struct cls_rgw_fsio_clone {
   cls_rgw_fsio_id r;
-  char role = 'g';
-  cls_rgw_fsio_gen record;   // set_attrs, for role 'g'
+  char role = 'G';           // sorts before 'a' and 'd':  a clone source (§2.7)
+  cls_rgw_fsio_gen record;   // set_attrs, for role 'G'
   ceph::buffer::list pm;     // set_attrs, for role 'a':  the pseudo-manifest (§2.4)
 };
 
@@ -458,7 +516,7 @@ namespace cls_rgw_fsio {
 using expired_t = std::set<uint64_t>;
 
 struct join_in {
-  uint64_t incarnation = 0;
+  cls_rgw_fsio_handle caller;
   bool writer = false;
   uint64_t nonce = 0;
   uint64_t counter_seed = 0;
@@ -472,10 +530,10 @@ struct join_out {
 int join(cls_rgw_fsio_head& h, const join_in& in, join_out& out,
 	 cls_rgw_fsio_effects& fx);
 
-int ready(cls_rgw_fsio_head& h, uint64_t incarnation,
+int ready(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& caller,
 	  const cls_rgw_fsio_id& cs, uint64_t extent);
 
-int extend(cls_rgw_fsio_head& h, uint64_t incarnation,
+int extend(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& caller,
 	   const cls_rgw_fsio_id& cs, uint64_t extent);
 
 /* versioned:  the publish the last writer's transition records (§4.2) */
@@ -487,16 +545,17 @@ struct publish_intent {
 
 struct leave_out {
   bool publishing = false;
+  bool abandoned = false;           // a constructing shadow, its constructor gave up (§3.4)
   uint64_t olh_epoch = 0;           // versioned:  recorded at the transition
   std::string instance;             // versioned:  the version the open read (§2.5)
   std::optional<cls_rgw_fsio_id> drained;
 };
-int leave(cls_rgw_fsio_head& h, uint64_t incarnation,
+int leave(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& caller,
 	  const cls_rgw_fsio_id& cs, bool writer, const expired_t& expired,
 	  leave_out& out, cls_rgw_fsio_effects& fx,
 	  const publish_intent* intent = nullptr);
 
-int rebind(cls_rgw_fsio_head& h, uint64_t incarnation,
+int rebind(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& caller,
 	   const cls_rgw_fsio_id& from, const cls_rgw_fsio_id& to,
 	   uint32_t readers);
 
@@ -506,7 +565,7 @@ struct replace_in {
   replace_mode mode = replace_mode::SUPERSEDE;
   cls_rgw_fsio_id r;
   std::string expected_id_tag;      // DELETE
-  uint64_t incarnation = 0;         // PUBLISH:  the publisher
+  cls_rgw_fsio_handle caller;       // PUBLISH:  the publisher
   cls_rgw_fsio_id shadow;           // PUBLISH
   bool versioned = false;           // PUBLISH:  the standalone call on the OLH
   bool complete = false;            // versioned PUBLISH:  for a dead publisher
@@ -520,12 +579,13 @@ struct replace_out {
 int replace_head(cls_rgw_fsio_head& h, const replace_in& in, replace_out& out,
 		 cls_rgw_fsio_effects& fx);
 
-int publish_release(cls_rgw_fsio_head& h, const cls_rgw_fsio_id& cs);
+int publish_release(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& caller,
+		    const cls_rgw_fsio_id& cs);
 
 int forget(cls_rgw_fsio_head& h, const cls_rgw_fsio_id& cs,
 	   cls_rgw_fsio_effects& fx);
 
-int fenced_finalize(cls_rgw_fsio_head& h, uint64_t finalizer,
+int fenced_finalize(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& finalizer,
 		    const cls_rgw_fsio_id& from, const expired_t& expired,
 		    cls_rgw_fsio_id& to, const publish_intent* intent = nullptr,
 		    const std::string& aborted = {});
@@ -533,7 +593,8 @@ int fenced_finalize(cls_rgw_fsio_head& h, uint64_t finalizer,
 struct expire_out {
   std::vector<cls_rgw_fsio_id> drained;
 };
-int expire(cls_rgw_fsio_head& h, uint64_t caller, const expired_t& expired,
+int expire(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& caller,
+	   const expired_t& expired,
 	   const std::optional<cls_rgw_fsio_id>& clear, expire_out& out,
 	   cls_rgw_fsio_effects& fx);
 
@@ -547,8 +608,8 @@ struct ocnt_drain {
   bool removed = false;
 };
 
-int ocnt_add(cls_rgw_fsio_instance_head& ih, uint64_t incarnation);
-int ocnt_remove(cls_rgw_fsio_instance_head& ih, uint64_t incarnation,
+int ocnt_add(cls_rgw_fsio_instance_head& ih, const cls_rgw_fsio_handle& holder);
+int ocnt_remove(cls_rgw_fsio_instance_head& ih, const cls_rgw_fsio_handle& holder,
 		ocnt_drain& out);
 int ocnt_expire(cls_rgw_fsio_instance_head& ih, const expired_t& expired,
 		ocnt_drain& out);

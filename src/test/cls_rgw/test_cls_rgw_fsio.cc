@@ -15,7 +15,11 @@ using state = cls_rgw_fsio_cs_state;
 
 namespace {
 
-constexpr uint64_t GW1 = 1, GW2 = 2, GW3 = 3, EXPIRER = 100;
+/* incarnations, and their handles (design §2.7, Z4):  each gateway's
+ * handle 1;  the expirer's handle 0 */
+constexpr uint64_t I1 = 1, I2 = 2, I3 = 3, IX = 100;
+constexpr cls_rgw_fsio_handle GW1{I1, 1}, GW2{I2, 1}, GW3{I3, 1},
+  EXPIRER{IX, 0};
 
 cls_rgw_fsio_head head(const std::string& manifest)
 {
@@ -27,7 +31,7 @@ cls_rgw_fsio_head head(const std::string& manifest)
 }
 
 /* a writer's join that constructs a shadow, then fsio_ready */
-cls_rgw_fsio_id construct(cls_rgw_fsio_head& h, uint64_t inc)
+cls_rgw_fsio_id construct(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& inc)
 {
   fsio::join_out out;
   cls_rgw_fsio_effects fx;
@@ -38,7 +42,7 @@ cls_rgw_fsio_id construct(cls_rgw_fsio_head& h, uint64_t inc)
 }
 
 /* a reader's join, bound to the published chunk set */
-cls_rgw_fsio_id join_reader(cls_rgw_fsio_head& h, uint64_t inc,
+cls_rgw_fsio_id join_reader(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& inc,
 			    const std::string& instance = {})
 {
   fsio::join_out out;
@@ -48,7 +52,7 @@ cls_rgw_fsio_id join_reader(cls_rgw_fsio_head& h, uint64_t inc,
 }
 
 /* the last writer's leave:  the shadow goes publishing */
-void leave_writer(cls_rgw_fsio_head& h, uint64_t inc,
+void leave_writer(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& inc,
 		  const cls_rgw_fsio_id& cs)
 {
   fsio::leave_out out;
@@ -57,13 +61,13 @@ void leave_writer(cls_rgw_fsio_head& h, uint64_t inc,
   EXPECT_TRUE(out.publishing);
 }
 
-int publish(cls_rgw_fsio_head& h, uint64_t inc, const cls_rgw_fsio_id& cs,
+int publish(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& inc, const cls_rgw_fsio_id& cs,
 	    uint64_t r = 1000)
 {
   fsio::replace_in in;
   in.mode = fsio::replace_mode::PUBLISH;
   in.r = cls_rgw_fsio_id{r, 0};
-  in.incarnation = inc;
+  in.caller = inc;
   in.shadow = cs;
   fsio::replace_out out;
   cls_rgw_fsio_effects fx;
@@ -71,7 +75,7 @@ int publish(cls_rgw_fsio_head& h, uint64_t inc, const cls_rgw_fsio_id& cs,
 }
 
 /* a writer join constructs a new shadow:  cur_shadow is clear */
-cls_rgw_fsio_id join_writer_constructs(cls_rgw_fsio_head& h, uint64_t inc)
+cls_rgw_fsio_id join_writer_constructs(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& inc)
 {
   fsio::join_out out;
   cls_rgw_fsio_effects fx;
@@ -128,7 +132,7 @@ TEST(cls_rgw_fsio, W5_finalize_after_zombie_publish_conflicts)
   ASSERT_EQ(0, publish(h, GW1, s));
   cls_rgw_fsio_id to;
   EXPECT_EQ(-CLS_RGW_ERR_FSIO_CONFLICT,
-	    fsio::fenced_finalize(h, EXPIRER, s, {GW1}, to));
+	    fsio::fenced_finalize(h, EXPIRER, s, {I1}, to));
   /* a published shadow with nothing bound has no entry (§2.2);  the
    * finalize must not have created one, nor a record */
   EXPECT_FALSE(h.hdr && h.hdr->find(s));
@@ -149,7 +153,7 @@ void w5_finalize_of_published_shadow_with_follower()
   ASSERT_EQ(state::PUBLISHED, h.hdr->find(s)->state);
   cls_rgw_fsio_id to;
   EXPECT_EQ(-CLS_RGW_ERR_FSIO_CONFLICT,
-	    fsio::fenced_finalize(h, EXPIRER, s, {GW1}, to));
+	    fsio::fenced_finalize(h, EXPIRER, s, {I1}, to));
   const auto* e = h.hdr->find(s);
   ASSERT_TRUE(e);
   EXPECT_EQ(state::PUBLISHED, e->state);
@@ -174,15 +178,15 @@ void w6_expire_takes_over_zombie_publish()
   {
     fsio::expire_out out;
     cls_rgw_fsio_effects fx;
-    ASSERT_EQ(0, fsio::expire(h, EXPIRER, {GW1}, std::nullopt, out, fx));
+    ASSERT_EQ(0, fsio::expire(h, EXPIRER, {I1}, std::nullopt, out, fx));
   }
   const auto* e = h.hdr->find(s);
   ASSERT_TRUE(e && e->publishing);
   EXPECT_EQ(state::PUBLISHING, e->state);          // still frozen
-  EXPECT_EQ(EXPIRER, e->publishing->incarnation);
+  EXPECT_EQ(EXPIRER, e->publishing->publisher);
   EXPECT_EQ(-CLS_RGW_ERR_FSIO_CONFLICT, publish(h, GW1, s));
   cls_rgw_fsio_id to;
-  EXPECT_EQ(0, fsio::fenced_finalize(h, EXPIRER, s, {GW1}, to));
+  EXPECT_EQ(0, fsio::fenced_finalize(h, EXPIRER, s, {I1}, to));
 }
 
 TEST(cls_rgw_fsio, W6_expire_takes_over_zombie_publish)
@@ -198,7 +202,7 @@ void w3_finalize_publishes_to()
   auto h = head("C0");
   auto s = construct(h, GW1);            // ready, GW1's writer bound
   cls_rgw_fsio_id to;
-  ASSERT_EQ(0, fsio::fenced_finalize(h, EXPIRER, s, {GW1}, to));
+  ASSERT_EQ(0, fsio::fenced_finalize(h, EXPIRER, s, {I1}, to));
   const auto* t = h.hdr->find(to);
   ASSERT_TRUE(t);
   EXPECT_EQ(state::PUBLISHING, t->state);
@@ -218,15 +222,15 @@ TEST(cls_rgw_fsio, W3_finalize_publishes_to)
  * dead one's publish fails, and a live one's call returns BUSY */
 void w3_resumed_finalize_takes_over()
 {
-  constexpr uint64_t EXPIRER2 = 101, EXPIRER3 = 102;
+  constexpr cls_rgw_fsio_handle EXPIRER2{101, 0}, EXPIRER3{102, 0};
   auto h = head("C0");
   auto s = construct(h, GW1);
   cls_rgw_fsio_id to, to2, to3;
-  ASSERT_EQ(0, fsio::fenced_finalize(h, EXPIRER, s, {GW1}, to));
-  ASSERT_EQ(0, fsio::fenced_finalize(h, EXPIRER2, s, {GW1, EXPIRER}, to2));
+  ASSERT_EQ(0, fsio::fenced_finalize(h, EXPIRER, s, {I1}, to));
+  ASSERT_EQ(0, fsio::fenced_finalize(h, EXPIRER2, s, {I1, IX}, to2));
   EXPECT_EQ(to, to2);
   EXPECT_EQ(-CLS_RGW_ERR_FSIO_BUSY,                 // EXPIRER2 is alive
-	    fsio::fenced_finalize(h, EXPIRER3, s, {GW1}, to3));
+	    fsio::fenced_finalize(h, EXPIRER3, s, {I1}, to3));
   EXPECT_EQ(-CLS_RGW_ERR_FSIO_CONFLICT, publish(h, EXPIRER, to));
   EXPECT_EQ(0, publish(h, EXPIRER2, to));
 }
@@ -315,7 +319,7 @@ void cur_shadow_abandon_clears_it()
   ASSERT_EQ(0, fsio::join(h, {GW1, true, 1, 10, {}}, out, fx));  // GW1 dies
   fsio::expire_out eout;
   cls_rgw_fsio_effects efx;
-  ASSERT_EQ(0, fsio::expire(h, EXPIRER, {GW1}, out.bound, eout, efx));
+  ASSERT_EQ(0, fsio::expire(h, EXPIRER, {I1}, out.bound, eout, efx));
   ASSERT_TRUE(h.hdr);
   EXPECT_FALSE(h.hdr->cur_shadow);
 }
@@ -323,6 +327,67 @@ void cur_shadow_abandon_clears_it()
 TEST(cls_rgw_fsio, cur_shadow_abandon_clears_it)
 {
   cur_shadow_abandon_clears_it();
+}
+
+/* W15:  a constructor that gives up abandons its shadow with its leave,
+ * its GC entry already sent (design §3.4) */
+void w15_constructor_abandons()
+{
+  auto h = head("C0");
+  auto s = join_writer_constructs(h, GW1);
+  fsio::leave_out out;
+  cls_rgw_fsio_effects fx;
+  ASSERT_EQ(0, fsio::leave(h, GW1, s, true, {}, out, fx));
+  EXPECT_TRUE(out.abandoned);
+  EXPECT_FALSE(out.publishing);
+  EXPECT_TRUE(!h.hdr || !h.hdr->find(s));
+  EXPECT_TRUE(!h.hdr || !h.hdr->cur_shadow);
+  EXPECT_TRUE(h.opens.empty());
+}
+
+TEST(cls_rgw_fsio, W15_constructor_abandons)
+{
+  w15_constructor_abandons();
+}
+
+/* Z4:  two handles of one incarnation are two holders:  one's last leave
+ * does not freeze the shadow while the other still writes (design §2.7) */
+TEST(cls_rgw_fsio, two_handles_one_incarnation)
+{
+  constexpr cls_rgw_fsio_handle GW1B{I1, 2};
+  auto h = head("C0");
+  auto s = construct(h, GW1);
+  fsio::join_out out;
+  cls_rgw_fsio_effects fx;
+  ASSERT_EQ(0, fsio::join(h, {GW1B, true, 1, 10, {}}, out, fx));
+  ASSERT_EQ(s, out.bound);
+  ASSERT_EQ(1u, h.opens.size());                   // one record, two handles
+  EXPECT_EQ(2u, h.opens[I1].handles.size());
+  fsio::leave_out lout;
+  ASSERT_EQ(0, fsio::leave(h, GW1, s, true, {}, lout, fx));
+  EXPECT_FALSE(lout.publishing);
+  EXPECT_EQ(state::READY, h.hdr->find(s)->state);
+  leave_writer(h, GW1B, s);                        // the last writer
+  EXPECT_EQ(state::PUBLISHING, h.hdr->find(s)->state);
+  EXPECT_EQ(GW1B, h.hdr->find(s)->publishing->publisher);
+}
+
+/* W20:  only the recorded publisher may release a publishing shadow
+ * (design §3) */
+void w20_release_requires_the_publisher()
+{
+  auto h = head("C0");
+  auto s = construct(h, GW1);
+  leave_writer(h, GW1, s);
+  EXPECT_EQ(-CLS_RGW_ERR_FSIO_CONFLICT, fsio::publish_release(h, GW2, s));
+  EXPECT_EQ(state::PUBLISHING, h.hdr->find(s)->state);
+  EXPECT_EQ(0, fsio::publish_release(h, GW1, s));
+  EXPECT_EQ(state::READY, h.hdr->find(s)->state);
+}
+
+TEST(cls_rgw_fsio, W20_release_requires_the_publisher)
+{
+  w20_release_requires_the_publisher();
 }
 
 /* versioned transitions (design §2.5, §3.1, §3.4, §3.5, §4.2):  each one's
@@ -420,9 +485,9 @@ TEST(cls_rgw_fsio_versioned, ocnt_expire_removes_only_the_dead)
   cls_rgw_fsio_effects fx;
   ASSERT_EQ(0, fsio::remove_version(ih, cls_rgw_fsio_id{3000, 0}, ro, fx));
   fsio::ocnt_drain d;
-  ASSERT_EQ(0, fsio::ocnt_expire(ih, {GW1}, d));
+  ASSERT_EQ(0, fsio::ocnt_expire(ih, {I1}, d));
   EXPECT_FALSE(d.drained);
-  ASSERT_EQ(0, fsio::ocnt_expire(ih, {GW2}, d));
+  ASSERT_EQ(0, fsio::ocnt_expire(ih, {I2}, d));
   EXPECT_TRUE(d.drained);
 }
 
@@ -486,13 +551,13 @@ TEST(cls_rgw_fsio_versioned, publish_sets_the_shadow_published_at_its_instance)
   fsio::replace_in in;
   in.mode = fsio::replace_mode::PUBLISH;
   in.versioned = true;
-  in.incarnation = GW2;                            // not the publisher
+  in.caller = GW2;                            // not the publisher
   in.shadow = out.bound;
   fsio::replace_out rout;
   cls_rgw_fsio_effects rfx;
   EXPECT_EQ(-CLS_RGW_ERR_FSIO_CONFLICT,
 	    fsio::replace_head(h, in, rout, rfx));
-  in.incarnation = GW1;
+  in.caller = GW1;
   ASSERT_EQ(0, fsio::replace_head(h, in, rout, rfx));
   EXPECT_TRUE(rfx.clones.empty());                 // nothing superseded
   EXPECT_FALSE(h.hdr->cur_shadow);
@@ -515,13 +580,13 @@ TEST(cls_rgw_fsio_versioned, complete_admits_only_a_dead_publisher)
   in.mode = fsio::replace_mode::PUBLISH;
   in.versioned = true;
   in.complete = true;
-  in.incarnation = EXPIRER;
+  in.caller = EXPIRER;
   in.shadow = out.bound;
   fsio::replace_out rout;
   cls_rgw_fsio_effects rfx;
   EXPECT_EQ(-CLS_RGW_ERR_FSIO_CONFLICT,
 	    fsio::replace_head(h, in, rout, rfx));    // GW1 is alive
-  in.expired = {GW1};
+  in.expired = {I1};
   ASSERT_EQ(0, fsio::replace_head(h, in, rout, rfx));
   const auto* e = h.hdr->find(out.bound);
   ASSERT_TRUE(e);
@@ -599,12 +664,12 @@ void v1_finalize_requires_the_aborted_claim()
   fsio::publish_intent to_intent{"I3", "tok3", 78};
   cls_rgw_fsio_id to;
   EXPECT_EQ(-CLS_RGW_ERR_FSIO_CONFLICT,
-	    fsio::fenced_finalize(h, EXPIRER, out.bound, {GW1}, to,
+	    fsio::fenced_finalize(h, EXPIRER, out.bound, {I1}, to,
 				  &to_intent));            // not aborted
   EXPECT_EQ(-CLS_RGW_ERR_FSIO_CONFLICT,
-	    fsio::fenced_finalize(h, EXPIRER, out.bound, {GW1}, to,
+	    fsio::fenced_finalize(h, EXPIRER, out.bound, {I1}, to,
 				  &to_intent, "I9"));      // another claim
-  EXPECT_EQ(0, fsio::fenced_finalize(h, EXPIRER, out.bound, {GW1}, to,
+  EXPECT_EQ(0, fsio::fenced_finalize(h, EXPIRER, out.bound, {I1}, to,
 				     &to_intent, "I2"));
 }
 
@@ -630,20 +695,20 @@ void v2_complete_after_takeover_removes_the_dead_writer()
   {
     fsio::expire_out eout;
     cls_rgw_fsio_effects efx;
-    ASSERT_EQ(0, fsio::expire(h, EXPIRER, {GW1}, std::nullopt, eout, efx));
+    ASSERT_EQ(0, fsio::expire(h, EXPIRER, {I1}, std::nullopt, eout, efx));
   }
   fsio::replace_in in;
   in.mode = fsio::replace_mode::PUBLISH;
   in.versioned = true;
   in.complete = true;
-  in.incarnation = EXPIRER;
+  in.caller = EXPIRER;
   in.shadow = out.bound;
-  in.expired = {GW1, EXPIRER};
+  in.expired = {I1, IX};
   fsio::replace_out rout;
   cls_rgw_fsio_effects rfx;
   ASSERT_EQ(0, fsio::replace_head(h, in, rout, rfx));
   EXPECT_EQ(0u, h.bound(out.bound).writers);
-  EXPECT_FALSE(h.opens.count(GW1));
+  EXPECT_FALSE(h.opens.count(I1));
 }
 
 TEST(cls_rgw_fsio_versioned, V2_complete_after_takeover_removes_the_dead_writer)
@@ -726,6 +791,9 @@ TEST(cls_rgw_fsio, each_check_is_detected)
     {cls_rgw_fsio_check::NULL_IS_HEAD, null_is_the_heads_content},
     {cls_rgw_fsio_check::NULL_REMOVAL_RETIRES,
      null_removal_retires_the_head_chunk_set},
+    {cls_rgw_fsio_check::W15_CONSTRUCTOR_MAY_ABANDON, w15_constructor_abandons},
+    {cls_rgw_fsio_check::W20_RELEASE_CHECKS_PUBLISHER,
+     w20_release_requires_the_publisher},
   };
   for (const auto& [check, body] : table) {
     fsio::skipped_check = check;
