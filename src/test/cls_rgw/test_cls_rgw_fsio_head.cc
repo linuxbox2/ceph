@@ -214,9 +214,11 @@ TEST_F(FsioHead, CloneRecordsTheTailTag)
   const auto head = make_head(key);
   {
     ObjectWriteOperation op;
-    bufferlist tt;
+    bufferlist tt, rc;
     tt.append("tail0");
+    rc.append("tags");
     op.setxattr("user.rgw.tail_tag", tt);
+    op.setxattr("refcount", rc);     // a head a copy or dedup referenced
     ASSERT_EQ(0, ioctx.operate(head, &op));
   }
   join(head, 1, false);
@@ -235,6 +237,11 @@ TEST_F(FsioHead, CloneRecordsTheTailTag)
   decode(rec, it);
   EXPECT_EQ("tail0", rec.gc_tag);
   EXPECT_EQ("C0", rec.manifest.to_str());
+  /* A7, A8:  the clone drops the head's manifest (its record carries it)
+   * and cls_refcount's tags (X16) */
+  bufferlist m;
+  EXPECT_EQ(-ENODATA, io.getxattr(leaf(key, 1002), "user.rgw.manifest", m));
+  EXPECT_EQ(-ENODATA, io.getxattr(leaf(key, 1002), "refcount", m));
 }
 
 /* a DELETE with a reader open:  a tracking-only head, no ID tag or

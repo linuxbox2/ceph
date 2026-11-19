@@ -27,6 +27,7 @@ static constexpr std::string_view OPENS = "user.rgw.fsio.m.";         // + the i
 static constexpr std::string_view OCNT = "user.rgw.fsio.ocnt";
 static constexpr std::string_view GEN = "user.rgw.fsio.gen";
 static constexpr std::string_view PM = "user.rgw.fsio.pm";
+static constexpr std::string_view REFCOUNT = "refcount";       // cls_refcount's REFCOUNT_ATTR
 
 std::string opens_name(uint64_t incarnation)
 {
@@ -239,7 +240,11 @@ int apply(cls_method_context_t hctx, const std::string& marker,
     } else if (c.role == 'a' && c.pm.length()) {
       set[std::string(PM)] = c.pm;
     }
-    r = cls_cxx_clone_to(hctx, dest, {std::string(FSIO_PREFIX)}, set);
+    /* §2.3, §2.4, plan §6.7:  a clone drops FSIO's records, the head's
+     * manifest (its record carries it) and cls_refcount's tags (X16) */
+    r = cls_cxx_clone_to(hctx, dest,
+			 {std::string(FSIO_PREFIX), std::string(MANIFEST),
+			  std::string(REFCOUNT)}, set);
     if (r < 0 && r != -EEXIST) {   // EEXIST:  a resend's, done (§2.7)
       return r;
     }

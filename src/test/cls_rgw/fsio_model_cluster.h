@@ -324,8 +324,10 @@ public:
       Obj want_clone;
       want_clone.exists = true;
       want_clone.data = pre.data;
+      /* a clone drops FSIO's records, the manifest and refcount (§2.3,
+       * §2.4) */
       for (const auto& [k, v] : pre.attrs) {
-	if (!k.starts_with(FSIO_PREFIX)) {
+	if (!k.starts_with(FSIO_PREFIX) && k != MANIFEST && k != "refcount") {
 	  want_clone.attrs[k] = v;
 	}
       }
