@@ -364,6 +364,7 @@ class RGWRados
   int open_lc_pool_ctx(const DoutPrefixProvider *dpp);
   int open_restore_pool_ctx(const DoutPrefixProvider *dpp);
   int open_restore_pool_neo_ctx(const DoutPrefixProvider *dpp);
+  int open_log_pool_neo_ctx(const DoutPrefixProvider *dpp);
   int open_objexp_pool_ctx(const DoutPrefixProvider *dpp);
   int open_reshard_pool_ctx(const DoutPrefixProvider *dpp);
   int open_notif_pool_ctx(const DoutPrefixProvider *dpp);
@@ -471,6 +472,7 @@ protected:
   librados::IoCtx lc_pool_ctx;        // .rgw.lc
   librados::IoCtx restore_pool_ctx;        // .rgw.restore
   neorados::IOContext restore_pool_neo_ctx;        // .rgw.restore 
+  neorados::IOContext log_pool_neo_ctx;            // the FSIO open hints
   librados::IoCtx objexp_pool_ctx;
   librados::IoCtx reshard_pool_ctx;
   librados::IoCtx notif_pool_ctx;     // .rgw.notif
@@ -626,6 +628,10 @@ public:
    * use fsio_replace_head only where this holds */
   bool fsio_enabled(const DoutPrefixProvider *dpp, const RGWBucketInfo& info,
                     optional_yield y);
+  /* FSIO_RADOS_DESIGN.md §6.5:  -ENOTEMPTY while an FSIO open hint names
+   * the bucket, in a bucket that serves FSIO */
+  int fsio_check_no_hints(const DoutPrefixProvider *dpp,
+                          const RGWBucketInfo& info, optional_yield y);
   void get_max_aligned_size(uint64_t size, uint64_t alignment, uint64_t *max_size);
   int get_max_chunk_size(const rgw_pool& pool, uint64_t *max_chunk_size, const DoutPrefixProvider *dpp, uint64_t *palignment = nullptr);
   int get_max_chunk_size(const rgw_placement_rule& placement_rule, const rgw_obj& obj, uint64_t *max_chunk_size, const DoutPrefixProvider *dpp, uint64_t *palignment = nullptr);

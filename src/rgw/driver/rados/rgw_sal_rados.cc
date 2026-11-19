@@ -405,11 +405,20 @@ int RadosBucket::remove(const DoutPrefixProvider* dpp,
     return ret;
   }
 
+  const bool own_bucket = store->get_zone()->get_zonegroup().get_id() == info.zonegroup;
+
+  /* a purge skips check_bucket_empty:  the FSIO open hints first, before
+   * anything is deleted (FSIO_RADOS_DESIGN.md §6.5) */
+  if (delete_children && own_bucket) {
+    ret = store->getRados()->fsio_check_no_hints(dpp, info, y);
+    if (ret < 0) {
+      return ret;
+    }
+  }
+
   ListParams params;
   params.list_versions = true;
   params.allow_unordered = true;
-
-  const bool own_bucket = store->get_zone()->get_zonegroup().get_id() == info.zonegroup;
 
   ListResults results;
   results.is_truncated = own_bucket; // if we don't have the index, we're done
@@ -533,6 +542,12 @@ int RadosBucket::remove_bypass_gc(int concurrent_max, bool
   ret = load_bucket(dpp, y);
   if (ret < 0)
     return ret;
+
+  /* the FSIO open hints first, before anything is deleted (§6.5) */
+  ret = store->getRados()->fsio_check_no_hints(dpp, info, y);
+  if (ret < 0) {
+    return ret;
+  }
 
   const auto& index = info.get_current_index();
   ret = read_stats(dpp, y, index, RGW_NO_SHARD, &bucket_ver, &master_ver, stats, NULL);

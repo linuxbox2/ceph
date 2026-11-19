@@ -54,6 +54,8 @@
 #include "osd/osd_types.h"
 
 #include "neorados/cls/version.h"
+#include "neorados/cls/rgw_fsio.h"
+#include "rgw_fsio_hints.h"
 
 #include "rgw_tools.h"
 #include "rgw_coroutine.h"
@@ -1346,6 +1348,10 @@ int RGWRados::init_complete(const DoutPrefixProvider *dpp, optional_yield y, rgw
   ret = open_restore_pool_neo_ctx(dpp);
   if (ret < 0)
     return ret;
+
+  ret = open_log_pool_neo_ctx(dpp);
+  if (ret < 0)
+    return ret;
   
   ret = open_objexp_pool_ctx(dpp);
   if (ret < 0)
@@ -1613,6 +1619,21 @@ int RGWRados::open_lc_pool_ctx(const DoutPrefixProvider *dpp)
 int RGWRados::open_restore_pool_ctx(const DoutPrefixProvider *dpp)
 {
   return rgw_init_ioctx(dpp, get_rados_handle(), svc.zone->get_zone_params().restore_pool, restore_pool_ctx, true, true);
+}
+
+int RGWRados::open_log_pool_neo_ctx(const DoutPrefixProvider *dpp)
+{
+  maybe_warn_about_blocking(dpp);
+  try {
+    log_pool_neo_ctx = rgw::init_iocontext(dpp, driver->get_neorados(),
+                                           svc.zone->get_zone_params().log_pool,
+                                           rgw::create, ceph::async::use_blocked);
+  } catch (const boost::system::system_error& e) {
+    ldpp_dout(dpp, -1) << __PRETTY_FUNCTION__ << ": Failed to initialize ioctx: "
+                       << e.what() << ", for log pool" << dendl;
+    return ceph::from_error_code(e.code());
+  }
+  return 0;
 }
 
 int RGWRados::open_restore_pool_neo_ctx(const DoutPrefixProvider *dpp)
@@ -6441,6 +6462,59 @@ int RGWRados::check_bucket_empty(const DoutPrefixProvider *dpp, RGWBucketInfo& b
     }
   } while (is_truncated);
 
+  return fsio_check_no_hints(dpp, bucket_info, y);
+}
+
+int RGWRados::fsio_check_no_hints(const DoutPrefixProvider *dpp,
+                                  const RGWBucketInfo& info, optional_yield y)
+{
+  if (!fsio_enabled(dpp, info, y)) {
+    return 0;
+  }
+  auto& neo = driver->get_neorados();
+  const auto shards = static_cast<uint32_t>(
+    cct->_conf.get_val<uint64_t>("rgw_fsio_open_hints_num_shards"));
+  for (uint32_t i = 0; i < shards; ++i) {
+    const auto oid = rgw::fsio::open_hint_shard_oid(i);
+    cls_rgw_fsio_hint_list_op lop;
+    lop.max = 1;
+    lop.bucket = info.bucket;
+    for (;;) {
+      cls_rgw_fsio_hint_list_ret ret;
+      neorados::ReadOp op;
+      op.exec(neorados::cls::rgw_fsio::open_hint_list(lop, &ret));
+      boost::system::error_code ec;
+      if (y) {
+        neo.execute(oid, log_pool_neo_ctx, std::move(op), nullptr,
+                    y.get_yield_context()[ec]);
+      } else {
+        maybe_warn_about_blocking(dpp);
+        neo.execute(oid, log_pool_neo_ctx, std::move(op), nullptr,
+                    ceph::async::use_blocked[ec]);
+      }
+      if (ec == boost::system::errc::no_such_file_or_directory) {
+        break;                 // a shard no hint was ever written to
+      }
+      if (ec) {
+        ldpp_dout(dpp, 0) << "ERROR: FSIO: listing " << oid << " for bucket "
+                          << info.bucket << " returned " << ec.message()
+                          << dendl;
+        return ceph::from_error_code(ec);
+      }
+      if (!ret.hints.empty()) {
+        const auto& h = ret.hints.front();
+        ldpp_dout(dpp, 1) << "FSIO: bucket " << info.bucket
+                          << " not empty:  " << oid << " has a hint on "
+                          << h.key << " for incarnation " << std::hex
+                          << h.incarnation << std::dec << dendl;
+        return -ENOTEMPTY;
+      }
+      if (!ret.truncated) {
+        break;
+      }
+      lop.marker = ret.marker;
+    }
+  }
   return 0;
 }
 

@@ -9,11 +9,13 @@
  * today.  In a versioned bucket, a version's removal under an open
  * count resets its instance head and keeps its tail (§2.5);  the null
  * version's removal under a reader retires it with a leaf clone and
- * keeps the plain head as the OLH (§2.5a).  With
+ * keeps the plain head as the OLH (§2.5a).  An FSIO open hint naming a
+ * bucket blocks its deletion, and both purges before they delete
+ * anything (§6.5).  With
  * --fsio-off (the feature disabled), no leaf clone at all.
  *
  *   ceph_test_librgw_file_fsio_put [--fsio-off] [--data-pool P]
- *     [--gc-pool P] [--gc-ns N] [--gc-shards N]
+ *     [--gc-pool P] [--gc-ns N] [--gc-shards N] [--hint-shards N]
  *   with AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY set
  */
 
@@ -34,6 +36,9 @@
 #include "cls/rgw_gc/cls_rgw_gc_client.h"
 #include "cls/rgw/cls_rgw_client.h"
 #include "common/ceph_argparse.h"
+#include "common/dout.h"
+#include "rgw_lib.h"
+#include "rgw_sal.h"
 #include "global/global_context.h"
 #include "gtest/gtest.h"
 
@@ -56,10 +61,11 @@ std::string data_pool = "default.rgw.buckets.data";
 std::string gc_pool = "default.rgw.log";
 std::string gc_ns = "gc";
 int gc_shards = 32;
+int hint_shards = 127;               // rgw_fsio_open_hints_num_shards
 bool fsio_off = false;
 bool ready = false;                  // INIT succeeded
 
-Rados rados;
+Rados cluster;
 IoCtx data;
 
 constexpr size_t SIZE = 8 << 20;     // past the 4 MiB head:  a tail
@@ -90,7 +96,7 @@ void put(const std::string& name, char fill,
   ASSERT_EQ(0, rgw_close(fs, fh, RGW_CLOSE_FLAG_NONE));
   rgw_fh_rele(fs, fh, 0);
   if (!data.is_valid()) {
-    ASSERT_EQ(0, rados.ioctx_create(data_pool.c_str(), data));
+    ASSERT_EQ(0, cluster.ioctx_create(data_pool.c_str(), data));
   }
 }
 
@@ -174,7 +180,7 @@ bool exists(const std::string& oid)
 void report(const std::string& head, const std::set<std::string>& tails)
 {
   int8_t release = -1;
-  rados.get_min_compatible_osd(&release);
+  cluster.get_min_compatible_osd(&release);
   bufferlist hdr;
   const int h = data.getxattr(head, "user.rgw.fsio.hdr", hdr);
   std::cout << "  OSD release floor " << int(release)
@@ -191,7 +197,7 @@ std::set<std::string> in_gc()
 {
   IoCtx gc;
   std::set<std::string> s;
-  if (rados.ioctx_create(gc_pool.c_str(), gc) < 0) {
+  if (cluster.ioctx_create(gc_pool.c_str(), gc) < 0) {
     return s;
   }
   gc.set_namespace(gc_ns);
@@ -273,11 +279,11 @@ TEST(FsioPut, INIT) {
   ASSERT_EQ(0, rgw_mkdir(fs, fs->root_fh, null_name.c_str(), &st,
 			 RGW_SETATTR_MODE, &fh, RGW_MKDIR_FLAG_NONE));
   null_fh = fh;
-  ASSERT_EQ(0, rados.init_with_context(g_ceph_context));
-  ASSERT_EQ(0, rados.connect());
+  ASSERT_EQ(0, cluster.init_with_context(g_ceph_context));
+  ASSERT_EQ(0, cluster.connect());
   /* open now if an earlier run created it, so the first test's snapshot
    * of the pool's tails sees theirs */
-  (void)rados.ioctx_create(data_pool.c_str(), data);
+  (void)cluster.ioctx_create(data_pool.c_str(), data);
   ready = true;
 }
 
@@ -730,6 +736,131 @@ TEST(FsioPut, RemoveNullVersionWithNoReader) {
   }
 }
 
+namespace {
+
+/* an FSIO open hint naming `bucket`, in the last shard of the zone's log
+ * pool (gc_pool's), so the check reads every shard */
+void hint(const std::string& bucket, const std::string& bucket_id,
+	  const std::string& name, const std::string& head, bool add)
+{
+  IoCtx log;
+  ASSERT_EQ(0, cluster.ioctx_create(gc_pool.c_str(), log));
+  cls_rgw_fsio_hint_op op;
+  op.hint.bucket.name = bucket;
+  op.hint.bucket.bucket_id = bucket_id;
+  op.hint.bucket.marker = bucket_id;
+  op.hint.key = rgw_obj_key(name);
+  op.hint.incarnation = GW.incarnation;
+  op.hint.handle = GW.handle;
+  op.oid = head;
+  bufferlist in, out;
+  encode(op, in);
+  ObjectWriteOperation w;
+  w.exec(add ? cls::rgw::method::fsio_open_hint_add :
+	 cls::rgw::method::fsio_open_hint_remove, in, &out, nullptr);
+  ASSERT_EQ(0, log.operate(fmt::format("fsio_open_hint.{:010d}", hint_shards - 1),
+			   &w));
+}
+
+} // anonymous namespace
+
+/* a hint naming the bucket blocks its deletion;  without it, the empty
+ * bucket goes (§6.5) */
+TEST(FsioPut, HintBlocksBucketDelete) {
+  if (!ready) {
+    GTEST_SKIP() << "INIT failed";
+  }
+  const auto bname = fmt::format("fsio-hint-{}", getpid());
+  struct stat st{};
+  st.st_mode = 0755;
+  struct rgw_file_handle* fh = nullptr;
+  ASSERT_EQ(0, rgw_mkdir(fs, fs->root_fh, bname.c_str(), &st,
+			 RGW_SETATTR_MODE, &fh, RGW_MKDIR_FLAG_NONE));
+  /* one object, written and removed:  its head names the bucket's marker,
+   * a new bucket's bucket_id */
+  const auto name = fmt::format("hinted-{}", getpid());
+  put(name, 'a', fh);
+  const auto head = head_of(name);
+  ASSERT_FALSE(head.empty());
+  const auto marker = marker_of(head, name);
+  ASSERT_EQ(0, rgw_unlink(fs, fh, name.c_str(), RGW_UNLINK_FLAG_NONE));
+  rgw_fh_rele(fs, fh, 0);
+
+  hint(bname, marker, name, head, true);
+  const int r = rgw_unlink(fs, fs->root_fh, bname.c_str(), RGW_UNLINK_FLAG_NONE);
+  if (fsio_off) {
+    EXPECT_EQ(0, r);                   // the gate off:  today's path
+    hint(bname, marker, name, head, false);
+    return;
+  }
+  EXPECT_EQ(-ENOTEMPTY, r);
+  hint(bname, marker, name, head, false);
+  EXPECT_EQ(0, rgw_unlink(fs, fs->root_fh, bname.c_str(), RGW_UNLINK_FLAG_NONE));
+}
+
+/* both purges, as radosgw-admin bucket rm --purge-objects and
+ * --bypass-gc call them (rgw_bucket.cc):  a hint naming the bucket fails
+ * each before it deletes anything;  without it, the purge goes (§6.5) */
+TEST(FsioPut, HintBlocksPurge) {
+  if (!ready) {
+    GTEST_SKIP() << "INIT failed";
+  }
+  const auto bname = fmt::format("fsio-purge-{}", getpid());
+  struct stat st{};
+  st.st_mode = 0755;
+  struct rgw_file_handle* fh = nullptr;
+  ASSERT_EQ(0, rgw_mkdir(fs, fs->root_fh, bname.c_str(), &st,
+			 RGW_SETATTR_MODE, &fh, RGW_MKDIR_FLAG_NONE));
+  const auto name = fmt::format("purged-{}", getpid());
+  put(name, 'a', fh);
+  rgw_fh_rele(fs, fh, 0);
+  const auto head = head_of(name);
+  ASSERT_FALSE(head.empty());
+  const auto marker = marker_of(head, name);
+
+  const DoutPrefix dp(g_ceph_context, ceph_subsys_rgw, "fsio_put test: ");
+  auto* driver = rgw::g_rgwlib->get_driver();
+  auto load = [&]() {
+    std::unique_ptr<rgw::sal::Bucket> b;
+    rgw_bucket key;
+    key.name = bname;
+    EXPECT_EQ(0, driver->load_bucket(&dp, key, &b, null_yield));
+    return b;
+  };
+
+  hint(bname, marker, name, head, true);
+  {
+    auto b = load();
+    ASSERT_TRUE(b);
+    const int r = b->remove(&dp, true, null_yield);
+    if (fsio_off) {
+      EXPECT_EQ(0, r);                 // the gate off:  today's path
+      hint(bname, marker, name, head, false);
+      return;
+    }
+    EXPECT_EQ(-ENOTEMPTY, r);
+  }
+  EXPECT_TRUE(exists(head)) << "--purge-objects deleted before the check";
+  {
+    auto b = load();
+    ASSERT_TRUE(b);
+    EXPECT_EQ(-ENOTEMPTY, b->remove_bypass_gc(128, true, null_yield, &dp));
+  }
+  EXPECT_TRUE(exists(head)) << "--bypass-gc deleted before the check";
+
+  hint(bname, marker, name, head, false);
+  {
+    auto b = load();
+    ASSERT_TRUE(b);
+    EXPECT_EQ(0, b->remove(&dp, true, null_yield));
+  }
+  EXPECT_FALSE(exists(head));
+  std::unique_ptr<rgw::sal::Bucket> gone;
+  rgw_bucket key;
+  key.name = bname;
+  EXPECT_EQ(-ENOENT, driver->load_bucket(&dp, key, &gone, null_yield));
+}
+
 TEST(FsioPut, SHUTDOWN) {
   if (!ready) {
     GTEST_SKIP() << "INIT failed";
@@ -763,6 +894,8 @@ int main(int argc, char* argv[])
       gc_ns = val;
     } else if (ceph_argparse_witharg(args, i, &val, "--gc-shards", (char*)nullptr)) {
       gc_shards = std::stoi(val);
+    } else if (ceph_argparse_witharg(args, i, &val, "--hint-shards", (char*)nullptr)) {
+      hint_shards = std::stoi(val);
     } else if (ceph_argparse_witharg(args, i, &val, "--uid", (char*)nullptr)) {
       uid = val;
     } else {
