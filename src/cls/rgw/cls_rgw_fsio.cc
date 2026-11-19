@@ -712,6 +712,17 @@ int fenced_finalize(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& finalizer,
     if (prev != finalizer && !expired.count(prev.incarnation)) {
       return -CLS_RGW_ERR_FSIO_BUSY;    // a live finalizer
     }
+    /* versioned, resumed under a fresh claim:  the caller aborted `to`'s
+     * recorded one (§3.7 step 4) */
+    if (intent && !FSIO_SKIP_CHECK(RESUME_REPLACES_CLAIM)) {
+      if (t->publishing->instance.empty() ||
+	  aborted != t->publishing->instance) {
+	return -CLS_RGW_ERR_FSIO_CONFLICT;
+      }
+      t->publishing->instance = intent->instance;
+      t->publishing->token = intent->token;
+      t->publishing->olh_epoch = intent->now_epoch;
+    }
     t->publishing->publisher = finalizer;    // taken over (§3.7)
     hdr.find(ff->from)->publishing->publisher = finalizer;
     to = ff->to;

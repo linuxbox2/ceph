@@ -2295,6 +2295,32 @@ void expirer_actions_v(const World& w0, std::vector<Action>& acts)
     const auto* t = w0.head.hdr->find(ff.to);
     const bool versioned = t && t->publishing &&
       !t->publishing->instance.empty();
+    /* §3.7 step 4:  `to` never written:  its placeholder's claim aborted,
+     * then a fresh claim through the takeover with an intent
+     * (VF_DECIDED to VF_CALL);  written, the resume below completes it */
+    if (versioned) {
+      const auto inst = t->publishing->instance;
+      const auto token = t->publishing->token;
+      auto vi = w0.versions.find(inst);
+      if (vi != w0.versions.end() && vi->second.placeholder()) {
+	if (*vi->second.claim == token) {
+	  acts.push_back({fmt::format("expirer abort {}", inst),
+	      [inst](World& w) -> std::optional<std::string> {
+		w.versions.at(inst).claim = "aborted";
+		return std::nullopt;
+	      }});
+	} else {
+	  acts.push_back({fmt::format("expirer decide-finalize {}", sname(from)),
+	      [from, inst](World& w) -> std::optional<std::string> {
+		w.ex = VF_DECIDED;
+		w.ex_from = from;
+		w.ex_aborted = inst;       // `to`'s claim, aborted
+		return std::nullopt;
+	      }});
+	}
+	continue;
+      }
+    }
     acts.push_back({fmt::format("expirer resume-finalize {}", sname(from)),
 	[from, dead, versioned](World& w) -> std::optional<std::string> {
 	  if (!versioned) {
@@ -3167,6 +3193,7 @@ TEST(FSIOModel, Explore)
       {"W15_CONSTRUCTOR_MAY_ABANDON",
        cls_rgw_fsio_check::W15_CONSTRUCTOR_MAY_ABANDON},
       {"RESUME_RESOLVES_CLAIM", cls_rgw_fsio_check::RESUME_RESOLVES_CLAIM},
+      {"RESUME_REPLACES_CLAIM", cls_rgw_fsio_check::RESUME_REPLACES_CLAIM},
       {"W20_RELEASE_CHECKS_PUBLISHER",
        cls_rgw_fsio_check::W20_RELEASE_CHECKS_PUBLISHER},
     };

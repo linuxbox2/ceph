@@ -67,6 +67,7 @@ enum class cls_rgw_fsio_check : uint8_t {
   W15_CONSTRUCTOR_MAY_ABANDON,         // fsio_leave, a constructing shadow
   W20_RELEASE_CHECKS_PUBLISHER,        // fsio_publish_release
   RESUME_RESOLVES_CLAIM,               // the expirer's resumed versioned finalize (model)
+  RESUME_REPLACES_CLAIM,               // fsio_fenced_finalize, a takeover with an intent
 };
 
 #ifdef CLS_RGW_FSIO_SKIP_CHECKS

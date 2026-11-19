@@ -678,6 +678,45 @@ TEST(cls_rgw_fsio_versioned, V1_finalize_requires_the_aborted_claim)
   v1_finalize_requires_the_aborted_claim();
 }
 
+/* §3.7 step 4:  a resumed versioned finalize whose `to` was never
+ * written publishes under a fresh claim:  the takeover with an intent
+ * replaces `to`'s, once the recorded one is aborted */
+void resume_replaces_the_claim()
+{
+  auto h = olh();
+  fsio::join_out out;
+  cls_rgw_fsio_effects fx;
+  ASSERT_EQ(0, fsio::join(h, {GW1, true, 1, 10, {}, "I1"}, out, fx));
+  ASSERT_EQ(0, fsio::ready(h, GW1, out.bound, 1));
+  fsio::publish_intent intent{"I2", "tok", 77};
+  fsio::leave_out lout;
+  cls_rgw_fsio_effects lfx;
+  ASSERT_EQ(0, fsio::leave(h, GW1, out.bound, true, {}, lout, lfx, &intent));
+  fsio::publish_intent i3{"I3", "tok3", 78};
+  cls_rgw_fsio_id to;
+  ASSERT_EQ(0, fsio::fenced_finalize(h, EXPIRER, out.bound, {I1}, to,
+				     &i3, "I2"));
+  constexpr cls_rgw_fsio_handle EXPIRER2{101, 0};
+  fsio::publish_intent i4{"I4", "tok4", 79};
+  cls_rgw_fsio_id to2;
+  EXPECT_EQ(-CLS_RGW_ERR_FSIO_CONFLICT,
+	    fsio::fenced_finalize(h, EXPIRER2, out.bound, {I1, IX}, to2,
+				  &i4, "I9"));             // another claim
+  ASSERT_EQ(0, fsio::fenced_finalize(h, EXPIRER2, out.bound, {I1, IX}, to2,
+				     &i4, "I3"));
+  EXPECT_EQ(to, to2);
+  const auto* t = h.hdr->find(to);
+  ASSERT_TRUE(t && t->publishing);
+  EXPECT_EQ("I4", t->publishing->instance);
+  EXPECT_EQ("tok4", t->publishing->token);
+  EXPECT_EQ(79u, t->publishing->olh_epoch);
+}
+
+TEST(cls_rgw_fsio_versioned, resume_replaces_the_claim)
+{
+  resume_replaces_the_claim();
+}
+
 /* V2:  completing a publish the expirer took over removes the dead
  * writer's open (design §4.2) */
 void v2_complete_after_takeover_removes_the_dead_writer()
@@ -794,6 +833,7 @@ TEST(cls_rgw_fsio, each_check_is_detected)
     {cls_rgw_fsio_check::W15_CONSTRUCTOR_MAY_ABANDON, w15_constructor_abandons},
     {cls_rgw_fsio_check::W20_RELEASE_CHECKS_PUBLISHER,
      w20_release_requires_the_publisher},
+    {cls_rgw_fsio_check::RESUME_REPLACES_CLAIM, resume_replaces_the_claim},
   };
   for (const auto& [check, body] : table) {
     fsio::skipped_check = check;
