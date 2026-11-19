@@ -158,6 +158,13 @@ struct cls_rgw_fsio_replace_op;
 void cls_rgw_fsio_replace_head(librados::ObjectWriteOperation& o,
 			       const cls_rgw_fsio_replace_op& call,
 			       ceph::buffer::list* out, int* prval);
+/* FSIO's version removal on an instance head (FSIO_RADOS_DESIGN.md
+ * §2.5), in the caller's op in place of cls_rgw_remove_obj;  its reply,
+ * cls_rgw_fsio_remove_version_ret, as cls_rgw_fsio_replace_head's */
+struct cls_rgw_fsio_remove_version_op;
+void cls_rgw_fsio_remove_version(librados::ObjectWriteOperation& o,
+				 const cls_rgw_fsio_remove_version_op& call,
+				 ceph::buffer::list* out, int* prval);
 void cls_rgw_obj_store_pg_ver(librados::ObjectWriteOperation& o, const std::string& attr);
 void cls_rgw_obj_check_attrs_prefix(librados::ObjectOperation& o, const std::string& prefix, bool fail_if_exist);
 void cls_rgw_obj_check_mtime(librados::ObjectOperation& o, const ceph::real_time& mtime, bool high_precision_time, RGWCheckMTimeType type);

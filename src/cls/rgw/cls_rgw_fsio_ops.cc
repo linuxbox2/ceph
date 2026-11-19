@@ -588,16 +588,41 @@ int rgw_fsio_remove_version(cls_method_context_t hctx, ceph::buffer::list* in,
   if (int r = decode_op(in, op, __func__); r < 0) {
     return r;
   }
-  cls_rgw_fsio_remove_version_ret ret;
-  int r = on_instance(hctx, op.marker, [&](auto& ih, auto& fx) {
-    fsio::remove_out rout;
-    int r = fsio::remove_version(ih, op.r, rout, fx);
-    ret.keep_tail = rout.keep_tail;
-    return r;
-  });
+  cls_rgw_fsio_instance_head ih;
+  loaded l;
+  int r = load_instance(hctx, ih, l);
   if (r < 0) {
     return r;
   }
+  if ((r = require(ih.exists)) < 0) {
+    return r;
+  }
+  fsio::remove_out rout;
+  cls_rgw_fsio_effects fx;
+  if ((r = fsio::remove_version(ih, op.r, rout, fx)) < 0) {
+    return r;
+  }
+  /* §2.5:  the clone to the sibling first (CLONE_TO clones the pre-op
+   * object), then the instance head reset:  removed, and recreated with
+   * its open count alone while the count keeps it */
+  if ((r = apply(hctx, op.marker, fx)) < 0) {
+    return r;
+  }
+  if ((r = cls_cxx_remove(hctx)) < 0) {
+    CLS_ERR("ERROR: %s: cls_cxx_remove returned %d", __func__, r);
+    return r;
+  }
+  if (ih.exists && ih.ocnt) {
+    if ((r = cls_cxx_create(hctx, false)) < 0) {
+      return r;
+    }
+    ceph::buffer::list bl;
+    encode(*ih.ocnt, bl);
+    if ((r = cls_cxx_setxattr(hctx, OCNT.data(), &bl)) < 0) {
+      return r;
+    }
+  }
+  cls_rgw_fsio_remove_version_ret ret{rout.keep_tail};
   encode(ret, *out);
   return 0;
 }

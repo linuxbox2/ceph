@@ -200,6 +200,15 @@ void cls_rgw_fsio_replace_head(librados::ObjectWriteOperation& o,
   o.exec(method::fsio_replace_head, in, out, prval);
 }
 
+void cls_rgw_fsio_remove_version(librados::ObjectWriteOperation& o,
+				 const cls_rgw_fsio_remove_version_op& call,
+				 bufferlist* out, int* prval)
+{
+  bufferlist in;
+  encode(call, in);
+  o.exec(method::fsio_remove_version, in, out, prval);
+}
+
 void cls_rgw_obj_store_pg_ver(librados::ObjectWriteOperation& o, const string& attr)
 {
   bufferlist in;

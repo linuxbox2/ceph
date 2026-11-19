@@ -223,6 +223,95 @@ TEST_F(FsioHead, DeleteWithReaderLeavesTrackingOnly)
   EXPECT_LE(0, getxattr(head, HDR));
 }
 
+namespace {
+/* a version's instance head:  <marker>__:<instance>_<key> */
+std::string instance_of(const std::string& key)
+{
+  return MARKER + "__:i1_" + key;
+}
+}
+
+/* §2.5:  a version held by an open count is cloned to its sibling, its
+ * instance head reset to the open count alone, its tail kept */
+TEST_F(FsioHead, RemoveCountedVersionKeepsItsTail)
+{
+  std::string key;
+  make_head(key);                      // for its key;  the instance next
+  const auto ih = instance_of(key);
+  {
+    ObjectWriteOperation op;
+    bufferlist d, t, m;
+    op.create(true);
+    d.append("v1");
+    t.append("i0");
+    m.append("C0");
+    op.write_full(d);
+    op.setxattr("user.rgw.idtag", t);
+    op.setxattr("user.rgw.manifest", m);
+    ASSERT_EQ(0, ioctx.operate(ih, &op));
+  }
+  cls_rgw_fsio_ocnt_op add;
+  add.holder = GW1;
+  ASSERT_EQ(0, call(ih, cls::rgw::method::fsio_ocnt_add, add,
+		    (cls_rgw_fsio_flags_ret*)nullptr));
+  ObjectWriteOperation op;
+  bufferlist out;
+  int rval = 0;
+  cls_rgw_fsio_remove_version_op rv;
+  rv.r = cls_rgw_fsio_id{1007, 7};
+  rv.marker = MARKER;
+  cls_rgw_fsio_remove_version(op, rv, &out, &rval);
+  ASSERT_EQ(0, ioctx.operate(ih, &op, OPERATION_RETURNVEC));
+  cls_rgw_fsio_remove_version_ret ret;
+  auto it = out.cbegin();
+  decode(ret, it);
+  EXPECT_TRUE(ret.keep_tail);
+  /* the instance head reset:  its open count alone */
+  EXPECT_EQ(-ENODATA, getxattr(ih, "user.rgw.idtag"));
+  EXPECT_EQ(-ENODATA, getxattr(ih, "user.rgw.manifest"));
+  EXPECT_LE(0, getxattr(ih, "user.rgw.fsio.ocnt"));
+  EXPECT_EQ("", read(ih, ioctx));
+  /* its content on the sibling, after the bucket's heads (§2.7) */
+  const auto sib = fmt::format("{}~fsio_G{}_{}", MARKER,
+			       cls_rgw_fsio_id{1007, 7}.to_str(),
+			       ih.substr(MARKER.size() + 1));
+  auto io = keyed(ih);
+  EXPECT_EQ("v1", read(sib, io));
+}
+
+/* §2.5:  a version no open count holds goes, as it always has */
+TEST_F(FsioHead, RemoveUncountedVersionRemovesIt)
+{
+  std::string key;
+  make_head(key);
+  const auto ih = instance_of(key);
+  {
+    ObjectWriteOperation op;
+    bufferlist d, t;
+    op.create(true);
+    d.append("v1");
+    t.append("i0");
+    op.write_full(d);
+    op.setxattr("user.rgw.idtag", t);
+    ASSERT_EQ(0, ioctx.operate(ih, &op));
+  }
+  ObjectWriteOperation op;
+  bufferlist out;
+  int rval = 0;
+  cls_rgw_fsio_remove_version_op rv;
+  rv.r = cls_rgw_fsio_id{1008, 7};
+  rv.marker = MARKER;
+  cls_rgw_fsio_remove_version(op, rv, &out, &rval);
+  ASSERT_EQ(0, ioctx.operate(ih, &op, OPERATION_RETURNVEC));
+  cls_rgw_fsio_remove_version_ret ret;
+  auto it = out.cbegin();
+  decode(ret, it);
+  EXPECT_FALSE(ret.keep_tail);
+  uint64_t size;
+  time_t mtime;
+  EXPECT_EQ(-ENOENT, ioctx.stat(ih, &size, &mtime));
+}
+
 /* a DELETE with no FSIO state:  the head goes, as cls_rgw_remove_obj */
 TEST_F(FsioHead, DeleteWithoutFsioStateRemoves)
 {
