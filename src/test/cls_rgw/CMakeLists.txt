@@ -37,6 +37,8 @@ add_executable(ceph_test_cls_rgw_fsio_model EXCLUDE_FROM_ALL
   fsio_model.cc
   ${CMAKE_SOURCE_DIR}/src/cls/rgw/cls_rgw_fsio.cc)
 target_link_libraries(ceph_test_cls_rgw_fsio_model
+  cls_rgw_client
+  librados
   ceph-common
   ${UNITTEST_LIBS})
 # the explorer visits millions of states;  optimized even in a debug build

@@ -31,6 +31,11 @@ edition = "2021"
 //!   sample-skips  each skip check under random walks:  walks to catch;
 //!            a miss is reported as "missed (sampling)" and does not fail
 //!            the run, the exhaustive skips tier being the authority
+//!   cluster  the sample tier's configurations, fewer walks, each core
+//!            call also sent to a RADOS cluster as its CLS method and
+//!            compared (FSIO_MODEL_CLUSTER, fsio_model_cluster.h);  needs
+//!            CEPH_CONF and a running vstart, whose keyring is root's:
+//!            the tier asks for sudo once and runs the model under it
 //!
 //! A run passes when it is clean, or, for a skip check, when it finds a
 //! violation;  a run that reaches FSIO_MODEL_LIMIT is reported as a
@@ -52,6 +57,8 @@ struct Run {
     expect_violation: bool,
     /* a measurement of sampling's reach:  a miss is reported, not failed */
     measure: bool,
+    /* runs against the cluster, under sudo */
+    sudo: bool,
 }
 
 fn run(name: &str, env: &[(&str, &str)]) -> Run {
@@ -60,6 +67,7 @@ fn run(name: &str, env: &[(&str, &str)]) -> Run {
         env: env.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
         expect_violation: false,
         measure: false,
+        sudo: false,
     }
 }
 
@@ -342,6 +350,27 @@ fn sample() -> Vec<Run> {
         .collect()
 }
 
+/* the sample tier's configurations against the cluster:  each walk's
+ * calls go to the OSD, so fewer walks */
+const CLUSTER_WALKS: &str = "2000";
+
+fn cluster() -> Vec<Run> {
+    sample()
+        .into_iter()
+        .map(|mut r| {
+            r.name = r.name.replacen("sample-", "cluster-", 1);
+            for (k, v) in r.env.iter_mut() {
+                if k == "FSIO_MODEL_WALKS" {
+                    *v = CLUSTER_WALKS.into();
+                }
+            }
+            r.env.push(("FSIO_MODEL_CLUSTER".into(), "1".into()));
+            r.sudo = true;
+            r
+        })
+        .collect()
+}
+
 /* each skip check under random walks, on its shared configuration and
  * its own roles only (none of the narrowing the search needed):  how
  * many walks each takes to be caught, or that walks miss it */
@@ -430,7 +459,7 @@ fn main() {
     }
     if tiers.is_empty() {
         eprintln!("usage:  fsio_model_runs.rs [--bin PATH] [--out DIR] [--jobs N] \
-                   smoke|quick|vectors|skips|skips-search|sample|sample-skips ...");
+                   smoke|quick|vectors|skips|skips-search|sample|sample-skips|cluster ...");
         std::process::exit(2);
     }
     let mut runs = Vec::new();
@@ -443,6 +472,7 @@ fn main() {
             "skips-search" => runs.extend(skips_search()),
             "sample" => runs.extend(sample()),
             "sample-skips" => runs.extend(sample_skips()),
+            "cluster" => runs.extend(cluster()),
             other => {
                 eprintln!("unknown tier {other}");
                 std::process::exit(2);
@@ -450,6 +480,18 @@ fn main() {
         }
     }
     std::fs::create_dir_all(&out).expect("create the output directory");
+    /* the cluster tier's runs take sudo -n:  one password, asked here */
+    if runs.iter().any(|r| r.sudo) {
+        if std::env::var("CEPH_CONF").is_err() {
+            eprintln!("the cluster tier needs CEPH_CONF");
+            std::process::exit(2);
+        }
+        let ok = Command::new("sudo").arg("-v").status().map(|s| s.success());
+        if !matches!(ok, Ok(true)) {
+            eprintln!("the cluster tier needs sudo");
+            std::process::exit(2);
+        }
+    }
     let n = runs.len();
     println!("{n} runs, {jobs} at a time;  logs in {}", out.display());
     let queue = Arc::new(Mutex::new(runs.into_iter().collect::<VecDeque<_>>()));
@@ -464,13 +506,30 @@ fn main() {
         workers.push(std::thread::spawn(move || loop {
             let Some(r) = queue.lock().unwrap().pop_front() else { break };
             let t0 = Instant::now();
-            let mut cmd = Command::new(&bin);
-            cmd.env("FSIO_MODEL_LIMIT", LIMIT)
-                .env("FSIO_MODEL_PROGRESS", "1000000")
-                .stdin(Stdio::null());
-            for (k, v) in &r.env {
-                cmd.env(k, v);
-            }
+            /* a cluster run under sudo, its environment passed by env(1),
+             * which sudo would otherwise reset */
+            let mut env: Vec<(String, String)> = vec![
+                ("FSIO_MODEL_LIMIT".into(), LIMIT.into()),
+                ("FSIO_MODEL_PROGRESS".into(), "1000000".into()),
+            ];
+            env.extend(r.env.iter().cloned());
+            let mut cmd = if r.sudo {
+                let mut c = Command::new("sudo");
+                c.args(["-n", "env"]);
+                if let Ok(conf) = std::env::var("CEPH_CONF") {
+                    c.arg(format!("CEPH_CONF={conf}"));
+                }
+                for (k, v) in &env {
+                    c.arg(format!("{k}={v}"));
+                }
+                c.arg(&bin);
+                c
+            } else {
+                let mut c = Command::new(&bin);
+                c.envs(env.iter().map(|(k, v)| (k.as_str(), v.as_str())));
+                c
+            };
+            cmd.stdin(Stdio::null());
             /* the log is written as the run goes, so a long run's
              * progress lines can be read while it runs */
             let log = out.join(format!("{}.log", r.name));
