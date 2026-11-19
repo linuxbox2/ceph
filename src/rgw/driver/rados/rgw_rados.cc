@@ -16,6 +16,7 @@
 #include <boost/optional.hpp>
 #include <boost/utility/in_place_factory.hpp>
 
+#include "common/ceph_releases.h"
 #include "common/ceph_json.h"
 
 #include "common/errno.h"
@@ -2751,6 +2752,96 @@ int RGWRados::create_vector_bucket(const DoutPrefixProvider* dpp,
   /* this is highly unlikely */
   ldpp_dout(dpp, 0) << "ERROR: could not create s3vector bucket, continuously raced with bucket creation and removal" << dendl;
   return -ENOENT;
+}
+
+/* FSIO_RADOS_DESIGN.md §7:  the fsio zonegroup feature (X9);  the OSDs'
+ * release floor at the one that brings the fsio_* methods (§2.7);  every
+ * pool of the bucket's placement replicated and not Crimson, CLONE_TO
+ * having neither (X17, Z21);  a marker without '~', the separator of
+ * FSIO's own names (§2.7, E2) */
+bool RGWRados::fsio_enabled(const DoutPrefixProvider *dpp,
+                            const RGWBucketInfo& info, optional_yield y)
+{
+  if (!svc.zone->get_zonegroup().supports(rgw::zone_features::fsio)) {
+    ldpp_dout(dpp, 10) << "FSIO: off:  the zonegroup lacks the fsio feature"
+                       << dendl;
+    return false;
+  }
+  int8_t release = 0;
+  if (int r = get_rados_handle()->get_min_compatible_osd(&release);
+      r < 0 || release < static_cast<int8_t>(ceph_release_t::vampire)) {
+    ldpp_dout(dpp, 10) << "FSIO: off:  the OSDs' release floor is "
+                       << int(release) << " (r=" << r << "), below vampire"
+                       << dendl;
+    return false;
+  }
+  if (info.bucket.marker.find('~') != std::string::npos) {
+    ldpp_dout(dpp, 1) << "FSIO: off for bucket " << info.bucket
+                      << ":  its marker contains '~'" << dendl;
+    return false;
+  }
+  const auto& rule = info.placement_rule.name.empty() ?
+    svc.zone->get_zonegroup().default_placement : info.placement_rule;
+  RGWZonePlacementInfo placement;
+  if (!svc.zone->get_zone_params().get_placement(rule.name, &placement)) {
+    ldpp_dout(dpp, 10) << "FSIO: off for bucket " << info.bucket
+                       << ":  no placement " << rule.name << dendl;
+    return false;
+  }
+  std::vector<rgw_pool> pools{placement.index_pool, placement.data_extra_pool};
+  for (const auto& [name, sc] : placement.storage_classes.get_all()) {
+    if (sc.data_pool) {
+      pools.push_back(*sc.data_pool);
+    }
+  }
+  auto& neo = driver->get_neorados();
+  for (const auto& pool : pools) {
+    if (pool.name.empty()) {
+      continue;
+    }
+    const auto id = get_rados_handle()->pool_lookup(pool.name.c_str());
+    if (id == -ENOENT) {
+      continue;                // not created yet:  RGW creates it replicated
+    }
+    if (id < 0) {
+      ldpp_dout(dpp, 10) << "FSIO: off for bucket " << info.bucket
+                         << ":  pool " << pool << " lookup returned " << id
+                         << dendl;
+      return false;
+    }
+    /* neorados is its own client:  a pool RGW just created may not be
+     * in its OSDMap yet, so on ENOENT it waits for the latest map and
+     * asks again */
+    auto is_ec_or_crimson = [&]() -> std::optional<bool> {
+      try {
+        return neo.pool_is_erasure(id) || neo.pool_is_crimson(id);
+      } catch (const boost::system::system_error&) {
+        return std::nullopt;
+      }
+    };
+    auto bad = is_ec_or_crimson();
+    if (!bad) {
+      boost::system::error_code ec;
+      if (y) {
+        neo.wait_for_latest_osd_map(y.get_yield_context()[ec]);
+      } else {
+        neo.wait_for_latest_osd_map(ceph::async::use_blocked[ec]);
+      }
+      bad = ec ? std::nullopt : is_ec_or_crimson();
+    }
+    if (!bad) {
+      ldpp_dout(dpp, 10) << "FSIO: off for bucket " << info.bucket
+                         << ":  pool " << pool << " not in neorados's OSDMap"
+                         << dendl;
+      return false;
+    }
+    if (*bad) {
+      ldpp_dout(dpp, 10) << "FSIO: off for bucket " << info.bucket
+                         << ":  pool " << pool << " is EC or Crimson" << dendl;
+      return false;
+    }
+  }
+  return true;
 }
 
 bool RGWRados::obj_to_raw(const rgw_placement_rule& placement_rule, const rgw_obj& obj, rgw_raw_obj *raw_obj)

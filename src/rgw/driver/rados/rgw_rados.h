@@ -622,6 +622,10 @@ public:
   }
 
   int get_required_alignment(const DoutPrefixProvider *dpp, const rgw_pool& pool, uint64_t *alignment);
+  /* FSIO on a bucket's heads (FSIO_RADOS_DESIGN.md §7):  the head writes
+   * use fsio_replace_head only where this holds */
+  bool fsio_enabled(const DoutPrefixProvider *dpp, const RGWBucketInfo& info,
+                    optional_yield y);
   void get_max_aligned_size(uint64_t size, uint64_t alignment, uint64_t *max_size);
   int get_max_chunk_size(const rgw_pool& pool, uint64_t *max_chunk_size, const DoutPrefixProvider *dpp, uint64_t *palignment = nullptr);
   int get_max_chunk_size(const rgw_placement_rule& placement_rule, const rgw_obj& obj, uint64_t *max_chunk_size, const DoutPrefixProvider *dpp, uint64_t *palignment = nullptr);

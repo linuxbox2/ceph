@@ -16,12 +16,16 @@ namespace rgw::zone_features {
 inline constexpr std::string_view resharding = "resharding";
 inline constexpr std::string_view compress_encrypted = "compress-encrypted";
 inline constexpr std::string_view notification_v2 = "notification_v2";
+// FSIO, POSIX-style positional I/O on RADOS heads;  enabled only once
+// every gateway is upgraded (FSIO_RADOS_DESIGN.md §7, X9)
+inline constexpr std::string_view fsio = "fsio";
 
 // static list of features supported by this release
 inline constexpr std::initializer_list<std::string_view> supported = {
     resharding,
     compress_encrypted,
     notification_v2,
+    fsio,
 };
 
 inline constexpr bool supports(std::string_view feature) {
