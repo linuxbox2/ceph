@@ -7,6 +7,8 @@
 #   FSIO_MODEL_S3_OPS=1 FSIO_MODEL_SHORTEST=1 FSIO_MODEL_PREFIX=<this file>
 # Skip H3_PUBLISHER_HINTS_READERS to see it fail.
 # env: FSIO_MODEL_VERSIONED=1 FSIO_MODEL_VSTART=null FSIO_MODEL_ROLES=wr FSIO_MODEL_S3_OPS=1 FSIO_MODEL_EXPIRER_CRASHES=0
+# (2026-11-19, I4:  "gw1 uncount I2" after the publish dropped;  the
+# publisher was never in I2's count, and only the bug made it uncount.)
 gw1 read-olh-write
 gw1 open-write null
 gw1 ready S1.10
@@ -24,7 +26,6 @@ gw1 instance-write I2
 gw1 link I2
 gw1 publish S1.10
 gw1 publish-unhint I2
-gw1 uncount I2
 gw1 crash
 gw2 close-read S1.10
 gw2 crash

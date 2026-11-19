@@ -64,6 +64,7 @@ enum class cls_rgw_fsio_check : uint8_t {
   H3_HINT_WAITS_FOR_LIVE_CLAIM,        // the expirer's presence-hint drop (model)
   H3_PUBLISH_HINT_REMOVES_READER_HINTS, // the expirer's publish-hint rule (model)
   H3_PUBLISHER_CLEANUP_REMOVES_READER_HINTS,  // the gateway's aborted-placeholder cleanup (model)
+  I4_PUBLISHER_NOT_COUNTED,            // the gateway's versioned publish (model)
   W10_RELEASE_ONLY_WITH_LIVE_CLAIM,    // the gateway's versioned release (model)
   W10_RELEASE_ABORTS_CLAIM_FIRST,      // the gateway's versioned release (model)
   W15_CONSTRUCTOR_MAY_ABANDON,         // fsio_leave, a constructing shadow

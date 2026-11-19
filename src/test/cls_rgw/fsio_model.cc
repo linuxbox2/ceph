@@ -1744,8 +1744,14 @@ void gw_actions_v(const World& w0, size_t gi, std::vector<Action>& acts)
 	      return std::nullopt;
 	    }
 	    apply_remove_head(w, fx);
-	    if (!out.instance.empty()) {
-	      g.counted.insert(out.instance);  // to remove itself from (§2.5)
+	    /* §2.5, I4:  giving up its write open, the publisher's
+	     * fsio_leave returns the version its publish creates, but no
+	     * publish counts the writer:  it is not a
+	     * version this handle is in, and taking it for one skipped the
+	     * presence hint on a later count of it (H1) */
+	    if (!out.instance.empty() &&
+		FSIO_SKIP_CHECK(I4_PUBLISHER_NOT_COUNTED)) {
+	      g.counted.insert(out.instance);
 	    }
 	    if (out.publishing) {
 	      ++w.next_epoch;
@@ -3584,6 +3590,28 @@ struct Explorer {
     for (const auto& q : w.gcq) {
       s += fmt::format(" [{}]", fmt::join(q, ","));
     }
+    /* the versions' open counts, the hints, each gateway's counted set */
+    s += "\n  open counts:";
+    for (const auto& [i, v] : w.versions) {
+      if (v.ih.ocnt) {
+	std::vector<std::string> hs;
+	for (const auto& h : v.ih.ocnt->holders) {
+	  hs.push_back(fmt::format("{}.{}", h.incarnation, h.handle));
+	}
+	s += fmt::format(" {}{{{}}}{}", i, fmt::join(hs, ","),
+			 v.ih.ocnt->removed ? " removed" : "");
+      }
+    }
+    s += "\n  hints:";
+    for (const auto& h : w.hints) {
+      s += fmt::format(" {}{}{}/{}.{}", h.kind == HintKind::PRESENCE ? "P" : "U",
+		       h.target == HintTarget::HEAD ? "H" : "I", h.instance,
+		       h.incarnation, h.handle);
+    }
+    s += "\n  counted:";
+    for (const auto& g : w.gws) {
+      s += fmt::format(" gw{}{{{}}}", g.inc, fmt::join(g.counted, ","));
+    }
     std::cerr << s << "\n";
   }
 
@@ -3847,6 +3875,8 @@ TEST(FSIOModel, Explore)
        cls_rgw_fsio_check::H2_HINT_DROPPED_AFTER_GRACE},
       {"H3_PUBLISHER_HINTS_READERS",
        cls_rgw_fsio_check::H3_PUBLISHER_HINTS_READERS},
+      {"I4_PUBLISHER_NOT_COUNTED",
+       cls_rgw_fsio_check::I4_PUBLISHER_NOT_COUNTED},
       {"H3_TRACKING_ONLY_IS_REMOVED",
        cls_rgw_fsio_check::H3_TRACKING_ONLY_IS_REMOVED},
       {"H3_HINT_WAITS_FOR_LIVE_CLAIM",

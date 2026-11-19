@@ -1,0 +1,30 @@
+# W7_PUBLISH_COUNTS_READERS_ONLY:  required since finding I4
+# (2026-11-19).  With the publish counting writers too, gw1's own writer
+# handle is put in I2's count and hinted by the publisher;  a handle
+# learns it is counted only when it gives up a read open (§2.5), so gw1
+# never removes itself:  "hint left at the end:  presence on I2 of 1".  Found by the skips tier's search.
+# skip: W7_PUBLISH_COUNTS_READERS_ONLY
+# env: FSIO_MODEL_VERSIONED=1 FSIO_MODEL_ROLES=w+r FSIO_MODEL_S3_OPS=0 FSIO_MODEL_ZOMBIES=0
+gw1 read-olh-write
+gw1 count I1
+gw1 open-write I1
+gw1 ready S1.10
+gw1 write S1.10
+gw1 close-write S1.10
+gw1 publish-hint
+gw1 placeholder I2
+gw1 close-leave S1.10
+gw1 publish-read S1.10
+gw1 instance-write I2
+gw1 link I2
+gw1 publish S1.10
+gw1 publish-unhint I2
+gw1 uncount I1
+gw1 resend leave
+gw1.2 read-olh-read
+gw1.2 count I2
+gw1.2 open-read I2
+gw1.2 close-read S1.10
+gw1.2 uncount I2
+gw1.2 resend leave
+# => hint left at the end:  presence on I2 of 1

@@ -1,8 +1,11 @@
 # I4's open count left at the end:  incarnations {2}, 0 deferred
-# Found 2026-11-19 by the cluster tier's first versioned run (walk 67 of
-# seed 1), in memory as well:  a model finding, not a cluster
-# divergence;  under investigation (I4).  Same family as H3
-# (h3-reader-in-count.txt).  The vectors tier fails on it until settled.
+# I4_PUBLISHER_NOT_COUNTED:  found 2026-11-19 by the cluster tier's
+# first versioned run (walk 67 of seed 1), in memory as well.  gw2's
+# publishing leave returns I4;  taken as "counted in I4", it skips the
+# presence hint when it later counts I4 as a reader, then crashes:
+# nothing leads the expirer to the count.  Replayed with the check
+# skipped, it reproduces the violation.
+# skip: I4_PUBLISHER_NOT_COUNTED
 # replay: walk
 # env: FSIO_MODEL_VERSIONED=1
 s3 stop

@@ -20,7 +20,7 @@ edition = "2021"
 //!            check's:  a search from each, in its "# env:" configuration
 //!   skips    every skip check, each expected to be caught:  replayed
 //!            from its vector (a "# skip:" header) when it has one, else
-//!            searched (SHORTEST, STOP_AT_FIRST);  the two refinements
+//!            searched (SHORTEST, STOP_AT_FIRST);  the refinement
 //!            expected clean
 //!   skips-search  every skip check by search, vector or not
 //!
@@ -176,7 +176,7 @@ fn vectors(src: &Path) -> Vec<Run> {
 }
 
 /* each check, the configuration that reaches it, and whether skipping it
- * must be caught;  the two refinements change no result.  A check caught
+ * must be caught;  the refinement changes no result.  A check caught
  * only in a narrower configuration carries its own settings, which
  * replace the shared ones:  the narrowest configuration found to catch it
  * within the cap (2026-11-18, after the versioned model grew) */
@@ -211,10 +211,12 @@ fn skip_table() -> Vec<Check> {
         ("CUR_SHADOW_ABANDON", unv, none, true),
         ("W7_LEAVE_RETURNS_VERSION_READ", null, NARROW_W_R, true),
         ("W7_REBIND_WAITS_ON_PUBLISHING", ver, none, true),
-        /* a refinement is shown harmless only by an exhaustive clean run */
+        /* required since I4 (2026-11-19):  a handle learns it is counted
+         * only when it gives up a read open, so a counted writer never
+         * removes itself */
         ("W7_PUBLISH_COUNTS_READERS_ONLY", ver,
          &[("FSIO_MODEL_ROLES", "w+r"), ("FSIO_MODEL_S3_OPS", "0"), ("FSIO_MODEL_ZOMBIES", "0")],
-         false),
+         true),
         ("V1_FINALIZE_REQUIRES_ABORTED_CLAIM", ver, none, true),
         ("W9_HINT_SPARES_WRITTEN_VERSION", ver, none, true),
         ("W9_HINT_WAITS_FOR_WRITER", ver, none, true),
@@ -234,6 +236,8 @@ fn skip_table() -> Vec<Check> {
         ("H2_HINT_DROPPED_AFTER_GRACE", ver,
          &[("FSIO_MODEL_ROLES", "w"), ("FSIO_MODEL_S3_OPS", "0")], true),
         ("H3_PUBLISHER_HINTS_READERS", ver, NARROW_W_R, true),
+        /* a gateway that both publishes and later reads its version */
+        ("I4_PUBLISHER_NOT_COUNTED", ver, &[("FSIO_MODEL_ROLES", "f")], true),
         ("H3_TRACKING_ONLY_IS_REMOVED", null,
          &[("FSIO_MODEL_ZOMBIES", "0"), ("FSIO_MODEL_EXPIRER_CRASHES", "0")], false),
         ("H3_HINT_WAITS_FOR_LIVE_CLAIM", null, NARROW, true),
