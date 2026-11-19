@@ -225,11 +225,19 @@ void expire_readers(cls_rgw_fsio_head& h, const expired_t& expired)
   }
 }
 
+/* E5:  RGW collects a tail under its tail tag when set, else the ID tag
+ * (complete_atomic_modification()) */
+const std::string& gc_tag_of(const std::string& tail_tag,
+			     const std::string& id_tag)
+{
+  return tail_tag.empty() ? id_tag : tail_tag;
+}
+
 cls_rgw_fsio_gen record_of_head(const cls_rgw_fsio_head& h)
 {
   cls_rgw_fsio_gen rec;
   rec.manifest = h.manifest;
-  rec.gc_tag = h.id_tag;
+  rec.gc_tag = gc_tag_of(h.tail_tag, h.id_tag);
   return rec;
 }
 
@@ -1103,11 +1111,12 @@ int remove_version(cls_rgw_fsio_instance_head& ih, const cls_rgw_fsio_id& r,
   }
   cls_rgw_fsio_gen rec;
   rec.manifest = ih.manifest;
-  rec.gc_tag = ih.id_tag;
+  rec.gc_tag = gc_tag_of(ih.tail_tag, ih.id_tag);
   fx.clones.push_back(cls_rgw_fsio_clone{r, 'G', rec});
-  ih.ocnt->deferred.push_back(cls_rgw_fsio_replaced{ih.manifest, ih.id_tag, r});
+  ih.ocnt->deferred.push_back(cls_rgw_fsio_replaced{ih.manifest, rec.gc_tag, r});
   ih.ocnt->removed = true;
   ih.id_tag.clear();
+  ih.tail_tag.clear();
   ih.manifest.clear();
   out.keep_tail = true;
   return 0;

@@ -204,6 +204,37 @@ TEST_F(FsioHead, SupersedeWithReaderKeepsTheOldContent)
   EXPECT_LE(0, io.getxattr(leaf(key, 1000), "user.rgw.fsio.gen", g));
 }
 
+/* E5:  the leaf clone's record names the head's tail tag when it has one
+ * (a copy's), else its ID tag:  RGW collects the tail under it */
+TEST_F(FsioHead, CloneRecordsTheTailTag)
+{
+  std::string key;
+  const auto head = make_head(key);
+  {
+    ObjectWriteOperation op;
+    bufferlist tt;
+    tt.append("tail0");
+    op.setxattr("user.rgw.tail_tag", tt);
+    ASSERT_EQ(0, ioctx.operate(head, &op));
+  }
+  join(head, 1, false);
+  ObjectWriteOperation op;
+  bufferlist out;
+  int rval = 0;
+  auto in = replace(fsio::replace_mode::DELETE, 1002);
+  in.expected_id_tag = "t0";
+  cls_rgw_fsio_replace_head(op, in, &out, &rval);
+  ASSERT_EQ(0, ioctx.operate(head, &op, OPERATION_RETURNVEC));
+  auto io = keyed(head);
+  bufferlist g;
+  ASSERT_LE(0, io.getxattr(leaf(key, 1002), "user.rgw.fsio.gen", g));
+  cls_rgw_fsio_gen rec;
+  auto it = g.cbegin();
+  decode(rec, it);
+  EXPECT_EQ("tail0", rec.gc_tag);
+  EXPECT_EQ("C0", rec.manifest.to_str());
+}
+
 /* a DELETE with a reader open:  a tracking-only head, no ID tag or
  * manifest, its FSIO state kept (§2.2) */
 TEST_F(FsioHead, DeleteWithReaderLeavesTrackingOnly)
@@ -261,14 +292,16 @@ TEST_F(FsioHead, RemoveCountedVersionKeepsItsTail)
   const auto ih = instance_of(key);
   {
     ObjectWriteOperation op;
-    bufferlist d, t, m;
+    bufferlist d, t, m, tt;
     op.create(true);
     d.append("v1");
     t.append("i0");
     m.append("C0");
+    tt.append("tail0");
     op.write_full(d);
     op.setxattr("user.rgw.idtag", t);
     op.setxattr("user.rgw.manifest", m);
+    op.setxattr("user.rgw.tail_tag", tt);
     ASSERT_EQ(0, ioctx.operate(ih, &op));
   }
   cls_rgw_fsio_ocnt_op add;
@@ -298,6 +331,21 @@ TEST_F(FsioHead, RemoveCountedVersionKeepsItsTail)
 			       ih.substr(MARKER.size() + 1));
   auto io = keyed(ih);
   EXPECT_EQ("v1", read(sib, io));
+  /* E5:  its record, and the open count's, name the tail tag */
+  bufferlist g;
+  ASSERT_LE(0, io.getxattr(sib, "user.rgw.fsio.gen", g));
+  cls_rgw_fsio_gen rec;
+  auto git = g.cbegin();
+  decode(rec, git);
+  EXPECT_EQ("tail0", rec.gc_tag);
+  bufferlist o;
+  ASSERT_LE(0, ioctx.getxattr(ih, "user.rgw.fsio.ocnt", o));
+  cls_rgw_fsio_ocnt oc;
+  auto oit = o.cbegin();
+  decode(oc, oit);
+  ASSERT_EQ(1u, oc.deferred.size());
+  EXPECT_EQ("tail0", oc.deferred[0].gc_tag);
+  EXPECT_EQ(-ENODATA, getxattr(ih, "user.rgw.tail_tag"));
 }
 
 /* §2.5:  a version no open count holds goes, as it always has */

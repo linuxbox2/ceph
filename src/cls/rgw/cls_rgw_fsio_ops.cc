@@ -18,6 +18,7 @@ namespace fsio = cls_rgw_fsio;
 namespace {
 
 static constexpr std::string_view ID_TAG = "user.rgw.idtag";          // RGW_ATTR_ID_TAG
+static constexpr std::string_view TAIL_TAG = "user.rgw.tail_tag";     // RGW_ATTR_TAIL_TAG
 static constexpr std::string_view MANIFEST = "user.rgw.manifest";     // RGW_ATTR_MANIFEST
 static constexpr std::string_view OLH_INFO = "user.rgw.olh.info";     // RGW_ATTR_OLH_INFO
 static constexpr std::string_view FSIO_PREFIX = "user.rgw.fsio.";
@@ -67,6 +68,8 @@ int load_head(cls_method_context_t hctx, cls_rgw_fsio_head& h, loaded& l)
     for (auto& [k, v] : attrs) {
       if (k == ID_TAG) {
 	h.id_tag = v.to_str();
+      } else if (k == TAIL_TAG) {
+	h.tail_tag = v.to_str();
       } else if (k == MANIFEST) {
 	h.manifest = v;
       } else if (k == OLH_INFO) {
@@ -149,6 +152,8 @@ int load_instance(cls_method_context_t hctx, cls_rgw_fsio_instance_head& ih,
     for (auto& [k, v] : attrs) {
       if (k == ID_TAG) {
 	ih.id_tag = v.to_str();
+      } else if (k == TAIL_TAG) {
+	ih.tail_tag = v.to_str();
       } else if (k == MANIFEST) {
 	ih.manifest = v;
       } else if (k == OCNT) {
@@ -165,8 +170,8 @@ int load_instance(cls_method_context_t hctx, cls_rgw_fsio_instance_head& ih,
   return 0;
 }
 
-/* the open count, and the ID tag and manifest a version removal clears
- * (§2.5) */
+/* the open count, and the ID tag, tail tag and manifest a version
+ * removal clears (§2.5) */
 int store_instance(cls_method_context_t hctx, const loaded& before,
 		   const cls_rgw_fsio_instance_head& was,
 		   const cls_rgw_fsio_instance_head& ih)
@@ -184,6 +189,11 @@ int store_instance(cls_method_context_t hctx, const loaded& before,
   }
   if (!was.id_tag.empty() && ih.id_tag.empty()) {
     if ((r = cls_cxx_rmxattr(hctx, ID_TAG.data())) < 0) {
+      return r;
+    }
+  }
+  if (!was.tail_tag.empty() && ih.tail_tag.empty()) {
+    if ((r = cls_cxx_rmxattr(hctx, TAIL_TAG.data())) < 0) {
       return r;
     }
   }

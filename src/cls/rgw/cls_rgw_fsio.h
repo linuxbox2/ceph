@@ -436,6 +436,7 @@ WRITE_CLASS_ENCODER(cls_rgw_fsio_gen)
 struct cls_rgw_fsio_head {
   bool exists = false;
   std::string id_tag;                  // RGW_ATTR_ID_TAG;  empty when tracking-only
+  std::string tail_tag;                // RGW_ATTR_TAIL_TAG, when set
   ceph::buffer::list manifest;         // RGW_ATTR_MANIFEST, opaque
   std::optional<cls_rgw_fsio_hdr> hdr;
   std::map<uint64_t, cls_rgw_fsio_opens> opens;  // by incarnation
@@ -526,23 +527,28 @@ WRITE_CLASS_ENCODER(cls_rgw_fsio_ocnt)
 struct cls_rgw_fsio_instance_head {
   bool exists = false;
   std::string id_tag;                  // empty once removed:  tracking-only
+  std::string tail_tag;                // RGW_ATTR_TAIL_TAG, when set
   ceph::buffer::list manifest;         // RGW_ATTR_MANIFEST, opaque
   std::optional<cls_rgw_fsio_ocnt> ocnt;
 
   void encode(ceph::buffer::list& bl) const {
-    ENCODE_START(1, 1, bl);
+    ENCODE_START(2, 1, bl);
     encode(exists, bl);
     encode(id_tag, bl);
     encode(manifest, bl);
     encode(ocnt, bl);
+    encode(tail_tag, bl);
     ENCODE_FINISH(bl);
   }
   void decode(ceph::buffer::list::const_iterator& bl) {
-    DECODE_START(1, bl);
+    DECODE_START(2, bl);
     decode(exists, bl);
     decode(id_tag, bl);
     decode(manifest, bl);
     decode(ocnt, bl);
+    if (struct_v >= 2) {
+      decode(tail_tag, bl);
+    }
     DECODE_FINISH(bl);
   }
 };
