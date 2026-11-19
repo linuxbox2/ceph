@@ -5,6 +5,7 @@
 
 #include "cls/rgw/cls_rgw_const.h"
 #include "cls/rgw/cls_rgw_client.h"
+#include "cls/rgw/cls_rgw_fsio_ops.h"
 
 #include "common/debug.h"
 
@@ -188,6 +189,15 @@ void cls_rgw_remove_obj(librados::ObjectWriteOperation& o, list<string>& keep_at
   call.keep_attr_prefixes = keep_attr_prefixes;
   encode(call, in);
   o.exec(method::obj_remove, in);
+}
+
+void cls_rgw_fsio_replace_head(librados::ObjectWriteOperation& o,
+			       const cls_rgw_fsio_replace_op& call,
+			       bufferlist* out, int* prval)
+{
+  bufferlist in;
+  encode(call, in);
+  o.exec(method::fsio_replace_head, in, out, prval);
 }
 
 void cls_rgw_obj_store_pg_ver(librados::ObjectWriteOperation& o, const string& attr)

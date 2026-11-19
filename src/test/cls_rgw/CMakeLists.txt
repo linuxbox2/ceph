@@ -14,6 +14,18 @@ install(TARGETS
   ceph_test_cls_rgw
   DESTINATION ${CMAKE_INSTALL_BINDIR})
 
+add_executable(ceph_test_cls_rgw_fsio_head
+  test_cls_rgw_fsio_head.cc
+  ${CMAKE_SOURCE_DIR}/src/cls/rgw/cls_rgw_fsio.cc
+  $<TARGET_OBJECTS:unit-main>)
+target_link_libraries(ceph_test_cls_rgw_fsio_head
+  cls_rgw_client
+  librados
+  global
+  ${UNITTEST_LIBS}
+  radostest-cxx)
+install(TARGETS ceph_test_cls_rgw_fsio_head DESTINATION ${CMAKE_INSTALL_BINDIR})
+
 add_executable(ceph_test_cls_rgw_stats test_cls_rgw_stats.cc
   $<TARGET_OBJECTS:unit-main>)
 target_link_libraries(ceph_test_cls_rgw_stats cls_rgw_client global

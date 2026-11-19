@@ -35,6 +35,7 @@ std::string opens_name(uint64_t incarnation)
 /* the FSIO records as read, so a store writes only what changed */
 struct loaded {
   std::map<std::string, ceph::buffer::list> fsio;
+  std::map<std::string, ceph::buffer::list> all;    // every xattr read
 };
 
 /* one stat and one getxattrs;  an absent object loads as not existing */
@@ -57,7 +58,7 @@ int read_attrs(cls_method_context_t hctx, bool& exists,
 
 int load_head(cls_method_context_t hctx, cls_rgw_fsio_head& h, loaded& l)
 {
-  std::map<std::string, ceph::buffer::list> attrs;
+  auto& attrs = l.all;
   int r = read_attrs(hctx, h.exists, attrs);
   if (r < 0 || !h.exists) {
     return r;
@@ -601,13 +602,104 @@ int rgw_fsio_remove_version(cls_method_context_t hctx, ceph::buffer::list* in,
   return 0;
 }
 
+/* every FSIO record of a head, encoded:  what a recreated head is given */
+std::map<std::string, ceph::buffer::list> records_of(const cls_rgw_fsio_head& h)
+{
+  std::map<std::string, ceph::buffer::list> m;
+  if (h.hdr) {
+    encode(*h.hdr, m[std::string(HDR)]);
+  }
+  for (const auto& [inc, o] : h.opens) {
+    encode(o, m[opens_name(inc)]);
+  }
+  return m;
+}
+
+/* design §3:  in one call, the FSIO state for the mode, the clones first
+ * (CLONE_TO clones the pre-op object wherever the op places it), then,
+ * for every mode but the versioned publish, the head removed and, if
+ * anything stays, recreated with the RGW attributes the caller keeps
+ * and the new FSIO records, as rgw_obj_remove() removes a head.  The
+ * caller's own writes come after this call in its op (§3, the ordering
+ * rule). */
+int rgw_fsio_replace_head(cls_method_context_t hctx, ceph::buffer::list* in,
+			  ceph::buffer::list* out)
+{
+  cls_rgw_fsio_replace_op op;
+  if (int r = decode_op(in, op, __func__); r < 0) {
+    return r;
+  }
+  cls_rgw_fsio_head h;
+  loaded l;
+  int r = load_head(hctx, h, l);
+  if (r < 0) {
+    return r;
+  }
+  if ((r = require(h.exists)) < 0) {
+    return r;
+  }
+  const auto in_core = op.to_core();
+  fsio::replace_out rout;
+  cls_rgw_fsio_effects fx;
+  if ((r = fsio::replace_head(h, in_core, rout, fx)) < 0) {
+    return r;
+  }
+  cls_rgw_fsio_replace_ret ret{rout.keep_tail, rout.born_drained, rout.drained};
+  /* the clones first;  apply() would also remove a head with nothing
+   * left, which the replacement below decides itself */
+  auto clones = fx;
+  clones.remove_head = false;
+  if ((r = apply(hctx, op.marker, clones)) < 0) {
+    return r;
+  }
+  if (in_core.mode == fsio::replace_mode::PUBLISH && in_core.versioned) {
+    if ((r = store_head(hctx, l, h)) < 0) {   // the OLH head stays
+      return r;
+    }
+    encode(ret, *out);
+    return 0;
+  }
+  /* what the recreated head keeps:  the RGW attributes under the
+   * caller's prefixes, read before the op, and the new FSIO records */
+  std::map<std::string, ceph::buffer::list> kept;
+  for (const auto& prefix : op.keep_attr_prefixes) {
+    for (auto i = l.all.lower_bound(prefix);
+	 i != l.all.end() && i->first.starts_with(prefix); ++i) {
+      if (!i->first.starts_with(FSIO_PREFIX)) {
+	kept[i->first] = i->second;
+      }
+    }
+  }
+  if (!fx.remove_head) {
+    kept.merge(records_of(h));
+  }
+  if ((r = cls_cxx_remove(hctx)) < 0) {
+    CLS_ERR("ERROR: %s: cls_cxx_remove returned %d", __func__, r);
+    return r;
+  }
+  if (!kept.empty()) {
+    if ((r = cls_cxx_create(hctx, false)) < 0) {
+      CLS_ERR("ERROR: %s: cls_cxx_create returned %d", __func__, r);
+      return r;
+    }
+    for (auto& [name, v] : kept) {
+      if ((r = cls_cxx_setxattr(hctx, name.c_str(), &v)) < 0) {
+	CLS_ERR("ERROR: %s: setting %s returned %d", __func__, name.c_str(), r);
+	return r;
+      }
+    }
+  }
+  encode(ret, *out);
+  return 0;
+}
+
 } // anonymous namespace
 
 void cls_rgw_fsio_register(cls_handle_t h_class)
 {
   using namespace cls::rgw::method;
   ClassRegistrar<cls::rgw::ClassId> cls(h_class);
-  static cls_method_handle_t h[15];
+  static cls_method_handle_t h[16];
   cls.register_cxx_method(fsio_join, rgw_fsio_join, &h[0]);
   cls.register_cxx_method(fsio_ready, rgw_fsio_ready, &h[1]);
   cls.register_cxx_method(fsio_extend, rgw_fsio_extend, &h[2]);
@@ -623,4 +715,5 @@ void cls_rgw_fsio_register(cls_handle_t h_class)
   cls.register_cxx_method(fsio_ocnt_expire, rgw_fsio_ocnt_expire, &h[12]);
   cls.register_cxx_method(fsio_ocnt_forget, rgw_fsio_ocnt_forget, &h[13]);
   cls.register_cxx_method(fsio_remove_version, rgw_fsio_remove_version, &h[14]);
+  cls.register_cxx_method(fsio_replace_head, rgw_fsio_replace_head, &h[15]);
 }

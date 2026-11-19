@@ -423,6 +423,85 @@ struct cls_rgw_fsio_remove_version_ret {
 };
 WRITE_CLASS_ENCODER(cls_rgw_fsio_remove_version_ret)
 
+/* fsio_replace_head:  replaces cls_rgw_remove_obj wherever RGW replaces
+ * a head in an FSIO-enabled bucket (design §3), in RGW's own compound op */
+struct cls_rgw_fsio_replace_op {
+  uint8_t mode = 0;              // cls_rgw_fsio::replace_mode
+  cls_rgw_fsio_id r;             // the leaf clone's id, drawn by the caller
+  std::string expected_id_tag;   // delete:  the ID tag the caller read (Z7)
+  cls_rgw_fsio_handle caller;    // publish:  the publisher
+  cls_rgw_fsio_id shadow;        // publish
+  bool versioned = false;        // publish:  the standalone call on the OLH
+  bool complete = false;         // versioned publish:  for a dead publisher
+  std::set<uint64_t> expired;    // with complete
+  std::list<std::string> keep_attr_prefixes;  // as cls_rgw_remove_obj's
+  std::string marker;            // the bucket's, to name the leaf clone (§2.7)
+
+  cls_rgw_fsio::replace_in to_core() const {
+    cls_rgw_fsio::replace_in in;
+    in.mode = static_cast<cls_rgw_fsio::replace_mode>(mode);
+    in.r = r;
+    in.expected_id_tag = expected_id_tag;
+    in.caller = caller;
+    in.shadow = shadow;
+    in.versioned = versioned;
+    in.complete = complete;
+    in.expired = expired;
+    return in;
+  }
+  void encode(ceph::buffer::list& bl) const {
+    ENCODE_START(1, 1, bl);
+    encode(mode, bl);
+    encode(r, bl);
+    encode(expected_id_tag, bl);
+    encode(caller, bl);
+    encode(shadow, bl);
+    encode(versioned, bl);
+    encode(complete, bl);
+    encode(expired, bl);
+    encode(keep_attr_prefixes, bl);
+    encode(marker, bl);
+    ENCODE_FINISH(bl);
+  }
+  void decode(ceph::buffer::list::const_iterator& bl) {
+    DECODE_START(1, bl);
+    decode(mode, bl);
+    decode(r, bl);
+    decode(expected_id_tag, bl);
+    decode(caller, bl);
+    decode(shadow, bl);
+    decode(versioned, bl);
+    decode(complete, bl);
+    decode(expired, bl);
+    decode(keep_attr_prefixes, bl);
+    decode(marker, bl);
+    DECODE_FINISH(bl);
+  }
+};
+WRITE_CLASS_ENCODER(cls_rgw_fsio_replace_op)
+
+struct cls_rgw_fsio_replace_ret {
+  bool keep_tail = false;        // else the caller collects the replaced chain
+  bool born_drained = false;     // publish:  the replaced content named only by the hint
+  std::optional<cls_rgw_fsio_id> drained;
+
+  void encode(ceph::buffer::list& bl) const {
+    ENCODE_START(1, 1, bl);
+    encode(keep_tail, bl);
+    encode(born_drained, bl);
+    encode(drained, bl);
+    ENCODE_FINISH(bl);
+  }
+  void decode(ceph::buffer::list::const_iterator& bl) {
+    DECODE_START(1, bl);
+    decode(keep_tail, bl);
+    decode(born_drained, bl);
+    decode(drained, bl);
+    DECODE_FINISH(bl);
+  }
+};
+WRITE_CLASS_ENCODER(cls_rgw_fsio_replace_ret)
+
 namespace cls::rgw::method {
 constexpr auto fsio_join = ClsMethod<RdWrTag, ClassId>("fsio_join");
 constexpr auto fsio_ready = ClsMethod<RdWrTag, ClassId>("fsio_ready");
@@ -442,4 +521,6 @@ constexpr auto fsio_ocnt_expire = ClsMethod<RdWrTag, ClassId>("fsio_ocnt_expire"
 constexpr auto fsio_ocnt_forget = ClsMethod<RdWrTag, ClassId>("fsio_ocnt_forget");
 constexpr auto fsio_remove_version =
   ClsMethod<RdWrTag, ClassId>("fsio_remove_version");
+constexpr auto fsio_replace_head =
+  ClsMethod<RdWrTag, ClassId>("fsio_replace_head");
 }

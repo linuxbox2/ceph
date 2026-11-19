@@ -149,6 +149,15 @@ void cls_rgw_bucket_complete_op(librados::ObjectWriteOperation& o, RGWModifyOp o
 				const std::string& obj_locator = ""); // ignored if it's the empty string
 
 void cls_rgw_remove_obj(librados::ObjectWriteOperation& o, std::list<std::string>& keep_attr_prefixes);
+/* FSIO's head replacement, in an FSIO-enabled bucket in place of
+ * cls_rgw_remove_obj, in the caller's head-write op (FSIO_RADOS_DESIGN.md
+ * §3);  its reply, cls_rgw_fsio_replace_ret, lands in *out once the op
+ * completes, the op's return value in *prval;  the op must be sent with
+ * librados::OPERATION_RETURNVEC for a write to return it */
+struct cls_rgw_fsio_replace_op;
+void cls_rgw_fsio_replace_head(librados::ObjectWriteOperation& o,
+			       const cls_rgw_fsio_replace_op& call,
+			       ceph::buffer::list* out, int* prval);
 void cls_rgw_obj_store_pg_ver(librados::ObjectWriteOperation& o, const std::string& attr);
 void cls_rgw_obj_check_attrs_prefix(librados::ObjectOperation& o, const std::string& prefix, bool fail_if_exist);
 void cls_rgw_obj_check_mtime(librados::ObjectOperation& o, const ceph::real_time& mtime, bool high_precision_time, RGWCheckMTimeType type);
