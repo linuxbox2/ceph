@@ -544,7 +544,7 @@ cls_rgw_fsio_chunk_set* writer_shadow(cls_rgw_fsio_head& h,
 
 int hint(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& caller,
 	 const cls_rgw_fsio_id& cs, uint64_t trunc_epoch_seen, uint64_t size,
-	 uint64_t mtime, hint_out& out)
+	 ceph::real_time mtime, hint_out& out)
 {
   out = hint_out{};
   auto* e = writer_shadow(h, caller, cs);
@@ -583,7 +583,7 @@ int hint(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& caller,
 }
 
 int truncate(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& caller,
-	     const cls_rgw_fsio_id& cs, uint64_t size, uint64_t mtime,
+	     const cls_rgw_fsio_id& cs, uint64_t size, ceph::real_time mtime,
 	     uint64_t& trunc_epoch_out)
 {
   auto* e = writer_shadow(h, caller, cs);

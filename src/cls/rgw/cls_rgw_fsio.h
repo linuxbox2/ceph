@@ -13,6 +13,7 @@
 
 #include <fmt/format.h>
 
+#include "common/ceph_time.h"
 #include "include/buffer.h"
 #include "include/encoding.h"
 
@@ -140,7 +141,7 @@ WRITE_CLASS_ENCODER(cls_rgw_fsio_run)
 
 struct cls_rgw_fsio_shadow {
   uint64_t size_hint = 0;
-  uint64_t mtime_hint = 0;
+  ceph::real_time mtime_hint;
   uint64_t trunc_epoch = 0;
   std::optional<uint64_t> trunc_low;
   /* reserved runs:  sorted, disjoint, merged when they touch, at most
@@ -627,12 +628,12 @@ struct hint_out {
 };
 int hint(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& caller,
 	 const cls_rgw_fsio_id& cs, uint64_t trunc_epoch_seen, uint64_t size,
-	 uint64_t mtime, hint_out& out);
+	 ceph::real_time mtime, hint_out& out);
 
 /* §3.3:  ftruncate():  size and mtime set exactly, a new truncate epoch,
  * trunc_low lowered to the size;  after the chunks changed */
 int truncate(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& caller,
-	     const cls_rgw_fsio_id& cs, uint64_t size, uint64_t mtime,
+	     const cls_rgw_fsio_id& cs, uint64_t size, ceph::real_time mtime,
 	     uint64_t& trunc_epoch_out);
 
 /* versioned:  the publish the last writer's transition records (§4.2) */

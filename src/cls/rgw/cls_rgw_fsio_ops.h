@@ -199,7 +199,7 @@ struct cls_rgw_fsio_hint_size_op {
   cls_rgw_fsio_id cs;
   uint64_t trunc_epoch = 0;
   uint64_t size = 0;
-  uint64_t mtime = 0;
+  ceph::real_time mtime;
 
   void encode(ceph::buffer::list& bl) const {
     ENCODE_START(1, 1, bl);
@@ -255,7 +255,7 @@ struct cls_rgw_fsio_truncate_op {
   cls_rgw_fsio_handle caller;
   cls_rgw_fsio_id cs;
   uint64_t size = 0;
-  uint64_t mtime = 0;
+  ceph::real_time mtime;
 
   void encode(ceph::buffer::list& bl) const {
     ENCODE_START(1, 1, bl);

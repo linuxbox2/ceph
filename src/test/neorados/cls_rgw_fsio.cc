@@ -325,7 +325,7 @@ CORO_TEST_F(NeoRadosClsRgwFsio, HintAndTruncate, NeoRadosTest) {
   hop.cs = jret.bound;
   hop.trunc_epoch = 0;
   hop.size = 100;
-  hop.mtime = 5;
+  hop.mtime = ceph::real_time(std::chrono::seconds(5));
   cls_rgw_fsio_hint_size_ret hret;
   co_await execute(head, WriteOp{}.exec(f::hint(hop, &hret)));
   EXPECT_FALSE(hret.stale);
@@ -336,13 +336,13 @@ CORO_TEST_F(NeoRadosClsRgwFsio, HintAndTruncate, NeoRadosTest) {
   top.caller = GW1;
   top.cs = jret.bound;
   top.size = 40;
-  top.mtime = 7;
+  top.mtime = ceph::real_time(std::chrono::seconds(7));
   cls_rgw_fsio_truncate_ret tret;
   co_await execute(head, WriteOp{}.exec(f::truncate(top, &tret)));
   EXPECT_EQ(1u, tret.trunc_epoch);
 
   hop.size = 500;
-  hop.mtime = 8;
+  hop.mtime = ceph::real_time(std::chrono::seconds(8));
   co_await execute(head, WriteOp{}.exec(f::hint(hop, &hret)));
   EXPECT_TRUE(hret.stale);
   EXPECT_EQ(1u, hret.trunc_epoch);
@@ -360,7 +360,7 @@ CORO_TEST_F(NeoRadosClsRgwFsio, HintAndTruncate, NeoRadosTest) {
     co_return;
   }
   EXPECT_EQ(40u, e->shadow->size_hint);
-  EXPECT_EQ(7u, e->shadow->mtime_hint);
+  EXPECT_EQ(ceph::real_time(std::chrono::seconds(7)), e->shadow->mtime_hint);
   EXPECT_EQ(1u, e->shadow->trunc_epoch);
   EXPECT_EQ(std::optional<uint64_t>(40), e->shadow->trunc_low);
   co_return;
