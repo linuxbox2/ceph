@@ -1,0 +1,375 @@
+#!/usr/bin/env -S cargo +nightly -Zscript
+---
+[package]
+edition = "2021"
+---
+//! Runs the FSIO model checker's tiers in parallel.
+//!
+//! Each run is one invocation of `ceph_test_cls_rgw_fsio_model` with its
+//! bounds in the environment;  the runs of a tier are independent, so
+//! they run side by side, one core each, and the tier takes as long as
+//! its longest run.  Each prints its summary as it ends;  its full
+//! output, traces included, goes to `<out>/<name>.log`.
+//!
+//!   fsio_model_runs.rs [--bin PATH] [--out DIR] [--jobs N (8)] TIER...
+//!
+//! Tiers:
+//!   smoke    small bounds over every configuration kind;  for every change
+//!   quick    the checkpoint tier, before a commit
+//!   vectors  the replay vectors in fsio_vectors/, plain search
+//!   skips    every skip check, each expected to be caught (SHORTEST,
+//!            STOP_AT_FIRST);  the two refinements expected clean
+//!   sample   random walks (FSIO_MODEL_WALKS) over configurations beyond
+//!            the exhaustive search, a seed per run
+//!   sample-skips  each skip check under random walks:  walks to catch
+//!
+//! A run passes when it is clean, or, for a skip check, when it finds a
+//! violation;  a run that reaches FSIO_MODEL_LIMIT is reported as a
+//! partial sample, not a pass.  The exit status is non-zero if any run
+//! fails.
+
+use std::collections::VecDeque;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
+
+const LIMIT: &str = "20000000";
+
+#[derive(Clone)]
+struct Run {
+    name: String,
+    env: Vec<(String, String)>,
+    expect_violation: bool,
+}
+
+fn run(name: &str, env: &[(&str, &str)]) -> Run {
+    Run {
+        name: name.to_string(),
+        env: env.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
+        expect_violation: false,
+    }
+}
+
+fn smoke() -> Vec<Run> {
+    vec![
+        run("smoke-wr", &[("FSIO_MODEL_ROLES", "wr"), ("FSIO_MODEL_S3_OPS", "0"),
+                          ("FSIO_MODEL_ZOMBIES", "0")]),
+        run("smoke-w-s3", &[("FSIO_MODEL_ROLES", "w"), ("FSIO_MODEL_S3_OPS", "1")]),
+        run("smoke-w+r", &[("FSIO_MODEL_ROLES", "w+r"), ("FSIO_MODEL_S3_OPS", "0")]),
+        run("smoke-v-w", &[("FSIO_MODEL_VERSIONED", "1"), ("FSIO_MODEL_ROLES", "w"),
+                           ("FSIO_MODEL_S3_OPS", "0"), ("FSIO_MODEL_EXPIRER_CRASHES", "0")]),
+        run("smoke-null-w", &[("FSIO_MODEL_VERSIONED", "1"), ("FSIO_MODEL_VSTART", "null"),
+                              ("FSIO_MODEL_ROLES", "w"), ("FSIO_MODEL_S3_OPS", "0"),
+                              ("FSIO_MODEL_EXPIRER_CRASHES", "0")]),
+        run("smoke-v-w+r", &[("FSIO_MODEL_VERSIONED", "1"), ("FSIO_MODEL_ROLES", "w+r"),
+                             ("FSIO_MODEL_S3_OPS", "0"), ("FSIO_MODEL_ZOMBIES", "0"),
+                             ("FSIO_MODEL_EXPIRER_CRASHES", "0")]),
+    ]
+}
+
+fn quick() -> Vec<Run> {
+    vec![
+        run("quick-wr", &[("FSIO_MODEL_ROLES", "wr"), ("FSIO_MODEL_S3_OPS", "0")]),
+        run("quick-v-w", &[("FSIO_MODEL_VERSIONED", "1"), ("FSIO_MODEL_ROLES", "w"),
+                           ("FSIO_MODEL_S3_OPS", "0")]),
+        run("quick-null-w", &[("FSIO_MODEL_VERSIONED", "1"), ("FSIO_MODEL_VSTART", "null"),
+                              ("FSIO_MODEL_ROLES", "w"), ("FSIO_MODEL_S3_OPS", "0")]),
+        run("quick-f2", &[("FSIO_MODEL_ROLES", "f"), ("FSIO_MODEL_S3_OPS", "2")]),
+        run("quick-w+r", &[("FSIO_MODEL_ROLES", "w+r"), ("FSIO_MODEL_S3_OPS", "0")]),
+        run("quick-w+w", &[("FSIO_MODEL_ROLES", "w+w"), ("FSIO_MODEL_S3_OPS", "0")]),
+    ]
+}
+
+fn vectors(src: &Path) -> Vec<Run> {
+    let dir = src.join("fsio_vectors");
+    let mut v = Vec::new();
+    let mut names: Vec<PathBuf> = std::fs::read_dir(&dir)
+        .map(|d| d.filter_map(|e| e.ok()).map(|e| e.path()).collect())
+        .unwrap_or_default();
+    names.sort();
+    for p in names {
+        if p.extension().map_or(true, |e| e != "txt") {
+            continue;
+        }
+        let stem = p.file_stem().unwrap().to_string_lossy().to_string();
+        let mut r = run(&format!("vector-{stem}"),
+                        &[("FSIO_MODEL_VERSIONED", "1"), ("FSIO_MODEL_VSTART", "null"),
+                          ("FSIO_MODEL_ROLES", "wr"), ("FSIO_MODEL_S3_OPS", "1"),
+                          /* depth-first, so the livelock check runs;  no
+                           * expirer crash, so the search finishes */
+                          ("FSIO_MODEL_EXPIRER_CRASHES", "0")]);
+        r.env.push(("FSIO_MODEL_PREFIX".into(), p.to_string_lossy().into()));
+        v.push(r);
+    }
+    v
+}
+
+/* each check, the configuration that reaches it, and whether skipping it
+ * must be caught;  the two refinements change no result.  A check caught
+ * only in a narrower configuration carries its own settings, which
+ * replace the shared ones:  the narrowest configuration found to catch it
+ * within the cap (2026-11-18, after the versioned model grew) */
+type Env = &'static [(&'static str, &'static str)];
+/* no partitions, no expirer crash, plain depth-first */
+const NARROW: Env = &[("FSIO_MODEL_S3_OPS", "0"), ("FSIO_MODEL_ZOMBIES", "0"),
+                      ("FSIO_MODEL_EXPIRER_CRASHES", "0"), ("FSIO_MODEL_SHORTEST", "0")];
+const NARROW_W_R: Env = &[("FSIO_MODEL_ROLES", "w+r"), ("FSIO_MODEL_S3_OPS", "0"),
+                          ("FSIO_MODEL_ZOMBIES", "0"), ("FSIO_MODEL_EXPIRER_CRASHES", "0"),
+                          ("FSIO_MODEL_SHORTEST", "0")];
+
+type Check = (&'static str, Env, Env, bool);
+
+fn skip_table() -> Vec<Check> {
+    let unv: Env = &[("FSIO_MODEL_ROLES", "wr"), ("FSIO_MODEL_S3_OPS", "1")];
+    let ver: Env = &[("FSIO_MODEL_VERSIONED", "1"), ("FSIO_MODEL_ROLES", "wr"),
+                     ("FSIO_MODEL_S3_OPS", "1")];
+    let null: Env = &[("FSIO_MODEL_VERSIONED", "1"), ("FSIO_MODEL_VSTART", "null"),
+                      ("FSIO_MODEL_ROLES", "wr"), ("FSIO_MODEL_S3_OPS", "1")];
+    let none: Env = &[];
+    vec![
+        ("W5_FINALIZE_RECHECKS_STATE", unv, none, true),
+        ("W6_EXPIRE_TAKES_OVER_PUBLISH", unv, none, true),
+        ("W3_FINALIZE_CREATES_TO_PUBLISHING", unv, none, true),
+        ("W3_RESUMED_FINALIZE_TAKES_OVER", unv, none, true),
+        ("W3_PUBLISHING_TO_RETIRES_FROM", unv,
+         &[("FSIO_MODEL_ROLES", "w"), ("FSIO_MODEL_S3_OPS", "0"), ("FSIO_MODEL_ZOMBIES", "0"),
+           ("FSIO_MODEL_EXPIRER_CRASHES", "0"), ("FSIO_MODEL_SHORTEST", "0")], true),
+        ("W1_SHADOW_STORES_PSEUDO_MANIFEST", unv, none, true),
+        ("CUR_SHADOW_SUPERSEDE", unv, &[("FSIO_MODEL_ROLES", "ww")], true),
+        ("CUR_SHADOW_PUBLISH", unv, none, true),
+        ("CUR_SHADOW_ABANDON", unv, none, true),
+        ("W7_LEAVE_RETURNS_VERSION_READ", null, NARROW_W_R, true),
+        ("W7_REBIND_WAITS_ON_PUBLISHING", ver, none, true),
+        /* a refinement is shown harmless only by an exhaustive clean run */
+        ("W7_PUBLISH_COUNTS_READERS_ONLY", ver,
+         &[("FSIO_MODEL_ROLES", "w+r"), ("FSIO_MODEL_S3_OPS", "0"), ("FSIO_MODEL_ZOMBIES", "0")],
+         false),
+        ("V1_FINALIZE_REQUIRES_ABORTED_CLAIM", ver, none, true),
+        ("W9_HINT_SPARES_WRITTEN_VERSION", ver, none, true),
+        ("W9_HINT_WAITS_FOR_WRITER", ver, none, true),
+        ("V2_COMPLETE_REMOVES_DEAD_WRITERS", ver, none, true),
+        ("V3_FINALIZER_HINTS_PLACEHOLDER", ver, &[("FSIO_MODEL_ROLES", "w")], true),
+        ("V4_HINT_WAITS_FOR_GRACE", ver, none, true),
+        ("V4_PUBLISHER_KEEPS_HINT", null,
+         &[("FSIO_MODEL_ROLES", "w"), ("FSIO_MODEL_S3_OPS", "0"), ("FSIO_MODEL_CRASHES", "0"),
+           ("FSIO_MODEL_EXPIRER_CRASHES", "0"), ("FSIO_MODEL_SHORTEST", "0")], true),
+        ("NULL_IS_HEAD", null, none, true),
+        ("NULL_REMOVAL_RETIRES", null, none, true),
+        ("PUBLISH_FOLLOWS_STATE", null, none, true),
+        ("PRESENCE_HINT_BEFORE_JOIN", unv, none, true),
+        ("PRESENCE_HINT_BEFORE_OCNT", ver, none, true),
+        ("PRESENCE_HINT_HELD_UNTIL_RELEASED", unv, none, true),
+        ("H1_FAILED_RELEASE_KEEPS_HINT", unv, none, true),
+        ("H2_HINT_DROPPED_AFTER_GRACE", ver,
+         &[("FSIO_MODEL_ROLES", "w"), ("FSIO_MODEL_S3_OPS", "0")], true),
+        ("H3_PUBLISHER_HINTS_READERS", ver, NARROW_W_R, true),
+        ("H3_TRACKING_ONLY_IS_REMOVED", null,
+         &[("FSIO_MODEL_ZOMBIES", "0"), ("FSIO_MODEL_EXPIRER_CRASHES", "0")], false),
+        ("H3_HINT_WAITS_FOR_LIVE_CLAIM", null, NARROW, true),
+        ("H3_PUBLISH_HINT_REMOVES_READER_HINTS", null, NARROW, true),
+        ("H3_PUBLISHER_CLEANUP_REMOVES_READER_HINTS", null,
+         &[("FSIO_MODEL_PREFIX", "src/test/cls_rgw/fsio_vectors/h3-tracking-only.txt"),
+           ("FSIO_MODEL_SHORTEST", "0")], true),
+        ("W10_RELEASE_ONLY_WITH_LIVE_CLAIM", ver, none, true),
+        ("W10_RELEASE_ABORTS_CLAIM_FIRST", ver, none, true),
+        ("W15_CONSTRUCTOR_MAY_ABANDON", unv, none, true),
+        ("W20_RELEASE_CHECKS_PUBLISHER", null,
+         &[("FSIO_MODEL_ROLES", "ww"), ("FSIO_MODEL_S3_OPS", "0"), ("FSIO_MODEL_CRASHES", "0"),
+           ("FSIO_MODEL_EXPIRER_CRASHES", "0")], true),
+    ]
+}
+
+fn skips() -> Vec<Run> {
+    skip_table()
+        .iter()
+        .map(|(c, env, own, caught)| {
+            let mut r = run(&format!("skip-{c}"), env);
+            r.env.push(("FSIO_MODEL_SKIP_CHECK".into(), c.to_string()));
+            if *caught {
+                r.env.push(("FSIO_MODEL_SHORTEST".into(), "1".into()));
+                r.env.push(("FSIO_MODEL_STOP_AT_FIRST".into(), "1".into()));
+            }
+            /* later settings replace earlier ones of the same name */
+            for (k, v) in own.iter() {
+                r.env.retain(|(ek, _)| ek != k);
+                r.env.push((k.to_string(), v.to_string()));
+            }
+            r.expect_violation = *caught;
+            r
+        })
+        .collect()
+}
+
+const WALKS: &str = "200000";
+
+fn walks(name: &str, env: &[(&str, &str)], seed: u64) -> Run {
+    let mut r = run(name, env);
+    r.env.push(("FSIO_MODEL_WALKS".into(), WALKS.into()));
+    r.env.push(("FSIO_MODEL_SEED".into(), seed.to_string()));
+    r
+}
+
+/* random walks over configurations beyond the exhaustive search;  a
+ * distinct seed per run */
+fn sample() -> Vec<Run> {
+    let v: &[(&str, &str)] = &[("FSIO_MODEL_VERSIONED", "1")];
+    let n: &[(&str, &str)] = &[("FSIO_MODEL_VERSIONED", "1"), ("FSIO_MODEL_VSTART", "null")];
+    let configs: Vec<(&str, Vec<(&str, &str)>)> = vec![
+        ("sample-fff-2", vec![("FSIO_MODEL_ROLES", "fff"), ("FSIO_MODEL_S3_OPS", "2")]),
+        ("sample-wr-2", vec![("FSIO_MODEL_ROLES", "wr"), ("FSIO_MODEL_S3_OPS", "2")]),
+        ("sample-w+r+r-1", vec![("FSIO_MODEL_ROLES", "w+r+r"), ("FSIO_MODEL_S3_OPS", "1")]),
+        ("sample-w+r,w-1", vec![("FSIO_MODEL_ROLES", "w+rw"), ("FSIO_MODEL_S3_OPS", "1")]),
+        ("sample-v-wr-2", [v, &[("FSIO_MODEL_ROLES", "wr"), ("FSIO_MODEL_S3_OPS", "2")]].concat()),
+        ("sample-v-w+r-1", [v, &[("FSIO_MODEL_ROLES", "w+r"), ("FSIO_MODEL_S3_OPS", "1")]].concat()),
+        ("sample-v-www-1", [v, &[("FSIO_MODEL_ROLES", "www"), ("FSIO_MODEL_S3_OPS", "1")]].concat()),
+        ("sample-null-wr-2", [n, &[("FSIO_MODEL_ROLES", "wr"), ("FSIO_MODEL_S3_OPS", "2")]].concat()),
+    ];
+    configs
+        .iter()
+        .enumerate()
+        .map(|(i, (name, env))| walks(name, env, i as u64 + 1))
+        .collect()
+}
+
+/* each skip check under random walks, on its shared configuration and
+ * its own roles only (none of the narrowing the search needed):  how
+ * many walks each takes to be caught, or that walks miss it */
+fn sample_skips() -> Vec<Run> {
+    skip_table()
+        .iter()
+        .filter(|(_, _, _, caught)| *caught)
+        .map(|(c, env, own, _)| {
+            let mut r = walks(&format!("sample-skip-{c}"), env, 1);
+            for (k, v) in own.iter().filter(|(k, _)| *k == "FSIO_MODEL_ROLES") {
+                r.env.retain(|(ek, _)| ek != k);
+                r.env.push((k.to_string(), v.to_string()));
+            }
+            r.env.push(("FSIO_MODEL_SKIP_CHECK".into(), c.to_string()));
+            r.env.push(("FSIO_MODEL_STOP_AT_FIRST".into(), "1".into()));
+            r.expect_violation = true;
+            r
+        })
+        .collect()
+}
+
+/* the summary line a run ends with:  "N states, M end states, K kinds of
+ * violation" */
+fn summary(out: &str) -> (Option<u64>, Option<u64>) {
+    for line in out.lines().rev() {
+        if let Some(i) = line.find(" states") {
+            if line.contains("kinds of violation") {
+                let states = line[..i].split_whitespace().next()
+                    .and_then(|w| w.parse().ok());
+                let kinds = line.split(", ").last()
+                    .and_then(|t| t.split_whitespace().next())
+                    .and_then(|w| w.parse().ok());
+                return (states, kinds);
+            }
+        }
+    }
+    (None, None)
+}
+
+fn main() {
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
+    /* run from the worktree root:  the paths below are relative to it */
+    let here = PathBuf::from("src/test/cls_rgw");
+    let mut bin = PathBuf::from("build/bin/ceph_test_cls_rgw_fsio_model");
+    let mut out = PathBuf::from("build/fsio-model-runs");
+    let mut jobs = 8;               // a modest default;  --jobs N for more
+    let mut tiers = Vec::new();
+    while !args.is_empty() {
+        let a = args.remove(0);
+        match a.as_str() {
+            "--bin" => bin = PathBuf::from(args.remove(0)),
+            "--out" => out = PathBuf::from(args.remove(0)),
+            "--jobs" => jobs = args.remove(0).parse().expect("--jobs N"),
+            t => tiers.push(t.to_string()),
+        }
+    }
+    if tiers.is_empty() {
+        eprintln!("usage:  fsio_model_runs.rs [--bin PATH] [--out DIR] [--jobs N] \
+                   smoke|quick|vectors|skips|sample|sample-skips ...");
+        std::process::exit(2);
+    }
+    let mut runs = Vec::new();
+    for t in &tiers {
+        match t.as_str() {
+            "smoke" => runs.extend(smoke()),
+            "quick" => runs.extend(quick()),
+            "vectors" => runs.extend(vectors(&here)),
+            "skips" => runs.extend(skips()),
+            "sample" => runs.extend(sample()),
+            "sample-skips" => runs.extend(sample_skips()),
+            other => {
+                eprintln!("unknown tier {other}");
+                std::process::exit(2);
+            }
+        }
+    }
+    std::fs::create_dir_all(&out).expect("create the output directory");
+    let n = runs.len();
+    println!("{n} runs, {jobs} at a time;  logs in {}", out.display());
+    let queue = Arc::new(Mutex::new(runs.into_iter().collect::<VecDeque<_>>()));
+    let failed = Arc::new(Mutex::new(Vec::<String>::new()));
+    let start = Instant::now();
+    let mut workers = Vec::new();
+    for _ in 0..jobs.min(n) {
+        let queue = Arc::clone(&queue);
+        let failed = Arc::clone(&failed);
+        let bin = bin.clone();
+        let out = out.clone();
+        workers.push(std::thread::spawn(move || loop {
+            let Some(r) = queue.lock().unwrap().pop_front() else { break };
+            let t0 = Instant::now();
+            let mut cmd = Command::new(&bin);
+            cmd.env("FSIO_MODEL_LIMIT", LIMIT)
+                .env("FSIO_MODEL_PROGRESS", "1000000")
+                .stdin(Stdio::null());
+            for (k, v) in &r.env {
+                cmd.env(k, v);
+            }
+            /* the log is written as the run goes, so a long run's
+             * progress lines can be read while it runs */
+            let log = out.join(format!("{}.log", r.name));
+            let f = std::fs::File::create(&log).expect("create the log");
+            cmd.stdout(f.try_clone().expect("the log")).stderr(f);
+            let _ = cmd.status().expect("run the model");
+            let text = std::fs::read_to_string(&log).unwrap_or_default();
+            let (states, kinds) = summary(&text);
+            let capped = states.map_or(false, |s| s.to_string() == LIMIT);
+            let found = kinds.map_or(false, |k| k > 0);
+            let verdict = match (r.expect_violation, found, capped) {
+                (true, true, _) => "caught",
+                (true, false, _) => "MISSED",
+                (false, true, _) => "VIOLATION",
+                (false, false, true) => "partial (cap)",
+                (false, false, false) => "clean",
+            };
+            if matches!(verdict, "MISSED" | "VIOLATION") || states.is_none() {
+                failed.lock().unwrap().push(r.name.clone());
+            }
+            let walked = text.lines().rev()
+                .find_map(|l| l.split("sampled by ").nth(1))
+                .and_then(|t| t.split_whitespace().next())
+                .map(|w| format!("{w} walks"));
+            println!("{:<56} {:>18}  {:>7.1}s  {}",
+                     r.name,
+                     walked.unwrap_or_else(|| format!(
+                         "{} states", states.map_or("?".into(), |s| s.to_string()))),
+                     t0.elapsed().as_secs_f64(),
+                     if states.is_none() { "NO SUMMARY" } else { verdict });
+        }));
+    }
+    for w in workers {
+        let _ = w.join();
+    }
+    let failed = failed.lock().unwrap();
+    println!("{} of {n} as expected, {:.1}s", n - failed.len(),
+             start.elapsed().as_secs_f64());
+    if !failed.is_empty() {
+        println!("not as expected:  {}", failed.join(", "));
+        std::process::exit(1);
+    }
+}

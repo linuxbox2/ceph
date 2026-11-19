@@ -65,6 +65,7 @@
 #include <iostream>
 #include <optional>
 #include <map>
+#include <random>
 #include <set>
 #include <string>
 #include <unordered_map>
@@ -2699,6 +2700,151 @@ struct Explorer {
     }
   }
 
+  static std::vector<Action> actions_of(const World& w) {
+    std::vector<Action> acts;
+    for (size_t gi = 0; gi < w.gws.size(); ++gi) {
+      auto first = acts.size();
+      if (cfg.versioned) {
+	gw_actions_v(w, gi, acts);
+      } else {
+	gw_actions(w, gi, acts);
+      }
+      presence_hints(w, gi, acts, first);
+    }
+    if (cfg.versioned) {
+      s3_actions_v(w, acts);
+      expirer_actions_v(w, acts);
+    } else {
+      s3_actions(w, acts);
+      expirer_actions(w, acts);
+    }
+    drop_presence_hints(w, acts);
+    gc_actions(w, acts);
+    return acts;
+  }
+
+  /* FSIO_MODEL_COMMUTE_SAMPLE=N:  at every Nth state, apply each pair of
+   * available actions in both orders, and count the pairs that commute:
+   * each still available after the other, no violation, the same state.
+   * What sleep sets could save */
+  uint64_t commute_sample = 0, pairs = 0, commuting = 0;
+  std::map<std::string, std::pair<uint64_t, uint64_t>> by_kind;  // pairs, commuting
+  static std::string act_kind(const std::string& name) {
+    auto sp = name.find(' ');
+    auto head = name.substr(0, sp);
+    if (head.starts_with("gw")) {
+      head = "gw";
+    }
+    auto rest = sp == std::string::npos ? std::string{} : name.substr(sp + 1);
+    return head + " " + rest.substr(0, rest.find(' '));
+  }
+  static std::optional<World> after(const World& w, const std::string& a,
+				    const std::string& b) {
+    World n = w;
+    for (const auto& name : {a, b}) {
+      auto acts = actions_of(n);
+      auto i = std::find_if(acts.begin(), acts.end(),
+			    [&](const Action& x) { return x.name == name; });
+      if (i == acts.end()) return std::nullopt;
+      if (i->run(n) || check_state(n)) return std::nullopt;
+    }
+    return n;
+  }
+  void measure_commute(const World& w, const std::vector<Action>& acts) {
+    for (size_t i = 0; i < acts.size(); ++i) {
+      for (size_t j = i + 1; j < acts.size(); ++j) {
+	if (acts[i].failure || acts[j].failure) continue;
+	auto ab = after(w, acts[i].name, acts[j].name);
+	auto ba = after(w, acts[j].name, acts[i].name);
+	bool c = ab && ba && ab->key() == ba->key();
+	++pairs;
+	commuting += c;
+	auto k = act_kind(acts[i].name) + " | " + act_kind(acts[j].name);
+	auto& [p, q] = by_kind[k];
+	++p;
+	q += c;
+      }
+    }
+  }
+
+  /* FSIO_MODEL_WALKS:  random walks instead of the search.  A walk takes
+   * one available action at a time, a failure with probability fail_p
+   * when one is available, else a work action uniformly;  at an end it
+   * applies the end checks, then stops or, as often, takes a failure and
+   * goes on (recovery after a completed run).  Walk i of seed s draws
+   * from its own generator, so FSIO_MODEL_SEED=s FSIO_MODEL_WALK=i
+   * replays it alone */
+  double fail_p = 0.05;
+  uint64_t walks = 0;
+  void walk(const World& w0, uint64_t seed, uint64_t i) {
+    std::seed_seq ss{seed, i};
+    std::mt19937_64 rng(ss);
+    auto pick = [&](const std::vector<size_t>& v) {
+      return v[std::uniform_int_distribution<size_t>(0, v.size() - 1)(rng)];
+    };
+    auto coin = [&](double p) {
+      return std::bernoulli_distribution(p)(rng);
+    };
+    auto found_one = [&](const std::string& v) {
+      if (!found.count(kind(v))) {
+	std::cerr << fmt::format("[fsio-model] walk {} of seed {}:\n", i, seed);
+      }
+      report(v);
+    };
+    World w = w0;
+    path.clear();
+    ++walks;
+    for (;;) {
+      auto k = w.key();
+      if (seen.insert(XXH3_128bits(k.data(), k.size())).second) {
+	++states;
+      }
+      if (path.size() >= max_depth) {
+	found_one(fmt::format("path exceeds {} steps:  a cycle drawing new ids",
+			      max_depth));
+	return;
+      }
+      auto acts = actions_of(w);
+      std::vector<size_t> work, fail;
+      for (size_t j = 0; j < acts.size(); ++j) {
+	(acts[j].failure ? fail : work).push_back(j);
+      }
+      size_t a;
+      if (path.size() < prefix.size()) {
+	auto j = std::find_if(acts.begin(), acts.end(), [&](const Action& x) {
+	  return x.name == prefix[path.size()];
+	});
+	if (j == acts.end()) {
+	  prefix_missed = true;
+	  return;
+	}
+	a = j - acts.begin();
+      } else if (work.empty()) {
+	++ends;
+	if (auto v = check_end(w)) {
+	  found_one(*v);
+	  return;
+	}
+	if (fail.empty() || !coin(0.5)) {
+	  return;
+	}
+	a = pick(fail);
+      } else if (!fail.empty() && coin(fail_p)) {
+	a = pick(fail);
+      } else {
+	a = pick(work);
+      }
+      path.push_back(acts[a].name);
+      auto v = acts[a].run(w);
+      if (!v) v = check_state(w);
+      if (v) {
+	found_one(*v);
+	return;
+      }
+    }
+  }
+
+  uint64_t transitions = 0, revisits = 0, background_only = 0;
   void dfs(const World& w) {
     if (states >= limit) return;
     if (stop_at_first && !found.empty()) return;
@@ -2720,31 +2866,26 @@ struct Explorer {
 	i->second = path.size();         // reached shallower:  explore again
       }
     } else if (!seen.insert(hash).second) {
+      ++revisits;
       return;
     }
     ++states;
     if (progress && states % progress == 0) {
       status();
     }
-    std::vector<Action> acts;
-    for (size_t gi = 0; gi < w.gws.size(); ++gi) {
-      auto first = acts.size();
-      if (cfg.versioned) {
-	gw_actions_v(w, gi, acts);
-      } else {
-	gw_actions(w, gi, acts);
-      }
-      presence_hints(w, gi, acts, first);
+    std::vector<Action> acts = actions_of(w);
+    /* only the expirer and GC can act:  no gateway or S3 action available */
+    if (std::all_of(acts.begin(), acts.end(), [](const Action& a) {
+	  return a.failure || a.name.starts_with("expirer") ||
+	    a.name.starts_with("gc ");
+	}) &&
+	std::any_of(acts.begin(), acts.end(),
+		    [](const Action& a) { return !a.failure; })) {
+      ++background_only;
     }
-    if (cfg.versioned) {
-      s3_actions_v(w, acts);
-      expirer_actions_v(w, acts);
-    } else {
-      s3_actions(w, acts);
-      expirer_actions(w, acts);
+    if (commute_sample && states % commute_sample == 0) {
+      measure_commute(w, acts);
     }
-    drop_presence_hints(w, acts);
-    gc_actions(w, acts);
     /* terminal:  nothing left to do but fail.  With no action at all,
      * everyone failed and recovery ran;  with only failures left, the
      * run completed normally, its gateways alive, and the end checks
@@ -2781,6 +2922,7 @@ struct Explorer {
       return;
     }
     for (auto& a : acts) {
+      ++transitions;
       World n = w;
       path.push_back(a.name);
       auto v = a.run(n);
@@ -2882,6 +3024,7 @@ TEST(FSIOModel, Explore)
   x.progress = env_int("FSIO_MODEL_PROGRESS", 100'000);
   x.max_depth = env_int("FSIO_MODEL_MAX_DEPTH", 200);
   x.stop_at_first = env_int("FSIO_MODEL_STOP_AT_FIRST", 0);
+  x.commute_sample = env_int("FSIO_MODEL_COMMUTE_SAMPLE", 0);
   if (auto c = std::getenv("FSIO_MODEL_SKIP_CHECK")) {
     const std::map<std::string, cls_rgw_fsio_check> checks = {
       {"W5_FINALIZE_RECHECKS_STATE", cls_rgw_fsio_check::W5_FINALIZE_RECHECKS_STATE},
@@ -2977,10 +3120,55 @@ TEST(FSIOModel, Explore)
   }
   if (x.shortest) {
     deepen(x, initial(roles, env_int("FSIO_MODEL_S3_OPS", 2)));
+  } else if (auto nw = env_int("FSIO_MODEL_WALKS", 0); nw > 0) {
+    const uint64_t seed = env_int("FSIO_MODEL_SEED", 1);
+    x.fail_p = std::getenv("FSIO_MODEL_FAIL_P") ?
+      std::stod(std::getenv("FSIO_MODEL_FAIL_P")) : 0.05;
+    const auto w0 = initial(roles, env_int("FSIO_MODEL_S3_OPS", 2));
+    const int only = env_int("FSIO_MODEL_WALK", -1);
+    for (uint64_t i = only >= 0 ? only : 0;
+	 i < (only >= 0 ? (uint64_t)only + 1 : (uint64_t)nw); ++i) {
+      if (x.stop_at_first && !x.found.empty()) break;
+      x.walk(w0, seed, i);
+      if (x.progress && x.walks % 100000 == 0) {
+	std::cerr << fmt::format("[fsio-model] {} walks", x.walks);
+	x.status();
+      }
+    }
+    x.status();
+    std::cout << fmt::format("{} states (sampled by {} walks, seed {}), {} end "
+			     "states, {} kinds of violation\n", x.states,
+			     x.walks, seed, x.ends, x.found.size());
+    for (const auto& [k, t] : x.found) {
+      std::cout << "\n--- " << t.back().substr(3) << "\n";
+      for (const auto& s : t) {
+	std::cout << "    " << s << "\n";
+      }
+    }
+    return;
   } else {
     x.dfs(initial(roles, env_int("FSIO_MODEL_S3_OPS", 2)));
   }
   x.status();
+  std::cout << fmt::format("{} transitions, {} to a visited state;  {} "
+			   "states where only the expirer and GC act\n",
+			   x.transitions, x.revisits, x.background_only);
+  if (x.commute_sample) {
+    std::cout << fmt::format("{} action pairs sampled, {} commute ({:.1f}%)\n",
+			     x.pairs, x.commuting,
+			     x.pairs ? 100.0 * x.commuting / x.pairs : 0.0);
+    std::vector<std::pair<std::string, std::pair<uint64_t, uint64_t>>> v(
+      x.by_kind.begin(), x.by_kind.end());
+    std::sort(v.begin(), v.end(), [](auto& a, auto& b) {
+      return a.second.first > b.second.first;
+    });
+    for (size_t i = 0; i < v.size() && i < 25; ++i) {
+      std::cout << fmt::format("  {:>8} pairs {:>5.1f}% commute  {}\n",
+			       v[i].second.first,
+			       100.0 * v[i].second.second / v[i].second.first,
+			       v[i].first);
+    }
+  }
   if (x.states >= x.limit) {
     std::cout << "state limit reached:  the space was not exhausted\n";
   }
