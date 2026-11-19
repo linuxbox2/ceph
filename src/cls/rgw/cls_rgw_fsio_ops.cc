@@ -224,6 +224,16 @@ int head_clone_name(cls_method_context_t hctx, const std::string& marker,
   return 0;
 }
 
+/* §4.2, X31:  the OLH epoch a versioned publish links with, the OSD's
+ * time in nanoseconds, as rgw_bucket_link_olh computes it;  never the
+ * caller's, which would carry the gateway's clock skew */
+uint64_t osd_epoch()
+{
+  using namespace std::chrono;
+  return duration_cast<nanoseconds>(
+    ceph::real_clock::now().time_since_epoch()).count();
+}
+
 /* the effects:  each clone by CLONE_TO, FSIO's records dropped from it
  * and its own record set;  a head with nothing left removed */
 int apply(cls_method_context_t hctx, const std::string& marker,
@@ -439,6 +449,7 @@ int rgw_fsio_leave(cls_method_context_t hctx, ceph::buffer::list* in,
     std::optional<fsio::publish_intent> intent;
     if (op.intent) {
       intent = op.intent->to_core();
+      intent->now_epoch = osd_epoch();
     }
     fsio::leave_out lout;
     int r = fsio::leave(h, op.caller, op.seq, op.cs, op.writer, op.expired,
@@ -505,6 +516,7 @@ int rgw_fsio_fenced_finalize(cls_method_context_t hctx, ceph::buffer::list* in,
     std::optional<fsio::publish_intent> intent;
     if (op.intent) {
       intent = op.intent->to_core();
+      intent->now_epoch = osd_epoch();
     }
     return fsio::fenced_finalize(h, op.finalizer, op.from, op.expired, ret.to,
 				 intent ? &*intent : nullptr, op.aborted);

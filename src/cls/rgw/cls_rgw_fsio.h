@@ -649,7 +649,7 @@ int truncate(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& caller,
 struct publish_intent {
   std::string instance;             // chosen before the placeholder
   std::string token;                // the claim on the placeholder
-  uint64_t now_epoch = 0;           // the OSD's, read by the CLS wrapper
+  uint64_t now_epoch = 0;           // the OSD's, set by the CLS wrapper (X31)
 };
 
 struct leave_out {

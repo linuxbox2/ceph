@@ -485,7 +485,9 @@ int m_leave(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& caller,
 	ret && (ret->already_applied != out.already_applied ||
 		ret->publishing != out.publishing ||
 		ret->abandoned != out.abandoned ||
-		ret->olh_epoch != out.olh_epoch ||
+		/* X31:  the OSD's time, where the core's is logical */
+		(out.olh_epoch ? !cl.in_call(ret->olh_epoch) :
+		 ret->olh_epoch != 0) ||
 		ret->instance != out.instance || ret->drained != out.drained)) {
       cl.reply_mismatch("fsio_leave", "differs from the core's leave_out");
     }

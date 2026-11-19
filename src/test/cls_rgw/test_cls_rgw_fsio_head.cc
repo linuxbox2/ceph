@@ -448,9 +448,17 @@ TEST_F(FsioHead, VersionedPublish)
   lop.writer = true;
   lop.intent = cls_rgw_fsio_intent{"i2", "tok", 5};
   cls_rgw_fsio_leave_ret lret;
+  const auto ns = [] {
+    return uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+      ceph::real_clock::now().time_since_epoch()).count());
+  };
+  const auto before = ns();
   ASSERT_EQ(0, call(head, cls::rgw::method::fsio_leave, lop, &lret));
+  const auto after = ns();
   ASSERT_TRUE(lret.publishing);
-  EXPECT_EQ(5u, lret.olh_epoch);
+  /* §4.2, X31:  the OSD's time, never the caller's 5 */
+  EXPECT_LE(before, lret.olh_epoch);
+  EXPECT_GE(after, lret.olh_epoch);
   EXPECT_EQ("i2", lret.instance);
 
   auto in = replace(fsio::replace_mode::PUBLISH, 1009);

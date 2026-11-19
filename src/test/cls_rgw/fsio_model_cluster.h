@@ -266,7 +266,9 @@ public:
     int rval = 0;
     auto inbl = in;                // librados's exec takes it non-const
     op.exec(method, inbl, &reply, &rval);
+    call_start = now_ns();
     int r = io.operate(oid, &op, librados::OPERATION_RETURNVEC);
+    call_end = now_ns();
     return r < 0 ? r : rval;
   }
 
@@ -306,6 +308,9 @@ public:
       return;
     }
     const Obj& expect = r_core < 0 ? pre : want;
+    if (r_core == 0 && !olh_epoch_from_osd(method, got, expect)) {
+      return;
+    }
     if (got.exists != expect.exists || got.data != expect.data ||
 	got.attrs != expect.attrs) {
       diverge(fmt::format("cluster:  after {} (returned {}), {} is {};  the "
@@ -357,6 +362,60 @@ public:
 	return;
       }
     }
+  }
+
+  /* the client's clock around the last call:  vstart's OSDs share it */
+  uint64_t call_start = 0, call_end = 0;
+  static uint64_t now_ns() {
+    using namespace std::chrono;
+    return duration_cast<nanoseconds>(
+      ceph::real_clock::now().time_since_epoch()).count();
+  }
+  bool in_call(uint64_t epoch) const {
+    return epoch >= call_start && epoch <= call_end;
+  }
+
+  /* §4.2, X31:  fsio_leave and fsio_fenced_finalize record the OSD's time
+   * as a publish's OLH epoch, where the model's core records its logical
+   * one;  each entry whose epoch differs must hold one taken during the
+   * call, and then takes the core's, so the rest compares exactly */
+  bool olh_epoch_from_osd(const char* method, Obj& got, const Obj& expect) {
+    if (std::string_view(method) != "fsio_leave" &&
+	std::string_view(method) != "fsio_fenced_finalize") {
+      return true;
+    }
+    auto g = got.attrs.find(std::string(HDR));
+    auto e = expect.attrs.find(std::string(HDR));
+    if (g == got.attrs.end() || e == expect.attrs.end()) {
+      return true;
+    }
+    cls_rgw_fsio_hdr gh, eh;
+    try {
+      auto gi = g->second.cbegin();
+      decode(gh, gi);
+      auto ei = e->second.cbegin();
+      decode(eh, ei);
+    } catch (const ceph::buffer::error&) {
+      return true;                 // the comparison reports it
+    }
+    for (auto& c : gh.chunk_sets) {
+      const auto* w = eh.find(c.id);
+      if (!c.publishing || !w || !w->publishing ||
+	  c.publishing->olh_epoch == w->publishing->olh_epoch) {
+	continue;
+      }
+      if (!in_call(c.publishing->olh_epoch)) {
+	diverge(fmt::format("cluster:  after {}, {}'s OLH epoch {} is not "
+			    "the OSD's time during the call [{}, {}]", method,
+			    c.id.to_str(), c.publishing->olh_epoch, call_start,
+			    call_end));
+	return false;
+      }
+      c.publishing->olh_epoch = w->publishing->olh_epoch;
+    }
+    g->second.clear();
+    encode(gh, g->second);
+    return true;
   }
 
   /* a finer count of a call that succeeded, as fsio_replace_head's modes */

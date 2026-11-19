@@ -24,7 +24,7 @@
 struct cls_rgw_fsio_intent {
   std::string instance;
   std::string token;
-  uint64_t now_epoch = 0;
+  uint64_t now_epoch = 0;        // ignored:  the OSD's is used (§4.2, X31)
 
   cls_rgw_fsio::publish_intent to_core() const {
     return {instance, token, now_epoch};
