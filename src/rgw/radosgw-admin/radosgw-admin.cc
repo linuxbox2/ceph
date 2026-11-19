@@ -9486,14 +9486,19 @@ next:
 
   if (opt_cmd == OPT::BUCKET_RM) {
     if (!inconsistent_index) {
-      RGWBucketAdminOp::remove_bucket(driver, *site, bucket_op, null_yield, dpp(), bypass_gc, true, false);
+      ret = RGWBucketAdminOp::remove_bucket(driver, *site, bucket_op, null_yield, dpp(), bypass_gc, true, false);
     } else {
       if (!yes_i_really_mean_it) {
 	cerr << "using --inconsistent_index can corrupt the bucket index " << std::endl
 	<< "do you really mean it? (requires --yes-i-really-mean-it)" << std::endl;
 	return 1;
       }
-      RGWBucketAdminOp::remove_bucket(driver, *site, bucket_op, null_yield, dpp(), bypass_gc, false, false);
+      ret = RGWBucketAdminOp::remove_bucket(driver, *site, bucket_op, null_yield, dpp(), bypass_gc, false, false);
+    }
+    if (ret < 0) {
+      cerr << "ERROR: could not remove bucket " << bucket_name << ": "
+           << cpp_strerror(-ret) << std::endl;
+      return -ret;
     }
   }
 
