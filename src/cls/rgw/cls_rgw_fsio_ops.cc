@@ -528,29 +528,7 @@ int rgw_fsio_expire(cls_method_context_t hctx, ceph::buffer::list* in,
     fsio::expire_out eout;
     int r = fsio::expire(h, op.caller, op.expired, op.clear, eout, fx);
     ret.drained = !eout.drained.empty();
-    /* §3.8:  a ready shadow whose writers are all presumed dead, or a
-     * publishing one whose publisher is */
-    if (h.hdr) {
-      for (const auto& e : h.hdr->chunk_sets) {
-	if (e.state == cls_rgw_fsio_cs_state::PUBLISHING && e.publishing &&
-	    op.expired.count(e.publishing->publisher.incarnation)) {
-	  ret.finalize = true;
-	}
-	if (e.state == cls_rgw_fsio_cs_state::READY && h.bound(e.id).writers) {
-	  bool live = false;
-	  for (const auto& [inc, o] : h.opens) {
-	    for (const auto& [k, ho] : o.handles) {
-	      auto c = ho.chunk_sets.find(e.id);
-	      if (c != ho.chunk_sets.end() && c->second.writers &&
-		  !op.expired.count(inc)) {
-		live = true;
-	      }
-	    }
-	  }
-	  ret.finalize |= !live;
-	}
-      }
-    }
+    ret.finalize = eout.finalize;
     return r;
   });
   if (r < 0) {

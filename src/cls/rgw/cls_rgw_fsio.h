@@ -711,6 +711,7 @@ int fenced_finalize(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& finalizer,
 
 struct expire_out {
   std::vector<cls_rgw_fsio_id> drained;
+  bool finalize = false;    // a shadow needs a fenced finalize (§3.8)
 };
 int expire(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& caller,
 	   const expired_t& expired,

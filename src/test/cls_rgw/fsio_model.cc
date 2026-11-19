@@ -601,8 +601,9 @@ int m_expire(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& caller,
     }, &reply);
   if (cl.on && r == 0 && reply.length()) {
     if (auto ret = dec<cls_rgw_fsio_expire_ret>("fsio_expire", reply);
-	ret && ret->drained != !out.drained.empty()) {
-      cl.reply_mismatch("fsio_expire", "drained differs");
+	ret && (ret->drained != !out.drained.empty() ||
+		ret->finalize != out.finalize)) {
+      cl.reply_mismatch("fsio_expire", "drained or finalize differs");
     }
   }
   return r;

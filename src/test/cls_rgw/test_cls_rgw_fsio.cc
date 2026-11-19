@@ -203,6 +203,33 @@ TEST(cls_rgw_fsio, W6_expire_takes_over_zombie_publish)
   w6_expire_takes_over_zombie_publish();
 }
 
+/* A28, §3.8:  the finalize flag counts the publishes the call took over,
+ * and a ready shadow whose writers are all presumed dead */
+TEST(cls_rgw_fsio, A28_expire_reports_finalize)
+{
+  {
+    auto h = head("C0");
+    const auto s = construct(h, GW1);
+    leave_writer(h, GW1, s);             // publishing under GW1
+    fsio::expire_out out;
+    cls_rgw_fsio_effects fx;
+    ASSERT_EQ(0, fsio::expire(h, EXPIRER, {I1}, std::nullopt, out, fx));
+    EXPECT_EQ(EXPIRER, h.hdr->find(s)->publishing->publisher);
+    EXPECT_TRUE(out.finalize);
+  }
+  {
+    auto h = head("C0");
+    construct(h, GW1);                   // ready, GW1's writer bound
+    fsio::expire_out out;
+    cls_rgw_fsio_effects fx;
+    ASSERT_EQ(0, fsio::expire(h, EXPIRER, {I1}, std::nullopt, out, fx));
+    EXPECT_TRUE(out.finalize);
+    fsio::expire_out live;
+    ASSERT_EQ(0, fsio::expire(h, EXPIRER, {I2}, std::nullopt, live, fx));
+    EXPECT_FALSE(live.finalize);         // GW1 is live
+  }
+}
+
 /* W3:  a fenced finalize of a shadow whose writer is presumed dead:  to is
  * created publishing under the finalizer, so its publish succeeds, and
  * publishing it retires from (design §3.7) */

@@ -1118,6 +1118,30 @@ int expire(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& caller,
     }
   }
   settle(h, out.drained, fx, caller.incarnation);
+  /* §3.8, A28:  a ready shadow whose writers are all presumed dead, or a
+   * publishing one whose publisher is, this call's takeover included */
+  if (h.hdr) {
+    for (const auto& e : h.hdr->chunk_sets) {
+      if (e.state == state::PUBLISHING && e.publishing &&
+	  (expired.count(e.publishing->publisher.incarnation) ||
+	   e.publishing->publisher == caller)) {
+	out.finalize = true;
+      }
+      if (e.state == state::READY && h.bound(e.id).writers) {
+	bool live = false;
+	for (const auto& [inc, o] : h.opens) {
+	  for (const auto& [k, ho] : o.handles) {
+	    auto c = ho.chunk_sets.find(e.id);
+	    if (c != ho.chunk_sets.end() && c->second.writers &&
+		!expired.count(inc)) {
+	      live = true;
+	    }
+	  }
+	}
+	out.finalize |= !live;
+      }
+    }
+  }
   return 0;
 }
 
