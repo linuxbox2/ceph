@@ -349,7 +349,7 @@ struct cls_rgw_fsio_counts {
   uint32_t readers = 0;
   uint32_t writers = 0;
   std::string writer_identity;
-  uint64_t joined_seq = 0;     // the header's counter at the writer join (Z14)
+  uint64_t joined_seq = 0;     // the header's counter when it joined as writer (Z14)
 
   void encode(ceph::buffer::list& bl) const {
     ENCODE_START(1, 1, bl);
@@ -576,9 +576,9 @@ namespace cls_rgw_fsio {
 
 using expired_t = std::set<uint64_t>;
 
-/* the counted calls (join, leave, rebind) carry the handle's sequence
- * number;  one not newer than the handle's last_seq changes nothing and
- * returns already_applied (§3, Z22) */
+/* the counted calls (fsio_join, fsio_leave, fsio_rebind) carry the
+ * handle's sequence number;  one not newer than the handle's last_seq
+ * changes nothing and returns already_applied (§3, Z22) */
 struct join_in {
   cls_rgw_fsio_handle caller;
   uint64_t seq = 0;

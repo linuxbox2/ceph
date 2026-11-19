@@ -7,7 +7,8 @@
 ///
 /// \brief NeoRADOS interface to FSIO's head methods in the rgw class
 ///
-/// The calls a gateway makes on its own (join, leave, rebind, ...), and
+/// The calls a gateway makes on its own (fsio_join, fsio_leave,
+/// fsio_rebind, ...), and
 /// the FSIO open hints' add, remove and list on a hint shard.  The
 /// calls that ride in RGW's head writes (the head replacement, the
 /// publish) stay on librados beside RGW's own ops

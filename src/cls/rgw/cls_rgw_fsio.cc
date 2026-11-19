@@ -358,7 +358,7 @@ int join_once(cls_rgw_fsio_head& h, const join_in& in, join_out& out,
     h.hdr->cur_instance = in.instance;
   }
   auto& hdr = *h.hdr;
-  /* §2.5a:  joining the null version is the unversioned join */
+  /* §2.5a:  joining the null version is as in an unversioned bucket */
   const bool versioned = !is_null(in.instance);
   /* 4. versioned:  the OLH names another instance, a new current
    * generation;  the old version's published entry stays at INSTANCE */
@@ -1013,7 +1013,7 @@ int drop_seqs(cls_rgw_fsio_head& h, uint64_t incarnation,
   return 0;
 }
 
-/* §2.5:  before the OLH join, a gateway adds its incarnation;  a version
+/* §2.5:  before joining on the OLH head, a gateway adds its incarnation;  a version
  * that is gone gains no opens */
 int ocnt_add(cls_rgw_fsio_instance_head& ih, const cls_rgw_fsio_handle& holder)
 {

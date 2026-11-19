@@ -224,9 +224,9 @@ enum class Counted : uint8_t { JOIN, LEAVE, REBIND };
 struct Resend {
   Counted kind = Counted::JOIN;
   uint64_t seq = 0;
-  bool writer = false;           // join, leave
+  bool writer = false;           // fsio_join, fsio_leave
   uint64_t nonce = 0;            // join
-  std::set<uint64_t> expired;    // join, leave
+  std::set<uint64_t> expired;    // fsio_join, fsio_leave
   std::string instance;          // join:  versioned
   fid_t cs, to;                  // leave:  cs;  rebind:  cs to `to`
   std::optional<fsio::publish_intent> intent;   // leave
@@ -841,8 +841,8 @@ struct World {
   bool suspended = false;                        // versioning suspended (§2.5a)
   uint64_t olh_epoch = 0, next_i = 2, next_epoch = 1;
 
-  /* a gateway passes a fresh nonce with every join, used only if the join
-   * creates the header (§2.2, §3.1):  the next one is available, and taken
+  /* a gateway passes a fresh nonce with every fsio_join, used only if
+   * the call creates the header (§2.2, §3.1):  the next one is available, and taken
    * when it was used */
   uint64_t nonce_for_join() const { return next_nonce; }
   void took_nonce() {
@@ -1582,7 +1582,7 @@ void gw_actions_v(const World& w0, size_t gi, std::vector<Action>& acts)
       break;
     case V_PUB_READ:
       /* §4.2 step 3:  the incarnations bound to the shadow, read now that
-       * reader joins wait */
+       * joining as reader waits */
       acts.push_back({fmt::format("gw{} publish-read {}", glabel(g),
 				  sname(g.step_cs)),
 	  [gi](World& w) -> std::optional<std::string> {
@@ -1909,8 +1909,8 @@ void gw_actions_v(const World& w0, size_t gi, std::vector<Action>& acts)
 	  }
 	  g.pending = w.olh_cur;
 	  g.pending_writer = writer;
-	  /* §2.5a:  the null version has no open count;  the join is the
-	   * unversioned join */
+	  /* §2.5a:  the null version has no open count;  joining is as in
+	   * an unversioned bucket */
 	  g.step = w.olh_cur == "null" && !FSIO_SKIP_CHECK(NULL_IS_HEAD) ?
 	    V_JOIN : V_COUNT;
 	  return std::nullopt;

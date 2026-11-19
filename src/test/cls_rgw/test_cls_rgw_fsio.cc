@@ -39,7 +39,7 @@ cls_rgw_fsio_head head(const std::string& manifest)
   return h;
 }
 
-/* a writer's join that constructs a shadow, then fsio_ready */
+/* joining as writer, which constructs a shadow, then fsio_ready */
 cls_rgw_fsio_id construct(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& inc)
 {
   fsio::join_out out;
@@ -50,7 +50,7 @@ cls_rgw_fsio_id construct(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& inc)
   return out.bound;
 }
 
-/* a reader's join, bound to the published chunk set */
+/* joining as reader, bound to the published chunk set */
 cls_rgw_fsio_id join_reader(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& inc,
 			    const std::string& instance = {})
 {
@@ -83,7 +83,7 @@ int publish(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& inc, const cls_rgw_
   return fsio::replace_head(h, in, out, fx);
 }
 
-/* a writer join constructs a new shadow:  cur_shadow is clear */
+/* joining as writer constructs a new shadow:  cur_shadow is clear */
 cls_rgw_fsio_id join_writer_constructs(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& inc)
 {
   fsio::join_out out;
@@ -901,7 +901,7 @@ TEST(cls_rgw_fsio_versioned, V2_complete_after_takeover_removes_the_dead_writer)
 }
 
 /* §2.5a:  versioning enabled over content FSIO has open makes it the null
- * version in place:  a join naming null binds to the same chunk-set entry
+ * version in place:  an fsio_join naming null binds to the same chunk-set entry
  * at HEAD and starts no generation */
 void null_is_the_heads_content()
 {
