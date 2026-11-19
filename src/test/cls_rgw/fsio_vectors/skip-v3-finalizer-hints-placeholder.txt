@@ -1,0 +1,24 @@
+# V3_FINALIZER_HINTS_PLACEHOLDER:  the shortest trace the search finds with the check
+# skipped (1180061 states by search, 2026-11-18);  replayed alone it
+# reproduces the violation at once.
+# skip: V3_FINALIZER_HINTS_PLACEHOLDER
+# env: FSIO_MODEL_VERSIONED=1 FSIO_MODEL_ROLES=w FSIO_MODEL_S3_OPS=1
+gw1 read-olh-write
+gw1 count I1
+gw1 open-write I1
+gw1 ready S1.10
+gw1 uncount I1
+gw1 partition
+expirer decide-finalize S1.10
+s3 suspend-versioning
+gw1 close-write S1.10
+gw1 publish-hint
+gw1 publish S1.10
+gw1 publish-gc
+expirer publish-hint for S1.10
+expirer placeholder I2
+expirer crash
+expirer grace 1
+expirer grace 100
+gc R1000
+# => placeholder I2 left at the end (claim k2)

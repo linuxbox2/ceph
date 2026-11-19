@@ -16,9 +16,16 @@ edition = "2021"
 //! Tiers:
 //!   smoke    small bounds over every configuration kind;  for every change
 //!   quick    the checkpoint tier, before a commit
-//!   vectors  the replay vectors in fsio_vectors/, plain search
-//!   skips    every skip check, each expected to be caught (SHORTEST,
-//!            STOP_AT_FIRST);  the two refinements expected clean
+//!   vectors  the vectors in fsio_vectors/ that are not a skipped
+//!            check's:  a search from each, in its "# env:" configuration
+//!   skips    every skip check, each expected to be caught:  replayed
+//!            from its vector (a "# skip:" header) when it has one, else
+//!            searched (SHORTEST, STOP_AT_FIRST);  the two refinements
+//!            expected clean
+//!   skips-search  every skip check by search, vector or not
+//!
+//! A vector whose steps no longer apply fails as STALE VECTOR.  A sample
+//! run's violation is also written as <out>/<name>.vector.txt.
 //!   sample   random walks (FSIO_MODEL_WALKS) over configurations beyond
 //!            the exhaustive search, a seed per run
 //!   sample-skips  each skip check under random walks:  walks to catch;
@@ -86,28 +93,69 @@ fn quick() -> Vec<Run> {
     ]
 }
 
-fn vectors(src: &Path) -> Vec<Run> {
+/* a vector's header:  "# skip: CHECK" makes it a skipped check's
+ * reproducer, expected caught;  "# env: K=V ..." is the configuration it
+ * runs in;  "# replay: walk" replays it as one walk, which a livelock
+ * needs (a search stops where the loop revisits a state) */
+struct Vector {
+    path: PathBuf,
+    skip: Option<String>,
+    env: Vec<(String, String)>,
+    walk: bool,
+}
+
+fn read_vectors(src: &Path) -> Vec<Vector> {
     let dir = src.join("fsio_vectors");
-    let mut v = Vec::new();
     let mut names: Vec<PathBuf> = std::fs::read_dir(&dir)
         .map(|d| d.filter_map(|e| e.ok()).map(|e| e.path()).collect())
         .unwrap_or_default();
     names.sort();
-    for p in names {
-        if p.extension().map_or(true, |e| e != "txt") {
-            continue;
-        }
-        let stem = p.file_stem().unwrap().to_string_lossy().to_string();
-        let mut r = run(&format!("vector-{stem}"),
-                        &[("FSIO_MODEL_VERSIONED", "1"), ("FSIO_MODEL_VSTART", "null"),
-                          ("FSIO_MODEL_ROLES", "wr"), ("FSIO_MODEL_S3_OPS", "1"),
-                          /* depth-first, so the livelock check runs;  no
-                           * expirer crash, so the search finishes */
-                          ("FSIO_MODEL_EXPIRER_CRASHES", "0")]);
-        r.env.push(("FSIO_MODEL_PREFIX".into(), p.to_string_lossy().into()));
-        v.push(r);
+    names
+        .into_iter()
+        .filter(|p| p.extension().map_or(false, |e| e == "txt"))
+        .map(|p| {
+            let text = std::fs::read_to_string(&p).unwrap_or_default();
+            let mut v = Vector { path: p, skip: None, env: Vec::new(), walk: false };
+            for l in text.lines() {
+                if l.trim() == "# replay: walk" {
+                    v.walk = true;
+                } else if let Some(c) = l.strip_prefix("# skip: ") {
+                    v.skip = Some(c.trim().to_string());
+                } else if let Some(e) = l.strip_prefix("# env: ") {
+                    for kv in e.split_whitespace() {
+                        if let Some((k, val)) = kv.split_once('=') {
+                            v.env.push((k.to_string(), val.to_string()));
+                        }
+                    }
+                }
+            }
+            v
+        })
+        .collect()
+}
+
+fn vector_run(v: &Vector) -> Run {
+    let stem = v.path.file_stem().unwrap().to_string_lossy().to_string();
+    let mut r = run(&format!("vector-{stem}"), &[]);
+    r.env = v.env.clone();
+    r.env.push(("FSIO_MODEL_PREFIX".into(), v.path.to_string_lossy().into()));
+    if v.walk {
+        r.env.push(("FSIO_MODEL_WALKS".into(), "1".into()));
     }
-    v
+    if let Some(c) = &v.skip {
+        r.env.push(("FSIO_MODEL_SKIP_CHECK".into(), c.clone()));
+        if !v.walk {
+            r.env.push(("FSIO_MODEL_PREFIX_ONLY".into(), "1".into()));
+        }
+        r.env.push(("FSIO_MODEL_STOP_AT_FIRST".into(), "1".into()));
+        r.expect_violation = true;
+    }
+    r
+}
+
+/* the vectors that are not a skipped check's:  a search from each */
+fn vectors(src: &Path) -> Vec<Run> {
+    read_vectors(src).iter().filter(|v| v.skip.is_none()).map(vector_run).collect()
 }
 
 /* each check, the configuration that reaches it, and whether skipping it
@@ -193,7 +241,34 @@ fn skip_table() -> Vec<Check> {
     ]
 }
 
-fn skips() -> Vec<Run> {
+/* each skip check:  replayed from its vector when it has one (a check
+ * whose search is long), else searched */
+fn skips(src: &Path) -> Vec<Run> {
+    let vecs = read_vectors(src);
+    skip_table()
+        .iter()
+        .flat_map(|(c, ..)| {
+            let mine: Vec<Run> = vecs
+                .iter()
+                .filter(|v| v.skip.as_deref() == Some(*c))
+                .map(|v| {
+                    let mut r = vector_run(v);
+                    let stem = v.path.file_stem().unwrap().to_string_lossy().to_string();
+                    r.name = format!("skip-{c} ({stem})");
+                    r
+                })
+                .collect();
+            if mine.is_empty() { vec![skip_search(c)] } else { mine }
+        })
+        .collect()
+}
+
+fn skip_search(check: &str) -> Run {
+    skips_search().into_iter().find(|r| r.name == format!("skip-{check}")).unwrap()
+}
+
+/* each skip check by search, vector or not */
+fn skips_search() -> Vec<Run> {
     skip_table()
         .iter()
         .map(|(c, env, own, caught)| {
@@ -267,6 +342,35 @@ fn sample_skips() -> Vec<Run> {
         .collect()
 }
 
+/* the first violation's trace in a run's log, as a vector:  its
+ * configuration in the header, the steps, the violation as a comment */
+fn walk_vector(r: &Run, text: &str) -> Option<String> {
+    let start = text.find("\n--- ")? + 1;
+    let mut lines = text[start..].lines();
+    let what = lines.next()?.trim_start_matches("--- ").to_string();
+    let walk = text.lines().find(|l| l.contains("] walk ") && l.contains(" of seed "))
+        .map(|l| l.trim_start_matches("[fsio-model] ").trim_end_matches(':').to_string())
+        .unwrap_or_default();
+    let env: Vec<String> = r.env.iter()
+        .filter(|(k, _)| !matches!(k.as_str(), "FSIO_MODEL_WALKS" | "FSIO_MODEL_SEED"))
+        .map(|(k, v)| format!("{k}={v}"))
+        .collect();
+    let mut v = format!("# {what}\n# found by {}, {walk};  to keep it, name the\n\
+                         # check whose absence it shows (# skip:) and copy it to\n\
+                         # fsio_vectors/\n# replay: walk\n# env: {}\n",
+                        r.name, env.join(" "));
+    for l in lines {
+        let Some(step) = l.strip_prefix("    ") else { break };
+        if step.starts_with("=> ") {
+            v.push_str(&format!("# {step}\n"));
+        } else {
+            v.push_str(step);
+            v.push('\n');
+        }
+    }
+    Some(v)
+}
+
 /* the summary line a run ends with:  "N states, M end states, K kinds of
  * violation" */
 fn summary(out: &str) -> (Option<u64>, Option<u64>) {
@@ -304,7 +408,7 @@ fn main() {
     }
     if tiers.is_empty() {
         eprintln!("usage:  fsio_model_runs.rs [--bin PATH] [--out DIR] [--jobs N] \
-                   smoke|quick|vectors|skips|sample|sample-skips ...");
+                   smoke|quick|vectors|skips|skips-search|sample|sample-skips ...");
         std::process::exit(2);
     }
     let mut runs = Vec::new();
@@ -313,7 +417,8 @@ fn main() {
             "smoke" => runs.extend(smoke()),
             "quick" => runs.extend(quick()),
             "vectors" => runs.extend(vectors(&here)),
-            "skips" => runs.extend(skips()),
+            "skips" => runs.extend(skips(&here)),
+            "skips-search" => runs.extend(skips_search()),
             "sample" => runs.extend(sample()),
             "sample-skips" => runs.extend(sample_skips()),
             other => {
@@ -352,6 +457,9 @@ fn main() {
             let _ = cmd.status().expect("run the model");
             let text = std::fs::read_to_string(&log).unwrap_or_default();
             let (states, kinds) = summary(&text);
+            /* a vector whose steps no longer apply:  the model prints
+             * "prefix step N ... is not available" */
+            let stale = text.contains("is not available;  the actions are:");
             let capped = states.map_or(false, |s| s.to_string() == LIMIT);
             let found = kinds.map_or(false, |k| k > 0);
             let verdict = match (r.expect_violation, found, capped) {
@@ -362,7 +470,15 @@ fn main() {
                 (false, false, true) => "partial (cap)",
                 (false, false, false) => "clean",
             };
-            if matches!(verdict, "MISSED" | "VIOLATION") || states.is_none() {
+            let verdict = if stale { "STALE VECTOR" } else { verdict };
+            /* a walk's violation, saved as a vector:  promoting it to
+             * fsio_vectors/ is a copy */
+            if found && !r.expect_violation && text.contains("sampled by") {
+                if let Some(v) = walk_vector(&r, &text) {
+                    let _ = std::fs::write(out.join(format!("{}.vector.txt", r.name)), v);
+                }
+            }
+            if matches!(verdict, "MISSED" | "VIOLATION" | "STALE VECTOR") || states.is_none() {
                 failed.lock().unwrap().push(r.name.clone());
             }
             let walked = text.lines().rev()

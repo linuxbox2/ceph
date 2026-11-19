@@ -1,0 +1,22 @@
+# V4_HINT_WAITS_FOR_GRACE:  the shortest trace the search finds with the check
+# skipped (7835736 states by search, 2026-11-18);  replayed alone it
+# reproduces the violation at once.
+# skip: V4_HINT_WAITS_FOR_GRACE
+# env: FSIO_MODEL_VERSIONED=1 FSIO_MODEL_ROLES=wr FSIO_MODEL_S3_OPS=1
+gw1 read-olh-write
+gw1 count I1
+gw1 open-write I1
+gw1 partition
+s3 delete
+gw2 read-olh-read
+expirer abandon S1.10
+gw1 ready S1.10
+gw1 close-write S1.10
+gw1 publish-hint
+expirer hint I2 for 1
+gw1 placeholder I2
+expirer grace 1
+expirer ocnt I1 for 1
+expirer drop-hint 1
+gc S1.10
+# => placeholder I2 left at the end (claim k1)

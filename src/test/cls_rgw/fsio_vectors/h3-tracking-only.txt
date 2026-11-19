@@ -8,6 +8,7 @@
 # Skip H3_PUBLISHER_HINTS_READERS to see the count left, or
 # H3_TRACKING_ONLY_IS_REMOVED to see it resolved only once the count
 # drains (or never, with the first skipped too).
+# env: FSIO_MODEL_VERSIONED=1 FSIO_MODEL_VSTART=null FSIO_MODEL_ROLES=wr FSIO_MODEL_S3_OPS=1 FSIO_MODEL_EXPIRER_CRASHES=0
 gw1 read-olh-write
 gw1 open-write null
 gw1 ready S1.10
