@@ -547,6 +547,7 @@ struct cls_rgw_fsio_replace_op {
   std::set<uint64_t> expired;    // with complete
   std::list<std::string> keep_attr_prefixes;  // as cls_rgw_remove_obj's
   std::string marker;            // the bucket's, to name the leaf clone (§2.7)
+  bool keep_tail = false;        // supersede:  the new object reuses the tail (Y2)
 
   cls_rgw_fsio::replace_in to_core() const {
     cls_rgw_fsio::replace_in in;
@@ -558,6 +559,7 @@ struct cls_rgw_fsio_replace_op {
     in.versioned = versioned;
     in.complete = complete;
     in.expired = expired;
+    in.keep_tail = keep_tail;
     return in;
   }
   void encode(ceph::buffer::list& bl) const {
@@ -572,6 +574,7 @@ struct cls_rgw_fsio_replace_op {
     encode(expired, bl);
     encode(keep_attr_prefixes, bl);
     encode(marker, bl);
+    encode(keep_tail, bl);
     ENCODE_FINISH(bl);
   }
   void decode(ceph::buffer::list::const_iterator& bl) {
@@ -586,6 +589,7 @@ struct cls_rgw_fsio_replace_op {
     decode(expired, bl);
     decode(keep_attr_prefixes, bl);
     decode(marker, bl);
+    decode(keep_tail, bl);
     DECODE_FINISH(bl);
   }
 };

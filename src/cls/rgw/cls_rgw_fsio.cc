@@ -902,8 +902,13 @@ int replace_head(cls_rgw_fsio_head& h, const replace_in& in, replace_out& out,
   if (p) {
     auto b = h.bound(p->id);
     if (b.readers || b.writers) {
-      fx.clones.push_back(
-	cls_rgw_fsio_clone{in.r, 'G', record_of_head(h)});
+      /* §3.6, Y2:  an append or a copy onto itself reuses the tail;  the
+       * record names none, so the drain collects the clone only */
+      auto rec = record_of_head(h);
+      if (in.mode == replace_mode::SUPERSEDE && in.keep_tail) {
+	rec.manifest.clear();
+      }
+      fx.clones.push_back(cls_rgw_fsio_clone{in.r, 'G', rec});
       p->state = state::RETIRED;
       p->manifest_at = at::CLONE;
       p->clone = in.r;

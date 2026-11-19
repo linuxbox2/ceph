@@ -3600,6 +3600,7 @@ int RGWRados::Object::Write::_do_write_meta(uint64_t size, uint64_t accounted_si
   }
   bool guard = ((target->manifest) || (target->state->obj_tag.length() != 0)) && (!target->state->fake_tag);
   bool set_attr_id_tag = guard && target->obj.key.instance.empty() && (meta.if_nomatch == nullptr || meta.if_nomatch != "*"sv);
+  target->fsio_write_keeps_tail = meta.keep_tail;
   r = target->prepare_atomic_modification(rctx.dpp, op, reset_obj, ptag, meta.modify_tail, set_attr_id_tag, rctx.y);
   if (r < 0)
     return r;
@@ -7477,6 +7478,7 @@ void RGWRados::Object::replace_head(const DoutPrefixProvider *dpp,
     break;
   default:
     call.mode = static_cast<uint8_t>(cls_rgw_fsio::replace_mode::SUPERSEDE);
+    call.keep_tail = fsio_write_keeps_tail;
     break;
   }
   call.r = r;

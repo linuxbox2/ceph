@@ -794,6 +794,9 @@ public:
       fsio_reply() : rval(0), version_removal(false) {}
     };
     std::optional<fsio_reply> fsio_replaced;
+    /* the head write reuses the old tail (meta.keep_tail:  an append, a
+     * copy onto itself);  FSIO's supersede then records none (§3.6, Y2) */
+    bool fsio_write_keeps_tail = false;
     /* how a head write replaces the head (FSIO_RADOS_DESIGN.md §3.6,
      * §2.5, §2.5a) */
     enum class head_op { SUPERSEDE, DELETE, REMOVE_VERSION, REMOVE_NULL };

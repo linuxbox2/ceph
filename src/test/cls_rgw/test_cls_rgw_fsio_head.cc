@@ -244,6 +244,31 @@ TEST_F(FsioHead, CloneRecordsTheTailTag)
   EXPECT_EQ(-ENODATA, io.getxattr(leaf(key, 1002), "refcount", m));
 }
 
+/* §3.6, Y2:  a tail-keeping supersede (an append, a copy onto itself):
+ * the leaf clone's record names no manifest, so its drain collects the
+ * clone and never the tail the live object reuses */
+TEST_F(FsioHead, KeepTailSupersedeRecordsNoManifest)
+{
+  std::string key;
+  const auto head = make_head(key);
+  join(head, 1, false);
+  ObjectWriteOperation op;
+  bufferlist out;
+  int rval = 0;
+  auto in = replace(fsio::replace_mode::SUPERSEDE, 1003);
+  in.keep_tail = true;
+  cls_rgw_fsio_replace_head(op, in, &out, &rval);
+  ASSERT_EQ(0, ioctx.operate(head, &op, OPERATION_RETURNVEC));
+  auto io = keyed(head);
+  bufferlist g;
+  ASSERT_LE(0, io.getxattr(leaf(key, 1003), "user.rgw.fsio.gen", g));
+  cls_rgw_fsio_gen rec;
+  auto it = g.cbegin();
+  decode(rec, it);
+  EXPECT_EQ(0u, rec.manifest.length());
+  EXPECT_EQ("t0", rec.gc_tag);
+}
+
 /* a DELETE with a reader open:  a tracking-only head, no ID tag or
  * manifest, its FSIO state kept (§2.2) */
 TEST_F(FsioHead, DeleteWithReaderLeavesTrackingOnly)

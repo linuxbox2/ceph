@@ -681,6 +681,7 @@ struct replace_in {
   bool versioned = false;           // PUBLISH:  the standalone call on the OLH
   bool complete = false;            // versioned PUBLISH:  for a dead publisher
   expired_t expired;                // with complete
+  bool keep_tail = false;           // SUPERSEDE:  the new object reuses the tail (Y2)
 };
 struct replace_out {
   bool keep_tail = false;           // else the caller collects the replaced chain

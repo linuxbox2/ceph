@@ -1129,6 +1129,31 @@ TEST(cls_rgw_fsio_repeat, release_after_publish_is_einval)
   EXPECT_EQ(-EINVAL, fsio::publish_release(h, GW1, s));
 }
 
+/* §3.6, Y2:  a tail-keeping supersede (an append, a copy onto itself)
+ * still retires the bound chunk set, but its record names no manifest,
+ * so its drain collects the clone and never the live object's tail;  the
+ * GC tag is kept */
+TEST(cls_rgw_fsio_supersede, keep_tail_records_no_manifest)
+{
+  for (bool keep : {false, true}) {
+    auto h = head("C0");
+    const auto p = join_reader(h, GW1);
+    fsio::replace_in in;
+    in.mode = fsio::replace_mode::SUPERSEDE;
+    in.r = cls_rgw_fsio_id{2000, 0};
+    in.keep_tail = keep;
+    fsio::replace_out out;
+    cls_rgw_fsio_effects fx;
+    ASSERT_EQ(0, fsio::replace_head(h, in, out, fx));
+    EXPECT_TRUE(out.keep_tail);
+    EXPECT_EQ(cls_rgw_fsio_cs_state::RETIRED, h.hdr->find(p)->state);
+    ASSERT_EQ(1u, fx.clones.size());
+    const auto& rec = fx.clones[0].record;
+    EXPECT_EQ(keep ? 0u : 2u, rec.manifest.length()) << "keep_tail " << keep;
+    EXPECT_EQ("t0", rec.gc_tag);
+  }
+}
+
 TEST(cls_rgw_fsio, each_check_is_detected)
 {
   const std::pair<cls_rgw_fsio_check, void (*)()> table[] = {
