@@ -21,7 +21,9 @@ edition = "2021"
 //!            STOP_AT_FIRST);  the two refinements expected clean
 //!   sample   random walks (FSIO_MODEL_WALKS) over configurations beyond
 //!            the exhaustive search, a seed per run
-//!   sample-skips  each skip check under random walks:  walks to catch
+//!   sample-skips  each skip check under random walks:  walks to catch;
+//!            a miss is reported as "missed (sampling)" and does not fail
+//!            the run, the exhaustive skips tier being the authority
 //!
 //! A run passes when it is clean, or, for a skip check, when it finds a
 //! violation;  a run that reaches FSIO_MODEL_LIMIT is reported as a
@@ -41,6 +43,8 @@ struct Run {
     name: String,
     env: Vec<(String, String)>,
     expect_violation: bool,
+    /* a measurement of sampling's reach:  a miss is reported, not failed */
+    measure: bool,
 }
 
 fn run(name: &str, env: &[(&str, &str)]) -> Run {
@@ -48,6 +52,7 @@ fn run(name: &str, env: &[(&str, &str)]) -> Run {
         name: name.to_string(),
         env: env.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
         expect_violation: false,
+        measure: false,
     }
 }
 
@@ -256,6 +261,7 @@ fn sample_skips() -> Vec<Run> {
             r.env.push(("FSIO_MODEL_SKIP_CHECK".into(), c.to_string()));
             r.env.push(("FSIO_MODEL_STOP_AT_FIRST".into(), "1".into()));
             r.expect_violation = true;
+            r.measure = true;
             r
         })
         .collect()
@@ -350,6 +356,7 @@ fn main() {
             let found = kinds.map_or(false, |k| k > 0);
             let verdict = match (r.expect_violation, found, capped) {
                 (true, true, _) => "caught",
+                (true, false, _) if r.measure => "missed (sampling)",
                 (true, false, _) => "MISSED",
                 (false, true, _) => "VIOLATION",
                 (false, false, true) => "partial (cap)",
