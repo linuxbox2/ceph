@@ -1,0 +1,38 @@
+# Z6_RESOLUTION_TESTS_ID_TAG, observable only with the claim written
+# back (Z6_INSTANCE_WRITE_DROPS_CLAIM skipped too):  testing the claim
+# first, the resolution takes a written version for a placeholder and
+# publishes the shadow again.  With only the write skipped, the claim
+# is merely left over.  A walk's trace (2026-11-19).
+# skip: Z6_INSTANCE_WRITE_DROPS_CLAIM,Z6_RESOLUTION_TESTS_ID_TAG
+# env: FSIO_MODEL_VERSIONED=1 FSIO_MODEL_ROLES=wr FSIO_MODEL_S3_OPS=1
+s3 stop
+gw2 read-olh-read
+gw1 read-olh-write
+gw2 count I1
+gw1 count I1
+gw1 open-write I1
+gw1 ready S1.10
+gw2 open-read I1
+gw1 close-write S1.10
+gw1 crash
+gw2 close-read C0
+expirer ocnt I1 for 1
+expirer grace 1
+gw2 uncount I1
+expirer decide-finalize S1.10
+expirer publish-hint for S1.10
+expirer placeholder I2
+gw2 resend leave
+expirer fenced-finalize S1.10
+expirer reclone S1.12
+expirer instance-write I2
+expirer link I2
+expirer crash
+expirer abort I2
+expirer decide-finalize S1.10
+expirer publish-hint for S1.10
+expirer placeholder I3
+expirer fenced-finalize S1.10
+expirer reclone S1.12
+expirer instance-write I3
+# => S1.12 linked as a version twice

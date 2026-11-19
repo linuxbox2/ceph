@@ -244,6 +244,11 @@ fn skip_table() -> Vec<Check> {
         ("Z22_ABANDON_WAITS_FOR_GRACE", unv,
          &[("FSIO_MODEL_ROLES", "wr"), ("FSIO_MODEL_S3_OPS", "0"), ("FSIO_MODEL_SHORTEST", "0")],
          true),
+        /* Z6:  the claim written back is caught as left over;  the
+         * resolution's ID-tag test only with it, by its vector */
+        ("Z6_INSTANCE_WRITE_DROPS_CLAIM", ver,
+         &[("FSIO_MODEL_ROLES", "w"), ("FSIO_MODEL_S3_OPS", "0")], true),
+        ("Z6_INSTANCE_WRITE_DROPS_CLAIM,Z6_RESOLUTION_TESTS_ID_TAG", ver, none, true),
         /* a cycle drawing new claims:  depth-first finds it */
         ("RESUME_REPLACES_CLAIM", ver,
          &[("FSIO_MODEL_ROLES", "w"), ("FSIO_MODEL_S3_OPS", "0"), ("FSIO_MODEL_SHORTEST", "0")],

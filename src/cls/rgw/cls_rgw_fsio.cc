@@ -95,6 +95,7 @@ namespace cls_rgw_fsio {
 
 #ifdef CLS_RGW_FSIO_SKIP_CHECKS
 cls_rgw_fsio_check skipped_check = cls_rgw_fsio_check::NONE;
+cls_rgw_fsio_check also_skipped_check = cls_rgw_fsio_check::NONE;
 #endif
 
 namespace {

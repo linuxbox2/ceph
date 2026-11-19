@@ -314,6 +314,9 @@ struct Config {
 };
 
 /* versioned:  one instance head and what it holds */
+struct Version;
+bool decided_by_claim(const Version& v);
+
 struct Version {
   cls_rgw_fsio_instance_head ih;
   std::string tail;              // its content:  "C<n>", or a shadow "S<id>"
@@ -325,6 +328,14 @@ struct Version {
     encode(ih, bl); encode(tail, bl); encode(epoch, bl); encode(claim, bl);
   }
 };
+
+/* §4.2:  an instance head with an ID tag is written, whatever its claim;
+ * only one without is decided by its claim (Z6) */
+bool decided_by_claim(const Version& v)
+{
+  return v.ih.exists && v.claim &&
+    (v.ih.id_tag.empty() || FSIO_SKIP_CHECK(Z6_RESOLUTION_TESTS_ID_TAG));
+}
 Config cfg;
 
 /* the counted calls, numbered per handle and kept for a resend (Z22).
@@ -1228,7 +1239,12 @@ void gw_actions_v(const World& w0, size_t gi, std::vector<Action>& acts)
 	    }
 	    v.tail = sn;
 	    v.epoch = g.pub_epoch;
-	    w.versions[g.pub_instance] = v;      // the claim removed
+	    w.versions[g.pub_instance] = v;
+	    /* the claim's removal goes after the head's replacement in the
+	     * op, or the replacement writes it back (§3, the ordering rule) */
+	    if (FSIO_SKIP_CHECK(Z6_INSTANCE_WRITE_DROPS_CLAIM)) {
+	      w.versions[g.pub_instance].claim = g.pub_token;
+	    }
 	    if (++w.published[sn] > 1) {
 	      return fmt::format("{} linked as a version twice", sn);
 	    }
@@ -2233,6 +2249,9 @@ void expirer_actions_v(const World& w0, std::vector<Action>& acts)
 	    v.tail = ts;
 	    v.epoch = t && t->publishing ? t->publishing->olh_epoch : 0;
 	    vi->second = v;
+	    if (FSIO_SKIP_CHECK(Z6_INSTANCE_WRITE_DROPS_CLAIM)) {
+	      vi->second.claim = w.ex_token;     // written back (§3, Z6)
+	    }
 	    if (++w.published[ts] > 1) {
 	      return fmt::format("{} linked as a version twice", ts);
 	    }
@@ -2361,9 +2380,9 @@ void expirer_actions_v(const World& w0, std::vector<Action>& acts)
       }
       return;
     }
-    if (!vi->second.claim) {
-      /* 2. no claim:  written by the publish, live or since removed
-       * (V5:  first keyed on the ID tag, which a removal clears) */
+    if (!vi->second.claim || !decided_by_claim(vi->second)) {
+      /* 2. written by the publish:  its ID tag (Z6), or no claim, live
+       * or since removed (V5:  a removal clears the ID tag) */
       if (FSIO_SKIP_CHECK(W9_HINT_SPARES_WRITTEN_VERSION)) {
 	w.gcq.push_back({vi->second.tail});   // as first written
       }
@@ -2423,7 +2442,7 @@ void expirer_actions_v(const World& w0, std::vector<Action>& acts)
       const auto inst = t->publishing->instance;
       const auto token = t->publishing->token;
       auto vi = w0.versions.find(inst);
-      if (vi != w0.versions.end() && vi->second.placeholder()) {
+      if (vi != w0.versions.end() && decided_by_claim(vi->second)) {
 	if (*vi->second.claim == token) {
 	  acts.push_back({fmt::format("expirer abort {}", inst),
 	      [inst](World& w) -> std::optional<std::string> {
@@ -2460,11 +2479,12 @@ void expirer_actions_v(const World& w0, std::vector<Action>& acts)
 	  if (FSIO_SKIP_CHECK(RESUME_RESOLVES_CLAIM)) {
 	    return std::nullopt;
 	  }
-	  if (vi == w.versions.end() ||
-	      (!vi->second.claim && vi->second.ih.id_tag.empty())) {
+	  if (vi != w.versions.end() && !vi->second.ih.id_tag.empty() &&
+	      !decided_by_claim(vi->second)) {
+	    w.ex = VF_LINK;                  // the ID tag first (Z6)
+	  } else if (vi == w.versions.end() ||
+		     (!vi->second.claim && vi->second.ih.id_tag.empty())) {
 	    w.ex = VF_PUBLISH;
-	  } else if (!vi->second.claim) {
-	    w.ex = VF_LINK;
 	  }
 	  return std::nullopt;
 	}});
@@ -2545,19 +2565,24 @@ void expirer_actions_v(const World& w0, std::vector<Action>& acts)
       apply_remove_head(w, fx);
       return std::nullopt;
     };
-    if (vi == w0.versions.end() ||
+    /* the ID tag first (Z6):  written, whatever its claim */
+    if (vi != w0.versions.end() && !vi->second.ih.id_tag.empty() &&
+	!decided_by_claim(vi->second)) {
+      acts.push_back({fmt::format("expirer complete {}", inst),
+	  [complete](World& w) { return complete(w, true); }});
+    } else if (vi == w0.versions.end() ||
 	(!vi->second.claim && vi->second.ih.id_tag.empty() &&
 	 !FSIO_SKIP_CHECK(H3_TRACKING_ONLY_IS_REMOVED))) {
       /* written, then removed (§4.2):  absent, or tracking-only (H3) */
       acts.push_back({fmt::format("expirer complete-removed {}", sname(from)),
 	  [complete](World& w) { return complete(w, false); }});
-    } else if (vi->second.placeholder() && *vi->second.claim == token) {
+    } else if (decided_by_claim(vi->second) && *vi->second.claim == token) {
       acts.push_back({fmt::format("expirer abort {}", inst),
 	  [inst](World& w) -> std::optional<std::string> {
 	    w.versions.at(inst).claim = "aborted";
 	    return std::nullopt;
 	  }});
-    } else if (vi->second.placeholder()) {
+    } else if (decided_by_claim(vi->second)) {
       acts.push_back({fmt::format("expirer decide-finalize {}", sname(from)),
 	  [from, inst](World& w) -> std::optional<std::string> {
 	    w.ex = VF_DECIDED;
@@ -2565,9 +2590,6 @@ void expirer_actions_v(const World& w0, std::vector<Action>& acts)
 	    w.ex_aborted = inst;             // the claim it aborted (V1)
 	    return std::nullopt;
 	  }});
-    } else if (!vi->second.ih.id_tag.empty()) {
-      acts.push_back({fmt::format("expirer complete {}", inst),
-	  [complete](World& w) { return complete(w, true); }});
     }
   }
 }
@@ -3418,12 +3440,24 @@ TEST(FSIOModel, Explore)
        cls_rgw_fsio_check::Z22_ABANDON_WAITS_FOR_GRACE},
       {"Z22_EXPIRY_KEEPS_SEQ", cls_rgw_fsio_check::Z22_EXPIRY_KEEPS_SEQ},
       {"Z11_EXTENT_CAPS_RUNS", cls_rgw_fsio_check::Z11_EXTENT_CAPS_RUNS},
+      {"Z6_INSTANCE_WRITE_DROPS_CLAIM",
+       cls_rgw_fsio_check::Z6_INSTANCE_WRITE_DROPS_CLAIM},
+      {"Z6_RESOLUTION_TESTS_ID_TAG", cls_rgw_fsio_check::Z6_RESOLUTION_TESTS_ID_TAG},
       {"W20_RELEASE_CHECKS_PUBLISHER",
        cls_rgw_fsio_check::W20_RELEASE_CHECKS_PUBLISHER},
     };
-    auto i = checks.find(c);
-    ASSERT_NE(i, checks.end()) << "unknown check " << c;
-    fsio::skipped_check = i->second;
+    /* one check, or two:  "A,B" */
+    std::string names = c;
+    auto comma = names.find(',');
+    std::vector<std::string> list{names.substr(0, comma)};
+    if (comma != std::string::npos) {
+      list.push_back(names.substr(comma + 1));
+    }
+    for (size_t k = 0; k < list.size(); ++k) {
+      auto i = checks.find(list[k]);
+      ASSERT_NE(i, checks.end()) << "unknown check " << list[k];
+      (k == 0 ? fsio::skipped_check : fsio::also_skipped_check) = i->second;
+    }
     std::cout << "skipping check " << c << "\n";
   }
   cfg.crashes = env_int("FSIO_MODEL_CRASHES", 1);

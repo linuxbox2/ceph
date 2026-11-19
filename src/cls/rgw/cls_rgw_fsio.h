@@ -72,14 +72,19 @@ enum class cls_rgw_fsio_check : uint8_t {
   Z22_ABANDON_WAITS_FOR_GRACE,         // the expirer's abandon of a construction (model)
   Z22_EXPIRY_KEEPS_SEQ,                // settle, an expired handle's last_seq
   Z11_EXTENT_CAPS_RUNS,                // fsio_extend, fsio_ready:  rgw_fsio_extent_max_runs
+  Z6_INSTANCE_WRITE_DROPS_CLAIM,       // the versioned instance write's post op (model)
+  Z6_RESOLUTION_TESTS_ID_TAG,          // the claim resolution and hint rule (model)
 };
 
 #ifdef CLS_RGW_FSIO_SKIP_CHECKS
 namespace cls_rgw_fsio {
-extern cls_rgw_fsio_check skipped_check;   // defined in cls_rgw_fsio.cc
+/* defined in cls_rgw_fsio.cc;  a second, for a check observable only
+ * once another is skipped too */
+extern cls_rgw_fsio_check skipped_check, also_skipped_check;
 }
 #define FSIO_SKIP_CHECK(c) \
-  (::cls_rgw_fsio::skipped_check == cls_rgw_fsio_check::c)
+  (::cls_rgw_fsio::skipped_check == cls_rgw_fsio_check::c || \
+   ::cls_rgw_fsio::also_skipped_check == cls_rgw_fsio_check::c)
 #else
 #define FSIO_SKIP_CHECK(c) false
 #endif
