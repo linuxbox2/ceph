@@ -12,11 +12,6 @@
  * that the model checker measures the design;  a fix lands in the design
  * and here together. */
 
-std::string cls_rgw_fsio_id::to_str() const
-{
-  return fmt::format("{:016x}{:016x}", counter, nonce);
-}
-
 cls_rgw_fsio_chunk_set* cls_rgw_fsio_hdr::find(const cls_rgw_fsio_id& id)
 {
   for (auto& cs : chunk_sets) {

@@ -12,6 +12,7 @@
 
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "include/encoding.h"
@@ -505,6 +506,17 @@ struct cls_rgw_fsio_replace_ret {
   }
 };
 WRITE_CLASS_ENCODER(cls_rgw_fsio_replace_ret)
+
+/* §2.7, E2:  a clone of a head (or instance head) lives after the
+ * bucket's heads, <marker>~fsio_<role><id>_<key part>, the key part being
+ * the head's oid after <marker>_;  the class and RGW name clones by it */
+inline std::string cls_rgw_fsio_clone_name(std::string_view marker, char role,
+					   const cls_rgw_fsio_id& id,
+					   std::string_view head_oid)
+{
+  return fmt::format("{}~fsio_{}{}_{}", marker, role, id.to_str(),
+		     head_oid.substr(marker.size() + 1));
+}
 
 /* the FSIO open hints (FSIO_RADOS_DESIGN.md §2.7, §4.3):  omap items of
  * the shard objects fsio_open_hint.NNNNNNNNNN in the zone's log pool,

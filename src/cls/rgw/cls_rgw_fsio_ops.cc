@@ -218,8 +218,7 @@ int head_clone_name(cls_method_context_t hctx, const std::string& marker,
 	    marker.c_str(), oid.c_str());
     return -EINVAL;
   }
-  name = fmt::format("{}~fsio_{}{}_{}", marker, role, id.to_str(),
-		     oid.substr(marker.size() + 1));
+  name = cls_rgw_fsio_clone_name(marker, role, id, oid);
   return 0;
 }
 

@@ -11,6 +11,8 @@
 #include <string>
 #include <vector>
 
+#include <fmt/format.h>
+
 #include "include/buffer.h"
 #include "include/encoding.h"
 
@@ -95,7 +97,9 @@ struct cls_rgw_fsio_id {
 
   auto operator<=>(const cls_rgw_fsio_id&) const = default;
   bool empty() const { return counter == 0 && nonce == 0; }
-  std::string to_str() const;
+  std::string to_str() const {
+    return fmt::format("{:016x}{:016x}", counter, nonce);
+  }
 
   void encode(ceph::buffer::list& bl) const {
     ENCODE_START(1, 1, bl);
