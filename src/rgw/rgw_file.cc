@@ -3637,6 +3637,80 @@ int rgw_unlink(struct rgw_fs *rgw_fs, struct rgw_file_handle *parent_fh,
 }
 
 /*
+  object versions (S3 versioning)
+*/
+int rgw_set_versioning(struct rgw_fs *rgw_fs,
+		       struct rgw_file_handle *bucket_fh,
+		       uint32_t status, uint32_t flags)
+{
+  RGWLibFS *fs = static_cast<RGWLibFS*>(rgw_fs->fs_private);
+  RGWFileHandle* bucket = get_rgwfh(bucket_fh);
+  if (!bucket || !bucket->is_bucket()) {
+    return -EINVAL;
+  }
+  int s;
+  switch (status) {
+  case RGW_VERSIONING_ENABLED:
+    s = VersioningEnabled;
+    break;
+  case RGW_VERSIONING_SUSPENDED:
+    s = VersioningSuspended;
+    break;
+  default:
+    return -EINVAL;
+  }
+  RGWSetVersioningRequest req(fs->get_context(), g_rgwlib->get_driver()->get_user(fs->get_user()->user_id),
+			      bucket->bucket_name(), s);
+  int rc = g_rgwlib->get_fe()->execute_req(&req);
+  return rc ? rc : req.get_ret();
+}
+
+int rgw_list_versions(struct rgw_fs *rgw_fs,
+		      struct rgw_file_handle *bucket_fh,
+		      const char *prefix, const char *delimiter,
+		      const char *key_marker, const char *version_id_marker,
+		      uint32_t max,
+		      rgw_version_cb cb, rgw_prefix_cb prefix_cb, void *arg,
+		      bool *truncated, uint32_t flags)
+{
+  RGWLibFS *fs = static_cast<RGWLibFS*>(rgw_fs->fs_private);
+  RGWFileHandle* bucket = get_rgwfh(bucket_fh);
+  if (!bucket || !bucket->is_bucket() || !cb) {
+    return -EINVAL;
+  }
+  rgw_obj_key marker{key_marker ? key_marker : "",
+		     version_id_marker ? version_id_marker : ""};
+  RGWListVersionsRequest req(fs->get_context(), g_rgwlib->get_driver()->get_user(fs->get_user()->user_id),
+			     bucket->bucket_name(), prefix ? prefix : "",
+			     delimiter ? delimiter : "", std::move(marker),
+			     max, cb, prefix_cb, arg);
+  int rc = g_rgwlib->get_fe()->execute_req(&req);
+  if (!rc) {
+    rc = req.get_ret();
+  }
+  if (!rc && truncated) {
+    *truncated = req.truncated();
+  }
+  return rc;
+}
+
+int rgw_unlink_version(struct rgw_fs *rgw_fs,
+		       struct rgw_file_handle *bucket_fh, const char *name,
+		       const char *version_id, uint32_t flags)
+{
+  RGWLibFS *fs = static_cast<RGWLibFS*>(rgw_fs->fs_private);
+  RGWFileHandle* bucket = get_rgwfh(bucket_fh);
+  if (!bucket || !bucket->is_bucket() || !name || !version_id) {
+    return -EINVAL;
+  }
+  const std::string oname{name}, vid{version_id};
+  RGWDeleteVersionRequest req(fs->get_context(), g_rgwlib->get_driver()->get_user(fs->get_user()->user_id),
+			      bucket->bucket_name(), oname, vid);
+  int rc = g_rgwlib->get_fe()->execute_req(&req);
+  return rc ? rc : req.get_ret();
+}
+
+/*
   lookup object by name (POSIX style)
 */
 int rgw_lookup(struct rgw_fs *rgw_fs,

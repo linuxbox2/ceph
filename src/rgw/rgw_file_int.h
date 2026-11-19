@@ -2383,6 +2383,183 @@ public:
 
 }; /* RGWDeleteObjRequest */
 
+/* S3's DELETE ?versionId=:  one version of an object */
+class RGWDeleteVersionRequest : public RGWLibRequest,
+				public RGWDeleteObj /* RGWOp */
+{
+public:
+  const std::string& bucket_name;
+  const std::string& obj_name;
+  const std::string& version_id;
+
+  RGWDeleteVersionRequest(CephContext* _cct,
+			  std::unique_ptr<rgw::sal::User> _user,
+			  const std::string& _bname, const std::string& _oname,
+			  const std::string& _version_id)
+    : RGWLibRequest(_cct, std::move(_user)), bucket_name(_bname),
+      obj_name(_oname), version_id(_version_id) {
+    op = this;
+  }
+
+  bool only_bucket() override { return true; }
+
+  int op_init() override {
+    RGWOp::init(RGWHandler::driver, get_state(), this);
+    op = this; // assign self as op: REQUIRED
+    return 0;
+  }
+
+  int header_init() override {
+    req_state* state = get_state();
+    state->info.method = "DELETE";
+    state->op = OP_DELETE;
+
+    std::string uri = make_uri(bucket_name, obj_name);
+    state->relative_uri = uri;
+    state->info.request_uri = uri;
+    state->info.effective_uri = uri;
+    /* init_from_header sets the object's instance from versionId */
+    state->info.request_params = "versionId=" + version_id;
+    state->info.domain = "";
+
+    return 0;
+  }
+
+  void send_response() override {}
+
+}; /* RGWDeleteVersionRequest */
+
+/* S3's PutBucketVersioning */
+class RGWSetVersioningRequest : public RGWLibRequest,
+				public RGWSetBucketVersioning /* RGWOp */
+{
+public:
+  const std::string& bucket_name;
+  const int status;
+
+  RGWSetVersioningRequest(CephContext* _cct,
+			  std::unique_ptr<rgw::sal::User> _user,
+			  const std::string& _bname, int _status)
+    : RGWLibRequest(_cct, std::move(_user)), bucket_name(_bname),
+      status(_status) {
+    op = this;
+  }
+
+  bool only_bucket() override { return true; }
+
+  int op_init() override {
+    RGWOp::init(RGWHandler::driver, get_state(), this);
+    op = this; // assign self as op: REQUIRED
+    return 0;
+  }
+
+  int header_init() override {
+    req_state* state = get_state();
+    state->info.method = "PUT";
+    state->op = OP_PUT;
+
+    std::string uri = "/" + bucket_name;
+    state->relative_uri = uri;
+    state->info.request_uri = uri;
+    state->info.effective_uri = uri;
+    state->info.request_params = "versioning";
+    state->info.domain = "";
+
+    return 0;
+  }
+
+  int get_params(optional_yield) override {
+    versioning_status = status;
+    return 0;
+  }
+
+  void send_response() override {}
+
+}; /* RGWSetVersioningRequest */
+
+/* S3's ListObjectVersions */
+class RGWListVersionsRequest : public RGWLibRequest,
+			       public RGWListBucket /* RGWOp */
+{
+public:
+  const std::string& bucket_name;
+  rgw_version_cb cb;
+  rgw_prefix_cb prefix_cb;
+  void* cb_arg;
+  bool stopped{false};
+
+  RGWListVersionsRequest(CephContext* _cct,
+			 std::unique_ptr<rgw::sal::User> _user,
+			 const std::string& _bname, std::string _prefix,
+			 std::string _delimiter, rgw_obj_key _marker,
+			 uint32_t _max, rgw_version_cb _cb,
+			 rgw_prefix_cb _prefix_cb, void* _cb_arg)
+    : RGWLibRequest(_cct, std::move(_user)), bucket_name(_bname),
+      cb(_cb), prefix_cb(_prefix_cb), cb_arg(_cb_arg) {
+    op = this;
+    prefix = std::move(_prefix);
+    delimiter = std::move(_delimiter);
+    marker = std::move(_marker);
+    default_max = 1000;
+    max = _max ? std::min<uint32_t>(_max, 1000) : default_max;
+  }
+
+  bool only_bucket() override { return true; }
+
+  int op_init() override {
+    RGWOp::init(RGWHandler::driver, get_state(), this);
+    op = this; // assign self as op: REQUIRED
+    return 0;
+  }
+
+  int header_init() override {
+    req_state* state = get_state();
+    state->info.method = "GET";
+    state->op = OP_GET;
+
+    std::string uri = "/" + bucket_name + "/";
+    state->relative_uri = uri;
+    state->info.request_uri = uri;
+    state->info.effective_uri = uri;
+    state->info.request_params = "versions";
+    state->info.domain = "";
+
+    return 0;
+  }
+
+  int get_params(optional_yield) override {
+    list_versions = true;
+    return 0;
+  }
+
+  void send_response() override {
+    for (auto& e : objs) {
+      if (stopped) {
+	return;
+      }
+      const auto& v = e.key.instance;
+      if (!cb(e.key.name.c_str(), v.empty() ? "null" : v.c_str(),
+	      e.is_current(), e.is_delete_marker(), e.meta.accounted_size,
+	      cb_arg)) {
+	stopped = true;
+      }
+    }
+    if (prefix_cb) {
+      for (auto& [cp, b] : common_prefixes) {
+	if (stopped) {
+	  return;
+	}
+	if (!prefix_cb(cp.c_str(), cb_arg)) {
+	  stopped = true;
+	}
+      }
+    }
+  }
+
+  bool truncated() const { return is_truncated && !stopped; }
+
+}; /* RGWListVersionsRequest */
+
 class RGWOpenRequest : public RGWLibRequest,
 		       public RGWOpen /* RGWOp */
 {

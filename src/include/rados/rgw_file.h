@@ -252,6 +252,46 @@ int rgw_unlink(struct rgw_fs *rgw_fs,
 	       uint32_t flags);
 
 /*
+ * object versions (S3 versioning), for librgw clients beyond NFS
+ */
+#define RGW_VERSIONING_ENABLED    0x0001
+#define RGW_VERSIONING_SUSPENDED  0x0002
+
+/* turn a bucket's versioning on, or suspend it, as S3's
+ * PutBucketVersioning does */
+int rgw_set_versioning(struct rgw_fs *rgw_fs,
+		       struct rgw_file_handle *bucket_fh,
+		       uint32_t status, uint32_t flags);
+
+/* an object version, or a common prefix when a delimiter is given;  a
+ * callback returns false to stop */
+typedef bool (*rgw_version_cb)(const char *name, const char *version_id,
+			       bool is_latest, bool is_delete_marker,
+			       uint64_t size, void *arg);
+typedef bool (*rgw_prefix_cb)(const char *common_prefix, void *arg);
+
+/* S3's ListObjectVersions:  versions newest first per key, keys in
+ * order, at most max entries (0:  the server's default).  The next page
+ * starts after the last entry returned:  pass its name and version id
+ * as key_marker and version_id_marker.  *truncated is set when there is
+ * one.  prefix, delimiter and the markers may be NULL;  prefix_cb may be
+ * NULL when there is no delimiter. */
+int rgw_list_versions(struct rgw_fs *rgw_fs,
+		      struct rgw_file_handle *bucket_fh,
+		      const char *prefix, const char *delimiter,
+		      const char *key_marker, const char *version_id_marker,
+		      uint32_t max,
+		      rgw_version_cb cb, rgw_prefix_cb prefix_cb, void *arg,
+		      bool *truncated, uint32_t flags);
+
+/* remove one version, as S3's DELETE ?versionId= does;  "null" names the
+ * null version.  Returns -ENOENT for a version that does not exist, where
+ * S3 returns 204. */
+int rgw_unlink_version(struct rgw_fs *rgw_fs,
+		       struct rgw_file_handle *bucket_fh, const char *name,
+		       const char *version_id, uint32_t flags);
+
+/*
     read  directory content
 */
 typedef int (*rgw_readdir_cb)(const char *name, void *arg, uint64_t offset,
