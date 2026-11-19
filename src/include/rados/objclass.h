@@ -168,6 +168,15 @@ extern int cls_cxx_setxattr(cls_method_context_t hctx, const char *name,
                             ceph::bufferlist *inbl);
 
 /**
+ * Remove an xattr of the object.  Removing one the object does not have
+ * is not an error.
+ *
+ * @param hctx
+ * @param name
+ */
+extern int cls_cxx_rmxattr(cls_method_context_t hctx, const char *name);
+
+/**
  * Get value corresponding to a key from the map.
  *
  * @param hctx

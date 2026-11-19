@@ -283,6 +283,15 @@ int cls_cxx_setxattr(cls_method_context_t hctx,
   return execute_osd_op(hctx, op);
 }
 
+int cls_cxx_rmxattr(cls_method_context_t hctx, const char *name)
+{
+  OSDOp op{CEPH_OSD_OP_RMXATTR};
+  op.op.xattr.name_len = std::strlen(name);
+  op.op.xattr.value_len = 0;
+  op.indata.append(name, op.op.xattr.name_len);
+  return execute_osd_op(hctx, op);
+}
+
 int cls_cxx_snap_revert(cls_method_context_t hctx, snapid_t snapid)
 {
   OSDOp op{CEPH_OSD_OP_ROLLBACK};
