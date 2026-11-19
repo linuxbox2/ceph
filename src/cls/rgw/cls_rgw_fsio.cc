@@ -427,8 +427,42 @@ int join_once(cls_rgw_fsio_head& h, const join_in& in, join_out& out,
 
 } // anonymous namespace
 
+void add_run(std::vector<cls_rgw_fsio_run>& extent, cls_rgw_fsio_run run,
+	     size_t max_runs)
+{
+  if (run.last < run.first) {
+    std::swap(run.first, run.last);
+  }
+  extent.push_back(run);
+  std::sort(extent.begin(), extent.end());
+  std::vector<cls_rgw_fsio_run> merged;
+  for (const auto& r : extent) {
+    if (!merged.empty() && r.first <= merged.back().last + 1) {
+      merged.back().last = std::max(merged.back().last, r.last);
+    } else {
+      merged.push_back(r);
+    }
+  }
+  /* the cap:  the smallest gap's pair merges, its gap becoming fenced
+   * holes at a finalize, never an unbounded header */
+  while (merged.size() > std::max<size_t>(max_runs, 1) &&
+	 !FSIO_SKIP_CHECK(Z11_EXTENT_CAPS_RUNS)) {
+    size_t best = 0;
+    for (size_t i = 1; i + 1 < merged.size(); ++i) {
+      if (merged[i + 1].first - merged[i].last <
+	  merged[best + 1].first - merged[best].last) {
+	best = i;
+      }
+    }
+    merged[best].last = merged[best + 1].last;
+    merged.erase(merged.begin() + best + 1);
+  }
+  extent = std::move(merged);
+}
+
 int ready(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& caller,
-	  const cls_rgw_fsio_id& cs, uint64_t extent)
+	  const cls_rgw_fsio_id& cs,
+	  const std::vector<cls_rgw_fsio_run>& runs, size_t max_runs)
 {
   if (!h.hdr) {
     return -EINVAL;
@@ -442,12 +476,16 @@ int ready(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& caller,
     return -EINVAL;
   }
   e->state = state::READY;
-  e->shadow->extent = extent;
+  e->shadow->extent.clear();
+  for (const auto& r : runs) {
+    add_run(e->shadow->extent, r, max_runs);
+  }
   return 0;
 }
 
 int extend(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& caller,
-	   const cls_rgw_fsio_id& cs, uint64_t extent)
+	   const cls_rgw_fsio_id& cs, const cls_rgw_fsio_run& run,
+	   size_t max_runs)
 {
   if (!h.hdr) {
     return -EINVAL;
@@ -463,7 +501,7 @@ int extend(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& caller,
   if (!o || !o->chunk_sets.count(cs) || o->chunk_sets[cs].writers == 0) {
     return -EINVAL;
   }
-  e->shadow->extent = std::max(e->shadow->extent, extent);
+  add_run(e->shadow->extent, run, max_runs);
   return 0;
 }
 
@@ -892,7 +930,8 @@ int fenced_finalize(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& finalizer,
       }
     }
   }
-  const auto f_extent = f->shadow ? f->shadow->extent : 0;
+  const auto f_extent = f->shadow ? f->shadow->extent :
+    std::vector<cls_rgw_fsio_run>{};
   cls_rgw_fsio_chunk_set t;
   t.id = hdr.draw();
   t.state = state::PUBLISHING;

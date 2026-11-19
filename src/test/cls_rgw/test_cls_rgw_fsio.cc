@@ -45,7 +45,7 @@ cls_rgw_fsio_id construct(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& inc)
   cls_rgw_fsio_effects fx;
   EXPECT_EQ(0, fsio::join(h, {inc, next_seq(), true, 1, 10, {}}, out, fx));
   EXPECT_TRUE(out.construct);
-  EXPECT_EQ(0, fsio::ready(h, inc, out.bound, 1));
+  EXPECT_EQ(0, fsio::ready(h, inc, out.bound, {{0, 0}}));
   return out.bound;
 }
 
@@ -263,7 +263,7 @@ void w1_shadow_carries_its_pseudo_manifest()
   EXPECT_EQ('a', fx.clones[0].role);
   EXPECT_EQ(out.bound, fx.clones[0].r);
   EXPECT_TRUE(fx.clones[0].pm.contents_equal(h.manifest));
-  ASSERT_EQ(0, fsio::ready(h, GW1, out.bound, 1));
+  ASSERT_EQ(0, fsio::ready(h, GW1, out.bound, {{0, 0}}));
   leave_writer(h, GW1, out.bound);
   /* the S3 PUT finds only a writer bound:  no record of C0 is kept */
   fsio::replace_in in;
@@ -443,6 +443,57 @@ TEST(cls_rgw_fsio, Z22_expiry_keeps_the_seq)
   z22_expiry_keeps_the_seq();
 }
 
+using runs = std::vector<cls_rgw_fsio_run>;
+
+/* Z11:  runs that overlap or touch merge;  one far write is one more
+ * run, not a range the size of the file */
+TEST(cls_rgw_fsio, Z11_runs_merge)
+{
+  runs e;
+  fsio::add_run(e, {0, 3}, 64);
+  fsio::add_run(e, {10, 12}, 64);
+  EXPECT_EQ((runs{{0, 3}, {10, 12}}), e);
+  fsio::add_run(e, {4, 9}, 64);                    // touches both
+  EXPECT_EQ((runs{{0, 12}}), e);
+  fsio::add_run(e, {1'000'000'000, 1'000'000'000}, 64);
+  EXPECT_EQ((runs{{0, 12}, {1'000'000'000, 1'000'000'000}}), e);
+  fsio::add_run(e, {5, 6}, 64);                    // inside one
+  EXPECT_EQ(2u, e.size());
+}
+
+/* Z11:  past the cap the adjacent pair with the smallest gap merges */
+void z11_extent_caps_runs()
+{
+  runs e;
+  fsio::add_run(e, {0, 0}, 2);
+  fsio::add_run(e, {10, 10}, 2);
+  fsio::add_run(e, {100, 100}, 2);
+  EXPECT_EQ((runs{{0, 10}, {100, 100}}), e);
+}
+
+TEST(cls_rgw_fsio, Z11_extent_caps_runs)
+{
+  z11_extent_caps_runs();
+}
+
+/* Z11:  fsio_ready records the constructor's runs, fsio_extend adds
+ * one, and a fenced finalize carries them to `to` (design §2.7, §3.7) */
+TEST(cls_rgw_fsio, Z11_runs_carried_to_the_finalize)
+{
+  auto h = head("C0");
+  fsio::join_out out;
+  cls_rgw_fsio_effects fx;
+  ASSERT_EQ(0, fsio::join(h, {GW1, next_seq(), true, 1, 10, {}}, out, fx));
+  const auto s = out.bound;
+  ASSERT_EQ(0, fsio::ready(h, GW1, s, runs{{0, 3}, {8, 9}}));
+  EXPECT_EQ((runs{{0, 3}, {8, 9}}), h.hdr->find(s)->shadow->extent);
+  ASSERT_EQ(0, fsio::extend(h, GW1, s, {50, 57}));
+  cls_rgw_fsio_id to;
+  ASSERT_EQ(0, fsio::fenced_finalize(h, EXPIRER, s, {I1}, to));
+  EXPECT_EQ((runs{{0, 3}, {8, 9}, {50, 57}}), h.hdr->find(to)->shadow->extent);
+  EXPECT_EQ(-CLS_RGW_ERR_FSIO_BUSY, fsio::extend(h, GW1, s, {60, 60}));
+}
+
 /* W20:  only the recorded publisher may release a publishing shadow
  * (design §3) */
 void w20_release_requires_the_publisher()
@@ -594,7 +645,7 @@ TEST(cls_rgw_fsio_versioned, leave_records_the_publish_intent)
   fsio::join_out out;
   cls_rgw_fsio_effects fx;
   ASSERT_EQ(0, fsio::join(h, {GW1, next_seq(), true, 1, 10, {}, "I1"}, out, fx));
-  ASSERT_EQ(0, fsio::ready(h, GW1, out.bound, 1));
+  ASSERT_EQ(0, fsio::ready(h, GW1, out.bound, {{0, 0}}));
   fsio::publish_intent intent{"I2", "tok", 77};
   fsio::leave_out lout;
   cls_rgw_fsio_effects lfx;
@@ -613,7 +664,7 @@ TEST(cls_rgw_fsio_versioned, publish_sets_the_shadow_published_at_its_instance)
   fsio::join_out out;
   cls_rgw_fsio_effects fx;
   ASSERT_EQ(0, fsio::join(h, {GW1, next_seq(), true, 1, 10, {}, "I1"}, out, fx));
-  ASSERT_EQ(0, fsio::ready(h, GW1, out.bound, 1));
+  ASSERT_EQ(0, fsio::ready(h, GW1, out.bound, {{0, 0}}));
   join_reader(h, GW2, "I1");                       // binds I1's entry
   fsio::publish_intent intent{"I2", "tok", 77};
   fsio::leave_out lout;
@@ -640,7 +691,7 @@ TEST(cls_rgw_fsio_versioned, complete_admits_only_a_dead_publisher)
   fsio::join_out out;
   cls_rgw_fsio_effects fx;
   ASSERT_EQ(0, fsio::join(h, {GW1, next_seq(), true, 1, 10, {}, "I1"}, out, fx));
-  ASSERT_EQ(0, fsio::ready(h, GW1, out.bound, 1));
+  ASSERT_EQ(0, fsio::ready(h, GW1, out.bound, {{0, 0}}));
   auto c0 = join_reader(h, GW2, "I1");
   ASSERT_EQ(0, fsio::rebind(h, GW2, next_seq(), c0, out.bound, 1));  // keeps the entry
   fsio::publish_intent intent{"I2", "tok", 77};
@@ -675,7 +726,7 @@ void w7_leave_returns_the_version_read()
   fsio::join_out out;
   cls_rgw_fsio_effects fx;
   ASSERT_EQ(0, fsio::join(h, {GW1, next_seq(), true, 1, 10, {}, "I1"}, out, fx));
-  ASSERT_EQ(0, fsio::ready(h, GW1, out.bound, 1));
+  ASSERT_EQ(0, fsio::ready(h, GW1, out.bound, {{0, 0}}));
   auto c0 = join_reader(h, GW2, "I1");
   auto c1 = join_reader(h, GW3, "I1");
   ASSERT_EQ(0, fsio::rebind(h, GW2, next_seq(), c0, out.bound, 1));   // follows
@@ -705,7 +756,7 @@ void w7_rebind_into_publishing_waits()
   fsio::join_out out;
   cls_rgw_fsio_effects fx;
   ASSERT_EQ(0, fsio::join(h, {GW1, next_seq(), true, 1, 10, {}, "I1"}, out, fx));
-  ASSERT_EQ(0, fsio::ready(h, GW1, out.bound, 1));
+  ASSERT_EQ(0, fsio::ready(h, GW1, out.bound, {{0, 0}}));
   auto c0 = join_reader(h, GW2, "I1");
   fsio::publish_intent intent{"I2", "tok", 77};
   fsio::leave_out lout;
@@ -727,7 +778,7 @@ void v1_finalize_requires_the_aborted_claim()
   fsio::join_out out;
   cls_rgw_fsio_effects fx;
   ASSERT_EQ(0, fsio::join(h, {GW1, next_seq(), true, 1, 10, {}, "I1"}, out, fx));
-  ASSERT_EQ(0, fsio::ready(h, GW1, out.bound, 1));
+  ASSERT_EQ(0, fsio::ready(h, GW1, out.bound, {{0, 0}}));
   fsio::publish_intent intent{"I2", "tok", 77};
   fsio::leave_out lout;
   cls_rgw_fsio_effects lfx;
@@ -758,7 +809,7 @@ void resume_replaces_the_claim()
   fsio::join_out out;
   cls_rgw_fsio_effects fx;
   ASSERT_EQ(0, fsio::join(h, {GW1, next_seq(), true, 1, 10, {}, "I1"}, out, fx));
-  ASSERT_EQ(0, fsio::ready(h, GW1, out.bound, 1));
+  ASSERT_EQ(0, fsio::ready(h, GW1, out.bound, {{0, 0}}));
   fsio::publish_intent intent{"I2", "tok", 77};
   fsio::leave_out lout;
   cls_rgw_fsio_effects lfx;
@@ -796,7 +847,7 @@ void v2_complete_after_takeover_removes_the_dead_writer()
   fsio::join_out out;
   cls_rgw_fsio_effects fx;
   ASSERT_EQ(0, fsio::join(h, {GW1, next_seq(), true, 1, 10, {}, "I1"}, out, fx));
-  ASSERT_EQ(0, fsio::ready(h, GW1, out.bound, 1));
+  ASSERT_EQ(0, fsio::ready(h, GW1, out.bound, {{0, 0}}));
   join_reader(h, GW2, "I1");                       // keeps the header
   fsio::publish_intent intent{"I2", "tok", 77};
   fsio::leave_out lout;
@@ -908,6 +959,7 @@ TEST(cls_rgw_fsio, each_check_is_detected)
     {cls_rgw_fsio_check::Z22_COUNTED_CALL_CHECKS_SEQ,
      z22_resend_is_already_applied},
     {cls_rgw_fsio_check::Z22_EXPIRY_KEEPS_SEQ, z22_expiry_keeps_the_seq},
+    {cls_rgw_fsio_check::Z11_EXTENT_CAPS_RUNS, z11_extent_caps_runs},
   };
   for (const auto& [check, body] : table) {
     fsio::skipped_check = check;

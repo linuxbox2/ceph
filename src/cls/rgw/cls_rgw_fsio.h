@@ -71,6 +71,7 @@ enum class cls_rgw_fsio_check : uint8_t {
   Z22_COUNTED_CALL_CHECKS_SEQ,         // fsio_join, fsio_leave, fsio_rebind
   Z22_ABANDON_WAITS_FOR_GRACE,         // the expirer's abandon of a construction (model)
   Z22_EXPIRY_KEEPS_SEQ,                // settle, an expired handle's last_seq
+  Z11_EXTENT_CAPS_RUNS,                // fsio_extend, fsio_ready:  rgw_fsio_extent_max_runs
 };
 
 #ifdef CLS_RGW_FSIO_SKIP_CHECKS
@@ -106,15 +107,38 @@ struct cls_rgw_fsio_id {
 };
 WRITE_CLASS_ENCODER(cls_rgw_fsio_id)
 
+/* chunk indexes, inclusive (§2.7, Z11) */
+struct cls_rgw_fsio_run {
+  uint64_t first = 0;
+  uint64_t last = 0;
+  auto operator<=>(const cls_rgw_fsio_run&) const = default;
+
+  void encode(ceph::buffer::list& bl) const {
+    ENCODE_START(1, 1, bl);
+    encode(first, bl);
+    encode(last, bl);
+    ENCODE_FINISH(bl);
+  }
+  void decode(ceph::buffer::list::const_iterator& bl) {
+    DECODE_START(1, bl);
+    decode(first, bl);
+    decode(last, bl);
+    DECODE_FINISH(bl);
+  }
+};
+WRITE_CLASS_ENCODER(cls_rgw_fsio_run)
+
 struct cls_rgw_fsio_shadow {
   uint64_t size_hint = 0;
   uint64_t mtime_hint = 0;
   uint64_t trunc_epoch = 0;
   std::optional<uint64_t> trunc_low;
-  uint64_t extent = 0;
+  /* reserved runs:  sorted, disjoint, merged when they touch, at most
+   * rgw_fsio_extent_max_runs (§3.7, Z11) */
+  std::vector<cls_rgw_fsio_run> extent;
 
   void encode(ceph::buffer::list& bl) const {
-    ENCODE_START(1, 1, bl);
+    ENCODE_START(2, 2, bl);
     encode(size_hint, bl);
     encode(mtime_hint, bl);
     encode(trunc_epoch, bl);
@@ -123,12 +147,18 @@ struct cls_rgw_fsio_shadow {
     ENCODE_FINISH(bl);
   }
   void decode(ceph::buffer::list::const_iterator& bl) {
-    DECODE_START(1, bl);
+    DECODE_START(2, bl);
     decode(size_hint, bl);
     decode(mtime_hint, bl);
     decode(trunc_epoch, bl);
     decode(trunc_low, bl);
-    decode(extent, bl);
+    if (struct_v >= 2) {
+      decode(extent, bl);
+    } else {
+      uint64_t highest;                 // version 1:  one highest index
+      decode(highest, bl);
+      extent = {{0, highest}};
+    }
     DECODE_FINISH(bl);
   }
 };
@@ -550,11 +580,25 @@ struct join_out {
 int join(cls_rgw_fsio_head& h, const join_in& in, join_out& out,
 	 cls_rgw_fsio_effects& fx);
 
-int ready(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& caller,
-	  const cls_rgw_fsio_id& cs, uint64_t extent);
+/* rgw_fsio_extent_max_runs's default (§7) */
+constexpr size_t extent_max_runs = 64;
 
+/* adds a run to an extent:  runs that overlap or touch merge, and past
+ * max_runs the adjacent pair with the smallest gap merges (§2.7, Z11) */
+void add_run(std::vector<cls_rgw_fsio_run>& extent, cls_rgw_fsio_run run,
+	     size_t max_runs);
+
+/* the constructor's clones done:  the shadow is ready, its extent the
+ * runs it cloned */
+int ready(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& caller,
+	  const cls_rgw_fsio_id& cs,
+	  const std::vector<cls_rgw_fsio_run>& runs,
+	  size_t max_runs = extent_max_runs);
+
+/* a writer reserves a run before creating a chunk in it */
 int extend(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& caller,
-	   const cls_rgw_fsio_id& cs, uint64_t extent);
+	   const cls_rgw_fsio_id& cs, const cls_rgw_fsio_run& run,
+	   size_t max_runs = extent_max_runs);
 
 /* versioned:  the publish the last writer's transition records (§4.2) */
 struct publish_intent {

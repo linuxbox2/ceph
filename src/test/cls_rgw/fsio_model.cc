@@ -720,7 +720,7 @@ void gw_actions(const World& w0, size_t gi, std::vector<Action>& acts)
       acts.push_back({fmt::format("gw{} ready {}", glabel(g), sname(g.step_cs)),
 	  [gi, inc](World& w) -> std::optional<std::string> {
 	    auto& g = w.gws[gi];
-	    fsio::ready(w.head, hd(g), g.step_cs, 1);
+	    fsio::ready(w.head, hd(g), g.step_cs, {{0, 0}});
 	    g.step = NONE;
 	    return std::nullopt;
 	  }});
@@ -1140,7 +1140,7 @@ void gw_actions_v(const World& w0, size_t gi, std::vector<Action>& acts)
       acts.push_back({fmt::format("gw{} ready {}", glabel(g), sname(g.step_cs)),
 	  [gi, inc](World& w) -> std::optional<std::string> {
 	    auto& g = w.gws[gi];
-	    fsio::ready(w.head, hd(g), g.step_cs, 1);
+	    fsio::ready(w.head, hd(g), g.step_cs, {{0, 0}});
 	    g.step = NONE;
 	    return std::nullopt;
 	  }});
@@ -3417,6 +3417,7 @@ TEST(FSIOModel, Explore)
       {"Z22_ABANDON_WAITS_FOR_GRACE",
        cls_rgw_fsio_check::Z22_ABANDON_WAITS_FOR_GRACE},
       {"Z22_EXPIRY_KEEPS_SEQ", cls_rgw_fsio_check::Z22_EXPIRY_KEEPS_SEQ},
+      {"Z11_EXTENT_CAPS_RUNS", cls_rgw_fsio_check::Z11_EXTENT_CAPS_RUNS},
       {"W20_RELEASE_CHECKS_PUBLISHER",
        cls_rgw_fsio_check::W20_RELEASE_CHECKS_PUBLISHER},
     };
