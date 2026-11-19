@@ -6668,8 +6668,12 @@ int RGWRados::fsio_purge(const DoutPrefixProvider *dpp,
                           << ":  undecodable FSIO record: " << e.what() << dendl;
         return -EIO;
       }
-      /* strip FSIO's records;  a head they were all of goes */
+      /* strip FSIO's records;  a head they were all of goes.  A zero
+       * mtime:  FSIO's ops leave a head's Last-Modified as it is (§2.2,
+       * Z3) */
       librados::ObjectWriteOperation op;
+      struct timespec zero_mtime{};
+      op.mtime2(&zero_mtime);
       op.assert_version(ver);
       bool only_fsio = size == 0;
       for (const auto& [name, v] : attrs) {

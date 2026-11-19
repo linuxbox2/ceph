@@ -956,6 +956,26 @@ TEST(FsioPut, PurgeFsio) {
   hint(bname, marker, live_name, live_head, true);
   rgw_fh_rele(fs, fh, 0);
 
+  /* A5:  the strip leaves a live head's mtime as it was (§2.2, Z3) */
+  {
+    uint64_t size;
+    struct timespec before{}, after{};
+    ASSERT_EQ(0, data.stat2(live_head, &size, &before));
+    const DoutPrefix dp(g_ceph_context, ceph_subsys_rgw, "fsio_put test: ");
+    std::unique_ptr<rgw::sal::Bucket> b;
+    rgw_bucket key;
+    key.name = bname;
+    auto* driver = rgw::g_rgwlib->get_driver();
+    ASSERT_EQ(0, driver->load_bucket(&dp, key, &b, null_yield));
+    ASSERT_EQ(0, static_cast<rgw::sal::RadosStore*>(driver)->getRados()->
+	      fsio_purge(&dp, b->get_info(), null_yield));
+    ASSERT_EQ(0, data.stat2(live_head, &size, &after));
+    bufferlist bl;
+    EXPECT_EQ(-ENODATA, data.getxattr(live_head, "user.rgw.fsio.hdr", bl));
+    EXPECT_EQ(before.tv_sec, after.tv_sec);
+    EXPECT_EQ(before.tv_nsec, after.tv_nsec);
+  }
+
   ASSERT_EQ(0, purge_fsio(bname));
   const auto gc = in_gc();
   EXPECT_FALSE(bucket_exists(bname));
