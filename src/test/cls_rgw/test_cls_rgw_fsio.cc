@@ -512,6 +512,7 @@ TEST(cls_rgw_fsio, replies_fit_the_reply_cap)
 			   std::string(32, 'i'), big};   // OBJ_INSTANCE_LEN
   EXPECT_LE(size(l), cap);
   EXPECT_LE(size(cls_rgw_fsio_flags_ret{true, true, true}), cap);
+  EXPECT_LE(size(cls_rgw_fsio_rebind_ret{true, big}), cap);
   EXPECT_LE(size(cls_rgw_fsio_finalize_ret{big}), cap);
   EXPECT_LE(size(cls_rgw_fsio_expire_ret{true, true}), cap);
   EXPECT_LE(size(cls_rgw_fsio_remove_version_ret{true}), cap);
@@ -1166,6 +1167,58 @@ TEST(cls_rgw_fsio_supersede, keep_tail_records_no_manifest)
     EXPECT_EQ(keep ? 0u : 2u, rec.manifest.length()) << "keep_tail " << keep;
     EXPECT_EQ("t0", rec.gc_tag);
   }
+}
+
+/* A18, §3.3:  W12's revalidate in a versioned bucket:  a reader left on
+ * an old version rebinds to the current version's published chunk set,
+ * which is at INSTANCE */
+TEST(cls_rgw_fsio_rebind, versioned_to_published)
+{
+  auto h = head("C0");
+  const auto p1 = join_reader(h, GW1, "v1");
+  const auto p2 = join_reader(h, GW2, "v2");   // the OLH relinked to v2
+  ASSERT_NE(p1, p2);
+  fsio::rebind_out out;
+  ASSERT_EQ(0, fsio::rebind(h, GW1, next_seq(), p1, p2, 1, &out));
+  EXPECT_EQ(2u, h.bound(p2).readers);
+  EXPECT_FALSE(h.hdr->find(p1));        // published, nothing bound:  gone
+  EXPECT_FALSE(out.drained);
+}
+
+/* W7 with a null current version:  the header cannot tell versioning
+ * suspended from enabled, and enabled, the publish makes a new version
+ * whose open count holds the readers the publisher reads;  so a rebind
+ * into the publishing shadow waits (found by the model's
+ * skip-H3_TRACKING_ONLY_IS_REMOVED, 2026-11-19) */
+TEST(cls_rgw_fsio_rebind, null_into_publishing_waits)
+{
+  auto h = head("C0");
+  const auto p = join_reader(h, GW2, "null");
+  fsio::join_out jout;
+  cls_rgw_fsio_effects fx;
+  ASSERT_EQ(0, fsio::join(h, {GW1, next_seq(), true, 1, 10, {}, "null"},
+			  jout, fx));
+  ASSERT_TRUE(jout.construct);
+  ASSERT_EQ(0, fsio::ready(h, GW1, jout.bound, {{0, 0}}));
+  leave_writer(h, GW1, jout.bound);     // publishing
+  EXPECT_EQ(-CLS_RGW_ERR_FSIO_BUSY,
+	    fsio::rebind(h, GW2, next_seq(), p, jout.bound, 1));
+}
+
+/* A19, §3.4:  a rebind that empties a retired chunk set returns its
+ * drain, as fsio_leave does;  the caller sends its GC entry */
+TEST(cls_rgw_fsio_rebind, from_retired_drains)
+{
+  auto h = head("C0");
+  const auto old = join_reader(h, GW1);
+  ASSERT_EQ(0, supersede(h));           // an S3 PUT:  old retired
+  ASSERT_EQ(cls_rgw_fsio_cs_state::RETIRED, h.hdr->find(old)->state);
+  const auto cur = join_reader(h, GW2);
+  fsio::rebind_out out;
+  ASSERT_EQ(0, fsio::rebind(h, GW1, next_seq(), old, cur, 1, &out));
+  ASSERT_TRUE(out.drained);
+  EXPECT_EQ(old, *out.drained);
+  EXPECT_TRUE(h.hdr->find(old)->drained);
 }
 
 TEST(cls_rgw_fsio, each_check_is_detected)

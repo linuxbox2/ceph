@@ -280,7 +280,7 @@ int leave_once(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& caller,
 	       const publish_intent* intent);
 int rebind_once(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& caller,
 		const cls_rgw_fsio_id& from, const cls_rgw_fsio_id& to,
-		uint32_t readers);
+		uint32_t readers, rebind_out& out);
 
 } // anonymous namespace
 
@@ -318,17 +318,18 @@ int rebind(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& caller,
 	   uint64_t seq, const cls_rgw_fsio_id& from, const cls_rgw_fsio_id& to,
 	   uint32_t readers, rebind_out* out)
 {
+  rebind_out o;
   if (already_applied(h, caller, seq)) {
-    if (out) {
-      out->already_applied = true;
-    }
-    return 0;
-  }
-  int r = rebind_once(h, caller, from, to, readers);
-  if (r == 0) {
+    o.already_applied = true;
+  } else if (int r = rebind_once(h, caller, from, to, readers, o); r < 0) {
+    return r;
+  } else {
     applied(h, caller, seq);
   }
-  return r;
+  if (out) {
+    *out = o;
+  }
+  return 0;
 }
 
 namespace {
@@ -697,21 +698,24 @@ int leave_once(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& caller,
 
 int rebind_once(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& caller,
 		const cls_rgw_fsio_id& from, const cls_rgw_fsio_id& to,
-		uint32_t readers)
+		uint32_t readers, rebind_out& out)
 {
   if (!h.hdr) {
     return -EINVAL;
   }
   auto* f = h.hdr->find(from);
   auto* t = h.hdr->find(to);
+  /* §3.3:  to the published chunk set (at INSTANCE when versioned, A18)
+   * or the current shadow, ready or publishing */
   if (!f || !t ||
-      !(t->manifest_at == at::HEAD ||
+      !(t == published_chunk_set(*h.hdr) ||
 	(h.hdr->cur_shadow && t->id == *h.hdr->cur_shadow &&
 	 (t->state == state::READY || t->state == state::PUBLISHING)))) {
     return -EINVAL;
   }
   /* versioned:  no follower arrives between the publisher's read of the
-   * readers and the publish (§3, W7) */
+   * readers and the publish (§3, W7).  A null current version counts:
+   * with versioning enabled, its publish makes a new version */
   if (!h.hdr->cur_instance.empty() && t->state == state::PUBLISHING &&
       !FSIO_SKIP_CHECK(W7_REBIND_WAITS_ON_PUBLISHING)) {
     return -CLS_RGW_ERR_FSIO_BUSY;
@@ -723,9 +727,14 @@ int rebind_once(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& caller,
   }
   o->chunk_sets[from].readers -= readers;
   o->chunk_sets[to].readers += readers;
+  /* §3.4, A19:  what empties is handled as fsio_leave handles it;  a
+   * retired chunk set's drain goes to the caller */
   std::vector<cls_rgw_fsio_id> drained;
   cls_rgw_fsio_effects fx;
   settle(h, drained, fx, caller.incarnation);
+  if (!drained.empty()) {
+    out.drained = drained.front();
+  }
   return 0;
 }
 

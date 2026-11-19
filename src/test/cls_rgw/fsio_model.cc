@@ -510,9 +510,10 @@ int m_rebind(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& caller,
       return fsio::rebind(h, caller, seq, from, to, readers, &out);
     }, &reply);
   if (cl.on && r == 0 && reply.length()) {
-    if (auto ret = dec<cls_rgw_fsio_flags_ret>("fsio_rebind", reply);
-	ret && ret->already_applied != out.already_applied) {
-      cl.reply_mismatch("fsio_rebind", "already_applied differs");
+    if (auto ret = dec<cls_rgw_fsio_rebind_ret>("fsio_rebind", reply);
+	ret && (ret->already_applied != out.already_applied ||
+		ret->drained != out.drained)) {
+      cl.reply_mismatch("fsio_rebind", "already_applied or drained differs");
     }
   }
   return r;

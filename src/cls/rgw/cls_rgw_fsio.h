@@ -666,6 +666,7 @@ int leave(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& caller,
 
 struct rebind_out {
   bool already_applied = false;
+  std::optional<cls_rgw_fsio_id> drained;   // a retired chunk set it emptied (§3.4)
 };
 int rebind(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& caller,
 	   uint64_t seq, const cls_rgw_fsio_id& from, const cls_rgw_fsio_id& to,

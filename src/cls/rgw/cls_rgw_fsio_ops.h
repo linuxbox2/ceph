@@ -357,6 +357,26 @@ struct cls_rgw_fsio_flags_ret {
 };
 WRITE_CLASS_ENCODER(cls_rgw_fsio_flags_ret)
 
+/* fsio_rebind's reply */
+struct cls_rgw_fsio_rebind_ret {
+  bool already_applied = false;
+  std::optional<cls_rgw_fsio_id> drained;   // a retired chunk set it emptied
+
+  void encode(ceph::buffer::list& bl) const {
+    ENCODE_START(1, 1, bl);
+    encode(already_applied, bl);
+    encode(drained, bl);
+    ENCODE_FINISH(bl);
+  }
+  void decode(ceph::buffer::list::const_iterator& bl) {
+    DECODE_START(1, bl);
+    decode(already_applied, bl);
+    decode(drained, bl);
+    DECODE_FINISH(bl);
+  }
+};
+WRITE_CLASS_ENCODER(cls_rgw_fsio_rebind_ret)
+
 /* fsio_publish_release, fsio_forget:  a handle and a chunk set */
 struct cls_rgw_fsio_cs_op {
   cls_rgw_fsio_handle caller;

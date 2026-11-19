@@ -465,12 +465,13 @@ int rgw_fsio_rebind(cls_method_context_t hctx, ceph::buffer::list* in,
   if (int r = decode_op(in, op, __func__); r < 0) {
     return r;
   }
-  cls_rgw_fsio_flags_ret ret;
+  cls_rgw_fsio_rebind_ret ret;
   int r = on_head(hctx, {}, [&](auto& h, auto&) {
     fsio::rebind_out rout;
     int r = fsio::rebind(h, op.caller, op.seq, op.from, op.to, op.readers,
 			 &rout);
     ret.already_applied = rout.already_applied;
+    ret.drained = rout.drained;
     return r;
   });
   if (r < 0) {
