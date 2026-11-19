@@ -246,6 +246,7 @@ struct RGWBucketAdminOpState {
   bool dump_keys;
   bool hide_progress;
   bool restore_stats;
+  bool purge_fsio = false;
   int max_aio = 0;
   ceph::timespan min_age = std::chrono::hours::zero();
 
@@ -259,6 +260,7 @@ struct RGWBucketAdminOpState {
   void set_check_objects(bool value) { check_objects = value; }
   void set_fix_index(bool value) { fix_index = value; }
   void set_delete_children(bool value) { delete_child_objects = value; }
+  void set_purge_fsio(bool value) { purge_fsio = value; }
   void set_hide_progress(bool value) { hide_progress = value; }
   void set_dump_keys(bool value) { dump_keys = value; }
 
@@ -312,6 +314,7 @@ struct RGWBucketAdminOpState {
   bool will_fetch_stats() { return stat_buckets; }
   bool will_fix_index() { return fix_index; }
   bool will_delete_children() { return delete_child_objects; }
+  bool will_purge_fsio() { return purge_fsio; }
   bool will_check_objects() { return check_objects; }
   bool is_user_op() { return !uid.empty(); }
   bool is_account_op() { return !account_id.empty(); }

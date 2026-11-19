@@ -11,7 +11,8 @@
  * version's removal under a reader retires it with a leaf clone and
  * keeps the plain head as the OLH (§2.5a).  An FSIO open hint naming a
  * bucket blocks its deletion, and both purges before they delete
- * anything (§6.5).  With
+ * anything;  --purge-fsio collects what FSIO kept and strips its state,
+ * and the purge then goes (§6.5).  With
  * --fsio-off (the feature disabled), no leaf clone at all.
  *
  *   ceph_test_librgw_file_fsio_put [--fsio-off] [--data-pool P]
@@ -39,6 +40,7 @@
 #include "common/dout.h"
 #include "rgw_lib.h"
 #include "rgw_sal.h"
+#include "driver/rados/rgw_sal_rados.h"
 #include "global/global_context.h"
 #include "gtest/gtest.h"
 
@@ -741,7 +743,9 @@ namespace {
 /* an FSIO open hint naming `bucket`, in the last shard of the zone's log
  * pool (gc_pool's), so the check reads every shard */
 void hint(const std::string& bucket, const std::string& bucket_id,
-	  const std::string& name, const std::string& head, bool add)
+	  const std::string& name, const std::string& head, bool add,
+	  cls_rgw_fsio_hint_target target = cls_rgw_fsio_hint_target::HEAD,
+	  const std::string& instance = {})
 {
   IoCtx log;
   ASSERT_EQ(0, cluster.ioctx_create(gc_pool.c_str(), log));
@@ -749,7 +753,8 @@ void hint(const std::string& bucket, const std::string& bucket_id,
   op.hint.bucket.name = bucket;
   op.hint.bucket.bucket_id = bucket_id;
   op.hint.bucket.marker = bucket_id;
-  op.hint.key = rgw_obj_key(name);
+  op.hint.target = target;
+  op.hint.key = rgw_obj_key(name, instance);
   op.hint.incarnation = GW.incarnation;
   op.hint.handle = GW.handle;
   op.oid = head;
@@ -859,6 +864,158 @@ TEST(FsioPut, HintBlocksPurge) {
   rgw_bucket key;
   key.name = bname;
   EXPECT_EQ(-ENOENT, driver->load_bucket(&dp, key, &gone, null_yield));
+}
+
+namespace {
+
+/* the hint shard's keys naming `oid` */
+size_t hints_on(const std::string& oid)
+{
+  IoCtx log;
+  if (cluster.ioctx_create(gc_pool.c_str(), log) < 0) {
+    return 0;
+  }
+  std::set<std::string> keys;
+  bool more = false;
+  log.omap_get_keys2(fmt::format("fsio_open_hint.{:010d}", hint_shards - 1),
+		     "", 1000, &keys, &more);
+  size_t n = 0;
+  for (const auto& k : keys) {
+    n += k.find(oid) != std::string::npos;
+  }
+  return n;
+}
+
+/* --purge-fsio as remove_bucket() runs it (rgw_bucket.cc):  the FSIO
+ * state, then the purge */
+int purge_fsio(const std::string& bname)
+{
+  const DoutPrefix dp(g_ceph_context, ceph_subsys_rgw, "fsio_put test: ");
+  auto* driver = rgw::g_rgwlib->get_driver();
+  std::unique_ptr<rgw::sal::Bucket> b;
+  rgw_bucket key;
+  key.name = bname;
+  if (int r = driver->load_bucket(&dp, key, &b, null_yield); r < 0) {
+    return r;
+  }
+  auto* rados = static_cast<rgw::sal::RadosStore*>(driver)->getRados();
+  if (int r = rados->fsio_purge(&dp, b->get_info(), null_yield); r < 0) {
+    return r;
+  }
+  return b->remove(&dp, true, null_yield);
+}
+
+bool bucket_exists(const std::string& bname)
+{
+  const DoutPrefix dp(g_ceph_context, ceph_subsys_rgw, "fsio_put test: ");
+  std::unique_ptr<rgw::sal::Bucket> b;
+  rgw_bucket key;
+  key.name = bname;
+  return rgw::g_rgwlib->get_driver()->load_bucket(&dp, key, &b, null_yield) == 0;
+}
+
+} // anonymous namespace
+
+/* --purge-fsio over a tracking-only head (a DELETE under a reader) and a
+ * live head with a reader:  the leaf clone and its tail collected, the
+ * tracking-only head removed, the live head stripped and then purged,
+ * the hints dropped, the bucket gone (§6.5) */
+TEST(FsioPut, PurgeFsio) {
+  if (!ready) {
+    GTEST_SKIP() << "INIT failed";
+  }
+  const auto bname = fmt::format("fsio-pf-{}", getpid());
+  struct stat st{};
+  st.st_mode = 0755;
+  struct rgw_file_handle* fh = nullptr;
+  ASSERT_EQ(0, rgw_mkdir(fs, fs->root_fh, bname.c_str(), &st,
+			 RGW_SETATTR_MODE, &fh, RGW_MKDIR_FLAG_NONE));
+  const auto gone_name = fmt::format("gone-{}", getpid());
+  const auto live_name = fmt::format("live-{}", getpid());
+  auto before = all_tails();
+  put(gone_name, 'a', fh);
+  const auto gone_head = head_of(gone_name);
+  ASSERT_FALSE(gone_head.empty());
+  const auto marker = marker_of(gone_head, gone_name);
+  const auto gone_tails = written_tails(before);
+  before = all_tails();
+  put(live_name, 'b', fh);
+  const auto live_head = head_of(live_name);
+  const auto live_tails = written_tails(before);
+  if (fsio_off) {
+    rgw_fh_rele(fs, fh, 0);
+    EXPECT_EQ(0, purge_fsio(bname));   // the gate off:  the purge alone
+    return;
+  }
+  join_reader(gone_head, marker);
+  ASSERT_EQ(0, rgw_unlink(fs, fh, gone_name.c_str(), RGW_UNLINK_FLAG_NONE));
+  const auto leaves = leaf_clones_of(marker, gone_name);
+  ASSERT_EQ(1u, leaves.size());        // tracking-only, its tail kept
+  join_reader(live_head, marker);
+  hint(bname, marker, gone_name, gone_head, true);
+  hint(bname, marker, live_name, live_head, true);
+  rgw_fh_rele(fs, fh, 0);
+
+  ASSERT_EQ(0, purge_fsio(bname));
+  const auto gc = in_gc();
+  EXPECT_FALSE(bucket_exists(bname));
+  EXPECT_FALSE(exists(gone_head)) << "the tracking-only head kept";
+  EXPECT_FALSE(exists(*leaves.begin())) << "the leaf clone kept";
+  EXPECT_FALSE(exists(live_head));
+  for (const auto& t : gone_tails) {
+    EXPECT_TRUE(!exists(t) || gc.count(t)) << t << " not collected";
+  }
+  for (const auto& t : live_tails) {
+    EXPECT_TRUE(!exists(t) || gc.count(t)) << t << " not collected";
+  }
+  EXPECT_EQ(0u, hints_on(gone_head));
+  EXPECT_EQ(0u, hints_on(live_head));
+}
+
+/* --purge-fsio over a removed version an open count holds:  its sibling
+ * and tail collected, its instance head removed, the bucket gone */
+TEST(FsioPut, PurgeFsioVersion) {
+  if (!ready) {
+    GTEST_SKIP() << "INIT failed";
+  }
+  if (fsio_off) {
+    GTEST_SKIP() << "needs FSIO's version removal";
+  }
+  const auto bname = fmt::format("fsio-pfv-{}", getpid());
+  struct stat st{};
+  st.st_mode = 0755;
+  struct rgw_file_handle* fh = nullptr;
+  ASSERT_EQ(0, rgw_mkdir(fs, fs->root_fh, bname.c_str(), &st,
+			 RGW_SETATTR_MODE, &fh, RGW_MKDIR_FLAG_NONE));
+  ASSERT_EQ(0, rgw_set_versioning(fs, fh, RGW_VERSIONING_ENABLED, 0));
+  const auto name = fmt::format("pv-{}", getpid());
+  const auto before = all_tails();
+  put(name, 'a', fh);
+  const auto tails = written_tails(before);
+  put(name, 'b', fh);
+  const auto v = versions_of(name, fh);
+  ASSERT_EQ(2u, v.size());
+  const auto older = v[1].id;
+  const auto ih = instance_head_of(name, older);
+  ASSERT_FALSE(ih.empty());
+  count_open(ih);
+  ASSERT_EQ(0, rgw_unlink_version(fs, fh, name.c_str(), older.c_str(), 0));
+  const auto sibs = siblings_of(ih);
+  ASSERT_EQ(1u, sibs.size());          // the version's content kept
+  const auto marker = ih.substr(0, ih.find("__:"));
+  hint(bname, marker, name, ih, true, cls_rgw_fsio_hint_target::INSTANCE_HEAD,
+       older);
+  rgw_fh_rele(fs, fh, 0);
+
+  ASSERT_EQ(0, purge_fsio(bname));
+  const auto gc = in_gc();
+  EXPECT_FALSE(bucket_exists(bname));
+  EXPECT_FALSE(exists(ih)) << "the instance head kept";
+  EXPECT_FALSE(exists(*sibs.begin())) << "the sibling kept";
+  for (const auto& t : tails) {
+    EXPECT_TRUE(!exists(t) || gc.count(t)) << t << " not collected";
+  }
+  EXPECT_EQ(0u, hints_on(ih));
 }
 
 TEST(FsioPut, SHUTDOWN) {

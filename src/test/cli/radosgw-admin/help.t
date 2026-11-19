@@ -337,6 +337,9 @@
                                        subuser keys
      --purge-objects                   remove a bucket's objects before deleting it
                                        (NOTE: required to delete a non-empty bucket)
+     --purge-fsio                      with bucket rm, destroy the bucket's FSIO state
+                                       (open files' state) rather than fail on it;
+                                       implies --purge-objects
      --sync-stats                      option to 'user stats', update user stats with current
                                        stats reported by user's buckets indexes
      --reset-stats                     option to 'user stats', reset stats in accordance with user buckets

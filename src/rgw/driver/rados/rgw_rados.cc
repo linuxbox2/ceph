@@ -6465,6 +6465,260 @@ int RGWRados::check_bucket_empty(const DoutPrefixProvider *dpp, RGWBucketInfo& b
   return fsio_check_no_hints(dpp, bucket_info, y);
 }
 
+namespace {
+
+constexpr std::string_view FSIO_ATTR_PREFIX = "user.rgw.fsio.";
+constexpr std::string_view FSIO_ATTR_HDR = "user.rgw.fsio.hdr";
+constexpr std::string_view FSIO_ATTR_OCNT = "user.rgw.fsio.ocnt";
+constexpr std::string_view FSIO_ATTR_GEN = "user.rgw.fsio.gen";
+
+/* a hint shard's hints naming the bucket, by shard */
+struct fsio_listed_hint {
+  uint32_t shard;
+  cls_rgw_fsio_hint hint;
+};
+
+} // anonymous namespace
+
+/* §6.5:  sends a replaced tail's chain to GC under its tag, as
+ * complete_atomic_modification() does, then removes the clone or sibling
+ * holding the replaced head's data */
+int RGWRados::fsio_collect_replaced(const DoutPrefixProvider *dpp,
+                                    librados::IoCtx& clone_ioctx,
+                                    const std::string& clone_oid,
+                                    const rgw_obj& head_obj,
+                                    const ceph::buffer::list& manifest_bl,
+                                    const std::string& tag, optional_yield y)
+{
+  if (manifest_bl.length()) {
+    RGWObjManifest manifest;
+    try {
+      auto it = manifest_bl.cbegin();
+      decode(manifest, it);
+    } catch (const ceph::buffer::error& e) {
+      ldpp_dout(dpp, 0) << "ERROR: FSIO: purge:  " << clone_oid
+                        << ":  undecodable manifest: " << e.what() << dendl;
+      return -EIO;
+    }
+    cls_rgw_obj_chain chain;
+    update_gc_chain(dpp, head_obj, manifest, &chain);
+    if (!chain.empty()) {
+      if (gc == nullptr) {
+        delete_objs_inline(dpp, chain, tag, y);
+      } else {
+        auto [r, left] = gc->send_split_chain(chain, tag, y);
+        if (r < 0 && left) {
+          delete_objs_inline(dpp, *left, tag, y);
+        }
+      }
+    }
+  }
+  librados::ObjectWriteOperation op;
+  op.remove();
+  int r = rgw_rados_operate(dpp, clone_ioctx, clone_oid, std::move(op), y);
+  return r == -ENOENT ? 0 : r;
+}
+
+int RGWRados::fsio_purge(const DoutPrefixProvider *dpp,
+                         const RGWBucketInfo& info, optional_yield y)
+{
+  if (!fsio_enabled(dpp, info, y)) {
+    return 0;
+  }
+  auto& neo = driver->get_neorados();
+  auto run = [&]<typename Op>(const std::string& oid, Op&& op) {
+    boost::system::error_code ec;
+    if (!y) {
+      maybe_warn_about_blocking(dpp);
+    }
+    if constexpr (std::is_same_v<std::decay_t<Op>, neorados::ReadOp>) {
+      if (y) {
+        neo.execute(oid, log_pool_neo_ctx, std::move(op), nullptr,
+                    y.get_yield_context()[ec]);
+      } else {
+        neo.execute(oid, log_pool_neo_ctx, std::move(op), nullptr,
+                    ceph::async::use_blocked[ec]);
+      }
+    } else {
+      if (y) {
+        neo.execute(oid, log_pool_neo_ctx, std::move(op),
+                    y.get_yield_context()[ec]);
+      } else {
+        neo.execute(oid, log_pool_neo_ctx, std::move(op),
+                    ceph::async::use_blocked[ec]);
+      }
+    }
+    return ec;
+  };
+
+  /* every hint naming the bucket, by target */
+  std::map<std::pair<cls_rgw_fsio_hint_target, rgw_obj_key>,
+           std::vector<fsio_listed_hint>> targets;
+  const auto shards = static_cast<uint32_t>(
+    cct->_conf.get_val<uint64_t>("rgw_fsio_open_hints_num_shards"));
+  for (uint32_t i = 0; i < shards; ++i) {
+    const auto oid = rgw::fsio::open_hint_shard_oid(i);
+    cls_rgw_fsio_hint_list_op lop;
+    lop.bucket = info.bucket;
+    for (;;) {
+      cls_rgw_fsio_hint_list_ret ret;
+      neorados::ReadOp op;
+      op.exec(neorados::cls::rgw_fsio::open_hint_list(lop, &ret));
+      auto ec = run(oid, std::move(op));
+      if (ec == boost::system::errc::no_such_file_or_directory) {
+        break;
+      }
+      if (ec) {
+        ldpp_dout(dpp, 0) << "ERROR: FSIO: purge:  listing " << oid
+                          << " returned " << ec.message() << dendl;
+        return ceph::from_error_code(ec);
+      }
+      for (auto& h : ret.hints) {
+        targets[{h.target, h.key}].push_back({i, std::move(h)});
+      }
+      if (!ret.truncated) {
+        break;
+      }
+      lop.marker = ret.marker;
+    }
+  }
+
+  for (auto& [target, hints] : targets) {
+    const rgw_obj obj(info.bucket, target.second);
+    rgw_rados_ref ref;
+    int r = get_obj_head_ref(dpp, info, obj, &ref);
+    if (r < 0) {
+      return r;
+    }
+    /* a clone lives under the head's effective key (CLONE_TO) */
+    librados::IoCtx clone_ioctx;
+    clone_ioctx.dup(ref.ioctx);
+    clone_ioctx.locator_set_key(ref.obj.loc.empty() ? ref.obj.oid :
+                                ref.obj.loc);
+    /* C3:  read, collect, then strip under the version read;  an fsio_*
+     * write in between moves it, and the strip returns ERANGE */
+    for (int attempt = 0; ; ++attempt) {
+      std::map<std::string, bufferlist> attrs;
+      uint64_t size = 0;
+      int rattrs = 0, rstat = 0;
+      version_t ver = 0;
+      {
+        librados::ObjectReadOperation op;
+        op.getxattrs(&attrs, &rattrs);
+        op.stat(&size, nullptr, &rstat);
+        r = rgw_rados_operate(dpp, ref.ioctx, ref.obj.oid, std::move(op),
+                              nullptr, y, 0, nullptr, &ver);
+      }
+      if (r == -ENOENT) {
+        break;                         // the head already gone
+      }
+      if (r < 0) {
+        return r;
+      }
+      try {
+        if (auto i = attrs.find(std::string(FSIO_ATTR_HDR)); i != attrs.end()) {
+          cls_rgw_fsio_hdr hdr;
+          auto it = i->second.cbegin();
+          decode(hdr, it);
+          /* retired content:  a leaf clone and its manifest's tail;  a
+           * shadow's chunks wait for the RADOS FSIO driver, which writes
+           * them */
+          for (const auto& cs : hdr.chunk_sets) {
+            if (cs.manifest_at != cls_rgw_fsio_manifest_at::CLONE ||
+                !cs.clone) {
+              continue;
+            }
+            const auto clone = cls_rgw_fsio_clone_name(info.bucket.marker, 'G',
+                                                      *cs.clone, ref.obj.oid);
+            bufferlist g;
+            r = clone_ioctx.getxattr(clone, FSIO_ATTR_GEN.data(), g);
+            if (r == -ENOENT || r == -ENODATA) {
+              continue;                // collected on an earlier attempt
+            }
+            if (r < 0) {
+              return r;
+            }
+            cls_rgw_fsio_gen rec;
+            auto git = g.cbegin();
+            decode(rec, git);
+            r = fsio_collect_replaced(dpp, clone_ioctx, clone, obj,
+                                      rec.manifest, rec.gc_tag, y);
+            if (r < 0) {
+              return r;
+            }
+          }
+        }
+        if (auto i = attrs.find(std::string(FSIO_ATTR_OCNT)); i != attrs.end()) {
+          cls_rgw_fsio_ocnt ocnt;
+          auto it = i->second.cbegin();
+          decode(ocnt, it);
+          /* an instance's deferred content:  its sibling and tail */
+          for (const auto& d : ocnt.deferred) {
+            const auto sib = cls_rgw_fsio_clone_name(info.bucket.marker, 'G',
+                                                    d.clone, ref.obj.oid);
+            r = fsio_collect_replaced(dpp, clone_ioctx, sib, obj,
+                                      d.manifest, d.gc_tag, y);
+            if (r < 0) {
+              return r;
+            }
+          }
+        }
+      } catch (const ceph::buffer::error& e) {
+        ldpp_dout(dpp, 0) << "ERROR: FSIO: purge:  " << ref.obj.oid
+                          << ":  undecodable FSIO record: " << e.what() << dendl;
+        return -EIO;
+      }
+      /* strip FSIO's records;  a head they were all of goes */
+      librados::ObjectWriteOperation op;
+      op.assert_version(ver);
+      bool only_fsio = size == 0;
+      for (const auto& [name, v] : attrs) {
+        if (!name.starts_with(FSIO_ATTR_PREFIX)) {
+          only_fsio = false;
+        }
+      }
+      if (only_fsio) {
+        op.remove();
+      } else {
+        for (const auto& [name, v] : attrs) {
+          if (name.starts_with(FSIO_ATTR_PREFIX)) {
+            op.rmxattr(name.c_str());
+          }
+        }
+      }
+      r = rgw_rados_operate(dpp, ref.ioctx, ref.obj.oid, std::move(op), y);
+      if (r == -ERANGE && attempt < 10) {
+        ldpp_dout(dpp, 10) << "FSIO: purge:  " << ref.obj.oid
+                           << " changed since it was read;  again" << dendl;
+        continue;
+      }
+      if (r < 0 && r != -ENOENT) {
+        ldpp_dout(dpp, 0) << "ERROR: FSIO: purge:  stripping " << ref.obj.oid
+                          << " returned " << r << dendl;
+        return r;
+      }
+      ldpp_dout(dpp, 10) << "FSIO: purge:  " << ref.obj.oid
+                         << (only_fsio ? " removed" : " stripped") << dendl;
+      break;
+    }
+    /* only then the head's hints */
+    for (const auto& lh : hints) {
+      cls_rgw_fsio_hint_op hop;
+      hop.hint = lh.hint;
+      hop.oid = ref.obj.oid;
+      neorados::WriteOp op;
+      op.exec(neorados::cls::rgw_fsio::open_hint_remove(hop));
+      if (auto ec = run(rgw::fsio::open_hint_shard_oid(lh.shard), std::move(op));
+          ec && ec != boost::system::errc::no_such_file_or_directory) {
+        ldpp_dout(dpp, 0) << "ERROR: FSIO: purge:  dropping a hint on "
+                          << ref.obj.oid << " returned " << ec.message() << dendl;
+        return ceph::from_error_code(ec);
+      }
+    }
+  }
+  return 0;
+}
+
 int RGWRados::fsio_check_no_hints(const DoutPrefixProvider *dpp,
                                   const RGWBucketInfo& info, optional_yield y)
 {

@@ -1537,6 +1537,9 @@ int RGWBucketAdminOp::remove_bucket(rgw::sal::Driver* driver, const rgw::SiteCon
   if (bypass_gc) {
     req.args.append("bypass-gc", "true");
   }
+  if (op_state.will_purge_fsio()) {
+    req.args.append("purge-fsio", "true");
+  }
   rgw_err err; // unused
 
   ret = rgw_forward_request_to_master(dpp, site, bucket->get_owner(), nullptr, nullptr, req, err, y);
@@ -1544,6 +1547,18 @@ int RGWBucketAdminOp::remove_bucket(rgw::sal::Driver* driver, const rgw::SiteCon
     ldpp_dout(dpp, 0) << "ERROR: failed to forward request to master zonegroup: "
                       << ret << dendl;
     return ret;
+  }
+
+  /* FSIO_RADOS_DESIGN.md §6.5:  FSIO's state first, so the purge's hint
+   * check passes;  the live content is then the purge's */
+  if (op_state.will_purge_fsio()) {
+    ret = static_cast<rgw::sal::RadosStore*>(driver)->getRados()->fsio_purge(
+      dpp, bucket->get_info(), y);
+    if (ret < 0) {
+      ldpp_dout(dpp, 0) << "ERROR: failed to purge the bucket's FSIO state: "
+                        << ret << dendl;
+      return ret;
+    }
   }
 
   if (bypass_gc)

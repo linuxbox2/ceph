@@ -228,17 +228,19 @@ public:
 void RGWOp_Bucket_Remove::execute(optional_yield y)
 {
   std::string bucket_name, tenant;
-  bool delete_children, bypass_gc;
+  bool delete_children, bypass_gc, purge_fsio;
 
   RESTArgs::get_string(s, "bucket", bucket_name, &bucket_name);
   RESTArgs::get_string(s, "tenant", tenant, &tenant);
   RESTArgs::get_bool(s, "purge-objects", false, &delete_children);
   RESTArgs::get_bool(s, "bypass-gc", false, &bypass_gc);
+  RESTArgs::get_bool(s, "purge-fsio", false, &purge_fsio);
 
   RGWBucketAdminOpState op_state;
   op_state.set_bucket_name(bucket_name);
   op_state.set_tenant(tenant);
-  op_state.set_delete_children(delete_children);
+  op_state.set_delete_children(delete_children || purge_fsio);
+  op_state.set_purge_fsio(purge_fsio);
 
   // Check if the request is being forwarded by looking for the "rgwx-zonegroup" argument
   // As this is an admin endpoint, checking by system_request is not sufficient

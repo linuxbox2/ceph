@@ -485,6 +485,9 @@ void usage()
   cout << "                                     subuser keys\n";
   cout << "   --purge-objects                   remove a bucket's objects before deleting it\n";
   cout << "                                     (NOTE: required to delete a non-empty bucket)\n";
+  cout << "   --purge-fsio                      with bucket rm, destroy the bucket's FSIO state\n";
+  cout << "                                     (open files' state) rather than fail on it;\n";
+  cout << "                                     implies --purge-objects\n";
   cout << "   --sync-stats                      option to 'user stats', update user stats with current\n";
   cout << "                                     stats reported by user's buckets indexes\n";
   cout << "   --reset-stats                     option to 'user stats', reset stats in accordance with user buckets\n";
@@ -3519,6 +3522,7 @@ int main(int argc, const char **argv)
   int yes_i_really_mean_it = false;
   int throttle_stat = false;
   int delete_child_objects = false;
+  int purge_fsio = false;
   int fix = false;
   int remove_bad = false;
   int check_head_obj_locator = false;
@@ -4038,6 +4042,8 @@ int main(int argc, const char **argv)
 	categories[*iter] = true;
       }
     } else if (ceph_argparse_binary_flag(args, i, &delete_child_objects, NULL, "--purge-objects", (char*)NULL)) {
+      // do nothing
+    } else if (ceph_argparse_binary_flag(args, i, &purge_fsio, NULL, "--purge-fsio", (char*)NULL)) {
       // do nothing
     } else if (ceph_argparse_binary_flag(args, i, &pretty_format, NULL, "--pretty-format", (char*)NULL)) {
       // do nothing
@@ -6878,7 +6884,8 @@ int main(int argc, const char **argv)
   bucket_op.set_bucket_name(bucket_name);
   bucket_op.set_object(object);
   bucket_op.set_check_objects(check_objects);
-  bucket_op.set_delete_children(delete_child_objects);
+  bucket_op.set_delete_children(delete_child_objects || purge_fsio);
+  bucket_op.set_purge_fsio(purge_fsio);
   bucket_op.set_fix_index(fix);
   bucket_op.set_max_aio(max_concurrent_ios);
   bucket_op.set_min_age(min_age);

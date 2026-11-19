@@ -632,6 +632,16 @@ public:
    * the bucket, in a bucket that serves FSIO */
   int fsio_check_no_hints(const DoutPrefixProvider *dpp,
                           const RGWBucketInfo& info, optional_yield y);
+  /* §6.5, --purge-fsio:  collects what FSIO kept out of GC under each
+   * FSIO open hint naming the bucket, strips FSIO's records from the
+   * head, then drops the hints;  live content is left to the purge */
+  int fsio_purge(const DoutPrefixProvider *dpp, const RGWBucketInfo& info,
+                 optional_yield y);
+  int fsio_collect_replaced(const DoutPrefixProvider *dpp,
+                            librados::IoCtx& clone_ioctx,
+                            const std::string& clone_oid, const rgw_obj& head_obj,
+                            const ceph::buffer::list& manifest_bl,
+                            const std::string& tag, optional_yield y);
   void get_max_aligned_size(uint64_t size, uint64_t alignment, uint64_t *max_size);
   int get_max_chunk_size(const rgw_pool& pool, uint64_t *max_chunk_size, const DoutPrefixProvider *dpp, uint64_t *palignment = nullptr);
   int get_max_chunk_size(const rgw_placement_rule& placement_rule, const rgw_obj& obj, uint64_t *max_chunk_size, const DoutPrefixProvider *dpp, uint64_t *palignment = nullptr);
