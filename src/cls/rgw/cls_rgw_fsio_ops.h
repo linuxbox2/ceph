@@ -253,6 +253,7 @@ WRITE_CLASS_ENCODER(cls_rgw_fsio_hint_size_ret)
 /* fsio_truncate (§3.3):  the size and mtime ftruncate() set */
 struct cls_rgw_fsio_truncate_op {
   cls_rgw_fsio_handle caller;
+  uint64_t seq = 0;              // a sequenced call (§2.2, Z22)
   cls_rgw_fsio_id cs;
   uint64_t size = 0;
   ceph::real_time mtime;
@@ -260,6 +261,7 @@ struct cls_rgw_fsio_truncate_op {
   void encode(ceph::buffer::list& bl) const {
     ENCODE_START(1, 1, bl);
     encode(caller, bl);
+    encode(seq, bl);
     encode(cs, bl);
     encode(size, bl);
     encode(mtime, bl);
@@ -268,6 +270,7 @@ struct cls_rgw_fsio_truncate_op {
   void decode(ceph::buffer::list::const_iterator& bl) {
     DECODE_START(1, bl);
     decode(caller, bl);
+    decode(seq, bl);
     decode(cs, bl);
     decode(size, bl);
     decode(mtime, bl);
@@ -278,15 +281,18 @@ WRITE_CLASS_ENCODER(cls_rgw_fsio_truncate_op)
 
 struct cls_rgw_fsio_truncate_ret {
   uint64_t trunc_epoch = 0;      // the new epoch
+  bool already_applied = false;
 
   void encode(ceph::buffer::list& bl) const {
     ENCODE_START(1, 1, bl);
     encode(trunc_epoch, bl);
+    encode(already_applied, bl);
     ENCODE_FINISH(bl);
   }
   void decode(ceph::buffer::list::const_iterator& bl) {
     DECODE_START(1, bl);
     decode(trunc_epoch, bl);
+    decode(already_applied, bl);
     DECODE_FINISH(bl);
   }
 };

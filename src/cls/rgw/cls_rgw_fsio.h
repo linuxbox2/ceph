@@ -577,9 +577,10 @@ namespace cls_rgw_fsio {
 
 using expired_t = std::set<uint64_t>;
 
-/* the sequenced calls (fsio_join, fsio_leave, fsio_rebind) carry the
- * handle's sequence number;  one not newer than the handle's last_seq
- * changes nothing and returns already_applied (§3, Z22) */
+/* the sequenced calls (fsio_join, fsio_leave, fsio_rebind,
+ * fsio_truncate) carry the handle's sequence number;  one not newer
+ * than the handle's last_seq changes nothing and returns
+ * already_applied (§3, Z22) */
 struct join_in {
   cls_rgw_fsio_handle caller;
   uint64_t seq = 0;
@@ -631,10 +632,16 @@ int hint(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& caller,
 	 ceph::real_time mtime, hint_out& out);
 
 /* §3.3:  ftruncate():  size and mtime set exactly, a new truncate epoch,
- * trunc_low lowered to the size;  after the chunks changed */
+ * trunc_low lowered to the size;  after the chunks changed.  A sequenced
+ * call (§2.2, Z22):  one no newer than the handle's last_seq changes
+ * nothing and returns already applied */
+struct truncate_out {
+  uint64_t trunc_epoch = 0;    // the new epoch
+  bool already_applied = false;
+};
 int truncate(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& caller,
-	     const cls_rgw_fsio_id& cs, uint64_t size, ceph::real_time mtime,
-	     uint64_t& trunc_epoch_out);
+	     uint64_t seq, const cls_rgw_fsio_id& cs, uint64_t size,
+	     ceph::real_time mtime, truncate_out& out);
 
 /* versioned:  the publish the last writer's transition records (§4.2) */
 struct publish_intent {

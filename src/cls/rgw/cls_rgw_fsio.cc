@@ -583,9 +583,14 @@ int hint(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& caller,
 }
 
 int truncate(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& caller,
-	     const cls_rgw_fsio_id& cs, uint64_t size, ceph::real_time mtime,
-	     uint64_t& trunc_epoch_out)
+	     uint64_t seq, const cls_rgw_fsio_id& cs, uint64_t size,
+	     ceph::real_time mtime, truncate_out& out)
 {
+  out = truncate_out{};
+  if (already_applied(h, caller, seq)) {
+    out.already_applied = true;
+    return 0;
+  }
   auto* e = writer_shadow(h, caller, cs);
   if (!e) {
     return -EINVAL;
@@ -598,7 +603,8 @@ int truncate(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& caller,
   sh.mtime_hint = mtime;
   ++sh.trunc_epoch;
   sh.trunc_low = sh.trunc_low ? std::min(*sh.trunc_low, size) : size;
-  trunc_epoch_out = sh.trunc_epoch;
+  out.trunc_epoch = sh.trunc_epoch;
+  applied(h, caller, seq);
   return 0;
 }
 

@@ -334,12 +334,17 @@ CORO_TEST_F(NeoRadosClsRgwFsio, HintAndTruncate, NeoRadosTest) {
 
   cls_rgw_fsio_truncate_op top;
   top.caller = GW1;
+  top.seq = 2;                   // a counted call, after the join's 1
   top.cs = jret.bound;
   top.size = 40;
   top.mtime = ceph::real_time(std::chrono::seconds(7));
   cls_rgw_fsio_truncate_ret tret;
   co_await execute(head, WriteOp{}.exec(f::truncate(top, &tret)));
   EXPECT_EQ(1u, tret.trunc_epoch);
+  EXPECT_FALSE(tret.already_applied);
+  /* resent, it changes nothing (A1) */
+  co_await execute(head, WriteOp{}.exec(f::truncate(top, &tret)));
+  EXPECT_TRUE(tret.already_applied);
 
   hop.size = 500;
   hop.mtime = ceph::real_time(std::chrono::seconds(8));

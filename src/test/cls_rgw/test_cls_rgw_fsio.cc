@@ -983,18 +983,34 @@ TEST(cls_rgw_fsio_size, truncate_sets_exactly)
   const auto s = construct(h, GW1);
   fsio::hint_out out;
   ASSERT_EQ(0, fsio::hint(h, GW1, s, 0, 100, secs(5), out));
-  uint64_t epoch = 0;
-  ASSERT_EQ(0, fsio::truncate(h, GW1, s, 60, secs(6), epoch));
-  EXPECT_EQ(1u, epoch);
+  fsio::truncate_out tout;
+  ASSERT_EQ(0, fsio::truncate(h, GW1, next_seq(), s, 60, secs(6), tout));
+  EXPECT_EQ(1u, tout.trunc_epoch);
   const auto& sh = *h.hdr->find(s)->shadow;
   EXPECT_EQ(60u, sh.size_hint);
   EXPECT_EQ(secs(6), sh.mtime_hint);
   ASSERT_TRUE(sh.trunc_low);
   EXPECT_EQ(60u, *sh.trunc_low);
-  ASSERT_EQ(0, fsio::truncate(h, GW1, s, 80, secs(7), epoch));
-  EXPECT_EQ(2u, epoch);
+  ASSERT_EQ(0, fsio::truncate(h, GW1, next_seq(), s, 80, secs(7), tout));
+  EXPECT_EQ(2u, tout.trunc_epoch);
   EXPECT_EQ(80u, sh.size_hint);        // exactly, though larger
   EXPECT_EQ(60u, *sh.trunc_low);       // the smallest size set
+}
+
+/* A1, §2.2:  a sequenced call:  a resend of the same number changes
+ * nothing and returns already applied */
+TEST(cls_rgw_fsio_size, truncate_is_sequenced)
+{
+  auto h = head("C0");
+  const auto s = construct(h, GW1);
+  const auto seq = next_seq();
+  fsio::truncate_out tout;
+  ASSERT_EQ(0, fsio::truncate(h, GW1, seq, s, 60, secs(6), tout));
+  EXPECT_FALSE(tout.already_applied);
+  EXPECT_EQ(1u, tout.trunc_epoch);
+  ASSERT_EQ(0, fsio::truncate(h, GW1, seq, s, 60, secs(6), tout));
+  EXPECT_TRUE(tout.already_applied);
+  EXPECT_EQ(1u, h.hdr->find(s)->shadow->trunc_epoch);
 }
 
 /* a report from an older epoch merges nothing:  the writer gets the
@@ -1003,8 +1019,8 @@ TEST(cls_rgw_fsio_size, a_stale_hint_merges_nothing)
 {
   auto h = head("C0");
   const auto s = construct(h, GW1);
-  uint64_t epoch = 0;
-  ASSERT_EQ(0, fsio::truncate(h, GW1, s, 40, secs(7), epoch));
+  fsio::truncate_out tout;
+  ASSERT_EQ(0, fsio::truncate(h, GW1, next_seq(), s, 40, secs(7), tout));
   fsio::hint_out out;
   ASSERT_EQ(0, fsio::hint(h, GW1, s, 0, 500, secs(8), out));
   EXPECT_TRUE(out.stale);
@@ -1048,8 +1064,8 @@ TEST(cls_rgw_fsio_size, publishing_freezes_the_size)
   ASSERT_EQ(0, fsio::hint(h, GW1, s, 0, 500, secs(9), out));
   EXPECT_EQ(100u, out.size);
   EXPECT_EQ(100u, h.hdr->find(s)->shadow->size_hint);
-  uint64_t epoch = 0;
-  EXPECT_EQ(-CLS_RGW_ERR_FSIO_BUSY, fsio::truncate(h, GW1, s, 10, secs(9), epoch));
+  fsio::truncate_out tout;
+  EXPECT_EQ(-CLS_RGW_ERR_FSIO_BUSY, fsio::truncate(h, GW1, next_seq(), s, 10, secs(9), tout));
   EXPECT_EQ(0u, h.hdr->find(s)->shadow->trunc_epoch);
 }
 
@@ -1061,8 +1077,8 @@ TEST(cls_rgw_fsio_size, only_a_writer_reports)
   join_reader(h, GW2);
   fsio::hint_out out;
   EXPECT_EQ(-EINVAL, fsio::hint(h, GW2, s, 0, 10, secs(1), out));
-  uint64_t epoch = 0;
-  EXPECT_EQ(-EINVAL, fsio::truncate(h, GW2, s, 10, secs(1), epoch));
+  fsio::truncate_out tout;
+  EXPECT_EQ(-EINVAL, fsio::truncate(h, GW2, next_seq(), s, 10, secs(1), tout));
   EXPECT_EQ(-EINVAL, fsio::hint(h, GW1, cls_rgw_fsio_id{999, 9}, 0, 10, secs(1), out));
 }
 

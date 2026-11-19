@@ -397,8 +397,12 @@ int rgw_fsio_truncate(cls_method_context_t hctx, ceph::buffer::list* in,
   }
   cls_rgw_fsio_truncate_ret ret;
   int r = on_head(hctx, {}, [&](auto& h, auto&) {
-    return fsio::truncate(h, op.caller, op.cs, op.size, op.mtime,
-			  ret.trunc_epoch);
+    fsio::truncate_out tout;
+    int r = fsio::truncate(h, op.caller, op.seq, op.cs, op.size, op.mtime,
+			   tout);
+    ret.trunc_epoch = tout.trunc_epoch;
+    ret.already_applied = tout.already_applied;
+    return r;
   });
   if (r < 0) {
     return r;
