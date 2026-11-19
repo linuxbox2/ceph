@@ -22,7 +22,7 @@ constexpr uint64_t I1 = 1, I2 = 2, I3 = 3, IX = 100;
 constexpr cls_rgw_fsio_handle GW1{I1, 1}, GW2{I2, 1}, GW3{I3, 1},
   EXPIRER{IX, 0};
 
-/* each counted call's sequence number (Z22):  increasing across the
+/* each sequenced call's sequence number (Z22):  increasing across the
  * file, so increasing for every handle */
 uint64_t next_seq()
 {
@@ -381,7 +381,7 @@ TEST(cls_rgw_fsio, two_handles_one_incarnation)
   EXPECT_EQ(GW1B, h.hdr->find(s)->publishing->publisher);
 }
 
-/* Z22:  a counted call resent past the PG log's dup window changes
+/* Z22:  a sequenced call resent past the PG log's dup window changes
  * nothing and returns already applied;  a leave whose record is gone
  * returns EINVAL to its resend (design §3) */
 void z22_resend_is_already_applied()

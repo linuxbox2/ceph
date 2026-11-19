@@ -372,7 +372,7 @@ WRITE_CLASS_ENCODER(cls_rgw_fsio_counts)
 
 /* one handle's FSIO opens on the head */
 struct cls_rgw_fsio_handle_opens {
-  uint64_t last_seq = 0;       // the newest counted call applied (Z22)
+  uint64_t last_seq = 0;       // the newest sequenced call applied (Z22)
   std::map<cls_rgw_fsio_id, cls_rgw_fsio_counts> chunk_sets;
 
   void encode(ceph::buffer::list& bl) const {
@@ -576,7 +576,7 @@ namespace cls_rgw_fsio {
 
 using expired_t = std::set<uint64_t>;
 
-/* the counted calls (fsio_join, fsio_leave, fsio_rebind) carry the
+/* the sequenced calls (fsio_join, fsio_leave, fsio_rebind) carry the
  * handle's sequence number;  one not newer than the handle's last_seq
  * changes nothing and returns already_applied (§3, Z22) */
 struct join_in {

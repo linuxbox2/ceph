@@ -217,7 +217,7 @@ enum Step : uint8_t { NONE, CONSTRUCT, PUBLISH_WRITE, PUBLISH_GC, DRAIN_SEND,
   /* a publisher that cannot proceed (§4.2, W10) */
   V_REL_RELEASE };
 
-/* a handle's latest counted call, as sent (§3, Z22):  resent with the
+/* a handle's latest sequenced call, as sent (§3, Z22):  resent with the
  * same sequence number, it models a reply lost past the PG log's dup
  * window and the op run again */
 enum class Counted : uint8_t { JOIN, LEAVE, REBIND };
@@ -273,8 +273,8 @@ struct Gw {
   uint8_t released = 0;          // released once:  a bound, else release and
 				 // retry would cycle, each drawing a new instance
   uint8_t pub_retry = 0;         // released:  publishes again after the cleanup
-  uint64_t seq = 0;              // its counted calls' sequence (Z22)
-  std::optional<Resend> resend;  // its latest counted call
+  uint64_t seq = 0;              // its sequenced calls' sequence (Z22)
+  std::optional<Resend> resend;  // its latest sequenced call
   uint8_t resent = 0;            // resends made
   void encode(ceph::buffer::list& bl) const {
     using ceph::encode;
@@ -758,7 +758,7 @@ int m_remove_version(const std::string& inst, cls_rgw_fsio_instance_head& ih,
 }
 
 
-/* the counted calls, numbered per handle and kept for a resend (Z22).
+/* the sequenced calls, numbered per handle and kept for a resend (Z22).
  * A call takes the next number when it applies:  a failed call changes
  * nothing, so its number can be used again.  So a handle record's
  * last_seq always equals the handle's counter, and the state key leaves
@@ -3020,7 +3020,7 @@ void expirer_actions_v(const World& w0, std::vector<Action>& acts)
   }
 }
 
-/* §3, Z22:  a handle resends its latest counted call, with the same
+/* §3, Z22:  a handle resends its latest sequenced call, with the same
  * sequence number, once the original has applied;  the reply is the one
  * the handle never saw, so it changes nothing on the handle's side */
 void resend_actions(const World& w0, size_t gi, std::vector<Action>& acts)

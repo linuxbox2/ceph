@@ -240,7 +240,7 @@ cls_rgw_fsio_gen record_of_head(const cls_rgw_fsio_head& h)
 
 namespace {
 
-/* §3, Z22:  a counted call not newer than the handle's last applied one
+/* §3, Z22:  a sequenced call not newer than the handle's last applied one
  * is a resend;  with no record for the handle there is nothing to compare
  * against, and the call itself decides */
 bool already_applied(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& c,
