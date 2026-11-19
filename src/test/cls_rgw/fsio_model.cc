@@ -1045,7 +1045,7 @@ void set_null_version(World& w, const std::string& tail)
 /* a gateway's death or partition, at any point, a protocol step pending
  * included */
 /* §3.4:  a constructor that gives up sends the shadow's GC entry, then
- * abandons it with its leave (W15) */
+ * abandons it with its fsio_leave (W15) */
 void construct_abandon_actions(const Gw& g, size_t gi, uint64_t inc,
 			       std::vector<Action>& acts)
 {
@@ -1726,7 +1726,7 @@ void gw_actions_v(const World& w0, size_t gi, std::vector<Action>& acts)
 	  }});
       break;
     case V_LEAVE:
-      /* §4.2 step 2:  the leave records the instance, token and epoch */
+      /* §4.2 step 2:  fsio_leave records the instance, token and epoch */
       acts.push_back({fmt::format("gw{} close-leave {}", glabel(g),
 				  sname(g.step_cs)),
 	  [gi, inc](World& w) -> std::optional<std::string> {
@@ -1968,7 +1968,7 @@ void gw_actions_v(const World& w0, size_t gi, std::vector<Action>& acts)
 	  g.opens.erase(g.opens.begin() + oi);
 	  if (o.writer && !(w.suspended &&
 			    !FSIO_SKIP_CHECK(PUBLISH_FOLLOWS_STATE))) {
-	    /* §4.2 step 1:  the claim comes before the leave;  a publish
+	    /* §4.2 step 1:  the claim comes before fsio_leave;  a publish
 	     * keeps the versioning state it began with, as an RGW PUT does */
 	    g.step = V_PUB_HINT;
 	    g.step_cs = o.cs;
@@ -2026,7 +2026,7 @@ void gw_actions_v(const World& w0, size_t gi, std::vector<Action>& acts)
     {
       /* written:  remove now;  a placeholder with a live claim:  wait;
        * aborted or absent:  nothing to remove (H3c:  the placeholder
-       * precedes the leave's intent, so an absent one cannot appear) */
+       * precedes fsio_leave's intent, so an absent one cannot appear) */
       auto vi = w0.versions.find(inst);
       bool wait = false;
       if (vi != w0.versions.end()) {

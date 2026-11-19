@@ -263,8 +263,8 @@ bool already_applied(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& c,
   return false;
 }
 
-/* stored in the same op as the call's effect;  a leave that removed the
- * handle's record leaves nothing to store it in */
+/* stored in the same op as the call's effect;  an fsio_leave that
+ * removed the handle's record leaves nothing to store it in */
 void applied(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& c, uint64_t seq)
 {
   if (auto* o = h.find(c)) {
