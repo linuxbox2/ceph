@@ -1073,6 +1073,32 @@ std::optional<uint64_t> RADOS::get_pool_alignment(int64_t pool_id)
     });
 }
 
+bool RADOS::pool_is_erasure(int64_t pool_id)
+{
+  return impl->objecter->with_osdmap(
+    [pool_id](const OSDMap &o) {
+      if (!o.have_pg_pool(pool_id)) {
+	throw bs::system_error(
+	  ENOENT, bs::system_category(),
+	  "Cannot find pool in OSDMap.");
+      }
+      return o.get_pg_pool(pool_id)->is_erasure();
+    });
+}
+
+bool RADOS::pool_is_crimson(int64_t pool_id)
+{
+  return impl->objecter->with_osdmap(
+    [pool_id](const OSDMap &o) {
+      if (!o.have_pg_pool(pool_id)) {
+	throw bs::system_error(
+	  ENOENT, bs::system_category(),
+	  "Cannot find pool in OSDMap.");
+      }
+      return o.get_pg_pool(pool_id)->has_flag(pg_pool_t::FLAG_CRIMSON);
+    });
+}
+
 void RADOS::list_pools_(LSPoolsComp c) {
   asio::dispatch(asio::append(std::move(c),
 			      impl->objecter->with_osdmap(

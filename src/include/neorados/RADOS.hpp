@@ -1453,6 +1453,17 @@ public:
 
   std::optional<uint64_t> get_pool_alignment(int64_t pool_id);
 
+  /// \brief Whether a pool is erasure-coded, from the client's OSDMap
+  ///
+  /// \throws boost::system::system_error ENOENT if the pool is not in it
+  bool pool_is_erasure(int64_t pool_id);
+
+  /// \brief Whether a pool is a Crimson pool (pg_pool_t::FLAG_CRIMSON),
+  /// from the client's OSDMap
+  ///
+  /// \throws boost::system::system_error ENOENT if the pool is not in it
+  bool pool_is_crimson(int64_t pool_id);
+
   using LSPoolsSig = void(std::vector<std::pair<std::int64_t, std::string>>);
   using LSPoolsComp = boost::asio::any_completion_handler<LSPoolsSig>;
   template<boost::asio::completion_token_for<LSPoolsSig> CompletionToken>
