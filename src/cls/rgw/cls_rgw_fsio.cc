@@ -472,11 +472,20 @@ int ready(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& caller,
     return -EINVAL;
   }
   auto* e = h.hdr->find(cs);
-  if (!e || e->state != state::CONSTRUCTING) {
+  if (!e) {
     return -EINVAL;
   }
   auto* o = h.find(caller);
   if (!o || !o->chunk_sets.count(cs) || o->chunk_sets[cs].writers == 0) {
+    return -EINVAL;
+  }
+  /* §2.2, A2:  idempotent by its effect:  a repeat finding the shadow
+   * ready changes nothing (not even extent, which fsio_extend may have
+   * grown since) and succeeds */
+  if (e->state == state::READY) {
+    return 0;
+  }
+  if (e->state != state::CONSTRUCTING) {
     return -EINVAL;
   }
   e->state = state::READY;
@@ -912,6 +921,11 @@ int publish_release(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& caller,
     return -EINVAL;
   }
   auto* e = h.hdr->find(cs);
+  /* §2.2, A3:  idempotent by its effect:  a repeat finding the shadow
+   * ready, no publish recorded, changes nothing and succeeds */
+  if (e && e->state == state::READY && !e->publishing) {
+    return 0;
+  }
   if (!e || e->state != state::PUBLISHING) {
     return -EINVAL;
   }

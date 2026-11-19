@@ -365,3 +365,51 @@ CORO_TEST_F(NeoRadosClsRgwFsio, HintAndTruncate, NeoRadosTest) {
   EXPECT_EQ(std::optional<uint64_t>(40), e->shadow->trunc_low);
   co_return;
 }
+
+/* A2, A3 (§2.2):  fsio_ready and fsio_publish_release are idempotent by
+ * their effect:  a repeat finding the state reached succeeds and stores
+ * nothing new */
+CORO_TEST_F(NeoRadosClsRgwFsio, ReadyAndReleaseRepeat, NeoRadosTest) {
+  const auto head = head_of(oid);
+  co_await execute(head, make_head());
+  cls_rgw_fsio_join_ret jret;
+  co_await execute(head, WriteOp{}.exec(f::join(join_op(1, true), &jret)));
+  EXPECT_TRUE(jret.construct);
+  if (!jret.construct) {
+    co_return;
+  }
+  cls_rgw_fsio_runs_op rop;
+  rop.caller = GW1;
+  rop.cs = jret.bound;
+  rop.runs = {{0, 0}};
+  co_await execute(head, WriteOp{}.exec(f::ready(rop)));
+  co_await execute(head, WriteOp{}.exec(f::ready(rop)));   // a repeat:  0
+
+  cls_rgw_fsio_leave_op lop;
+  lop.caller = GW1;
+  lop.seq = 2;
+  lop.cs = jret.bound;
+  lop.writer = true;
+  cls_rgw_fsio_leave_ret lret;
+  co_await execute(head, WriteOp{}.exec(f::leave(lop, &lret)));
+  EXPECT_TRUE(lret.publishing);
+  cls_rgw_fsio_cs_op cop;
+  cop.caller = GW1;
+  cop.cs = jret.bound;
+  co_await execute(head, WriteOp{}.exec(f::publish_release(cop)));
+  co_await execute(head, WriteOp{}.exec(f::publish_release(cop)));   // 0
+
+  ceph::buffer::list v;
+  co_await execute(head, ReadOp{}.get_xattr(HDR, &v));
+  cls_rgw_fsio_hdr hdr;
+  auto it = v.cbegin();
+  decode(hdr, it);
+  const auto* e = hdr.find(jret.bound);
+  EXPECT_TRUE(e);
+  if (!e) {
+    co_return;
+  }
+  EXPECT_EQ(cls_rgw_fsio_cs_state::READY, e->state);
+  EXPECT_FALSE(e->publishing);
+  co_return;
+}

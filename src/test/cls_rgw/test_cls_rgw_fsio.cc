@@ -1060,6 +1060,53 @@ TEST(cls_rgw_fsio_size, only_a_writer_reports)
   EXPECT_EQ(-EINVAL, fsio::hint(h, GW1, cls_rgw_fsio_id{999, 9}, 0, 10, 1, out));
 }
 
+/* A2, §2.2:  fsio_ready is idempotent by its effect:  a repeat finds the
+ * shadow ready, succeeds and changes nothing, extent included */
+TEST(cls_rgw_fsio_repeat, ready_repeat_changes_nothing)
+{
+  auto h = head("C0");
+  const auto s = construct(h, GW1);
+  ASSERT_EQ(0, fsio::extend(h, GW1, s, {5, 7}));
+  const auto extent = h.hdr->find(s)->shadow->extent;
+  EXPECT_EQ(0, fsio::ready(h, GW1, s, {{0, 0}}));
+  EXPECT_EQ(cls_rgw_fsio_cs_state::READY, h.hdr->find(s)->state);
+  EXPECT_EQ(extent, h.hdr->find(s)->shadow->extent);
+}
+
+/* …but a shadow that has moved on is a stale view:  EINVAL */
+TEST(cls_rgw_fsio_repeat, ready_after_freezing_is_einval)
+{
+  auto h = head("C0");
+  const auto s = construct(h, GW1);
+  leave_writer(h, GW1, s);             // publishing
+  EXPECT_EQ(-EINVAL, fsio::ready(h, GW1, s, {{0, 0}}));
+}
+
+/* A3, §2.2:  fsio_publish_release is idempotent by its effect:  a repeat
+ * finds the shadow ready with no publish recorded */
+TEST(cls_rgw_fsio_repeat, release_repeat_changes_nothing)
+{
+  auto h = head("C0");
+  const auto s = construct(h, GW1);
+  leave_writer(h, GW1, s);
+  ASSERT_EQ(0, fsio::publish_release(h, GW1, s));
+  EXPECT_EQ(0, fsio::publish_release(h, GW1, s));
+  const auto* e = h.hdr->find(s);
+  EXPECT_EQ(cls_rgw_fsio_cs_state::READY, e->state);
+  EXPECT_FALSE(e->publishing);
+}
+
+/* …but after the shadow has published, a release is stale:  EINVAL */
+TEST(cls_rgw_fsio_repeat, release_after_publish_is_einval)
+{
+  auto h = head("C0");
+  const auto s = construct(h, GW1);
+  join_reader(h, GW2);                 // keeps the published entry
+  leave_writer(h, GW1, s);
+  ASSERT_EQ(0, publish(h, GW1, s));
+  EXPECT_EQ(-EINVAL, fsio::publish_release(h, GW1, s));
+}
+
 TEST(cls_rgw_fsio, each_check_is_detected)
 {
   const std::pair<cls_rgw_fsio_check, void (*)()> table[] = {
