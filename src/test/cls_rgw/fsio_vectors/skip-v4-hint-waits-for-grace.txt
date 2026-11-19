@@ -1,22 +1,41 @@
-# V4_HINT_WAITS_FOR_GRACE:  the shortest trace the search finds with the check
-# skipped (7835736 states by search, 2026-11-18);  replayed alone it
-# reproduces the violation at once.
+# V4_HINT_WAITS_FOR_GRACE:  a walk's trace with the check skipped (walk 966 of
+# seed 1, 2026-11-18;  regenerated when the search, with
+# resends, outgrew its budget);  replayed alone it reproduces the
+# violation at once.
 # skip: V4_HINT_WAITS_FOR_GRACE
 # env: FSIO_MODEL_VERSIONED=1 FSIO_MODEL_ROLES=wr FSIO_MODEL_S3_OPS=1
+s3 put
 gw1 read-olh-write
-gw1 count I1
-gw1 open-write I1
-gw1 partition
-s3 delete
 gw2 read-olh-read
-expirer abandon S1.10
-gw1 ready S1.10
-gw1 close-write S1.10
+gw2 count I2
+gw2 open-read I2
+gw1 count I2
+gw2 resend join
+gw2 close-read C1
+gw2 uncount I2
+gw1 open-write I2
+gw1 ready S2.10
+gw1 uncount I2
+gw1 write S2.10
+gw1 resend join
+gw1 close-write S2.10
 gw1 publish-hint
-expirer hint I2 for 1
-gw1 placeholder I2
+gw1 partition
+expirer hint I3 for 1
+gw2 partition
+gw1 placeholder I3
 expirer grace 1
-expirer ocnt I1 for 1
+expirer decide-finalize S2.10
+expirer publish-hint for S2.10
+expirer placeholder I4
+expirer fenced-finalize S2.10
+expirer reclone S2.11
+expirer instance-write I4
+expirer link I4
+gw2 crash
+expirer publish S2.11
+expirer grace 2
+expirer expire
+gc S2.10
 expirer drop-hint 1
-gc S1.10
-# => placeholder I2 left at the end (claim k1)
+# => placeholder I3 left at the end (claim k2)

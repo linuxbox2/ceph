@@ -80,8 +80,10 @@ fn smoke() -> Vec<Run> {
     ]
 }
 
+/* the baselines, without resends (FSIO_MODEL_RESENDS=0), and two runs
+ * with them (Z22) */
 fn quick() -> Vec<Run> {
-    vec![
+    let mut v: Vec<Run> = vec![
         run("quick-wr", &[("FSIO_MODEL_ROLES", "wr"), ("FSIO_MODEL_S3_OPS", "0")]),
         run("quick-v-w", &[("FSIO_MODEL_VERSIONED", "1"), ("FSIO_MODEL_ROLES", "w"),
                            ("FSIO_MODEL_S3_OPS", "0")]),
@@ -90,7 +92,14 @@ fn quick() -> Vec<Run> {
         run("quick-f2", &[("FSIO_MODEL_ROLES", "f"), ("FSIO_MODEL_S3_OPS", "2")]),
         run("quick-w+r", &[("FSIO_MODEL_ROLES", "w+r"), ("FSIO_MODEL_S3_OPS", "0")]),
         run("quick-w+w", &[("FSIO_MODEL_ROLES", "w+w"), ("FSIO_MODEL_S3_OPS", "0")]),
-    ]
+    ];
+    for r in &mut v {
+        r.env.push(("FSIO_MODEL_RESENDS".into(), "0".into()));
+    }
+    v.push(run("quick-wr-resend", &[("FSIO_MODEL_ROLES", "wr"), ("FSIO_MODEL_S3_OPS", "0")]));
+    v.push(run("quick-v-w-resend", &[("FSIO_MODEL_VERSIONED", "1"), ("FSIO_MODEL_ROLES", "w"),
+                                     ("FSIO_MODEL_S3_OPS", "0")]));
+    v
 }
 
 /* a vector's header:  "# skip: CHECK" makes it a skipped check's
@@ -227,6 +236,14 @@ fn skip_table() -> Vec<Check> {
         ("W10_RELEASE_ONLY_WITH_LIVE_CLAIM", ver, none, true),
         ("W10_RELEASE_ABORTS_CLAIM_FIRST", ver, none, true),
         ("W15_CONSTRUCTOR_MAY_ABANDON", unv, none, true),
+        /* Z22:  resends (FSIO_MODEL_RESENDS, on by default) */
+        ("Z22_COUNTED_CALL_CHECKS_SEQ", unv,
+         &[("FSIO_MODEL_ROLES", "wr"), ("FSIO_MODEL_S3_OPS", "0")], true),
+        ("Z22_EXPIRY_KEEPS_SEQ", unv,
+         &[("FSIO_MODEL_ROLES", "wr"), ("FSIO_MODEL_S3_OPS", "0")], true),
+        ("Z22_ABANDON_WAITS_FOR_GRACE", unv,
+         &[("FSIO_MODEL_ROLES", "wr"), ("FSIO_MODEL_S3_OPS", "0"), ("FSIO_MODEL_SHORTEST", "0")],
+         true),
         /* a cycle drawing new claims:  depth-first finds it */
         ("RESUME_REPLACES_CLAIM", ver,
          &[("FSIO_MODEL_ROLES", "w"), ("FSIO_MODEL_S3_OPS", "0"), ("FSIO_MODEL_SHORTEST", "0")],

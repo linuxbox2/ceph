@@ -75,6 +75,16 @@ cls_rgw_fsio_head::find(const cls_rgw_fsio_handle& c)
   return ho == o->second.handles.end() ? nullptr : &ho->second;
 }
 
+bool cls_rgw_fsio_head::holds_opens() const
+{
+  for (const auto& [i, o] : opens) {
+    if (!o.handles.empty()) {
+      return true;
+    }
+  }
+  return false;
+}
+
 cls_rgw_fsio_counts& cls_rgw_fsio_head::counts(const cls_rgw_fsio_handle& c,
 					       const cls_rgw_fsio_id& cs)
 {
@@ -139,10 +149,17 @@ cls_rgw_fsio_chunk_set* current_shadow(cls_rgw_fsio_hdr& hdr)
 /* removes or drains what empties (§2.2, §3.4);  the drained ids go to the
  * caller, which sends their GC entries and calls forget() */
 void settle(cls_rgw_fsio_head& h, std::vector<cls_rgw_fsio_id>& drained,
-	    cls_rgw_fsio_effects& fx)
+	    cls_rgw_fsio_effects& fx, uint64_t caller = 0)
 {
   for (auto i = h.opens.begin(); i != h.opens.end(); ) {
     auto& hs = i->second.handles;
+    /* a handle record emptied by another's call, so a presumed-dead
+     * incarnation's (expiry, a fenced finalize, an abandon, a dead
+     * publisher's completion), keeps its last_seq until grace:  its
+     * resends may still land (Z22).  Never the caller's own:  its own
+     * call emptied it, and a resend of that call finds no record (§3) */
+    const bool keep = i->first != caller &&
+      !FSIO_SKIP_CHECK(Z22_EXPIRY_KEEPS_SEQ);
     for (auto k = hs.begin(); k != hs.end(); ) {
       auto& m = k->second.chunk_sets;
       for (auto j = m.begin(); j != m.end(); ) {
@@ -153,12 +170,16 @@ void settle(cls_rgw_fsio_head& h, std::vector<cls_rgw_fsio_id>& drained,
 	}
       }
       if (m.empty()) {
+	if (keep) {
+	  auto& s = i->second.seqs[k->first];
+	  s = std::max(s, k->second.last_seq);
+	}
 	k = hs.erase(k);
       } else {
 	++k;
       }
     }
-    if (hs.empty()) {
+    if (hs.empty() && i->second.seqs.empty()) {
       i = h.opens.erase(i);
     } else {
       ++i;
@@ -179,11 +200,11 @@ void settle(cls_rgw_fsio_head& h, std::vector<cls_rgw_fsio_id>& drained,
       }
       ++i;
     }
-    if (h.opens.empty() && h.hdr->empty()) {
+    if (!h.holds_opens() && h.hdr->empty()) {
       h.hdr.reset();
     }
   }
-  if (!h.hdr && h.opens.empty() && h.tracking_only()) {
+  if (!h.hdr && !h.holds_opens() && h.tracking_only()) {
     fx.remove_head = true;
   }
 }
@@ -213,8 +234,103 @@ cls_rgw_fsio_gen record_of_head(const cls_rgw_fsio_head& h)
 
 } // anonymous namespace
 
+namespace {
+
+/* §3, Z22:  a counted call not newer than the handle's last applied one
+ * is a resend;  with no record for the handle there is nothing to compare
+ * against, and the call itself decides */
+bool already_applied(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& c,
+		     uint64_t seq)
+{
+  if (FSIO_SKIP_CHECK(Z22_COUNTED_CALL_CHECKS_SEQ)) {
+    return false;
+  }
+  if (auto* o = h.find(c)) {
+    return seq <= o->last_seq;
+  }
+  /* expired:  its kept last_seq answers a resend still in flight */
+  auto i = h.opens.find(c.incarnation);
+  if (i != h.opens.end()) {
+    auto s = i->second.seqs.find(c.handle);
+    if (s != i->second.seqs.end()) {
+      return seq <= s->second;
+    }
+  }
+  return false;
+}
+
+/* stored in the same op as the call's effect;  a leave that removed the
+ * handle's record leaves nothing to store it in */
+void applied(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& c, uint64_t seq)
+{
+  if (auto* o = h.find(c)) {
+    o->last_seq = std::max(o->last_seq, seq);
+  }
+}
+
+int join_once(cls_rgw_fsio_head& h, const join_in& in, join_out& out,
+	      cls_rgw_fsio_effects& fx);
+int leave_once(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& caller,
+	       const cls_rgw_fsio_id& cs, bool writer, const expired_t& expired,
+	       leave_out& out, cls_rgw_fsio_effects& fx,
+	       const publish_intent* intent);
+int rebind_once(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& caller,
+		const cls_rgw_fsio_id& from, const cls_rgw_fsio_id& to,
+		uint32_t readers);
+
+} // anonymous namespace
+
 int join(cls_rgw_fsio_head& h, const join_in& in, join_out& out,
 	 cls_rgw_fsio_effects& fx)
+{
+  if (already_applied(h, in.caller, in.seq)) {
+    out.already_applied = true;
+    return 0;
+  }
+  int r = join_once(h, in, out, fx);
+  if (r == 0) {
+    applied(h, in.caller, in.seq);
+  }
+  return r;
+}
+
+int leave(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& caller,
+	  uint64_t seq, const cls_rgw_fsio_id& cs, bool writer,
+	  const expired_t& expired, leave_out& out, cls_rgw_fsio_effects& fx,
+	  const publish_intent* intent)
+{
+  if (already_applied(h, caller, seq)) {
+    out.already_applied = true;
+    return 0;
+  }
+  int r = leave_once(h, caller, cs, writer, expired, out, fx, intent);
+  if (r == 0) {
+    applied(h, caller, seq);
+  }
+  return r;
+}
+
+int rebind(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& caller,
+	   uint64_t seq, const cls_rgw_fsio_id& from, const cls_rgw_fsio_id& to,
+	   uint32_t readers, rebind_out* out)
+{
+  if (already_applied(h, caller, seq)) {
+    if (out) {
+      out->already_applied = true;
+    }
+    return 0;
+  }
+  int r = rebind_once(h, caller, from, to, readers);
+  if (r == 0) {
+    applied(h, caller, seq);
+  }
+  return r;
+}
+
+namespace {
+
+int join_once(cls_rgw_fsio_head& h, const join_in& in, join_out& out,
+	      cls_rgw_fsio_effects& fx)
 {
   /* 1. a tracking-only head:  the name is deleted */
   if (h.tracking_only()) {
@@ -228,7 +344,7 @@ int join(cls_rgw_fsio_head& h, const join_in& in, join_out& out,
   expire_readers(h, in.expired);
   {
     std::vector<cls_rgw_fsio_id> drained;
-    settle(h, drained, fx);
+    settle(h, drained, fx, in.caller.incarnation);
   }
   /* 3. */
   if (!h.hdr) {
@@ -309,6 +425,8 @@ int join(cls_rgw_fsio_head& h, const join_in& in, join_out& out,
   return 0;
 }
 
+} // anonymous namespace
+
 int ready(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& caller,
 	  const cls_rgw_fsio_id& cs, uint64_t extent)
 {
@@ -349,10 +467,12 @@ int extend(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& caller,
   return 0;
 }
 
-int leave(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& caller,
-	  const cls_rgw_fsio_id& cs, bool writer, const expired_t& expired,
-	  leave_out& out, cls_rgw_fsio_effects& fx,
-	  const publish_intent* intent)
+namespace {
+
+int leave_once(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& caller,
+	       const cls_rgw_fsio_id& cs, bool writer, const expired_t& expired,
+	       leave_out& out, cls_rgw_fsio_effects& fx,
+	       const publish_intent* intent)
 {
   if (!h.hdr) {
     return -EINVAL;
@@ -391,7 +511,7 @@ int leave(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& caller,
 	o->chunk_sets.erase(cs);
 	out.abandoned = true;
 	std::vector<cls_rgw_fsio_id> drained;
-	settle(h, drained, fx);
+	settle(h, drained, fx, caller.incarnation);
 	return 0;
       }
       /* §3.4:  the last writer freezes its shadow;  only a ready shadow
@@ -423,16 +543,17 @@ int leave(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& caller,
     --c.readers;
   }
   std::vector<cls_rgw_fsio_id> drained;
-  settle(h, drained, fx);
+  settle(h, drained, fx, caller.incarnation);
   if (!drained.empty()) {
     out.drained = drained.front();
   }
   return 0;
 }
 
-int rebind(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& caller,
-	   const cls_rgw_fsio_id& from, const cls_rgw_fsio_id& to,
-	   uint32_t readers)
+
+int rebind_once(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& caller,
+		const cls_rgw_fsio_id& from, const cls_rgw_fsio_id& to,
+		uint32_t readers)
 {
   if (!h.hdr) {
     return -EINVAL;
@@ -460,9 +581,11 @@ int rebind(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& caller,
   o->chunk_sets[to].readers += readers;
   std::vector<cls_rgw_fsio_id> drained;
   cls_rgw_fsio_effects fx;
-  settle(h, drained, fx);
+  settle(h, drained, fx, caller.incarnation);
   return 0;
 }
+
+} // anonymous namespace
 
 /* §3.5, §4.2:  a versioned publish, the standalone call on the OLH once
  * the version is linked:  nothing is superseded, the previous version
@@ -523,7 +646,7 @@ int publish_versioned(cls_rgw_fsio_head& h, const replace_in& in,
   }
   out.keep_tail = true;
   std::vector<cls_rgw_fsio_id> drained;
-  settle(h, drained, fx);
+  settle(h, drained, fx, in.caller.incarnation);
   if (!drained.empty()) {
     out.drained = drained.front();
   }
@@ -594,7 +717,7 @@ int replace_head(cls_rgw_fsio_head& h, const replace_in& in, replace_out& out,
     }
     out.keep_tail = true;
     std::vector<cls_rgw_fsio_id> drained;
-    settle(h, drained, fx);
+    settle(h, drained, fx, in.caller.incarnation);
     if (!drained.empty()) {
       out.drained = drained.front();
     }
@@ -650,7 +773,7 @@ int replace_head(cls_rgw_fsio_head& h, const replace_in& in, replace_out& out,
     hdr.cur_shadow.reset();        // a new generation
   }
   out.keep_tail = kept;
-  if (in.mode == replace_mode::DELETE && h.opens.empty() && hdr.empty()) {
+  if (in.mode == replace_mode::DELETE && !h.holds_opens() && hdr.empty()) {
     h.hdr.reset();
   }
   return 0;
@@ -830,7 +953,20 @@ int expire(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& caller,
       }
     }
   }
-  settle(h, out.drained, fx);
+  settle(h, out.drained, fx, caller.incarnation);
+  return 0;
+}
+
+int drop_seqs(cls_rgw_fsio_head& h, uint64_t incarnation,
+	      cls_rgw_fsio_effects& fx)
+{
+  auto i = h.opens.find(incarnation);
+  if (i == h.opens.end()) {
+    return 0;
+  }
+  i->second.seqs.clear();
+  std::vector<cls_rgw_fsio_id> drained;
+  settle(h, drained, fx);              // the record goes if nothing else is in it
   return 0;
 }
 

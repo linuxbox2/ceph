@@ -1,0 +1,20 @@
+# Z22_ABANDON_WAITS_FOR_GRACE:  a depth-first trace with the check
+# skipped (5,397,579 states by search, 2026-11-18);  replayed alone
+# it reproduces the violation at once.
+# skip: Z22_ABANDON_WAITS_FOR_GRACE
+# env: FSIO_MODEL_ROLES=wr FSIO_MODEL_S3_OPS=0
+gw1 open-write
+gw1 construct-gc S1.10
+gw1 partition
+gw1 resend join
+gw2 open-read
+gw2 close-read C0
+gw2 crash
+expirer grace 2
+expirer abandon S1.10
+gw1 construct-leave S1.10
+gw1 crash
+expirer grace 1
+gc S1.10
+gc S1.10
+# => FSIO state left at the end (0 entries, 1 incarnation records)

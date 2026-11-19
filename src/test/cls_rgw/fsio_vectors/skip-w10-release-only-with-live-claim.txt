@@ -1,21 +1,35 @@
-# W10_RELEASE_ONLY_WITH_LIVE_CLAIM:  the shortest trace the search finds with the check
-# skipped (2759095 states by search, 2026-11-18);  replayed alone it
-# reproduces the violation at once.
+# W10_RELEASE_ONLY_WITH_LIVE_CLAIM:  a walk's trace with the check skipped (walk 37 of
+# seed 1, 2026-11-18;  regenerated when the search, with
+# resends, outgrew its budget);  replayed alone it reproduces the
+# violation at once.
 # skip: W10_RELEASE_ONLY_WITH_LIVE_CLAIM
 # env: FSIO_MODEL_VERSIONED=1 FSIO_MODEL_ROLES=wr FSIO_MODEL_S3_OPS=1
+s3 put
 gw1 read-olh-write
-gw1 count I1
-gw1 open-write I1
+gw2 read-olh-read
+gw2 count I2
+gw1 count I2
+gw1 open-write I2
+gw2 open-read I2
 gw1 ready S1.10
+gw2 follow S1.10
 gw1 close-write S1.10
+gw2 resend rebind
 gw1 publish-hint
-gw1 placeholder I2
+gw2 uncount I2
+gw1 placeholder I3
+gw2 close-read S1.10
+gw1 resend join
 gw1 close-leave S1.10
 gw1 publish-read S1.10
-gw1 instance-write I2
-gw2 crash
-s3 delete-version I2
-gw1 release-abort I2
-expirer grace 2
-gc S1.10
-# => hint left at the end:  presence on the head of 1
+gw1 instance-write I3
+gw1 link I3
+gw1 release-abort I3
+gw1 publish-release S1.10
+gw1 unplace-aborted I3
+gw1 publish-hint
+gw1 placeholder I4
+gw1 close-leave S1.10
+gw1 publish-read S1.10
+gw1 instance-write I4
+# => S1.10 linked as a version twice

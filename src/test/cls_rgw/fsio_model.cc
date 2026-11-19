@@ -210,6 +210,32 @@ enum Step : uint8_t { NONE, CONSTRUCT, PUBLISH_WRITE, PUBLISH_GC, DRAIN_SEND,
   /* a publisher that cannot proceed (§4.2, W10) */
   V_REL_RELEASE };
 
+/* a handle's latest counted call, as sent (§3, Z22):  resent with the
+ * same sequence number, it models a reply lost past the PG log's dup
+ * window and the op run again */
+enum class Counted : uint8_t { JOIN, LEAVE, REBIND };
+struct Resend {
+  Counted kind = Counted::JOIN;
+  uint64_t seq = 0;
+  bool writer = false;           // join, leave
+  uint64_t nonce = 0;            // join
+  std::set<uint64_t> expired;    // join, leave
+  std::string instance;          // join:  versioned
+  fid_t cs, to;                  // leave:  cs;  rebind:  cs to `to`
+  std::optional<fsio::publish_intent> intent;   // leave
+  void encode(ceph::buffer::list& bl) const {
+    using ceph::encode;
+    encode((uint8_t)kind, bl); encode(writer, bl);   // seq:  the handle's
+    encode(nonce, bl); encode(expired, bl); encode(instance, bl);
+    encode(cs, bl); encode(to, bl);
+    encode(intent.has_value(), bl);
+    if (intent) {
+      encode(intent->instance, bl); encode(intent->token, bl);
+      encode(intent->now_epoch, bl);
+    }
+  }
+};
+
 struct Gw {
   uint64_t inc = 0;
   uint64_t handle = 1;           // its FSIOObject on the head:  a second shares inc (Z4)
@@ -240,6 +266,9 @@ struct Gw {
   uint8_t released = 0;          // released once:  a bound, else release and
 				 // retry would cycle, each drawing a new instance
   uint8_t pub_retry = 0;         // released:  publishes again after the cleanup
+  uint64_t seq = 0;              // its counted calls' sequence (Z22)
+  std::optional<Resend> resend;  // its latest counted call
+  uint8_t resent = 0;            // resends made
   void encode(ceph::buffer::list& bl) const {
     using ceph::encode;
     encode(inc, bl); encode(handle, bl); encode(alive, bl);
@@ -256,6 +285,11 @@ struct Gw {
     encode(pub_epoch, bl); encode(pub_token, bl);
     encode(released, bl); encode(pub_retry, bl);
     encode(pub_began_suspended, bl);
+    encode(resent, bl);            // seq:  equal to its records' last_seq
+    encode(resend.has_value(), bl);
+    if (resend) {
+      resend->encode(bl);
+    }
   }
 };
 
@@ -268,6 +302,7 @@ std::string glabel(const Gw& g)
     fmt::format("{}.{}", g.inc, g.handle);
 }
 
+
 /* what a run explores (the header comment) */
 struct Config {
   int crashes = 1;
@@ -275,6 +310,7 @@ struct Config {
   int expirer_crashes = 1;
   int versioned = 0;
   bool vstart_null = false;      // FSIO_MODEL_VSTART=null
+  int resends = 1;               // FSIO_MODEL_RESENDS:  per handle (Z22)
 };
 
 /* versioned:  one instance head and what it holds */
@@ -290,6 +326,65 @@ struct Version {
   }
 };
 Config cfg;
+
+/* the counted calls, numbered per handle and kept for a resend (Z22).
+ * A call takes the next number when it applies:  a failed call changes
+ * nothing, so its number can be used again.  So a handle record's
+ * last_seq always equals the handle's counter, and the state key leaves
+ * both out (World::key) */
+int counted_join(cls_rgw_fsio_head& h, Gw& g, fsio::join_in& in,
+		 fsio::join_out& out, cls_rgw_fsio_effects& fx)
+{
+  in.seq = g.seq + 1;
+  int r = fsio::join(h, in, out, fx);
+  g.resend.reset();
+  if (r == 0) {
+    g.seq = in.seq;
+  }
+  if (r == 0 && g.resent < cfg.resends) {
+    g.resend = Resend{Counted::JOIN, in.seq, in.writer, in.nonce, in.expired,
+		      in.instance};
+  }
+  return r;
+}
+int counted_leave(cls_rgw_fsio_head& h, Gw& g, const fid_t& cs, bool writer,
+		  const std::set<uint64_t>& expired, fsio::leave_out& out,
+		  cls_rgw_fsio_effects& fx,
+		  const fsio::publish_intent* intent = nullptr)
+{
+  const auto seq = g.seq + 1;
+  int r = fsio::leave(h, hd(g), seq, cs, writer, expired, out, fx, intent);
+  g.resend.reset();
+  if (r == 0) {
+    g.seq = seq;
+  }
+  if (r == 0 && g.resent < cfg.resends) {
+    Resend rs{Counted::LEAVE, seq, writer, 0, expired};
+    rs.cs = cs;
+    if (intent) {
+      rs.intent = *intent;
+    }
+    g.resend = rs;
+  }
+  return r;
+}
+int counted_rebind(cls_rgw_fsio_head& h, Gw& g, const fid_t& from,
+		   const fid_t& to, uint32_t readers)
+{
+  const auto seq = g.seq + 1;
+  int r = fsio::rebind(h, hd(g), seq, from, to, readers);
+  g.resend.reset();
+  if (r == 0) {
+    g.seq = seq;
+  }
+  if (r == 0 && g.resent < cfg.resends) {
+    Resend rs{Counted::REBIND, seq};
+    rs.cs = from;
+    rs.to = to;
+    g.resend = rs;
+  }
+  return r;
+}
 
 enum ExPhase : uint8_t { EX_IDLE, EX_FF_PUBLISH, EX_FF_RECLONE, EX_FF_DECIDED,
   /* versioned:  the fenced finalize as §4.2's sequence for `to` */
@@ -338,7 +433,27 @@ struct World {
   std::string key() const {
     using ceph::encode;
     ceph::buffer::list bl;
-    encode(head, bl); encode(storage, bl); encode(records, bl);
+    /* a handle record's last_seq equals its handle's counter (Z22,
+     * counted_join), so neither is part of the state */
+    if (head.opens.empty()) {
+      encode(head, bl);
+    } else {
+      auto h = head;
+      for (auto& [i, o] : h.opens) {
+	for (auto& [k, ho] : o.handles) {
+	  ho.last_seq = 0;
+	}
+	/* a kept seq is the handle's counter, or behind it */
+	for (auto& [k, v] : o.seqs) {
+	  auto g = std::find_if(gws.begin(), gws.end(), [&](const Gw& x) {
+	    return x.inc == i && x.handle == k;
+	  });
+	  v = g != gws.end() && g->seq == v ? 1 : 2;
+	}
+      }
+      encode(h, bl);
+    }
+    encode(storage, bl); encode(records, bl);
     encode(pms, bl); encode(fenced, bl);
     encode(gcq, bl);
     for (auto& g : gws) g.encode(bl);
@@ -535,7 +650,7 @@ void construct_abandon_actions(const Gw& g, size_t gi, uint64_t inc,
 	fsio::leave_out out;
 	cls_rgw_fsio_effects fx;
 	auto save = w.head;
-	if (fsio::leave(w.head, hd(g), g.step_cs, true, w.dead(), out, fx,
+	if (counted_leave(w.head, g, g.step_cs, true, w.dead(), out, fx,
 			nullptr) < 0 || !out.abandoned) {
 	  w.head = save;                 // as first written:  no exit
 	  g.step = NONE;
@@ -730,11 +845,11 @@ void gw_actions(const World& w0, size_t gi, std::vector<Action>& acts)
 	[gi, inc](World& w) -> std::optional<std::string> {
 	  auto& g = w.gws[gi];
 	  g.did_read = 1;
-	  fsio::join_in in{hd(g), false, w.nonce_for_join(), 10, w.dead()};
+	  fsio::join_in in{hd(g), 0, false, w.nonce_for_join(), 10, w.dead()};
 	  fsio::join_out out;
 	  cls_rgw_fsio_effects fx;
 	  auto save = w.head;
-	  if (fsio::join(w.head, in, out, fx) < 0) {
+	  if (counted_join(w.head, g, in, out, fx) < 0) {
 	    w.head = save;
 	    return std::nullopt;
 	  }
@@ -748,11 +863,11 @@ void gw_actions(const World& w0, size_t gi, std::vector<Action>& acts)
 	[gi, inc](World& w) -> std::optional<std::string> {
 	  auto& g = w.gws[gi];
 	  g.did_write = 1;
-	  fsio::join_in in{hd(g), true, w.nonce_for_join(), 10, w.dead()};
+	  fsio::join_in in{hd(g), 0, true, w.nonce_for_join(), 10, w.dead()};
 	  fsio::join_out out;
 	  cls_rgw_fsio_effects fx;
 	  auto save = w.head;
-	  if (fsio::join(w.head, in, out, fx) < 0) {
+	  if (counted_join(w.head, g, in, out, fx) < 0) {
 	    w.head = save;
 	    return std::nullopt;
 	  }
@@ -811,7 +926,7 @@ void gw_actions(const World& w0, size_t gi, std::vector<Action>& acts)
 		  auto& g = w.gws[gi];
 		  g.did_follow = 1;
 		  auto& o = g.opens[oi];
-		  if (fsio::rebind(w.head, hd(g), o.cs, to, 1) == 0) {
+		  if (counted_rebind(w.head, g, o.cs, to, 1) == 0) {
 		    o.cs = to;
 		    o.storage = sname(to);
 		  }
@@ -830,7 +945,7 @@ void gw_actions(const World& w0, size_t gi, std::vector<Action>& acts)
 	  fsio::leave_out out;
 	  cls_rgw_fsio_effects fx;
 	  auto save = w.head;
-	  if (fsio::leave(w.head, hd(g), o.cs, o.writer, w.dead(), out, fx) < 0) {
+	  if (counted_leave(w.head, g, o.cs, o.writer, w.dead(), out, fx) < 0) {
 	    w.head = save;
 	    g.release_failed = 1;         // keeps its hint (H1)
 	    return std::nullopt;
@@ -981,12 +1096,12 @@ void gw_actions_v(const World& w0, size_t gi, std::vector<Action>& acts)
 	    if (w.olh_cur != g.pending) {
 	      return std::nullopt;           // the OLH guard:  ECANCELED
 	    }
-	    fsio::join_in in{hd(g), g.pending_writer, w.nonce_for_join(), 10,
+	    fsio::join_in in{hd(g), 0, g.pending_writer, w.nonce_for_join(), 10,
 			     w.dead(), g.pending};
 	    fsio::join_out out;
 	    cls_rgw_fsio_effects fx;
 	    auto save = w.head;
-	    if (fsio::join(w.head, in, out, fx) < 0) {
+	    if (counted_join(w.head, g, in, out, fx) < 0) {
 	      w.head = save;
 	      return std::nullopt;
 	    }
@@ -1195,7 +1310,7 @@ void gw_actions_v(const World& w0, size_t gi, std::vector<Action>& acts)
 	    fsio::publish_intent intent{g.pub_instance, g.pub_token,
 					w.next_epoch};
 	    auto save = w.head;
-	    if (fsio::leave(w.head, hd(g), g.step_cs, true, w.dead(), out, fx,
+	    if (counted_leave(w.head, g, g.step_cs, true, w.dead(), out, fx,
 			    &intent) < 0) {
 	      w.head = save;
 	      g.release_failed = 1;         // keeps its hint (H1)
@@ -1404,7 +1519,7 @@ void gw_actions_v(const World& w0, size_t gi, std::vector<Action>& acts)
 	    [gi, oi, inc, to](World& w) -> std::optional<std::string> {
 	      auto& g = w.gws[gi];
 	      auto& o = g.opens[oi];
-	      if (fsio::rebind(w.head, hd(g), o.cs, to, 1) == 0) {
+	      if (counted_rebind(w.head, g, o.cs, to, 1) == 0) {
 		g.did_follow = 1;
 		o.cs = to;
 		o.storage = sname(to);
@@ -1434,7 +1549,7 @@ void gw_actions_v(const World& w0, size_t gi, std::vector<Action>& acts)
 	    fsio::leave_out out;
 	    cls_rgw_fsio_effects fx;
 	    auto save = w.head;
-	    if (fsio::leave(w.head, hd(g), o.cs, true, w.dead(), out, fx) < 0) {
+	    if (counted_leave(w.head, g, o.cs, true, w.dead(), out, fx) < 0) {
 	      w.head = save;
 	      g.release_failed = 1;         // keeps its hint (H1)
 	      return std::nullopt;
@@ -1449,7 +1564,7 @@ void gw_actions_v(const World& w0, size_t gi, std::vector<Action>& acts)
 	  fsio::leave_out out;
 	  cls_rgw_fsio_effects fx;
 	  auto save = w.head;
-	  if (fsio::leave(w.head, hd(g), o.cs, false, w.dead(), out, fx) < 0) {
+	  if (counted_leave(w.head, g, o.cs, false, w.dead(), out, fx) < 0) {
 	    w.head = save;
 	    g.release_failed = 1;         // keeps its hint (H1)
 	    return std::nullopt;
@@ -1796,16 +1911,22 @@ void expirer_actions(const World& w0, std::vector<Action>& acts)
   }
   for (const auto& e : w0.head.hdr->chunk_sets) {
     auto b = w0.head.bound(e.id);
-    bool live_writer = false;
+    bool live_writer = false, in_grace = false;
     for (auto& [inc, o] : w0.head.opens) {
       auto ocs = inc_chunk_sets(o);
       auto c = ocs.find(e.id);
       if (c != ocs.end() && c->second.writers && !dead.count(inc)) {
 	live_writer = true;
       }
+      if (c != ocs.end() && c->second.writers && dead.count(inc) &&
+	  !w0.graced.count(inc)) {
+	in_grace = true;
+      }
     }
-    /* abandoned construction (§3.8) */
-    if (e.state == state::CONSTRUCTING && !live_writer) {
+    /* abandoned construction (§3.8):  once the constructor's grace has
+     * elapsed, so no resent join of its can recreate the shadow (Z22) */
+    if (e.state == state::CONSTRUCTING && !live_writer &&
+	(!in_grace || FSIO_SKIP_CHECK(Z22_ABANDON_WAITS_FOR_GRACE))) {
       auto id = e.id;
       acts.push_back({fmt::format("expirer abandon {}", sname(id)),
 	  [id, dead](World& w) -> std::optional<std::string> {
@@ -2451,6 +2572,59 @@ void expirer_actions_v(const World& w0, std::vector<Action>& acts)
   }
 }
 
+/* §3, Z22:  a handle resends its latest counted call, with the same
+ * sequence number, once the original has applied;  the reply is the one
+ * the handle never saw, so it changes nothing on the handle's side */
+void resend_actions(const World& w0, size_t gi, std::vector<Action>& acts)
+{
+  const auto& g = w0.gws[gi];
+  if (!g.resend || g.resent >= cfg.resends || !g.alive ||
+      (g.zombie && w0.graced.count(g.inc))) {
+    return;
+  }
+  static const char* names[] = {"join", "leave", "rebind"};
+  acts.push_back({fmt::format("gw{} resend {}", glabel(g),
+			      names[(int)g.resend->kind]),
+      [gi](World& w) -> std::optional<std::string> {
+	auto& g = w.gws[gi];
+	const auto r = *g.resend;
+	g.resend.reset();
+	++g.resent;
+	cls_rgw_fsio_effects fx;
+	auto save = w.head;
+	int ret = 0;
+	switch (r.kind) {
+	case Counted::JOIN: {
+	  fsio::join_in in{hd(g), r.seq, r.writer, r.nonce, 10, r.expired,
+			   r.instance};
+	  fsio::join_out out;
+	  const auto tok = w.head_tok();
+	  ret = fsio::join(w.head, in, out, fx);
+	  if (ret == 0) {
+	    apply_clones(w, fx, tok);      // its effects run in the op
+	  }
+	  break;
+	}
+	case Counted::LEAVE: {
+	  fsio::leave_out out;
+	  ret = fsio::leave(w.head, hd(g), r.seq, r.cs, r.writer, r.expired,
+			    out, fx, r.intent ? &*r.intent : nullptr);
+	  if (ret == 0) {
+	    apply_remove_head(w, fx);
+	  }
+	  break;
+	}
+	case Counted::REBIND:
+	  ret = fsio::rebind(w.head, hd(g), r.seq, r.cs, r.to, 1);
+	  break;
+	}
+	if (ret < 0) {
+	  w.head = save;
+	}
+	return std::nullopt;
+      }});
+}
+
 /* §4.3:  a gateway's presence hint on the head, added before the call
  * that creates its first state there and removed after the call that
  * releases its last;  folded into those actions.  With
@@ -2524,8 +2698,12 @@ void drop_presence_hints(const World& w0, std::vector<Action>& acts)
   const auto dead = w0.dead();
   for (const auto& h : w0.hints) {
     if (h.kind != HintKind::PRESENCE || h.target != HintTarget::HEAD ||
-	!dead.count(h.incarnation) || w0.head.opens.count(h.incarnation)) {
+	!dead.count(h.incarnation)) {
       continue;
+    }
+    if (auto i = w0.head.opens.find(h.incarnation);
+	i != w0.head.opens.end() && !i->second.handles.empty()) {
+      continue;                  // its opens, not only its kept seqs
     }
     if (!w0.graced.count(h.incarnation) &&
 	!FSIO_SKIP_CHECK(H2_HINT_DROPPED_AFTER_GRACE)) {
@@ -2533,6 +2711,11 @@ void drop_presence_hints(const World& w0, std::vector<Action>& acts)
     }
     acts.push_back({fmt::format("expirer drop-hint {}", h.incarnation),
 	[h](World& w) -> std::optional<std::string> {
+	  /* §4.3 step 6:  the last_seq its expired handles kept goes
+	   * first, then the hint (Z22) */
+	  cls_rgw_fsio_effects fx;
+	  fsio::drop_seqs(w.head, h.incarnation, fx);
+	  apply_remove_head(w, fx);
 	  w.hints.erase(h);
 	  return std::nullopt;
 	}});
@@ -2749,6 +2932,7 @@ struct Explorer {
 	gw_actions(w, gi, acts);
       }
       presence_hints(w, gi, acts, first);
+      resend_actions(w, gi, acts);
     }
     if (cfg.versioned) {
       s3_actions_v(w, acts);
@@ -2937,6 +3121,36 @@ struct Explorer {
     return {NO_LOW, r};
   }
 
+  /* FSIO_MODEL_DUMP=1:  during a prefix, what each step left */
+  bool dump = false;
+  static void dump_state(const World& w, const std::string& step) {
+    std::string s = fmt::format("[fsio-model] after {}:\n  chunk sets:", step);
+    if (w.head.hdr) {
+      for (const auto& e : w.head.hdr->chunk_sets) {
+	s += fmt::format(" {}={}", sname(e.id), (int)e.state);
+      }
+      if (w.head.hdr->cur_shadow) {
+	s += fmt::format("  cur_shadow {}", sname(*w.head.hdr->cur_shadow));
+      }
+    } else {
+      s += " (no header)";
+    }
+    s += "\n  opens:";
+    for (const auto& [i, o] : w.head.opens) {
+      for (const auto& [k, ho] : o.handles) {
+	for (const auto& [cs, c] : ho.chunk_sets) {
+	  s += fmt::format(" {}.{}:{} r{} w{}", i, k, sname(cs), c.readers,
+			   c.writers);
+	}
+      }
+    }
+    s += fmt::format("\n  storage: {}\n  gc queue:", fmt::join(w.storage, " "));
+    for (const auto& q : w.gcq) {
+      s += fmt::format(" [{}]", fmt::join(q, ","));
+    }
+    std::cerr << s << "\n";
+  }
+
   uint64_t transitions = 0, revisits = 0, background_only = 0;
   Visit dfs(const World& w) {
     if (states >= limit) return {};
@@ -3036,6 +3250,9 @@ struct Explorer {
       World n = w;
       path.push_back(a.name);
       auto v = a.run(n);
+      if (dump && path.size() <= prefix.size()) {
+	dump_state(n, a.name);
+      }
       if (!v) v = check_state(n);
       if (v) {
 	report(*v);
@@ -3140,6 +3357,7 @@ TEST(FSIOModel, Explore)
   x.stop_at_first = env_int("FSIO_MODEL_STOP_AT_FIRST", 0);
   x.commute_sample = env_int("FSIO_MODEL_COMMUTE_SAMPLE", 0);
   x.livelock = env_int("FSIO_MODEL_LIVELOCK", 1);
+  x.dump = env_int("FSIO_MODEL_DUMP", 0);
   if (auto c = std::getenv("FSIO_MODEL_SKIP_CHECK")) {
     const std::map<std::string, cls_rgw_fsio_check> checks = {
       {"W5_FINALIZE_RECHECKS_STATE", cls_rgw_fsio_check::W5_FINALIZE_RECHECKS_STATE},
@@ -3194,6 +3412,11 @@ TEST(FSIOModel, Explore)
        cls_rgw_fsio_check::W15_CONSTRUCTOR_MAY_ABANDON},
       {"RESUME_RESOLVES_CLAIM", cls_rgw_fsio_check::RESUME_RESOLVES_CLAIM},
       {"RESUME_REPLACES_CLAIM", cls_rgw_fsio_check::RESUME_REPLACES_CLAIM},
+      {"Z22_COUNTED_CALL_CHECKS_SEQ",
+       cls_rgw_fsio_check::Z22_COUNTED_CALL_CHECKS_SEQ},
+      {"Z22_ABANDON_WAITS_FOR_GRACE",
+       cls_rgw_fsio_check::Z22_ABANDON_WAITS_FOR_GRACE},
+      {"Z22_EXPIRY_KEEPS_SEQ", cls_rgw_fsio_check::Z22_EXPIRY_KEEPS_SEQ},
       {"W20_RELEASE_CHECKS_PUBLISHER",
        cls_rgw_fsio_check::W20_RELEASE_CHECKS_PUBLISHER},
     };
@@ -3205,6 +3428,7 @@ TEST(FSIOModel, Explore)
   cfg.crashes = env_int("FSIO_MODEL_CRASHES", 1);
   cfg.zombies = env_int("FSIO_MODEL_ZOMBIES", 1);
   cfg.expirer_crashes = env_int("FSIO_MODEL_EXPIRER_CRASHES", 1);
+  cfg.resends = env_int("FSIO_MODEL_RESENDS", 1);
   cfg.versioned = env_int("FSIO_MODEL_VERSIONED", 0);
   if (auto v = std::getenv("FSIO_MODEL_VSTART")) {
     cfg.vstart_null = std::string(v) == "null";

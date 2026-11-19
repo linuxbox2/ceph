@@ -68,6 +68,9 @@ enum class cls_rgw_fsio_check : uint8_t {
   W20_RELEASE_CHECKS_PUBLISHER,        // fsio_publish_release
   RESUME_RESOLVES_CLAIM,               // the expirer's resumed versioned finalize (model)
   RESUME_REPLACES_CLAIM,               // fsio_fenced_finalize, a takeover with an intent
+  Z22_COUNTED_CALL_CHECKS_SEQ,         // fsio_join, fsio_leave, fsio_rebind
+  Z22_ABANDON_WAITS_FOR_GRACE,         // the expirer's abandon of a construction (model)
+  Z22_EXPIRY_KEEPS_SEQ,                // settle, an expired handle's last_seq
 };
 
 #ifdef CLS_RGW_FSIO_SKIP_CHECKS
@@ -351,15 +354,23 @@ WRITE_CLASS_ENCODER(cls_rgw_fsio_handle_opens)
  * by handle (Z4) */
 struct cls_rgw_fsio_opens {
   std::map<uint64_t, cls_rgw_fsio_handle_opens> handles;
+  /* a presumed-dead incarnation's handles whose counts expiry removed:
+   * each one's last_seq, kept until its grace has elapsed, so a resend
+   * still in flight is answered already applied (§3, Z22) */
+  std::map<uint64_t, uint64_t> seqs;
 
   void encode(ceph::buffer::list& bl) const {
-    ENCODE_START(1, 1, bl);
+    ENCODE_START(2, 1, bl);
     encode(handles, bl);
+    encode(seqs, bl);
     ENCODE_FINISH(bl);
   }
   void decode(ceph::buffer::list::const_iterator& bl) {
-    DECODE_START(1, bl);
+    DECODE_START(2, bl);
     decode(handles, bl);
+    if (struct_v >= 2) {
+      decode(seqs, bl);
+    }
     DECODE_FINISH(bl);
   }
 };
@@ -401,6 +412,8 @@ struct cls_rgw_fsio_head {
   cls_rgw_fsio_counts bound(const cls_rgw_fsio_id& cs) const;
   /* one handle's opens, or null */
   cls_rgw_fsio_handle_opens* find(const cls_rgw_fsio_handle& c);
+  /* any handle's opens;  an expired handle's kept last_seq is not one */
+  bool holds_opens() const;
   /* one handle's counts on cs, created if absent */
   cls_rgw_fsio_counts& counts(const cls_rgw_fsio_handle& c,
 			      const cls_rgw_fsio_id& cs);
@@ -517,8 +530,12 @@ namespace cls_rgw_fsio {
 
 using expired_t = std::set<uint64_t>;
 
+/* the counted calls (join, leave, rebind) carry the handle's sequence
+ * number;  one not newer than the handle's last_seq changes nothing and
+ * returns already_applied (§3, Z22) */
 struct join_in {
   cls_rgw_fsio_handle caller;
+  uint64_t seq = 0;
   bool writer = false;
   uint64_t nonce = 0;
   uint64_t counter_seed = 0;
@@ -528,6 +545,7 @@ struct join_in {
 struct join_out {
   cls_rgw_fsio_id bound;
   bool construct = false;
+  bool already_applied = false;
 };
 int join(cls_rgw_fsio_head& h, const join_in& in, join_out& out,
 	 cls_rgw_fsio_effects& fx);
@@ -546,6 +564,7 @@ struct publish_intent {
 };
 
 struct leave_out {
+  bool already_applied = false;
   bool publishing = false;
   bool abandoned = false;           // a constructing shadow, its constructor gave up (§3.4)
   uint64_t olh_epoch = 0;           // versioned:  recorded at the transition
@@ -553,13 +572,16 @@ struct leave_out {
   std::optional<cls_rgw_fsio_id> drained;
 };
 int leave(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& caller,
-	  const cls_rgw_fsio_id& cs, bool writer, const expired_t& expired,
-	  leave_out& out, cls_rgw_fsio_effects& fx,
+	  uint64_t seq, const cls_rgw_fsio_id& cs, bool writer,
+	  const expired_t& expired, leave_out& out, cls_rgw_fsio_effects& fx,
 	  const publish_intent* intent = nullptr);
 
+struct rebind_out {
+  bool already_applied = false;
+};
 int rebind(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& caller,
-	   const cls_rgw_fsio_id& from, const cls_rgw_fsio_id& to,
-	   uint32_t readers);
+	   uint64_t seq, const cls_rgw_fsio_id& from, const cls_rgw_fsio_id& to,
+	   uint32_t readers, rebind_out* out = nullptr);
 
 enum class replace_mode { SUPERSEDE, DELETE, PUBLISH,
   REMOVE_NULL };                   // version removal of the null version (§2.5a)
@@ -583,6 +605,11 @@ int replace_head(cls_rgw_fsio_head& h, const replace_in& in, replace_out& out,
 
 int publish_release(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& caller,
 		    const cls_rgw_fsio_id& cs);
+
+/* after an incarnation's grace:  the last_seq its expired handles kept
+ * goes (§4.3, Z22) */
+int drop_seqs(cls_rgw_fsio_head& h, uint64_t incarnation,
+	      cls_rgw_fsio_effects& fx);
 
 int forget(cls_rgw_fsio_head& h, const cls_rgw_fsio_id& cs,
 	   cls_rgw_fsio_effects& fx);
