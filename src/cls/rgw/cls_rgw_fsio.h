@@ -616,6 +616,25 @@ int extend(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& caller,
 	   const cls_rgw_fsio_id& cs, const cls_rgw_fsio_run& run,
 	   size_t max_runs = extent_max_runs);
 
+/* §3.3, §2.7:  a writer's size and mtime hint, merged by max within a
+ * truncate epoch;  an older epoch merges nothing, and the writer rebases
+ * from the current epoch and size returned */
+struct hint_out {
+  bool stale = false;          // the caller's epoch was older:  nothing merged
+  bool others = false;         // another handle has an open on the shadow or the published set
+  uint64_t trunc_epoch = 0;
+  uint64_t size = 0;
+};
+int hint(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& caller,
+	 const cls_rgw_fsio_id& cs, uint64_t trunc_epoch_seen, uint64_t size,
+	 uint64_t mtime, hint_out& out);
+
+/* §3.3:  ftruncate():  size and mtime set exactly, a new truncate epoch,
+ * trunc_low lowered to the size;  after the chunks changed */
+int truncate(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& caller,
+	     const cls_rgw_fsio_id& cs, uint64_t size, uint64_t mtime,
+	     uint64_t& trunc_epoch_out);
+
 /* versioned:  the publish the last writer's transition records (§4.2) */
 struct publish_intent {
   std::string instance;             // chosen before the placeholder

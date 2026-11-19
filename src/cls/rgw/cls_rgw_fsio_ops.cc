@@ -358,6 +358,50 @@ int rgw_fsio_ready(cls_method_context_t hctx, ceph::buffer::list* in,
   });
 }
 
+int rgw_fsio_hint(cls_method_context_t hctx, ceph::buffer::list* in,
+		  ceph::buffer::list* out)
+{
+  cls_rgw_fsio_hint_size_op op;
+  if (int r = decode_op(in, op, __func__); r < 0) {
+    return r;
+  }
+  cls_rgw_fsio_hint_size_ret ret;
+  int r = on_head(hctx, {}, [&](auto& h, auto&) {
+    fsio::hint_out hout;
+    int r = fsio::hint(h, op.caller, op.cs, op.trunc_epoch, op.size,
+		       op.mtime, hout);
+    ret.stale = hout.stale;
+    ret.others = hout.others;
+    ret.trunc_epoch = hout.trunc_epoch;
+    ret.size = hout.size;
+    return r;
+  });
+  if (r < 0) {
+    return r;
+  }
+  encode(ret, *out);
+  return 0;
+}
+
+int rgw_fsio_truncate(cls_method_context_t hctx, ceph::buffer::list* in,
+		      ceph::buffer::list* out)
+{
+  cls_rgw_fsio_truncate_op op;
+  if (int r = decode_op(in, op, __func__); r < 0) {
+    return r;
+  }
+  cls_rgw_fsio_truncate_ret ret;
+  int r = on_head(hctx, {}, [&](auto& h, auto&) {
+    return fsio::truncate(h, op.caller, op.cs, op.size, op.mtime,
+			  ret.trunc_epoch);
+  });
+  if (r < 0) {
+    return r;
+  }
+  encode(ret, *out);
+  return 0;
+}
+
 int rgw_fsio_extend(cls_method_context_t hctx, ceph::buffer::list* in,
 		ceph::buffer::list* out)
 {
@@ -829,7 +873,7 @@ void cls_rgw_fsio_register(cls_handle_t h_class)
 {
   using namespace cls::rgw::method;
   ClassRegistrar<cls::rgw::ClassId> cls(h_class);
-  static cls_method_handle_t h[19];
+  static cls_method_handle_t h[21];
   cls.register_cxx_method(fsio_join, rgw_fsio_join, &h[0]);
   cls.register_cxx_method(fsio_ready, rgw_fsio_ready, &h[1]);
   cls.register_cxx_method(fsio_extend, rgw_fsio_extend, &h[2]);
@@ -850,4 +894,6 @@ void cls_rgw_fsio_register(cls_handle_t h_class)
   cls.register_cxx_method(fsio_open_hint_remove, rgw_fsio_open_hint_remove,
 			  &h[17]);
   cls.register_cxx_method(fsio_open_hint_list, rgw_fsio_open_hint_list, &h[18]);
+  cls.register_cxx_method(fsio_hint, rgw_fsio_hint, &h[19]);
+  cls.register_cxx_method(fsio_truncate, rgw_fsio_truncate, &h[20]);
 }

@@ -79,6 +79,21 @@ namespace m = ::cls::rgw::method;
   return detail::call(m::fsio_extend, in);
 }
 
+/* §3.3:  a writer's size and mtime hint, and ftruncate()'s exact set */
+[[nodiscard]] inline auto hint(const cls_rgw_fsio_hint_size_op& in,
+                               cls_rgw_fsio_hint_size_ret* ret = nullptr,
+                               boost::system::error_code* ec = nullptr)
+{
+  return detail::call(m::fsio_hint, in, ret, ec);
+}
+
+[[nodiscard]] inline auto truncate(const cls_rgw_fsio_truncate_op& in,
+                                   cls_rgw_fsio_truncate_ret* ret = nullptr,
+                                   boost::system::error_code* ec = nullptr)
+{
+  return detail::call(m::fsio_truncate, in, ret, ec);
+}
+
 [[nodiscard]] inline auto leave(const cls_rgw_fsio_leave_op& in,
                                 cls_rgw_fsio_leave_ret* ret = nullptr,
                                 boost::system::error_code* ec = nullptr)

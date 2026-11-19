@@ -5,7 +5,8 @@
  * the records each writes and removes, its reply, and the clone it
  * makes;  the transitions themselves are unittest_cls_rgw_fsio's.  And
  * the FSIO open hints on a hint shard (§2.7):  the key each is stored
- * under, listing in pages and by filter, removal. */
+ * under, listing in pages and by filter, removal.  And the shadow's size
+ * hint and truncate (§3.3):  their replies and the stored record. */
 
 #include <coroutine>
 #include <string>
@@ -298,5 +299,69 @@ CORO_TEST_F(NeoRadosClsRgwFsio, OpenHintListFilters, NeoRadosTest) {
     EXPECT_TRUE(ret.hints.empty());
     EXPECT_FALSE(ret.truncated);
   }
+  co_return;
+}
+
+/* §3.3:  a writer's hint merges by max in its epoch;  a truncate sets
+ * the size exactly in a new epoch;  a hint from the old epoch merges
+ * nothing and gets the current epoch and size */
+CORO_TEST_F(NeoRadosClsRgwFsio, HintAndTruncate, NeoRadosTest) {
+  const auto head = head_of(oid);
+  co_await execute(head, make_head());
+  cls_rgw_fsio_join_ret jret;
+  co_await execute(head, WriteOp{}.exec(f::join(join_op(1, true), &jret)));
+  EXPECT_TRUE(jret.construct);
+  if (!jret.construct) {
+    co_return;
+  }
+  cls_rgw_fsio_runs_op rop;
+  rop.caller = GW1;
+  rop.cs = jret.bound;
+  rop.runs = {{0, 0}};
+  co_await execute(head, WriteOp{}.exec(f::ready(rop)));
+
+  cls_rgw_fsio_hint_size_op hop;
+  hop.caller = GW1;
+  hop.cs = jret.bound;
+  hop.trunc_epoch = 0;
+  hop.size = 100;
+  hop.mtime = 5;
+  cls_rgw_fsio_hint_size_ret hret;
+  co_await execute(head, WriteOp{}.exec(f::hint(hop, &hret)));
+  EXPECT_FALSE(hret.stale);
+  EXPECT_FALSE(hret.others);
+  EXPECT_EQ(100u, hret.size);
+
+  cls_rgw_fsio_truncate_op top;
+  top.caller = GW1;
+  top.cs = jret.bound;
+  top.size = 40;
+  top.mtime = 7;
+  cls_rgw_fsio_truncate_ret tret;
+  co_await execute(head, WriteOp{}.exec(f::truncate(top, &tret)));
+  EXPECT_EQ(1u, tret.trunc_epoch);
+
+  hop.size = 500;
+  hop.mtime = 8;
+  co_await execute(head, WriteOp{}.exec(f::hint(hop, &hret)));
+  EXPECT_TRUE(hret.stale);
+  EXPECT_EQ(1u, hret.trunc_epoch);
+  EXPECT_EQ(40u, hret.size);
+
+  /* the stored record:  the truncate's size, its epoch and trunc_low */
+  ceph::buffer::list v;
+  co_await execute(head, ReadOp{}.get_xattr(HDR, &v));
+  cls_rgw_fsio_hdr hdr;
+  auto it = v.cbegin();
+  decode(hdr, it);
+  const auto* e = hdr.find(jret.bound);
+  EXPECT_TRUE(e && e->shadow);
+  if (!e || !e->shadow) {
+    co_return;
+  }
+  EXPECT_EQ(40u, e->shadow->size_hint);
+  EXPECT_EQ(7u, e->shadow->mtime_hint);
+  EXPECT_EQ(1u, e->shadow->trunc_epoch);
+  EXPECT_EQ(std::optional<uint64_t>(40), e->shadow->trunc_low);
   co_return;
 }

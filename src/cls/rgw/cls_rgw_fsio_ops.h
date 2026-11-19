@@ -192,6 +192,106 @@ struct cls_rgw_fsio_leave_ret {
 };
 WRITE_CLASS_ENCODER(cls_rgw_fsio_leave_ret)
 
+/* fsio_hint (§3.3):  a writer's size and mtime, with the truncate epoch
+ * it last saw */
+struct cls_rgw_fsio_hint_size_op {
+  cls_rgw_fsio_handle caller;
+  cls_rgw_fsio_id cs;
+  uint64_t trunc_epoch = 0;
+  uint64_t size = 0;
+  uint64_t mtime = 0;
+
+  void encode(ceph::buffer::list& bl) const {
+    ENCODE_START(1, 1, bl);
+    encode(caller, bl);
+    encode(cs, bl);
+    encode(trunc_epoch, bl);
+    encode(size, bl);
+    encode(mtime, bl);
+    ENCODE_FINISH(bl);
+  }
+  void decode(ceph::buffer::list::const_iterator& bl) {
+    DECODE_START(1, bl);
+    decode(caller, bl);
+    decode(cs, bl);
+    decode(trunc_epoch, bl);
+    decode(size, bl);
+    decode(mtime, bl);
+    DECODE_FINISH(bl);
+  }
+};
+WRITE_CLASS_ENCODER(cls_rgw_fsio_hint_size_op)
+
+/* the current epoch and size, to rebase from;  whether the report was
+ * stale, and whether another handle has an open bound to the shadow or
+ * the published chunk set */
+struct cls_rgw_fsio_hint_size_ret {
+  bool stale = false;
+  bool others = false;
+  uint64_t trunc_epoch = 0;
+  uint64_t size = 0;
+
+  void encode(ceph::buffer::list& bl) const {
+    ENCODE_START(1, 1, bl);
+    encode(stale, bl);
+    encode(others, bl);
+    encode(trunc_epoch, bl);
+    encode(size, bl);
+    ENCODE_FINISH(bl);
+  }
+  void decode(ceph::buffer::list::const_iterator& bl) {
+    DECODE_START(1, bl);
+    decode(stale, bl);
+    decode(others, bl);
+    decode(trunc_epoch, bl);
+    decode(size, bl);
+    DECODE_FINISH(bl);
+  }
+};
+WRITE_CLASS_ENCODER(cls_rgw_fsio_hint_size_ret)
+
+/* fsio_truncate (§3.3):  the size and mtime ftruncate() set */
+struct cls_rgw_fsio_truncate_op {
+  cls_rgw_fsio_handle caller;
+  cls_rgw_fsio_id cs;
+  uint64_t size = 0;
+  uint64_t mtime = 0;
+
+  void encode(ceph::buffer::list& bl) const {
+    ENCODE_START(1, 1, bl);
+    encode(caller, bl);
+    encode(cs, bl);
+    encode(size, bl);
+    encode(mtime, bl);
+    ENCODE_FINISH(bl);
+  }
+  void decode(ceph::buffer::list::const_iterator& bl) {
+    DECODE_START(1, bl);
+    decode(caller, bl);
+    decode(cs, bl);
+    decode(size, bl);
+    decode(mtime, bl);
+    DECODE_FINISH(bl);
+  }
+};
+WRITE_CLASS_ENCODER(cls_rgw_fsio_truncate_op)
+
+struct cls_rgw_fsio_truncate_ret {
+  uint64_t trunc_epoch = 0;      // the new epoch
+
+  void encode(ceph::buffer::list& bl) const {
+    ENCODE_START(1, 1, bl);
+    encode(trunc_epoch, bl);
+    ENCODE_FINISH(bl);
+  }
+  void decode(ceph::buffer::list::const_iterator& bl) {
+    DECODE_START(1, bl);
+    decode(trunc_epoch, bl);
+    DECODE_FINISH(bl);
+  }
+};
+WRITE_CLASS_ENCODER(cls_rgw_fsio_truncate_ret)
+
 /* fsio_rebind */
 struct cls_rgw_fsio_rebind_op {
   cls_rgw_fsio_handle caller;
@@ -644,6 +744,8 @@ namespace cls::rgw::method {
 constexpr auto fsio_join = ClsMethod<RdWrTag, ClassId>("fsio_join");
 constexpr auto fsio_ready = ClsMethod<RdWrTag, ClassId>("fsio_ready");
 constexpr auto fsio_extend = ClsMethod<RdWrTag, ClassId>("fsio_extend");
+constexpr auto fsio_hint = ClsMethod<RdWrTag, ClassId>("fsio_hint");
+constexpr auto fsio_truncate = ClsMethod<RdWrTag, ClassId>("fsio_truncate");
 constexpr auto fsio_leave = ClsMethod<RdWrTag, ClassId>("fsio_leave");
 constexpr auto fsio_rebind = ClsMethod<RdWrTag, ClassId>("fsio_rebind");
 constexpr auto fsio_publish_release =

@@ -60,7 +60,7 @@ cls_rgw_fsio_id join_reader(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& inc
   return out.bound;
 }
 
-/* the last writer's leave:  the shadow goes publishing */
+/* the last writer gives up its write open:  the shadow goes publishing */
 void leave_writer(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& inc,
 		  const cls_rgw_fsio_id& cs)
 {
@@ -952,6 +952,114 @@ TEST(cls_rgw_fsio_versioned, null_removal_retires_the_head_chunk_set)
 }
 
 /* every check's tests fail without it */
+/* §3.3, §2.7:  a writer's size and mtime hint merges by max within a
+ * truncate epoch */
+TEST(cls_rgw_fsio_size, hint_merges_by_max_within_an_epoch)
+{
+  auto h = head("C0");
+  const auto s = construct(h, GW1);
+  fsio::hint_out out;
+  ASSERT_EQ(0, fsio::hint(h, GW1, s, 0, 100, 5, out));
+  EXPECT_FALSE(out.stale);
+  EXPECT_EQ(100u, out.size);
+  ASSERT_EQ(0, fsio::hint(h, GW1, s, 0, 50, 9, out));
+  EXPECT_EQ(100u, out.size);           // a lower size does not lower it
+  const auto& sh = *h.hdr->find(s)->shadow;
+  EXPECT_EQ(100u, sh.size_hint);
+  EXPECT_EQ(9u, sh.mtime_hint);
+}
+
+/* a truncate sets the size exactly in a new epoch, and lowers trunc_low
+ * only when smaller */
+TEST(cls_rgw_fsio_size, truncate_sets_exactly)
+{
+  auto h = head("C0");
+  const auto s = construct(h, GW1);
+  fsio::hint_out out;
+  ASSERT_EQ(0, fsio::hint(h, GW1, s, 0, 100, 5, out));
+  uint64_t epoch = 0;
+  ASSERT_EQ(0, fsio::truncate(h, GW1, s, 60, 6, epoch));
+  EXPECT_EQ(1u, epoch);
+  const auto& sh = *h.hdr->find(s)->shadow;
+  EXPECT_EQ(60u, sh.size_hint);
+  EXPECT_EQ(6u, sh.mtime_hint);
+  ASSERT_TRUE(sh.trunc_low);
+  EXPECT_EQ(60u, *sh.trunc_low);
+  ASSERT_EQ(0, fsio::truncate(h, GW1, s, 80, 7, epoch));
+  EXPECT_EQ(2u, epoch);
+  EXPECT_EQ(80u, sh.size_hint);        // exactly, though larger
+  EXPECT_EQ(60u, *sh.trunc_low);       // the smallest size set
+}
+
+/* a report from an older epoch merges nothing:  the writer gets the
+ * current epoch and size to rebase from */
+TEST(cls_rgw_fsio_size, a_stale_hint_merges_nothing)
+{
+  auto h = head("C0");
+  const auto s = construct(h, GW1);
+  uint64_t epoch = 0;
+  ASSERT_EQ(0, fsio::truncate(h, GW1, s, 40, 7, epoch));
+  fsio::hint_out out;
+  ASSERT_EQ(0, fsio::hint(h, GW1, s, 0, 500, 8, out));
+  EXPECT_TRUE(out.stale);
+  EXPECT_EQ(1u, out.trunc_epoch);
+  EXPECT_EQ(40u, out.size);
+  EXPECT_EQ(40u, h.hdr->find(s)->shadow->size_hint);
+  ASSERT_EQ(0, fsio::hint(h, GW1, s, out.trunc_epoch, 500, 8, out));
+  EXPECT_FALSE(out.stale);             // rebased:  merged
+  EXPECT_EQ(500u, out.size);
+}
+
+/* the hint says whether another handle has an open on the shadow or the
+ * published chunk set:  another gateway's, or a sibling's (Z4) */
+TEST(cls_rgw_fsio_size, hint_reports_other_opens)
+{
+  auto h = head("C0");
+  const auto s = construct(h, GW1);
+  fsio::hint_out out;
+  ASSERT_EQ(0, fsio::hint(h, GW1, s, 0, 10, 1, out));
+  EXPECT_FALSE(out.others);
+  join_reader(h, GW2);                 // bound to the published set
+  ASSERT_EQ(0, fsio::hint(h, GW1, s, 0, 10, 1, out));
+  EXPECT_TRUE(out.others);
+
+  auto h2 = head("C0");
+  const auto s2 = construct(h2, GW1);
+  join_reader(h2, cls_rgw_fsio_handle{I1, 2});   // GW1's sibling handle
+  ASSERT_EQ(0, fsio::hint(h2, GW1, s2, 0, 10, 1, out));
+  EXPECT_TRUE(out.others);
+}
+
+/* W14:  a publishing shadow's size is final:  the hint changes nothing
+ * and returns as usual, the truncate returns ERR_FSIO_BUSY */
+TEST(cls_rgw_fsio_size, publishing_freezes_the_size)
+{
+  auto h = head("C0");
+  const auto s = construct(h, GW1);
+  fsio::hint_out out;
+  ASSERT_EQ(0, fsio::hint(h, GW1, s, 0, 100, 5, out));
+  leave_writer(h, GW1, s);             // the open stays, the shadow publishing
+  ASSERT_EQ(0, fsio::hint(h, GW1, s, 0, 500, 9, out));
+  EXPECT_EQ(100u, out.size);
+  EXPECT_EQ(100u, h.hdr->find(s)->shadow->size_hint);
+  uint64_t epoch = 0;
+  EXPECT_EQ(-CLS_RGW_ERR_FSIO_BUSY, fsio::truncate(h, GW1, s, 10, 9, epoch));
+  EXPECT_EQ(0u, h.hdr->find(s)->shadow->trunc_epoch);
+}
+
+/* only a handle with a writer open on the shadow reports on it */
+TEST(cls_rgw_fsio_size, only_a_writer_reports)
+{
+  auto h = head("C0");
+  const auto s = construct(h, GW1);
+  join_reader(h, GW2);
+  fsio::hint_out out;
+  EXPECT_EQ(-EINVAL, fsio::hint(h, GW2, s, 0, 10, 1, out));
+  uint64_t epoch = 0;
+  EXPECT_EQ(-EINVAL, fsio::truncate(h, GW2, s, 10, 1, epoch));
+  EXPECT_EQ(-EINVAL, fsio::hint(h, GW1, cls_rgw_fsio_id{999, 9}, 0, 10, 1, out));
+}
+
 TEST(cls_rgw_fsio, each_check_is_detected)
 {
   const std::pair<cls_rgw_fsio_check, void (*)()> table[] = {

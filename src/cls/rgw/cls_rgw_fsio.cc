@@ -511,6 +511,90 @@ int extend(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& caller,
 
 namespace {
 
+/* the shadow a writer reports on:  it holds a writer open there, as
+ * fsio_extend requires */
+cls_rgw_fsio_chunk_set* writer_shadow(cls_rgw_fsio_head& h,
+				      const cls_rgw_fsio_handle& caller,
+				      const cls_rgw_fsio_id& cs)
+{
+  if (!h.hdr) {
+    return nullptr;
+  }
+  auto* e = h.hdr->find(cs);
+  if (!e || !e->shadow) {
+    return nullptr;
+  }
+  auto* o = h.find(caller);
+  if (!o || !o->chunk_sets.count(cs) || o->chunk_sets[cs].writers == 0) {
+    return nullptr;
+  }
+  return e;
+}
+
+} // anonymous namespace
+
+int hint(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& caller,
+	 const cls_rgw_fsio_id& cs, uint64_t trunc_epoch_seen, uint64_t size,
+	 uint64_t mtime, hint_out& out)
+{
+  out = hint_out{};
+  auto* e = writer_shadow(h, caller, cs);
+  if (!e) {
+    return -EINVAL;
+  }
+  auto& sh = *e->shadow;
+  /* W14:  a publishing shadow's size is final;  the hint changes nothing
+   * and returns as usual */
+  if (e->state != state::PUBLISHING) {
+    if (trunc_epoch_seen == sh.trunc_epoch) {
+      sh.size_hint = std::max(sh.size_hint, size);
+      sh.mtime_hint = std::max(sh.mtime_hint, mtime);
+    } else {
+      out.stale = true;
+    }
+  }
+  out.trunc_epoch = sh.trunc_epoch;
+  out.size = sh.size_hint;
+  /* Z4:  another handle, a sibling in the same process included, with an
+   * open bound to the shadow or to the published chunk set */
+  const auto* pub = published_chunk_set(*h.hdr);
+  for (const auto& [inc, o] : h.opens) {
+    for (const auto& [hdl, ho] : o.handles) {
+      if (cls_rgw_fsio_handle{inc, hdl} == caller) {
+	continue;
+      }
+      for (const auto& [id, c] : ho.chunk_sets) {
+	if ((id == cs || (pub && id == pub->id)) && (c.readers || c.writers)) {
+	  out.others = true;
+	}
+      }
+    }
+  }
+  return 0;
+}
+
+int truncate(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& caller,
+	     const cls_rgw_fsio_id& cs, uint64_t size, uint64_t mtime,
+	     uint64_t& trunc_epoch_out)
+{
+  auto* e = writer_shadow(h, caller, cs);
+  if (!e) {
+    return -EINVAL;
+  }
+  if (e->state == state::PUBLISHING) {
+    return -CLS_RGW_ERR_FSIO_BUSY;    // W14, as fsio_extend
+  }
+  auto& sh = *e->shadow;
+  sh.size_hint = size;
+  sh.mtime_hint = mtime;
+  ++sh.trunc_epoch;
+  sh.trunc_low = sh.trunc_low ? std::min(*sh.trunc_low, size) : size;
+  trunc_epoch_out = sh.trunc_epoch;
+  return 0;
+}
+
+namespace {
+
 int leave_once(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& caller,
 	       const cls_rgw_fsio_id& cs, bool writer, const expired_t& expired,
 	       leave_out& out, cls_rgw_fsio_effects& fx,
