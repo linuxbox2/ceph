@@ -142,13 +142,14 @@ protected:
   }
   /* the publish in the head write's op, RGW's writes after it */
   int publish(const std::string& head, const cls_rgw_fsio_id& s, uint64_t r,
-	      cls_rgw_fsio_replace_ret& ret) {
+	      cls_rgw_fsio_replace_ret& ret, const std::string& tags = {}) {
     ObjectWriteOperation op;
     bufferlist out, t, m;
     int rval = 0;
     auto in = replace(fsio::replace_mode::PUBLISH, r);
     in.caller = GW1;
     in.shadow = s;
+    in.tags.append(tags);
     cls_rgw_fsio_replace_head(op, in, &out, &rval);
     t.append("t1");
     m.append("S");
@@ -568,4 +569,41 @@ TEST_F(FsioHead, UnversionedPublishWithReader)
   EXPECT_EQ((cls_rgw_fsio_id{1005, 7}), *old->clone);
   auto io = keyed(head);
   EXPECT_EQ("old", read(leaf(key, 1005), io));
+}
+
+/* §3.5, Y18, Z15:  a publish keeps the committed head's tags;  onto a
+ * tracking-only head it sets the tags the publisher passes */
+TEST_F(FsioHead, PublishKeepsTags)
+{
+  {
+    std::string key;
+    const auto head = make_head(key);
+    bufferlist tg;
+    tg.append("tagA");
+    ASSERT_EQ(0, ioctx.setxattr(head, "user.rgw.x-amz-tagging", tg));
+    const auto s = write_and_close(head);
+    cls_rgw_fsio_replace_ret ret;
+    ASSERT_EQ(0, publish(head, s, 1010, ret, "ignored"));
+    std::string v;
+    ASSERT_LE(0, getxattr(head, "user.rgw.x-amz-tagging", &v));
+    EXPECT_EQ("tagA", v);
+  }
+  {
+    std::string key;
+    const auto head = make_head(key);
+    const auto s = write_and_close(head);
+    ObjectWriteOperation op;
+    bufferlist out;
+    int rval = 0;
+    auto in = replace(fsio::replace_mode::DELETE, 1011);
+    in.expected_id_tag = "t0";
+    cls_rgw_fsio_replace_head(op, in, &out, &rval);
+    ASSERT_EQ(0, ioctx.operate(head, &op, OPERATION_RETURNVEC));
+    ASSERT_EQ(-ENODATA, getxattr(head, "user.rgw.idtag"));   // tracking-only
+    cls_rgw_fsio_replace_ret ret;
+    ASSERT_EQ(0, publish(head, s, 1012, ret, "tagB"));
+    std::string v;
+    ASSERT_LE(0, getxattr(head, "user.rgw.x-amz-tagging", &v));
+    EXPECT_EQ("tagB", v);
+  }
 }

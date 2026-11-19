@@ -548,6 +548,8 @@ struct cls_rgw_fsio_replace_op {
   std::list<std::string> keep_attr_prefixes;  // as cls_rgw_remove_obj's
   std::string marker;            // the bucket's, to name the leaf clone (§2.7)
   bool keep_tail = false;        // supersede:  the new object reuses the tail (Y2)
+  ceph::buffer::list tags;       // publish onto a tracking-only head:  the
+                                 // tags the content had (§3.5, Z15)
 
   cls_rgw_fsio::replace_in to_core() const {
     cls_rgw_fsio::replace_in in;
@@ -575,6 +577,7 @@ struct cls_rgw_fsio_replace_op {
     encode(keep_attr_prefixes, bl);
     encode(marker, bl);
     encode(keep_tail, bl);
+    encode(tags, bl);
     ENCODE_FINISH(bl);
   }
   void decode(ceph::buffer::list::const_iterator& bl) {
@@ -590,6 +593,7 @@ struct cls_rgw_fsio_replace_op {
     decode(keep_attr_prefixes, bl);
     decode(marker, bl);
     decode(keep_tail, bl);
+    decode(tags, bl);
     DECODE_FINISH(bl);
   }
 };

@@ -21,6 +21,7 @@ static constexpr std::string_view ID_TAG = "user.rgw.idtag";          // RGW_ATT
 static constexpr std::string_view TAIL_TAG = "user.rgw.tail_tag";     // RGW_ATTR_TAIL_TAG
 static constexpr std::string_view MANIFEST = "user.rgw.manifest";     // RGW_ATTR_MANIFEST
 static constexpr std::string_view OLH_INFO = "user.rgw.olh.info";     // RGW_ATTR_OLH_INFO
+static constexpr std::string_view TAGS = "user.rgw.x-amz-tagging";   // RGW_ATTR_TAGS
 static constexpr std::string_view FSIO_PREFIX = "user.rgw.fsio.";
 static constexpr std::string_view HDR = "user.rgw.fsio.hdr";
 static constexpr std::string_view OPENS = "user.rgw.fsio.m.";         // + the incarnation
@@ -755,6 +756,18 @@ int rgw_fsio_replace_head(cls_method_context_t hctx, ceph::buffer::list* in,
       if (!i->first.starts_with(FSIO_PREFIX)) {
 	kept[i->first] = i->second;
       }
+    }
+  }
+  /* §3.5, Y18, Z15, C1:  the publish's only writer of tags:  the
+   * committed head's when it is an S3 object, else the tags the content
+   * had, which the publisher passes */
+  if (in_core.mode == fsio::replace_mode::PUBLISH) {
+    if (!h.id_tag.empty()) {
+      if (auto t = l.all.find(std::string(TAGS)); t != l.all.end()) {
+	kept[t->first] = t->second;
+      }
+    } else if (op.tags.length()) {
+      kept[std::string(TAGS)] = op.tags;
     }
   }
   if (!fx.remove_head) {
