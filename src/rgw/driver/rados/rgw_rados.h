@@ -769,6 +769,20 @@ public:
     int prepare_atomic_modification(const DoutPrefixProvider *dpp, librados::ObjectWriteOperation& op, bool reset_obj,
                                     const std::string *ptag, bool modify_tail, bool set_attr_id_tag, optional_yield y);
     int complete_atomic_modification(const DoutPrefixProvider *dpp, bool keep_tail, optional_yield y);
+    /* fsio_replace_head's reply, when this head write carries it
+     * (FSIO_RADOS_DESIGN.md §3);  reset by each prepare */
+    struct fsio_reply {
+      bufferlist out;
+      int rval;
+      fsio_reply() : rval(0) {}
+    };
+    std::optional<fsio_reply> fsio_replaced;
+    /* the head's replacement in a head write:  FSIO's in an FSIO-enabled
+     * bucket, else remove_rgw_head_obj() */
+    void replace_head(const DoutPrefixProvider *dpp, librados::ObjectWriteOperation& op,
+                      optional_yield y);
+    /* the reply's keep_tail;  false without one */
+    bool fsio_keep_tail() const;
 
   public:
     Object(RGWRados *_store, const RGWBucketInfo& _bucket_info, RGWObjectCtx& _ctx, const rgw_obj& _obj) : store(_store), bucket_info(_bucket_info),

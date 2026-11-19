@@ -317,6 +317,23 @@ target_link_libraries(ceph_test_librgw_file
   )
 install(TARGETS ceph_test_librgw_file DESTINATION ${CMAKE_INSTALL_BINDIR})
 
+# FSIO's PUT hook through RGW's write path (FSIO_RADOS_DESIGN.md §3.6)
+add_executable(ceph_test_librgw_file_fsio_put
+  librgw_file_fsio_put.cc
+  ${CMAKE_SOURCE_DIR}/src/cls/rgw/cls_rgw_fsio.cc
+  )
+target_link_libraries(ceph_test_librgw_file_fsio_put
+  rgw
+  librados
+  cls_rgw_client
+  cls_rgw_gc_client
+  ceph-common
+  ${UNITTEST_LIBS}
+  ${EXTRALIBS}
+  ${ALLOC_LIBS}
+  )
+install(TARGETS ceph_test_librgw_file_fsio_put DESTINATION ${CMAKE_INSTALL_BINDIR})
+
 add_dependencies(ceph_test_librgw_file
   ceph_test_librgw_file_cd
   ceph_test_librgw_file_gp

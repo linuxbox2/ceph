@@ -47,6 +47,7 @@
 
 #include "cls/rgw/cls_rgw_ops.h"
 #include "cls/rgw/cls_rgw_client.h"
+#include "cls/rgw/cls_rgw_fsio_ops.h"
 #include "cls/rgw/cls_rgw_const.h"
 #include "cls/refcount/cls_refcount_client.h"
 #include "cls/version/cls_version_client.h"
@@ -3737,7 +3738,9 @@ int RGWRados::Object::Write::_do_write_meta(uint64_t size, uint64_t accounted_si
   auto& ioctx = ref.ioctx;
 
   tracepoint(rgw_rados, operate_enter, req_id.c_str());
-  r = rgw_rados_operate(rctx.dpp, ref.ioctx, ref.obj.oid, std::move(op), rctx.y, 0, &trace, &epoch);
+  r = rgw_rados_operate(rctx.dpp, ref.ioctx, ref.obj.oid, std::move(op), rctx.y,
+                        target->fsio_replaced ? librados::OPERATION_RETURNVEC : 0,
+                        &trace, &epoch);
   tracepoint(rgw_rados, operate_exit, req_id.c_str());
   if (r < 0) { /* we can expect to get -ECANCELED if object was replaced under,
                 or -ENOENT if was removed, or -EEXIST if it did not exist
@@ -3751,7 +3754,8 @@ int RGWRados::Object::Write::_do_write_meta(uint64_t size, uint64_t accounted_si
 
   poolid = ioctx.get_id();
 
-  r = target->complete_atomic_modification(rctx.dpp, meta.keep_tail, rctx.y);
+  r = target->complete_atomic_modification(
+    rctx.dpp, meta.keep_tail || target->fsio_keep_tail(), rctx.y);
   if (r < 0) {
     ldpp_dout(rctx.dpp, 0) << "ERROR: complete_atomic_modification returned r=" << r << dendl;
   }
@@ -7104,6 +7108,45 @@ void RGWRados::remove_rgw_head_obj(ObjectWriteOperation& op)
   cls_rgw_remove_obj(op, prefixes);
 }
 
+void RGWRados::Object::replace_head(const DoutPrefixProvider *dpp,
+                                    ObjectWriteOperation& op,
+                                    optional_yield y)
+{
+  if (!store->fsio_enabled(dpp, bucket_info, y)) {
+    store->remove_rgw_head_obj(op);
+    return;
+  }
+  /* FSIO_RADOS_DESIGN.md §3.6:  the supersede, in place of
+   * cls_rgw_remove_obj, keeping the OLH attributes as it does;  the leaf
+   * clone's r drawn at random */
+  cls_rgw_fsio_replace_op call;
+  call.mode = static_cast<uint8_t>(cls_rgw_fsio::replace_mode::SUPERSEDE);
+  call.r = {ceph::util::generate_random_number<uint64_t>(),
+            ceph::util::generate_random_number<uint64_t>()};
+  call.keep_attr_prefixes = {RGW_ATTR_OLH_PREFIX};
+  call.marker = bucket_info.bucket.marker;
+  fsio_replaced.emplace();
+  cls_rgw_fsio_replace_head(op, call, &fsio_replaced->out,
+                            &fsio_replaced->rval);
+}
+
+bool RGWRados::Object::fsio_keep_tail() const
+{
+  if (!fsio_replaced || fsio_replaced->rval < 0) {
+    return false;
+  }
+  try {
+    cls_rgw_fsio_replace_ret ret;
+    auto it = fsio_replaced->out.cbegin();
+    decode(ret, it);
+    return ret.keep_tail;
+  } catch (const ceph::buffer::error&) {
+    /* no reply where one was asked for:  keep the tail, never collect
+     * content an FSIO reader may hold;  at worst a leak */
+    return true;
+  }
+}
+
 void RGWRados::cls_obj_check_prefix_exist(ObjectOperation& op, const string& prefix, bool fail_if_exist)
 {
   cls_rgw_obj_check_attrs_prefix(op, prefix, fail_if_exist);
@@ -8050,12 +8093,13 @@ int RGWRados::Object::check_preconditions(const DoutPrefixProvider *dpp, std::op
 int RGWRados::Object::prepare_atomic_modification(const DoutPrefixProvider *dpp, ObjectWriteOperation& op, bool reset_obj,
                                                   const string *ptag, bool modify_tail, bool set_attr_id_tag, optional_yield y)
 {
+  fsio_replaced.reset();
   if (!state->is_atomic) {
     ldpp_dout(dpp, 20) << "prepare_atomic_modification: state is not atomic. state=" << (void *) state << dendl;
 
     if (reset_obj) {
       op.create(false);
-      store->remove_rgw_head_obj(op); // we're not dropping reference here, actually removing object
+      replace_head(dpp, op, y); // we're not dropping reference here, actually removing object
     }
 
     return 0;
@@ -8070,7 +8114,7 @@ int RGWRados::Object::prepare_atomic_modification(const DoutPrefixProvider *dpp,
   if (reset_obj) {
     if (state->exists) {
       op.create(false);
-      store->remove_rgw_head_obj(op);
+      replace_head(dpp, op, y);
     } else {
       op.create(true);
     }
