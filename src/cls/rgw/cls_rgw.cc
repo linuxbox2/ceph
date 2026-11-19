@@ -5373,6 +5373,9 @@ static int rgw_get_bucket_resharding(cls_method_context_t hctx,
   return 0;
 }
 
+/* the fsio_* methods, cls_rgw_fsio_ops.cc */
+void cls_rgw_fsio_register(cls_handle_t h_class);
+
 CLS_INIT(rgw)
 {
   CLS_LOG(1, "Loaded rgw class!");
@@ -5437,6 +5440,8 @@ CLS_INIT(rgw)
   cls_register(ClassId::name, &h_class);
 
   ClassRegistrar<ClassId> cls(h_class);
+
+  cls_rgw_fsio_register(h_class);
 
   using namespace method;
 

@@ -1,0 +1,626 @@
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
+// vim: ts=8 sw=2 smarttab
+
+/* The fsio_* methods on a real object (FSIO_RADOS_DESIGN.md §2.2, §2.5,
+ * §2.7, §8):  each reads the object's FSIO records once, runs the pure
+ * transition in cls_rgw_fsio.cc, writes the records that changed and
+ * removes those that went, applies the effects, and encodes its reply.
+ * A method never reads back what it wrote (Z32). */
+
+#include <fmt/format.h>
+
+#include "objclass/objclass.h"
+#include "osd/osd_types.h"
+#include "cls/rgw/cls_rgw_fsio_ops.h"
+
+namespace fsio = cls_rgw_fsio;
+
+namespace {
+
+static constexpr std::string_view ID_TAG = "user.rgw.idtag";          // RGW_ATTR_ID_TAG
+static constexpr std::string_view MANIFEST = "user.rgw.manifest";     // RGW_ATTR_MANIFEST
+static constexpr std::string_view OLH_INFO = "user.rgw.olh.info";     // RGW_ATTR_OLH_INFO
+static constexpr std::string_view FSIO_PREFIX = "user.rgw.fsio.";
+static constexpr std::string_view HDR = "user.rgw.fsio.hdr";
+static constexpr std::string_view OPENS = "user.rgw.fsio.m.";         // + the incarnation
+static constexpr std::string_view OCNT = "user.rgw.fsio.ocnt";
+static constexpr std::string_view GEN = "user.rgw.fsio.gen";
+static constexpr std::string_view PM = "user.rgw.fsio.pm";
+
+std::string opens_name(uint64_t incarnation)
+{
+  return fmt::format("{}{:016x}", OPENS, incarnation);
+}
+
+/* the FSIO records as read, so a store writes only what changed */
+struct loaded {
+  std::map<std::string, ceph::buffer::list> fsio;
+};
+
+/* one stat and one getxattrs;  an absent object loads as not existing */
+int read_attrs(cls_method_context_t hctx, bool& exists,
+	       std::map<std::string, ceph::buffer::list>& attrs)
+{
+  uint64_t size;
+  ceph::real_time mtime;
+  int r = cls_cxx_stat2(hctx, &size, &mtime);
+  if (r == -ENOENT) {
+    exists = false;
+    return 0;
+  }
+  if (r < 0) {
+    return r;
+  }
+  exists = true;
+  return cls_cxx_getxattrs(hctx, &attrs);
+}
+
+int load_head(cls_method_context_t hctx, cls_rgw_fsio_head& h, loaded& l)
+{
+  std::map<std::string, ceph::buffer::list> attrs;
+  int r = read_attrs(hctx, h.exists, attrs);
+  if (r < 0 || !h.exists) {
+    return r;
+  }
+  try {
+    for (auto& [k, v] : attrs) {
+      if (k == ID_TAG) {
+	h.id_tag = v.to_str();
+      } else if (k == MANIFEST) {
+	h.manifest = v;
+      } else if (k == OLH_INFO) {
+	h.olh = true;
+      } else if (k.starts_with(FSIO_PREFIX)) {
+	l.fsio[k] = v;
+	auto it = v.cbegin();
+	if (k == HDR) {
+	  h.hdr.emplace();
+	  decode(*h.hdr, it);
+	} else if (k.starts_with(OPENS)) {
+	  const auto inc = std::stoull(k.substr(OPENS.size()), nullptr, 16);
+	  decode(h.opens[inc], it);
+	}
+      }
+    }
+  } catch (const std::exception& e) {
+    CLS_ERR("ERROR: %s: decoding the FSIO records: %s", __func__, e.what());
+    return -EIO;
+  }
+  return 0;
+}
+
+int set_if_changed(cls_method_context_t hctx, const loaded& before,
+		   const std::string& name, ceph::buffer::list& bl)
+{
+  auto i = before.fsio.find(name);
+  if (i != before.fsio.end() && i->second.contents_equal(bl)) {
+    return 0;
+  }
+  return cls_cxx_setxattr(hctx, name.c_str(), &bl);
+}
+
+/* writes each record whose encoding changed and removes each that went:
+ * an incarnation's, the header.  RGW's own attributes are not written
+ * here. */
+int store_head(cls_method_context_t hctx, const loaded& before,
+	       const cls_rgw_fsio_head& h)
+{
+  int r = 0;
+  if (h.hdr) {
+    ceph::buffer::list bl;
+    encode(*h.hdr, bl);
+    r = set_if_changed(hctx, before, std::string(HDR), bl);
+  } else if (before.fsio.count(std::string(HDR))) {
+    r = cls_cxx_rmxattr(hctx, HDR.data());
+  }
+  if (r < 0) {
+    return r;
+  }
+  std::set<std::string> kept;
+  for (const auto& [inc, o] : h.opens) {
+    auto name = opens_name(inc);
+    kept.insert(name);
+    ceph::buffer::list bl;
+    encode(o, bl);
+    if ((r = set_if_changed(hctx, before, name, bl)) < 0) {
+      return r;
+    }
+  }
+  for (const auto& [name, v] : before.fsio) {
+    if (name.starts_with(OPENS) && !kept.count(name)) {
+      if ((r = cls_cxx_rmxattr(hctx, name.c_str())) < 0) {
+	return r;
+      }
+    }
+  }
+  return 0;
+}
+
+int load_instance(cls_method_context_t hctx, cls_rgw_fsio_instance_head& ih,
+		  loaded& l)
+{
+  std::map<std::string, ceph::buffer::list> attrs;
+  int r = read_attrs(hctx, ih.exists, attrs);
+  if (r < 0 || !ih.exists) {
+    return r;
+  }
+  try {
+    for (auto& [k, v] : attrs) {
+      if (k == ID_TAG) {
+	ih.id_tag = v.to_str();
+      } else if (k == MANIFEST) {
+	ih.manifest = v;
+      } else if (k == OCNT) {
+	l.fsio[k] = v;
+	auto it = v.cbegin();
+	ih.ocnt.emplace();
+	decode(*ih.ocnt, it);
+      }
+    }
+  } catch (const std::exception& e) {
+    CLS_ERR("ERROR: %s: decoding the open count: %s", __func__, e.what());
+    return -EIO;
+  }
+  return 0;
+}
+
+/* the open count, and the ID tag and manifest a version removal clears
+ * (§2.5) */
+int store_instance(cls_method_context_t hctx, const loaded& before,
+		   const cls_rgw_fsio_instance_head& was,
+		   const cls_rgw_fsio_instance_head& ih)
+{
+  int r = 0;
+  if (ih.ocnt) {
+    ceph::buffer::list bl;
+    encode(*ih.ocnt, bl);
+    r = set_if_changed(hctx, before, std::string(OCNT), bl);
+  } else if (before.fsio.count(std::string(OCNT))) {
+    r = cls_cxx_rmxattr(hctx, OCNT.data());
+  }
+  if (r < 0) {
+    return r;
+  }
+  if (!was.id_tag.empty() && ih.id_tag.empty()) {
+    if ((r = cls_cxx_rmxattr(hctx, ID_TAG.data())) < 0) {
+      return r;
+    }
+  }
+  if (was.manifest.length() && !ih.manifest.length()) {
+    if ((r = cls_cxx_rmxattr(hctx, MANIFEST.data())) < 0) {
+      return r;
+    }
+  }
+  return 0;
+}
+
+/* §2.7, E2:  a clone of the head (or instance head) lives after the
+ * bucket's heads, <marker>~fsio_<role><id>_<key part>;  the caller names
+ * the marker, which the object's name must start with, then "_" */
+int head_clone_name(cls_method_context_t hctx, const std::string& marker,
+		    char role, const cls_rgw_fsio_id& id, std::string& name)
+{
+  const auto& oid = cls_get_object_info(hctx).soid.oid.name;
+  if (marker.empty() || marker.find('~') != std::string::npos ||
+      !oid.starts_with(marker + "_")) {
+    CLS_ERR("ERROR: %s: marker %s does not name %s", __func__,
+	    marker.c_str(), oid.c_str());
+    return -EINVAL;
+  }
+  name = fmt::format("{}~fsio_{}{}_{}", marker, role, id.to_str(),
+		     oid.substr(marker.size() + 1));
+  return 0;
+}
+
+/* the effects:  each clone by CLONE_TO, FSIO's records dropped from it
+ * and its own record set;  a head with nothing left removed */
+int apply(cls_method_context_t hctx, const std::string& marker,
+	  const cls_rgw_fsio_effects& fx)
+{
+  for (const auto& c : fx.clones) {
+    std::string dest;
+    int r = head_clone_name(hctx, marker, c.role, c.r, dest);
+    if (r < 0) {
+      return r;
+    }
+    std::map<std::string, ceph::buffer::list> set;
+    if (c.role == 'G') {
+      encode(c.record, set[std::string(GEN)]);
+    } else if (c.role == 'a' && c.pm.length()) {
+      set[std::string(PM)] = c.pm;
+    }
+    r = cls_cxx_clone_to(hctx, dest, {std::string(FSIO_PREFIX)}, set);
+    if (r < 0 && r != -EEXIST) {   // EEXIST:  a resend's, done (§2.7)
+      return r;
+    }
+  }
+  if (fx.remove_head) {
+    return cls_cxx_remove(hctx);
+  }
+  return 0;
+}
+
+/* §2.2, Z24:  no method creates a head */
+int require(bool exists)
+{
+  return exists ? 0 : -ENOENT;
+}
+
+template <typename T>
+int decode_op(ceph::buffer::list* in, T& op, const char* fn)
+{
+  try {
+    auto it = in->cbegin();
+    decode(op, it);
+  } catch (const ceph::buffer::error&) {
+    CLS_ERR("ERROR: %s: failed to decode its input", fn);
+    return -EINVAL;
+  }
+  return 0;
+}
+
+/* a head method's frame:  load, the transition, store, apply */
+template <typename F>
+int on_head(cls_method_context_t hctx, const std::string& marker, F&& f)
+{
+  cls_rgw_fsio_head h;
+  loaded l;
+  int r = load_head(hctx, h, l);
+  if (r < 0) {
+    return r;
+  }
+  if ((r = require(h.exists)) < 0) {
+    return r;
+  }
+  cls_rgw_fsio_effects fx;
+  if ((r = f(h, fx)) < 0) {
+    return r;
+  }
+  if (fx.remove_head) {
+    return apply(hctx, marker, fx);   // the head goes, its records with it
+  }
+  if ((r = store_head(hctx, l, h)) < 0) {
+    return r;
+  }
+  return apply(hctx, marker, fx);
+}
+
+template <typename F>
+int on_instance(cls_method_context_t hctx, const std::string& marker, F&& f)
+{
+  cls_rgw_fsio_instance_head ih;
+  loaded l;
+  int r = load_instance(hctx, ih, l);
+  if (r < 0) {
+    return r;
+  }
+  if ((r = require(ih.exists)) < 0) {
+    return r;
+  }
+  const auto was = ih;
+  cls_rgw_fsio_effects fx;
+  if ((r = f(ih, fx)) < 0) {
+    return r;
+  }
+  if (fx.remove_head) {
+    return apply(hctx, marker, fx);
+  }
+  if ((r = store_instance(hctx, l, was, ih)) < 0) {
+    return r;
+  }
+  return apply(hctx, marker, fx);
+}
+
+int rgw_fsio_join(cls_method_context_t hctx, ceph::buffer::list* in,
+	      ceph::buffer::list* out)
+{
+  cls_rgw_fsio_join_op op;
+  if (int r = decode_op(in, op, __func__); r < 0) {
+    return r;
+  }
+  cls_rgw_fsio_join_ret ret;
+  int r = on_head(hctx, op.marker, [&](auto& h, auto& fx) {
+    fsio::join_in jin{op.caller, op.seq, op.writer, op.nonce, op.counter_seed,
+		      op.expired, op.instance};
+    fsio::join_out jout;
+    int r = fsio::join(h, jin, jout, fx);
+    ret.bound = jout.bound;
+    ret.construct = jout.construct;
+    ret.already_applied = jout.already_applied;
+    return r;
+  });
+  if (r < 0) {
+    return r;
+  }
+  encode(ret, *out);
+  return 0;
+}
+
+int rgw_fsio_ready(cls_method_context_t hctx, ceph::buffer::list* in,
+	       ceph::buffer::list* out)
+{
+  cls_rgw_fsio_runs_op op;
+  if (int r = decode_op(in, op, __func__); r < 0) {
+    return r;
+  }
+  return on_head(hctx, {}, [&](auto& h, auto&) {
+    return fsio::ready(h, op.caller, op.cs, op.runs);
+  });
+}
+
+int rgw_fsio_extend(cls_method_context_t hctx, ceph::buffer::list* in,
+		ceph::buffer::list* out)
+{
+  cls_rgw_fsio_runs_op op;
+  if (int r = decode_op(in, op, __func__); r < 0) {
+    return r;
+  }
+  if (op.runs.size() != 1) {
+    return -EINVAL;
+  }
+  return on_head(hctx, {}, [&](auto& h, auto&) {
+    return fsio::extend(h, op.caller, op.cs, op.runs.front());
+  });
+}
+
+int rgw_fsio_leave(cls_method_context_t hctx, ceph::buffer::list* in,
+	       ceph::buffer::list* out)
+{
+  cls_rgw_fsio_leave_op op;
+  if (int r = decode_op(in, op, __func__); r < 0) {
+    return r;
+  }
+  cls_rgw_fsio_leave_ret ret;
+  int r = on_head(hctx, {}, [&](auto& h, auto& fx) {
+    std::optional<fsio::publish_intent> intent;
+    if (op.intent) {
+      intent = op.intent->to_core();
+    }
+    fsio::leave_out lout;
+    int r = fsio::leave(h, op.caller, op.seq, op.cs, op.writer, op.expired,
+			lout, fx, intent ? &*intent : nullptr);
+    ret.already_applied = lout.already_applied;
+    ret.publishing = lout.publishing;
+    ret.abandoned = lout.abandoned;
+    ret.olh_epoch = lout.olh_epoch;
+    ret.instance = lout.instance;
+    ret.drained = lout.drained;
+    return r;
+  });
+  if (r < 0) {
+    return r;
+  }
+  encode(ret, *out);
+  return 0;
+}
+
+int rgw_fsio_rebind(cls_method_context_t hctx, ceph::buffer::list* in,
+		ceph::buffer::list* out)
+{
+  cls_rgw_fsio_rebind_op op;
+  if (int r = decode_op(in, op, __func__); r < 0) {
+    return r;
+  }
+  cls_rgw_fsio_flags_ret ret;
+  int r = on_head(hctx, {}, [&](auto& h, auto&) {
+    fsio::rebind_out rout;
+    int r = fsio::rebind(h, op.caller, op.seq, op.from, op.to, op.readers,
+			 &rout);
+    ret.already_applied = rout.already_applied;
+    return r;
+  });
+  if (r < 0) {
+    return r;
+  }
+  encode(ret, *out);
+  return 0;
+}
+
+int rgw_fsio_publish_release(cls_method_context_t hctx, ceph::buffer::list* in,
+			 ceph::buffer::list* out)
+{
+  cls_rgw_fsio_cs_op op;
+  if (int r = decode_op(in, op, __func__); r < 0) {
+    return r;
+  }
+  return on_head(hctx, {}, [&](auto& h, auto&) {
+    return fsio::publish_release(h, op.caller, op.cs);
+  });
+}
+
+int rgw_fsio_fenced_finalize(cls_method_context_t hctx, ceph::buffer::list* in,
+			 ceph::buffer::list* out)
+{
+  cls_rgw_fsio_finalize_op op;
+  if (int r = decode_op(in, op, __func__); r < 0) {
+    return r;
+  }
+  cls_rgw_fsio_finalize_ret ret;
+  int r = on_head(hctx, {}, [&](auto& h, auto&) {
+    std::optional<fsio::publish_intent> intent;
+    if (op.intent) {
+      intent = op.intent->to_core();
+    }
+    return fsio::fenced_finalize(h, op.finalizer, op.from, op.expired, ret.to,
+				 intent ? &*intent : nullptr, op.aborted);
+  });
+  if (r < 0) {
+    return r;
+  }
+  encode(ret, *out);
+  return 0;
+}
+
+int rgw_fsio_expire(cls_method_context_t hctx, ceph::buffer::list* in,
+		ceph::buffer::list* out)
+{
+  cls_rgw_fsio_expire_op op;
+  if (int r = decode_op(in, op, __func__); r < 0) {
+    return r;
+  }
+  cls_rgw_fsio_expire_ret ret;
+  int r = on_head(hctx, {}, [&](auto& h, auto& fx) {
+    fsio::expire_out eout;
+    int r = fsio::expire(h, op.caller, op.expired, op.clear, eout, fx);
+    ret.drained = !eout.drained.empty();
+    /* §3.8:  a ready shadow whose writers are all presumed dead, or a
+     * publishing one whose publisher is */
+    if (h.hdr) {
+      for (const auto& e : h.hdr->chunk_sets) {
+	if (e.state == cls_rgw_fsio_cs_state::PUBLISHING && e.publishing &&
+	    op.expired.count(e.publishing->publisher.incarnation)) {
+	  ret.finalize = true;
+	}
+	if (e.state == cls_rgw_fsio_cs_state::READY && h.bound(e.id).writers) {
+	  bool live = false;
+	  for (const auto& [inc, o] : h.opens) {
+	    for (const auto& [k, ho] : o.handles) {
+	      auto c = ho.chunk_sets.find(e.id);
+	      if (c != ho.chunk_sets.end() && c->second.writers &&
+		  !op.expired.count(inc)) {
+		live = true;
+	      }
+	    }
+	  }
+	  ret.finalize |= !live;
+	}
+      }
+    }
+    return r;
+  });
+  if (r < 0) {
+    return r;
+  }
+  encode(ret, *out);
+  return 0;
+}
+
+int rgw_fsio_forget(cls_method_context_t hctx, ceph::buffer::list* in,
+		ceph::buffer::list* out)
+{
+  cls_rgw_fsio_cs_op op;
+  if (int r = decode_op(in, op, __func__); r < 0) {
+    return r;
+  }
+  return on_head(hctx, {}, [&](auto& h, auto& fx) {
+    return fsio::forget(h, op.cs, fx);
+  });
+}
+
+int rgw_fsio_drop_seqs(cls_method_context_t hctx, ceph::buffer::list* in,
+		   ceph::buffer::list* out)
+{
+  cls_rgw_fsio_drop_seqs_op op;
+  if (int r = decode_op(in, op, __func__); r < 0) {
+    return r;
+  }
+  return on_head(hctx, {}, [&](auto& h, auto& fx) {
+    return fsio::drop_seqs(h, op.incarnation, fx);
+  });
+}
+
+int ocnt_reply(const fsio::ocnt_drain& d, ceph::buffer::list* out)
+{
+  cls_rgw_fsio_flags_ret ret;
+  ret.drained = d.drained;
+  ret.removed = d.removed;
+  encode(ret, *out);
+  return 0;
+}
+
+int rgw_fsio_ocnt_add(cls_method_context_t hctx, ceph::buffer::list* in,
+		  ceph::buffer::list* out)
+{
+  cls_rgw_fsio_ocnt_op op;
+  if (int r = decode_op(in, op, __func__); r < 0) {
+    return r;
+  }
+  return on_instance(hctx, {}, [&](auto& ih, auto&) {
+    return fsio::ocnt_add(ih, op.holder);
+  });
+}
+
+int rgw_fsio_ocnt_remove(cls_method_context_t hctx, ceph::buffer::list* in,
+		     ceph::buffer::list* out)
+{
+  cls_rgw_fsio_ocnt_op op;
+  if (int r = decode_op(in, op, __func__); r < 0) {
+    return r;
+  }
+  fsio::ocnt_drain d;
+  int r = on_instance(hctx, {}, [&](auto& ih, auto&) {
+    return fsio::ocnt_remove(ih, op.holder, d);
+  });
+  return r < 0 ? r : ocnt_reply(d, out);
+}
+
+int rgw_fsio_ocnt_expire(cls_method_context_t hctx, ceph::buffer::list* in,
+		     ceph::buffer::list* out)
+{
+  cls_rgw_fsio_ocnt_op op;
+  if (int r = decode_op(in, op, __func__); r < 0) {
+    return r;
+  }
+  fsio::ocnt_drain d;
+  int r = on_instance(hctx, {}, [&](auto& ih, auto&) {
+    return fsio::ocnt_expire(ih, op.expired, d);
+  });
+  return r < 0 ? r : ocnt_reply(d, out);
+}
+
+int rgw_fsio_ocnt_forget(cls_method_context_t hctx, ceph::buffer::list* in,
+		     ceph::buffer::list* out)
+{
+  cls_rgw_fsio_ocnt_op op;
+  if (int r = decode_op(in, op, __func__); r < 0) {
+    return r;
+  }
+  return on_instance(hctx, {}, [&](auto& ih, auto& fx) {
+    return fsio::ocnt_forget(ih, fx);
+  });
+}
+
+int rgw_fsio_remove_version(cls_method_context_t hctx, ceph::buffer::list* in,
+			ceph::buffer::list* out)
+{
+  cls_rgw_fsio_remove_version_op op;
+  if (int r = decode_op(in, op, __func__); r < 0) {
+    return r;
+  }
+  cls_rgw_fsio_remove_version_ret ret;
+  int r = on_instance(hctx, op.marker, [&](auto& ih, auto& fx) {
+    fsio::remove_out rout;
+    int r = fsio::remove_version(ih, op.r, rout, fx);
+    ret.keep_tail = rout.keep_tail;
+    return r;
+  });
+  if (r < 0) {
+    return r;
+  }
+  encode(ret, *out);
+  return 0;
+}
+
+} // anonymous namespace
+
+void cls_rgw_fsio_register(cls_handle_t h_class)
+{
+  using namespace cls::rgw::method;
+  ClassRegistrar<cls::rgw::ClassId> cls(h_class);
+  static cls_method_handle_t h[15];
+  cls.register_cxx_method(fsio_join, rgw_fsio_join, &h[0]);
+  cls.register_cxx_method(fsio_ready, rgw_fsio_ready, &h[1]);
+  cls.register_cxx_method(fsio_extend, rgw_fsio_extend, &h[2]);
+  cls.register_cxx_method(fsio_leave, rgw_fsio_leave, &h[3]);
+  cls.register_cxx_method(fsio_rebind, rgw_fsio_rebind, &h[4]);
+  cls.register_cxx_method(fsio_publish_release, rgw_fsio_publish_release, &h[5]);
+  cls.register_cxx_method(fsio_fenced_finalize, rgw_fsio_fenced_finalize, &h[6]);
+  cls.register_cxx_method(fsio_expire, rgw_fsio_expire, &h[7]);
+  cls.register_cxx_method(fsio_forget, rgw_fsio_forget, &h[8]);
+  cls.register_cxx_method(fsio_drop_seqs, rgw_fsio_drop_seqs, &h[9]);
+  cls.register_cxx_method(fsio_ocnt_add, rgw_fsio_ocnt_add, &h[10]);
+  cls.register_cxx_method(fsio_ocnt_remove, rgw_fsio_ocnt_remove, &h[11]);
+  cls.register_cxx_method(fsio_ocnt_expire, rgw_fsio_ocnt_expire, &h[12]);
+  cls.register_cxx_method(fsio_ocnt_forget, rgw_fsio_ocnt_forget, &h[13]);
+  cls.register_cxx_method(fsio_remove_version, rgw_fsio_remove_version, &h[14]);
+}

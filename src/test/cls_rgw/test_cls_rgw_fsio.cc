@@ -6,6 +6,7 @@
  * drives the finding's sequence and asserts what its fix guarantees. */
 
 #include "cls/rgw/cls_rgw_fsio.h"
+#include "cls/rgw/cls_rgw_fsio_ops.h"
 
 #include <gtest/gtest.h>
 #include <gtest/gtest-spi.h>
@@ -492,6 +493,28 @@ TEST(cls_rgw_fsio, Z11_runs_carried_to_the_finalize)
   ASSERT_EQ(0, fsio::fenced_finalize(h, EXPIRER, s, {I1}, to));
   EXPECT_EQ((runs{{0, 3}, {8, 9}, {50, 57}}), h.hdr->find(to)->shadow->extent);
   EXPECT_EQ(-CLS_RGW_ERR_FSIO_BUSY, fsio::extend(h, GW1, s, {60, 60}));
+}
+
+/* §2.7 rule 4, W18:  every reply fits osd_max_write_op_reply_len, which
+ * FSIO requires at 128 bytes, at its largest */
+TEST(cls_rgw_fsio, replies_fit_the_reply_cap)
+{
+  constexpr size_t cap = 128;
+  const cls_rgw_fsio_id big{UINT64_MAX, UINT64_MAX};
+  auto size = [](const auto& r) {
+    ceph::buffer::list bl;
+    encode(r, bl);
+    return bl.length();
+  };
+  cls_rgw_fsio_join_ret j{big, true, true};
+  EXPECT_LE(size(j), cap);
+  cls_rgw_fsio_leave_ret l{true, true, true, UINT64_MAX,
+			   std::string(32, 'i'), big};   // OBJ_INSTANCE_LEN
+  EXPECT_LE(size(l), cap);
+  EXPECT_LE(size(cls_rgw_fsio_flags_ret{true, true, true}), cap);
+  EXPECT_LE(size(cls_rgw_fsio_finalize_ret{big}), cap);
+  EXPECT_LE(size(cls_rgw_fsio_expire_ret{true, true}), cap);
+  EXPECT_LE(size(cls_rgw_fsio_remove_version_ret{true}), cap);
 }
 
 /* W20:  only the recorded publisher may release a publishing shadow

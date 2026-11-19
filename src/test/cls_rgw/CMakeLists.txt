@@ -38,6 +38,7 @@ add_executable(unittest_cls_rgw_fsio
 add_ceph_unittest(unittest_cls_rgw_fsio)
 target_link_libraries(unittest_cls_rgw_fsio
   ceph-common
+  cls_rgw_client
   ${UNITTEST_LIBS})
 target_compile_definitions(unittest_cls_rgw_fsio PRIVATE
   CLS_RGW_FSIO_SKIP_CHECKS)

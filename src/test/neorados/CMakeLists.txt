@@ -114,6 +114,26 @@ install(TARGETS
   ceph_test_neorados_write_operations
   DESTINATION ${CMAKE_INSTALL_BINDIR})
 
+if(WITH_RADOSGW)
+  add_executable(ceph_test_neorados_cls_rgw_fsio
+    cls_rgw_fsio.cc
+    ${CMAKE_SOURCE_DIR}/src/cls/rgw/cls_rgw_fsio.cc
+    )
+  target_link_libraries(ceph_test_neorados_cls_rgw_fsio
+    libneorados
+    cls_rgw_client
+    ${BLKID_LIBRARIES}
+    ${CMAKE_DL_LIBS}
+    ${CRYPTO_LIBS}
+    ${EXTRALIBS}
+    neoradostest-support
+    ${UNITTEST_LIBS}
+    )
+  install(TARGETS
+    ceph_test_neorados_cls_rgw_fsio
+    DESTINATION ${CMAKE_INSTALL_BINDIR})
+endif()
+
 add_executable(ceph_test_neorados_io
   io.cc
   )
