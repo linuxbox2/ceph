@@ -248,6 +248,9 @@ fn skip_table() -> Vec<Check> {
         ("W10_RELEASE_ONLY_WITH_LIVE_CLAIM", ver, none, true),
         ("W10_RELEASE_ABORTS_CLAIM_FIRST", ver, none, true),
         ("W15_CONSTRUCTOR_MAY_ABANDON", unv, none, true),
+        /* the model's expirer clears only a dead constructor's shadow;  the
+         * unit test detects it */
+        ("A29_CLEAR_RECHECKS_CONSTRUCTOR", unv, NARROW, false),
         /* Z22:  resends (FSIO_MODEL_RESENDS, on by default) */
         ("Z22_COUNTED_CALL_CHECKS_SEQ", unv,
          &[("FSIO_MODEL_ROLES", "wr"), ("FSIO_MODEL_S3_OPS", "0")], true),

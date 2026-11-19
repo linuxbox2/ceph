@@ -78,6 +78,7 @@ enum class cls_rgw_fsio_check : uint8_t {
   Z11_EXTENT_CAPS_RUNS,                // fsio_extend, fsio_ready:  rgw_fsio_extent_max_runs
   Z6_INSTANCE_WRITE_DROPS_CLAIM,       // the versioned instance write's post op (model)
   Z6_RESOLUTION_TESTS_ID_TAG,          // the claim resolution and hint rule (model)
+  A29_CLEAR_RECHECKS_CONSTRUCTOR,      // fsio_expire's clear
 };
 
 #ifdef CLS_RGW_FSIO_SKIP_CHECKS

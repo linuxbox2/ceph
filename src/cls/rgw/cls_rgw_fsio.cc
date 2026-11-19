@@ -1090,6 +1090,20 @@ int expire(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& caller,
 	   const std::optional<cls_rgw_fsio_id>& clear, expire_out& out,
 	   cls_rgw_fsio_effects& fx)
 {
+  /* §3.8, A29:  a clear is justified only by a dead constructor;  checked
+   * in this op, before any change, as a fenced finalize checks (W5) */
+  if (clear && h.hdr && h.hdr->find(*clear) &&
+      !FSIO_SKIP_CHECK(A29_CLEAR_RECHECKS_CONSTRUCTOR)) {
+    for (const auto& [inc, o] : h.opens) {
+      for (const auto& [hd, ho] : o.handles) {
+	auto c = ho.chunk_sets.find(*clear);
+	if (c != ho.chunk_sets.end() && c->second.writers &&
+	    !expired.count(inc)) {
+	  return -CLS_RGW_ERR_FSIO_CONFLICT;
+	}
+      }
+    }
+  }
   expire_readers(h, expired);
   /* §3.8:  take over the dead incarnations' publishes in flight (W6) */
   if (h.hdr && !FSIO_SKIP_CHECK(W6_EXPIRE_TAKES_OVER_PUBLISH)) {

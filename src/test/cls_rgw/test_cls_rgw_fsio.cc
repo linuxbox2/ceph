@@ -203,6 +203,30 @@ TEST(cls_rgw_fsio, W6_expire_takes_over_zombie_publish)
   w6_expire_takes_over_zombie_publish();
 }
 
+/* A29, §3.8:  a clear names an abandoned construction;  a live
+ * constructor's shadow is not cleared, and nothing else changes */
+void a29_clear_rechecks_constructor()
+{
+  auto h = head("C0");
+  join_reader(h, GW2);
+  fsio::join_out jout;
+  cls_rgw_fsio_effects jfx;
+  ASSERT_EQ(0, fsio::join(h, {GW1, next_seq(), true, 1, 10, {}}, jout, jfx));
+  ASSERT_TRUE(jout.construct);
+  fsio::expire_out out;
+  cls_rgw_fsio_effects fx;
+  EXPECT_EQ(-CLS_RGW_ERR_FSIO_CONFLICT,
+	    fsio::expire(h, EXPIRER, {I3}, jout.bound, out, fx));
+  ASSERT_TRUE(h.hdr);
+  EXPECT_TRUE(h.hdr->find(jout.bound));
+  EXPECT_EQ(1u, h.bound(jout.bound).writers);
+}
+
+TEST(cls_rgw_fsio, A29_clear_rechecks_constructor)
+{
+  a29_clear_rechecks_constructor();
+}
+
 /* A28, §3.8:  the finalize flag counts the publishes the call took over,
  * and a ready shadow whose writers are all presumed dead */
 TEST(cls_rgw_fsio, A28_expire_reports_finalize)
@@ -1254,6 +1278,7 @@ TEST(cls_rgw_fsio, each_check_is_detected)
     {cls_rgw_fsio_check::W5_FINALIZE_RECHECKS_STATE,
      w5_finalize_of_published_shadow_with_follower},
     {cls_rgw_fsio_check::W6_EXPIRE_TAKES_OVER_PUBLISH, w6_expire_takes_over_zombie_publish},
+    {cls_rgw_fsio_check::A29_CLEAR_RECHECKS_CONSTRUCTOR, a29_clear_rechecks_constructor},
     {cls_rgw_fsio_check::W3_FINALIZE_CREATES_TO_PUBLISHING, w3_finalize_publishes_to},
     {cls_rgw_fsio_check::W3_PUBLISHING_TO_RETIRES_FROM, w3_finalize_publishes_to},
     {cls_rgw_fsio_check::W3_RESUMED_FINALIZE_TAKES_OVER, w3_resumed_finalize_takes_over},
