@@ -2857,6 +2857,17 @@ options:
   services:
   - rgw
   with_legacy: true
+- name: rgw_fsio_open_hints_num_shards
+  type: uint
+  level: advanced
+  desc: Number of FSIO open hint shards
+  long_desc: The number of shards, in the zone's log pool, that hold the FSIO
+    open hints, the records of heads with FSIO state that the FSIO expirer
+    and a bucket's deletion read.  Fixed once FSIO has been enabled in the
+    zone.
+  default: 127
+  services:
+  - rgw
 # maximum number of entries in a single operation when processing objexp data
 - name: rgw_objexp_chunk_size
   type: uint

@@ -7,7 +7,8 @@
 ///
 /// \brief NeoRADOS interface to FSIO's head methods in the rgw class
 ///
-/// The calls a gateway makes on its own (join, leave, rebind, ...).  The
+/// The calls a gateway makes on its own (join, leave, rebind, ...), and
+/// the FSIO open hints' add, remove and list on a hint shard.  The
 /// calls that ride in RGW's head writes (the head replacement, the
 /// publish) stay on librados beside RGW's own ops
 /// (FSIO_RADOS_DESIGN.md §3).  Each sets RETURNVEC, so a write op
@@ -149,5 +150,40 @@ namespace m = ::cls::rgw::method;
                                          boost::system::error_code* ec = nullptr)
 {
   return detail::call(m::fsio_remove_version, in, ret, ec);
+}
+
+/* the FSIO open hints, on a hint shard (§2.7) */
+[[nodiscard]] inline auto open_hint_add(const cls_rgw_fsio_hint_op& in)
+{
+  return detail::call(m::fsio_open_hint_add, in);
+}
+
+[[nodiscard]] inline auto open_hint_remove(const cls_rgw_fsio_hint_op& in)
+{
+  return detail::call(m::fsio_open_hint_remove, in);
+}
+
+[[nodiscard]] inline auto open_hint_list(const cls_rgw_fsio_hint_list_op& in,
+                                         cls_rgw_fsio_hint_list_ret* ret,
+                                         boost::system::error_code* ec = nullptr)
+{
+  buffer::list bl;
+  encode(in, bl);
+  return ClsReadOp{[bl = std::move(bl), ret, ec](ReadOp& op) {
+    op.exec(m::fsio_open_hint_list, bl,
+            [ret, ec](boost::system::error_code e, const buffer::list& out) {
+              if (!e && ret) {
+                try {
+                  auto it = out.cbegin();
+                  decode(*ret, it);
+                } catch (const ceph::buffer::error&) {
+                  e = make_error_code(boost::system::errc::bad_message);
+                }
+              }
+              if (ec) {
+                *ec = e;
+              }
+            });
+  }};
 }
 } // namespace neorados::cls::rgw_fsio

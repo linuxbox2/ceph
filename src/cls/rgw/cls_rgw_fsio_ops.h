@@ -10,6 +10,10 @@
 
 #pragma once
 
+#include <optional>
+#include <string>
+#include <vector>
+
 #include "include/encoding.h"
 #include "include/rados/cls_traits.hpp"
 #include "cls/rgw/cls_rgw_ops.h"
@@ -502,6 +506,128 @@ struct cls_rgw_fsio_replace_ret {
 };
 WRITE_CLASS_ENCODER(cls_rgw_fsio_replace_ret)
 
+/* the FSIO open hints (FSIO_RADOS_DESIGN.md §2.7, §4.3):  omap items of
+ * the shard objects fsio_open_hint.NNNNNNNNNN in the zone's log pool,
+ * the shard chosen by the hash of the target's oid */
+enum class cls_rgw_fsio_hint_kind : uint8_t {
+  PRESENCE = 1,   // the incarnation holds FSIO state on the target
+  PUBLISH  = 2,   // one publish's leftovers on the target
+};
+enum class cls_rgw_fsio_hint_target : uint8_t {
+  HEAD          = 1,  // a head:  the OLH head, in a versioned bucket
+  INSTANCE_HEAD = 2,  // a version's instance head
+};
+
+struct cls_rgw_fsio_hint {
+  cls_rgw_fsio_hint_kind kind = cls_rgw_fsio_hint_kind::PRESENCE;
+  cls_rgw_fsio_hint_target target = cls_rgw_fsio_hint_target::HEAD;
+  rgw_bucket bucket;              // to reach the bucket index and the OLH
+  rgw_obj_key key;                // the name;  with its instance, for INSTANCE_HEAD
+  uint64_t incarnation = 0;       // whose state it covers
+  uint64_t handle = 0;            // which of its handles (Z4)
+  std::optional<cls_rgw_fsio_id> r;  // PUBLISH on a HEAD:  the leaf clone
+
+  void encode(ceph::buffer::list& bl) const {
+    ENCODE_START(1, 1, bl);
+    encode(static_cast<uint8_t>(kind), bl);
+    encode(static_cast<uint8_t>(target), bl);
+    encode(bucket, bl);
+    encode(key, bl);
+    encode(incarnation, bl);
+    encode(handle, bl);
+    encode(r, bl);
+    ENCODE_FINISH(bl);
+  }
+  void decode(ceph::buffer::list::const_iterator& bl) {
+    DECODE_START(1, bl);
+    uint8_t k, t;
+    decode(k, bl);
+    decode(t, bl);
+    kind = static_cast<cls_rgw_fsio_hint_kind>(k);
+    target = static_cast<cls_rgw_fsio_hint_target>(t);
+    decode(bucket, bl);
+    decode(key, bl);
+    decode(incarnation, bl);
+    decode(handle, bl);
+    decode(r, bl);
+    DECODE_FINISH(bl);
+  }
+};
+WRITE_CLASS_ENCODER(cls_rgw_fsio_hint)
+
+/* fsio_open_hint_add, fsio_open_hint_remove:  the hint and its target's
+ * oid;  the class builds the omap key from both,
+ * {incarnation:016x}_{handle:016x}_{kind}_{target oid}[_{r}] (§2.7) */
+struct cls_rgw_fsio_hint_op {
+  cls_rgw_fsio_hint hint;
+  std::string oid;
+
+  void encode(ceph::buffer::list& bl) const {
+    ENCODE_START(1, 1, bl);
+    encode(hint, bl);
+    encode(oid, bl);
+    ENCODE_FINISH(bl);
+  }
+  void decode(ceph::buffer::list::const_iterator& bl) {
+    DECODE_START(1, bl);
+    decode(hint, bl);
+    decode(oid, bl);
+    DECODE_FINISH(bl);
+  }
+};
+WRITE_CLASS_ENCODER(cls_rgw_fsio_hint_op)
+
+/* fsio_open_hint_list:  a shard's hints after `marker`, at most `max`,
+ * those naming `bucket` or held by `incarnation` when given */
+struct cls_rgw_fsio_hint_list_op {
+  std::string marker;
+  uint32_t max = 0;
+  std::optional<rgw_bucket> bucket;
+  std::optional<uint64_t> incarnation;
+
+  void encode(ceph::buffer::list& bl) const {
+    ENCODE_START(1, 1, bl);
+    encode(marker, bl);
+    encode(max, bl);
+    encode(bucket, bl);
+    encode(incarnation, bl);
+    ENCODE_FINISH(bl);
+  }
+  void decode(ceph::buffer::list::const_iterator& bl) {
+    DECODE_START(1, bl);
+    decode(marker, bl);
+    decode(max, bl);
+    decode(bucket, bl);
+    decode(incarnation, bl);
+    DECODE_FINISH(bl);
+  }
+};
+WRITE_CLASS_ENCODER(cls_rgw_fsio_hint_list_op)
+
+/* the next call starts after `marker`, the last key the class read:  with
+ * a filter, a call may read past many hints and return few or none */
+struct cls_rgw_fsio_hint_list_ret {
+  std::vector<cls_rgw_fsio_hint> hints;
+  std::string marker;
+  bool truncated = false;
+
+  void encode(ceph::buffer::list& bl) const {
+    ENCODE_START(1, 1, bl);
+    encode(hints, bl);
+    encode(marker, bl);
+    encode(truncated, bl);
+    ENCODE_FINISH(bl);
+  }
+  void decode(ceph::buffer::list::const_iterator& bl) {
+    DECODE_START(1, bl);
+    decode(hints, bl);
+    decode(marker, bl);
+    decode(truncated, bl);
+    DECODE_FINISH(bl);
+  }
+};
+WRITE_CLASS_ENCODER(cls_rgw_fsio_hint_list_ret)
+
 namespace cls::rgw::method {
 constexpr auto fsio_join = ClsMethod<RdWrTag, ClassId>("fsio_join");
 constexpr auto fsio_ready = ClsMethod<RdWrTag, ClassId>("fsio_ready");
@@ -523,4 +649,10 @@ constexpr auto fsio_remove_version =
   ClsMethod<RdWrTag, ClassId>("fsio_remove_version");
 constexpr auto fsio_replace_head =
   ClsMethod<RdWrTag, ClassId>("fsio_replace_head");
+constexpr auto fsio_open_hint_add =
+  ClsMethod<RdWrTag, ClassId>("fsio_open_hint_add");
+constexpr auto fsio_open_hint_remove =
+  ClsMethod<RdWrTag, ClassId>("fsio_open_hint_remove");
+constexpr auto fsio_open_hint_list =
+  ClsMethod<RdTag, ClassId>("fsio_open_hint_list");
 }

@@ -3,11 +3,14 @@
 
 /* FSIO's head methods on an OSD (FSIO_RADOS_DESIGN.md §2.2, §2.7, §8):
  * the records each writes and removes, its reply, and the clone it
- * makes;  the transitions themselves are unittest_cls_rgw_fsio's. */
+ * makes;  the transitions themselves are unittest_cls_rgw_fsio's.  And
+ * the FSIO open hints on a hint shard (§2.7):  the key each is stored
+ * under, listing in pages and by filter, removal. */
 
 #include <coroutine>
 #include <string>
 
+#include <boost/container/flat_set.hpp>
 #include <boost/system/errc.hpp>
 #include <fmt/format.h>
 
@@ -148,5 +151,152 @@ CORO_TEST_F(NeoRadosClsRgwFsio, WrongMarkerIsEinval, NeoRadosTest) {
   ceph::buffer::list v;
   co_await expect_error_code(execute(head, ReadOp{}.get_xattr(HDR, &v)),
                              sys::errc::no_message_available);
+  co_return;
+}
+
+namespace {
+
+constexpr auto shard = "fsio_open_hint.0000000000"sv;
+
+rgw_bucket bucket_named(const std::string& name)
+{
+  rgw_bucket b;
+  b.name = name;
+  b.marker = MARKER;
+  b.bucket_id = MARKER;
+  return b;
+}
+
+cls_rgw_fsio_hint_op hint_op(uint64_t incarnation, uint64_t handle,
+                             const std::string& bucket,
+                             const std::string& name)
+{
+  cls_rgw_fsio_hint_op op;
+  op.hint.kind = cls_rgw_fsio_hint_kind::PRESENCE;
+  op.hint.target = cls_rgw_fsio_hint_target::HEAD;
+  op.hint.bucket = bucket_named(bucket);
+  op.hint.key = rgw_obj_key(name);
+  op.hint.incarnation = incarnation;
+  op.hint.handle = handle;
+  op.oid = head_of(name);
+  return op;
+}
+
+} // anonymous namespace
+
+/* the key the class builds:  {incarnation:016x}_{handle:016x}_{kind}_
+ * {target oid}[_{r}] */
+CORO_TEST_F(NeoRadosClsRgwFsio, OpenHintKey, NeoRadosTest) {
+  auto presence = hint_op(0xa1, 2, "b1", "k1");
+  auto publish = hint_op(0xa1, 2, "b1", "k1");
+  publish.hint.kind = cls_rgw_fsio_hint_kind::PUBLISH;
+  publish.hint.r = cls_rgw_fsio_id{5, 6};
+  co_await execute(shard, WriteOp{}.exec(f::open_hint_add(presence)));
+  co_await execute(shard, WriteOp{}.exec(f::open_hint_add(publish)));
+  boost::container::flat_set<std::string> keys;
+  bool truncated = true;
+  co_await execute(shard, ReadOp{}.get_omap_keys(std::nullopt, 100, &keys,
+                                                 &truncated));
+  EXPECT_FALSE(truncated);
+  const auto lead = fmt::format("{:016x}_{:016x}_", 0xa1, 2);
+  EXPECT_EQ((boost::container::flat_set<std::string>{
+              lead + "1_" + head_of("k1"),
+              lead + "2_" + head_of("k1") + "_" +
+                cls_rgw_fsio_id{5, 6}.to_str()}),
+            keys);
+  co_return;
+}
+
+/* the record comes back whole;  pages follow the marker;  a removal, and
+ * a removal of an absent hint, succeed */
+CORO_TEST_F(NeoRadosClsRgwFsio, OpenHintAddListRemove, NeoRadosTest) {
+  for (uint64_t h = 1; h <= 3; ++h) {
+    co_await execute(shard, WriteOp{}.exec(
+                       f::open_hint_add(hint_op(0xa1, h, "b1", "k1"))));
+  }
+  std::vector<cls_rgw_fsio_hint> all;
+  cls_rgw_fsio_hint_list_op lop;
+  lop.max = 2;
+  for (;;) {
+    cls_rgw_fsio_hint_list_ret ret;
+    co_await execute(shard, ReadOp{}.exec(f::open_hint_list(lop, &ret)));
+    all.insert(all.end(), ret.hints.begin(), ret.hints.end());
+    if (!ret.truncated) {
+      break;
+    }
+    EXPECT_EQ(2u, ret.hints.size());
+    lop.marker = ret.marker;
+  }
+  EXPECT_EQ(3u, all.size());
+  if (all.size() != 3u) {
+    co_return;
+  }
+  for (uint64_t h = 1; h <= 3; ++h) {
+    const auto& x = all[h - 1];
+    EXPECT_EQ(h, x.handle);
+    EXPECT_EQ(0xa1u, x.incarnation);
+    EXPECT_EQ(cls_rgw_fsio_hint_kind::PRESENCE, x.kind);
+    EXPECT_EQ(cls_rgw_fsio_hint_target::HEAD, x.target);
+    EXPECT_EQ(bucket_named("b1"), x.bucket);
+    EXPECT_EQ(rgw_obj_key("k1"), x.key);
+    EXPECT_FALSE(x.r);
+  }
+  co_await execute(shard, WriteOp{}.exec(
+                     f::open_hint_remove(hint_op(0xa1, 2, "b1", "k1"))));
+  co_await execute(shard, WriteOp{}.exec(
+                     f::open_hint_remove(hint_op(0xa1, 2, "b1", "k1"))));
+  cls_rgw_fsio_hint_list_ret ret;
+  co_await execute(shard, ReadOp{}.exec(
+                     f::open_hint_list(cls_rgw_fsio_hint_list_op{}, &ret)));
+  EXPECT_EQ(2u, ret.hints.size());
+  if (ret.hints.size() != 2u) {
+    co_return;
+  }
+  EXPECT_EQ(1u, ret.hints[0].handle);
+  EXPECT_EQ(3u, ret.hints[1].handle);
+  co_return;
+}
+
+/* by incarnation:  only its hints, the others' keys not read;  by
+ * bucket:  only the hints naming it */
+CORO_TEST_F(NeoRadosClsRgwFsio, OpenHintListFilters, NeoRadosTest) {
+  co_await execute(shard, WriteOp{}.exec(
+                     f::open_hint_add(hint_op(0xa1, 1, "b1", "k1"))));
+  co_await execute(shard, WriteOp{}.exec(
+                     f::open_hint_add(hint_op(0xa2, 1, "b2", "k2"))));
+  co_await execute(shard, WriteOp{}.exec(
+                     f::open_hint_add(hint_op(0xa3, 1, "b1", "k3"))));
+  {
+    cls_rgw_fsio_hint_list_op lop;
+    lop.incarnation = 0xa2;
+    cls_rgw_fsio_hint_list_ret ret;
+    co_await execute(shard, ReadOp{}.exec(f::open_hint_list(lop, &ret)));
+    EXPECT_EQ(1u, ret.hints.size());
+    if (ret.hints.size() != 1u) {
+      co_return;
+    }
+    EXPECT_EQ(0xa2u, ret.hints[0].incarnation);
+    EXPECT_FALSE(ret.truncated);
+  }
+  {
+    cls_rgw_fsio_hint_list_op lop;
+    lop.bucket = bucket_named("b1");
+    cls_rgw_fsio_hint_list_ret ret;
+    co_await execute(shard, ReadOp{}.exec(f::open_hint_list(lop, &ret)));
+    EXPECT_EQ(2u, ret.hints.size());
+    if (ret.hints.size() != 2u) {
+      co_return;
+    }
+    EXPECT_EQ(0xa1u, ret.hints[0].incarnation);
+    EXPECT_EQ(0xa3u, ret.hints[1].incarnation);
+  }
+  {
+    cls_rgw_fsio_hint_list_op lop;
+    lop.bucket = bucket_named("b3");
+    cls_rgw_fsio_hint_list_ret ret;
+    co_await execute(shard, ReadOp{}.exec(f::open_hint_list(lop, &ret)));
+    EXPECT_TRUE(ret.hints.empty());
+    EXPECT_FALSE(ret.truncated);
+  }
   co_return;
 }

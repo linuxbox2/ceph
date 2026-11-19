@@ -718,13 +718,109 @@ int rgw_fsio_replace_head(cls_method_context_t hctx, ceph::buffer::list* in,
   return 0;
 }
 
+/* the FSIO open hints (§2.7):  the key leads with the incarnation, so
+ * the expirer range-lists a dead incarnation's hints */
+std::string incarnation_prefix(uint64_t incarnation)
+{
+  return fmt::format("{:016x}_", incarnation);
+}
+
+std::string hint_key(const cls_rgw_fsio_hint& h, const std::string& oid)
+{
+  auto k = fmt::format("{}{:016x}_{}_{}", incarnation_prefix(h.incarnation),
+		       h.handle, static_cast<unsigned>(h.kind), oid);
+  if (h.r) {
+    k += "_" + h.r->to_str();
+  }
+  return k;
+}
+
+int rgw_fsio_open_hint_add(cls_method_context_t hctx, ceph::buffer::list* in,
+			   ceph::buffer::list* out)
+{
+  cls_rgw_fsio_hint_op op;
+  if (int r = decode_op(in, op, __func__); r < 0) {
+    return r;
+  }
+  if (op.oid.empty()) {
+    return -EINVAL;
+  }
+  ceph::buffer::list bl;
+  encode(op.hint, bl);
+  return cls_cxx_map_set_val(hctx, hint_key(op.hint, op.oid), &bl);
+}
+
+/* removing an absent hint succeeds:  a release after a resend */
+int rgw_fsio_open_hint_remove(cls_method_context_t hctx, ceph::buffer::list* in,
+			      ceph::buffer::list* out)
+{
+  cls_rgw_fsio_hint_op op;
+  if (int r = decode_op(in, op, __func__); r < 0) {
+    return r;
+  }
+  if (op.oid.empty()) {
+    return -EINVAL;
+  }
+  int r = cls_cxx_map_remove_key(hctx, hint_key(op.hint, op.oid));
+  return r == -ENOENT ? 0 : r;
+}
+
+/* the most keys one call reads, filtered or not */
+constexpr uint32_t HINT_LIST_READ_MAX = 1000;
+
+int rgw_fsio_open_hint_list(cls_method_context_t hctx, ceph::buffer::list* in,
+			    ceph::buffer::list* out)
+{
+  cls_rgw_fsio_hint_list_op op;
+  if (int r = decode_op(in, op, __func__); r < 0) {
+    return r;
+  }
+  const uint32_t max = std::min(op.max ? op.max : HINT_LIST_READ_MAX,
+				HINT_LIST_READ_MAX);
+  /* the OSD seeks to the prefix when it sorts after the marker */
+  const std::string prefix =
+    op.incarnation ? incarnation_prefix(*op.incarnation) : std::string{};
+  std::map<std::string, ceph::buffer::list> vals;
+  bool more = false;
+  int r = cls_cxx_map_get_vals(hctx, op.marker, prefix, HINT_LIST_READ_MAX,
+			       &vals, &more);
+  if (r < 0) {
+    return r;
+  }
+  cls_rgw_fsio_hint_list_ret ret;
+  ret.marker = op.marker;
+  bool stopped = false;
+  for (auto& [k, v] : vals) {
+    if (ret.hints.size() == max) {
+      stopped = true;
+      break;
+    }
+    ret.marker = k;
+    cls_rgw_fsio_hint h;
+    try {
+      auto it = v.cbegin();
+      decode(h, it);
+    } catch (const ceph::buffer::error&) {
+      CLS_ERR("ERROR: %s: failed to decode hint %s", __func__, k.c_str());
+      return -EIO;
+    }
+    if (op.bucket && !(h.bucket == *op.bucket)) {
+      continue;
+    }
+    ret.hints.push_back(std::move(h));
+  }
+  ret.truncated = stopped || more;
+  encode(ret, *out);
+  return 0;
+}
+
 } // anonymous namespace
 
 void cls_rgw_fsio_register(cls_handle_t h_class)
 {
   using namespace cls::rgw::method;
   ClassRegistrar<cls::rgw::ClassId> cls(h_class);
-  static cls_method_handle_t h[16];
+  static cls_method_handle_t h[19];
   cls.register_cxx_method(fsio_join, rgw_fsio_join, &h[0]);
   cls.register_cxx_method(fsio_ready, rgw_fsio_ready, &h[1]);
   cls.register_cxx_method(fsio_extend, rgw_fsio_extend, &h[2]);
@@ -741,4 +837,8 @@ void cls_rgw_fsio_register(cls_handle_t h_class)
   cls.register_cxx_method(fsio_ocnt_forget, rgw_fsio_ocnt_forget, &h[13]);
   cls.register_cxx_method(fsio_remove_version, rgw_fsio_remove_version, &h[14]);
   cls.register_cxx_method(fsio_replace_head, rgw_fsio_replace_head, &h[15]);
+  cls.register_cxx_method(fsio_open_hint_add, rgw_fsio_open_hint_add, &h[16]);
+  cls.register_cxx_method(fsio_open_hint_remove, rgw_fsio_open_hint_remove,
+			  &h[17]);
+  cls.register_cxx_method(fsio_open_hint_list, rgw_fsio_open_hint_list, &h[18]);
 }
