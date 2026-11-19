@@ -23,7 +23,10 @@
  * and calls it in a later step.
  *
  * The environment bounds a run:  FSIO_MODEL_GATEWAYS, or FSIO_MODEL_ROLES
- * with one letter per gateway (f full, w writer only, r reader only);
+ * with one letter per gateway (f full, w writer only, r reader only),
+ * "+" joining the next letter to the previous gateway as its second
+ * handle on the head ("w+r":  one process, a writer FSIOObject and a
+ * reader FSIOObject;  FSIO state is keyed by handle, design §2.7, Z4);
  * FSIO_MODEL_S3_OPS;  and switches, each 1 by default:
  * FSIO_MODEL_CRASHES, FSIO_MODEL_ZOMBIES, FSIO_MODEL_EXPIRER_CRASHES.
  * FSIO_MODEL_SKIP_CHECK names one check of the core to skip
@@ -84,7 +87,6 @@ using fid_t = cls_rgw_fsio_id;
 
 /* FSIO state is keyed by handle (design §2.7, Z4).  Each gateway here
  * holds one FSIOObject per head, handle 1;  the FSIO expirer is handle 0 */
-cls_rgw_fsio_handle gh(uint64_t inc) { return {inc, 1}; }
 cls_rgw_fsio_handle xh(uint64_t inc) { return {inc, 0}; }
 
 /* an incarnation's counts by chunk set, summed over its handles */
@@ -114,14 +116,6 @@ std::set<uint64_t> ocnt_incs(const cls_rgw_fsio_ocnt& n)
   std::set<uint64_t> s;
   for (const auto& c : n.holders) {
     s.insert(c.incarnation);
-  }
-  return s;
-}
-std::set<cls_rgw_fsio_handle> holders_of(const std::set<uint64_t>& incs)
-{
-  std::set<cls_rgw_fsio_handle> s;
-  for (auto i : incs) {
-    s.insert(gh(i));
   }
   return s;
 }
@@ -175,29 +169,34 @@ struct Hint {
   HintTarget target;
   std::string instance;          // INSTANCE_HEAD:  "I2";  empty for HEAD
   uint64_t incarnation = 0;
+  uint64_t handle = 0;           // which of its handles (design §2.7, Z4)
   std::optional<fid_t> r;        // PUBLISH on a HEAD:  the leaf clone
   auto operator<=>(const Hint&) const = default;
   void encode(ceph::buffer::list& bl) const {
     using ceph::encode;
     encode((uint8_t)kind, bl); encode((uint8_t)target, bl);
-    encode(instance, bl); encode(incarnation, bl); encode(r, bl);
+    encode(instance, bl); encode(incarnation, bl); encode(handle, bl);
+    encode(r, bl);
   }
 };
-Hint presence_head(uint64_t inc)
+Hint presence_head(const cls_rgw_fsio_handle& c)
 {
-  return Hint{HintKind::PRESENCE, HintTarget::HEAD, {}, inc};
+  return Hint{HintKind::PRESENCE, HintTarget::HEAD, {}, c.incarnation, c.handle};
 }
-Hint presence_ih(const std::string& inst, uint64_t inc)
+Hint presence_ih(const std::string& inst, const cls_rgw_fsio_handle& c)
 {
-  return Hint{HintKind::PRESENCE, HintTarget::INSTANCE_HEAD, inst, inc};
+  return Hint{HintKind::PRESENCE, HintTarget::INSTANCE_HEAD, inst,
+	      c.incarnation, c.handle};
 }
-Hint publish_head(uint64_t inc, const fid_t& r)
+Hint publish_head(const cls_rgw_fsio_handle& c, const fid_t& r)
 {
-  return Hint{HintKind::PUBLISH, HintTarget::HEAD, {}, inc, r};
+  return Hint{HintKind::PUBLISH, HintTarget::HEAD, {}, c.incarnation,
+	      c.handle, r};
 }
-Hint publish_ih(const std::string& inst, uint64_t inc)
+Hint publish_ih(const std::string& inst, const cls_rgw_fsio_handle& c)
 {
-  return Hint{HintKind::PUBLISH, HintTarget::INSTANCE_HEAD, inst, inc};
+  return Hint{HintKind::PUBLISH, HintTarget::INSTANCE_HEAD, inst,
+	      c.incarnation, c.handle};
 }
 
 enum Step : uint8_t { NONE, CONSTRUCT, PUBLISH_WRITE, PUBLISH_GC, DRAIN_SEND,
@@ -212,6 +211,7 @@ enum Step : uint8_t { NONE, CONSTRUCT, PUBLISH_WRITE, PUBLISH_GC, DRAIN_SEND,
 
 struct Gw {
   uint64_t inc = 0;
+  uint64_t handle = 1;           // its FSIOObject on the head:  a second shares inc (Z4)
   char role = 'f';               // f full, w writer only, r reader only
   bool alive = true;
   std::vector<LOpen> opens;
@@ -233,7 +233,7 @@ struct Gw {
   std::string step_inst;         // V_OCNT_SEND:  that instance
   std::string pub_instance;      // the publish's new version
   std::string pub_token;         // its claim (§4.2 step 1)
-  std::set<uint64_t> pub_incs;   // the incarnations it read (§4.2 step 3)
+  std::set<cls_rgw_fsio_handle> pub_incs;   // the handles it read (§4.2 step 3)
   uint64_t pub_epoch = 0;
   bool pub_began_suspended = false;  // the bucket's state when the publish began
   uint8_t released = 0;          // released once:  a bound, else release and
@@ -241,7 +241,7 @@ struct Gw {
   uint8_t pub_retry = 0;         // released:  publishes again after the cleanup
   void encode(ceph::buffer::list& bl) const {
     using ceph::encode;
-    encode(inc, bl); encode(alive, bl);
+    encode(inc, bl); encode(handle, bl); encode(alive, bl);
     encode((uint32_t)opens.size(), bl);
     for (auto& o : opens) o.encode(bl);
     encode(did_read, bl); encode(did_write, bl); encode(did_io, bl);
@@ -257,6 +257,15 @@ struct Gw {
     encode(pub_began_suspended, bl);
   }
 };
+
+/* a gateway handle's identity, and its name in traces:  "1" for an
+ * incarnation's first handle, "1.2" for its second (Z4) */
+cls_rgw_fsio_handle hd(const Gw& g) { return {g.inc, g.handle}; }
+std::string glabel(const Gw& g)
+{
+  return g.handle == 1 ? fmt::format("{}", g.inc) :
+    fmt::format("{}.{}", g.inc, g.handle);
+}
 
 /* what a run explores (the header comment) */
 struct Config {
@@ -504,7 +513,7 @@ void construct_abandon_actions(const Gw& g, size_t gi, uint64_t inc,
 			       std::vector<Action>& acts)
 {
   if (g.step == CONSTRUCT) {
-    acts.push_back({fmt::format("gw{} construct-gc {}", inc, sname(g.step_cs)),
+    acts.push_back({fmt::format("gw{} construct-gc {}", glabel(g), sname(g.step_cs)),
 	[gi](World& w) -> std::optional<std::string> {
 	  auto& g = w.gws[gi];
 	  /* giving up fails the open (EAGAIN):  it serves no more I/O, so
@@ -519,13 +528,13 @@ void construct_abandon_actions(const Gw& g, size_t gi, uint64_t inc,
 	}});
     return;
   }
-  acts.push_back({fmt::format("gw{} construct-leave {}", inc, sname(g.step_cs)),
+  acts.push_back({fmt::format("gw{} construct-leave {}", glabel(g), sname(g.step_cs)),
       [gi, inc](World& w) -> std::optional<std::string> {
 	auto& g = w.gws[gi];
 	fsio::leave_out out;
 	cls_rgw_fsio_effects fx;
 	auto save = w.head;
-	if (fsio::leave(w.head, gh(inc), g.step_cs, true, w.dead(), out, fx,
+	if (fsio::leave(w.head, hd(g), g.step_cs, true, w.dead(), out, fx,
 			nullptr) < 0 || !out.abandoned) {
 	  w.head = save;                 // as first written:  no exit
 	  g.step = NONE;
@@ -539,26 +548,41 @@ void construct_abandon_actions(const Gw& g, size_t gi, uint64_t inc,
 
 void fail_actions(const Gw& g, size_t gi, std::vector<Action>& acts)
 {
+  /* a process fails once, through its first handle;  the action takes
+   * every handle of the incarnation */
+  if (g.handle != 1) {
+    return;
+  }
   const auto inc = g.inc;
   bool may_partition = true;
   /* a zombie may also die for real, leaving what it did as a zombie */
   if ((!g.did_crash || g.zombie) && cfg.crashes) {
-    acts.push_back({fmt::format("gw{} crash", inc),
+    acts.push_back({fmt::format("gw{} crash", glabel(g)),
 	[gi](World& w) -> std::optional<std::string> {
-	  auto& g = w.gws[gi];
-	  g.alive = false;
-	  g.did_crash = 1;
-	  g.opens.clear();
-	  g.step = NONE;
+	  /* a process dies whole:  every handle of its incarnation (Z4) */
+	  const auto inc = w.gws[gi].inc;
+	  for (auto& g : w.gws) {
+	    if (g.inc != inc) {
+	      continue;
+	    }
+	    g.alive = false;
+	    g.did_crash = 1;
+	    g.opens.clear();
+	    g.step = NONE;
+	  }
 	  return std::nullopt;
 	}, true});
   }
   if (!g.did_crash && cfg.zombies && may_partition) {
-    acts.push_back({fmt::format("gw{} partition", inc),
+    acts.push_back({fmt::format("gw{} partition", glabel(g)),
 	[gi](World& w) -> std::optional<std::string> {
-	  auto& g = w.gws[gi];
-	  g.zombie = 1;
-	  g.did_crash = 1;
+	  const auto inc = w.gws[gi].inc;
+	  for (auto& g : w.gws) {
+	    if (g.inc == inc) {
+	      g.zombie = 1;
+	      g.did_crash = 1;
+	    }
+	  }
 	  return std::nullopt;
 	}, true});
   }
@@ -577,10 +601,10 @@ void gw_actions(const World& w0, size_t gi, std::vector<Action>& acts)
   if (g.step != NONE) {
     switch (g.step) {
     case CONSTRUCT:
-      acts.push_back({fmt::format("gw{} ready {}", inc, sname(g.step_cs)),
+      acts.push_back({fmt::format("gw{} ready {}", glabel(g), sname(g.step_cs)),
 	  [gi, inc](World& w) -> std::optional<std::string> {
 	    auto& g = w.gws[gi];
-	    fsio::ready(w.head, gh(inc), g.step_cs, 1);
+	    fsio::ready(w.head, hd(g), g.step_cs, 1);
 	    g.step = NONE;
 	    return std::nullopt;
 	  }});
@@ -591,17 +615,17 @@ void gw_actions(const World& w0, size_t gi, std::vector<Action>& acts)
       break;
     case PUBLISH_HINT:
       /* §3.5:  the hint naming f(head, r) is added before the publish */
-      acts.push_back({fmt::format("gw{} publish-hint", inc),
+      acts.push_back({fmt::format("gw{} publish-hint", glabel(g)),
 	  [gi](World& w) -> std::optional<std::string> {
 	    auto& g = w.gws[gi];
 	    g.step_r = fid_t{w.next_r++, 0};
-	    w.hints.insert(publish_head(g.inc, g.step_r));
+	    w.hints.insert(publish_head(hd(g), g.step_r));
 	    g.step = PUBLISH_WRITE;
 	    return std::nullopt;
 	  }});
       break;
     case PUBLISH_WRITE:
-      acts.push_back({fmt::format("gw{} publish {}", inc, sname(g.step_cs)),
+      acts.push_back({fmt::format("gw{} publish {}", glabel(g), sname(g.step_cs)),
 	  [gi, inc](World& w) -> std::optional<std::string> {
 	    auto& g = w.gws[gi];
 	    /* fsio_publish's own check (§3.5):  a zombie whose shadow was
@@ -609,7 +633,7 @@ void gw_actions(const World& w0, size_t gi, std::vector<Action>& acts)
 	    const auto* e = w.head.hdr ? w.head.hdr->find(g.step_cs) : nullptr;
 	    if (!e || e->state != state::PUBLISHING || !e->publishing ||
 		e->publishing->publisher.incarnation != inc) {
-	      w.hints.erase(publish_head(g.inc, g.step_r));
+	      w.hints.erase(publish_head(hd(g), g.step_r));
 	      g.release_failed = 1;           // keeps its hint (H1)
 	      g.step = NONE;
 	      return std::nullopt;
@@ -621,13 +645,13 @@ void gw_actions(const World& w0, size_t gi, std::vector<Action>& acts)
 	    fsio::replace_in in;
 	    in.mode = fsio::replace_mode::PUBLISH;
 	    in.r = g.step_r;
-	    in.caller = gh(inc);
+	    in.caller = hd(g);
 	    in.shadow = g.step_cs;
 	    fsio::replace_out out;
 	    cls_rgw_fsio_effects fx;
 	    int r = fsio::replace_head(w.head, in, out, fx);
 	    if (r < 0) {
-	      w.hints.erase(publish_head(g.inc, g.step_r));
+	      w.hints.erase(publish_head(hd(g), g.step_r));
 	      g.release_failed = 1;           // keeps its hint (H1)
 	      g.step = NONE;
 	      return std::nullopt;
@@ -651,7 +675,7 @@ void gw_actions(const World& w0, size_t gi, std::vector<Action>& acts)
 	  }});
       break;
     case PUBLISH_GC:
-      acts.push_back({fmt::format("gw{} publish-gc", inc),
+      acts.push_back({fmt::format("gw{} publish-gc", glabel(g)),
 	  [gi](World& w) -> std::optional<std::string> {
 	    auto& g = w.gws[gi];
 	    if (g.step_born) {
@@ -662,7 +686,7 @@ void gw_actions(const World& w0, size_t gi, std::vector<Action>& acts)
 	      }
 	      w.gcq.push_back(v);
 	    }
-	    w.hints.erase(publish_head(g.inc, g.step_r));
+	    w.hints.erase(publish_head(hd(g), g.step_r));
 	    if (g.step_drained) {
 	      g.step = DRAIN_SEND;
 	      g.step_cs = *g.step_drained;
@@ -674,7 +698,7 @@ void gw_actions(const World& w0, size_t gi, std::vector<Action>& acts)
 	  }});
       break;
     case DRAIN_SEND:
-      acts.push_back({fmt::format("gw{} drain {}", inc, sname(g.step_cs)),
+      acts.push_back({fmt::format("gw{} drain {}", glabel(g), sname(g.step_cs)),
 	  [gi](World& w) -> std::optional<std::string> {
 	    auto& g = w.gws[gi];
 	    const auto* e = w.head.hdr ? w.head.hdr->find(g.step_cs) : nullptr;
@@ -701,11 +725,11 @@ void gw_actions(const World& w0, size_t gi, std::vector<Action>& acts)
   }
 
   if (!g.did_read && g.role != 'w') {
-    acts.push_back({fmt::format("gw{} open-read", inc),
+    acts.push_back({fmt::format("gw{} open-read", glabel(g)),
 	[gi, inc](World& w) -> std::optional<std::string> {
 	  auto& g = w.gws[gi];
 	  g.did_read = 1;
-	  fsio::join_in in{gh(inc), false, w.nonce_for_join(), 10, w.dead()};
+	  fsio::join_in in{hd(g), false, w.nonce_for_join(), 10, w.dead()};
 	  fsio::join_out out;
 	  cls_rgw_fsio_effects fx;
 	  auto save = w.head;
@@ -719,11 +743,11 @@ void gw_actions(const World& w0, size_t gi, std::vector<Action>& acts)
 	}});
   }
   if (!g.did_write && g.role != 'r') {
-    acts.push_back({fmt::format("gw{} open-write", inc),
+    acts.push_back({fmt::format("gw{} open-write", glabel(g)),
 	[gi, inc](World& w) -> std::optional<std::string> {
 	  auto& g = w.gws[gi];
 	  g.did_write = 1;
-	  fsio::join_in in{gh(inc), true, w.nonce_for_join(), 10, w.dead()};
+	  fsio::join_in in{hd(g), true, w.nonce_for_join(), 10, w.dead()};
 	  fsio::join_out out;
 	  cls_rgw_fsio_effects fx;
 	  auto save = w.head;
@@ -752,7 +776,7 @@ void gw_actions(const World& w0, size_t gi, std::vector<Action>& acts)
   for (size_t oi = 0; oi < g.opens.size(); ++oi) {
     const auto& o = g.opens[oi];
     if (o.writer && !g.did_io) {
-      acts.push_back({fmt::format("gw{} write {}", inc, o.storage),
+      acts.push_back({fmt::format("gw{} write {}", glabel(g), o.storage),
 	  [gi, oi](World& w) -> std::optional<std::string> {
 	    auto& g = w.gws[gi];
 	    g.did_io = 1;
@@ -781,12 +805,12 @@ void gw_actions(const World& w0, size_t gi, std::vector<Action>& acts)
 	  const auto& c = w0.head.hdr->cur_shadow;
 	  if (c && t.id == *c && t.state == state::READY) {
 	    auto to = t.id;
-	    acts.push_back({fmt::format("gw{} follow {}", inc, sname(to)),
+	    acts.push_back({fmt::format("gw{} follow {}", glabel(g), sname(to)),
 		[gi, oi, inc, to](World& w) -> std::optional<std::string> {
 		  auto& g = w.gws[gi];
 		  g.did_follow = 1;
 		  auto& o = g.opens[oi];
-		  if (fsio::rebind(w.head, gh(inc), o.cs, to, 1) == 0) {
+		  if (fsio::rebind(w.head, hd(g), o.cs, to, 1) == 0) {
 		    o.cs = to;
 		    o.storage = sname(to);
 		  }
@@ -796,7 +820,7 @@ void gw_actions(const World& w0, size_t gi, std::vector<Action>& acts)
 	}
       }
     }
-    acts.push_back({fmt::format("gw{} close-{} {}", inc,
+    acts.push_back({fmt::format("gw{} close-{} {}", glabel(g),
 				o.writer ? "write" : "read", o.storage),
 	[gi, oi, inc](World& w) -> std::optional<std::string> {
 	  auto& g = w.gws[gi];
@@ -805,7 +829,7 @@ void gw_actions(const World& w0, size_t gi, std::vector<Action>& acts)
 	  fsio::leave_out out;
 	  cls_rgw_fsio_effects fx;
 	  auto save = w.head;
-	  if (fsio::leave(w.head, gh(inc), o.cs, o.writer, w.dead(), out, fx) < 0) {
+	  if (fsio::leave(w.head, hd(g), o.cs, o.writer, w.dead(), out, fx) < 0) {
 	    w.head = save;
 	    g.release_failed = 1;         // keeps its hint (H1)
 	    return std::nullopt;
@@ -919,7 +943,7 @@ void gw_actions_v(const World& w0, size_t gi, std::vector<Action>& acts)
   if (g.step != NONE) {
     switch (g.step) {
     case V_COUNT:
-      acts.push_back({fmt::format("gw{} count {}", inc, g.pending),
+      acts.push_back({fmt::format("gw{} count {}", glabel(g), g.pending),
 	  [gi, inc](World& w) -> std::optional<std::string> {
 	    auto& g = w.gws[gi];
 	    /* §4.3:  the presence hint on the instance head comes first */
@@ -928,14 +952,14 @@ void gw_actions_v(const World& w0, size_t gi, std::vector<Action>& acts)
 	      if (FSIO_SKIP_CHECK(PRESENCE_HINT_BEFORE_OCNT)) {
 		g.owe_ih_hint = g.pending;   // in a step of its own, after
 	      } else {
-		w.hints.insert(presence_ih(g.pending, inc));
+		w.hints.insert(presence_ih(g.pending, hd(g)));
 	      }
 	    }
 	    auto v = w.versions.find(g.pending);
 	    if (v == w.versions.end() ||
-		fsio::ocnt_add(v->second.ih, gh(inc)) < 0) {
+		fsio::ocnt_add(v->second.ih, hd(g)) < 0) {
 	      if (!had) {
-		w.hints.erase(presence_ih(g.pending, inc));
+		w.hints.erase(presence_ih(g.pending, hd(g)));
 		g.owe_ih_hint.clear();
 	      }
 	      g.step = NONE;                 // the open fails
@@ -947,7 +971,7 @@ void gw_actions_v(const World& w0, size_t gi, std::vector<Action>& acts)
 	  }});
       break;
     case V_JOIN:
-      acts.push_back({fmt::format("gw{} open-{} {}", inc,
+      acts.push_back({fmt::format("gw{} open-{} {}", glabel(g),
 				  g.pending_writer ? "write" : "read",
 				  g.pending),
 	  [gi, inc](World& w) -> std::optional<std::string> {
@@ -956,7 +980,7 @@ void gw_actions_v(const World& w0, size_t gi, std::vector<Action>& acts)
 	    if (w.olh_cur != g.pending) {
 	      return std::nullopt;           // the OLH guard:  ECANCELED
 	    }
-	    fsio::join_in in{gh(inc), g.pending_writer, w.nonce_for_join(), 10,
+	    fsio::join_in in{hd(g), g.pending_writer, w.nonce_for_join(), 10,
 			     w.dead(), g.pending};
 	    fsio::join_out out;
 	    cls_rgw_fsio_effects fx;
@@ -997,10 +1021,10 @@ void gw_actions_v(const World& w0, size_t gi, std::vector<Action>& acts)
 	  }});
       break;
     case CONSTRUCT:
-      acts.push_back({fmt::format("gw{} ready {}", inc, sname(g.step_cs)),
+      acts.push_back({fmt::format("gw{} ready {}", glabel(g), sname(g.step_cs)),
 	  [gi, inc](World& w) -> std::optional<std::string> {
 	    auto& g = w.gws[gi];
-	    fsio::ready(w.head, gh(inc), g.step_cs, 1);
+	    fsio::ready(w.head, hd(g), g.step_cs, 1);
 	    g.step = NONE;
 	    return std::nullopt;
 	  }});
@@ -1010,11 +1034,11 @@ void gw_actions_v(const World& w0, size_t gi, std::vector<Action>& acts)
       construct_abandon_actions(g, gi, inc, acts);
       break;
     case V_OCNT_SEND:
-      acts.push_back({fmt::format("gw{} ocnt-send {}", inc, g.step_inst),
+      acts.push_back({fmt::format("gw{} ocnt-send {}", glabel(g), g.step_inst),
 	  [gi](World& w) -> std::optional<std::string> {
 	    auto& g = w.gws[gi];
 	    ocnt_send(w, g.step_inst);
-	    w.hints.erase(presence_ih(g.step_inst, g.inc));
+	    w.hints.erase(presence_ih(g.step_inst, hd(g)));
 	    g.step = NONE;
 	    return std::nullopt;
 	  }});
@@ -1022,18 +1046,20 @@ void gw_actions_v(const World& w0, size_t gi, std::vector<Action>& acts)
     case V_PUB_READ:
       /* §4.2 step 3:  the incarnations bound to the shadow, read now that
        * reader joins wait */
-      acts.push_back({fmt::format("gw{} publish-read {}", inc,
+      acts.push_back({fmt::format("gw{} publish-read {}", glabel(g),
 				  sname(g.step_cs)),
 	  [gi](World& w) -> std::optional<std::string> {
 	    auto& g = w.gws[gi];
 	    g.pub_incs.clear();
 	    for (const auto& [i, o] : w.head.opens) {
-	      auto ocs = inc_chunk_sets(o);
-	      auto c = ocs.find(g.step_cs);
-	      if (c != ocs.end() &&
-		  (c->second.readers ||
-		   (FSIO_SKIP_CHECK(W7_PUBLISH_COUNTS_READERS_ONLY) && c->second.writers))) {
-		g.pub_incs.insert(i);       // readers only (§4.2 step 3, W7)
+	      for (const auto& [hdl, ho] : o.handles) {   // per handle (Z4)
+		auto c = ho.chunk_sets.find(g.step_cs);
+		if (c != ho.chunk_sets.end() &&
+		    (c->second.readers ||
+		     (FSIO_SKIP_CHECK(W7_PUBLISH_COUNTS_READERS_ONLY) &&
+		      c->second.writers))) {
+		  g.pub_incs.insert({i, hdl});  // readers only (§4.2 step 3, W7)
+		}
 	      }
 	    }
 	    /* §4.2 step 3:  a presence hint on the new instance head for
@@ -1049,7 +1075,7 @@ void gw_actions_v(const World& w0, size_t gi, std::vector<Action>& acts)
       break;
     case V_PUB_WRITE:
       /* §4.2 step 4:  the instance head, its open count those incarnations */
-      acts.push_back({fmt::format("gw{} instance-write {}", inc,
+      acts.push_back({fmt::format("gw{} instance-write {}", glabel(g),
 				  g.pub_instance),
 	  [gi](World& w) -> std::optional<std::string> {
 	    auto& g = w.gws[gi];
@@ -1065,7 +1091,7 @@ void gw_actions_v(const World& w0, size_t gi, std::vector<Action>& acts)
 		g.step = V_PUB_CLEANUP;      // keeps its hint (§4.2, V4)
 		return std::nullopt;
 	      }
-	      w.hints.erase(publish_ih(g.pub_instance, g.inc));
+	      w.hints.erase(publish_ih(g.pub_instance, hd(g)));
 	      g.step = NONE;
 	      return std::nullopt;
 	    }
@@ -1082,7 +1108,7 @@ void gw_actions_v(const World& w0, size_t gi, std::vector<Action>& acts)
 	    v.ih.manifest = tok_bl(sn);
 	    if (!g.pub_incs.empty()) {
 	      v.ih.ocnt.emplace();
-	      v.ih.ocnt->holders = holders_of(g.pub_incs);
+	      v.ih.ocnt->holders = g.pub_incs;
 	    }
 	    v.tail = sn;
 	    v.epoch = g.pub_epoch;
@@ -1096,7 +1122,7 @@ void gw_actions_v(const World& w0, size_t gi, std::vector<Action>& acts)
       break;
     case V_PUB_LINK:
       /* set_olh() at the epoch recorded at the transition (§4.2) */
-      acts.push_back({fmt::format("gw{} link {}", inc, g.pub_instance),
+      acts.push_back({fmt::format("gw{} link {}", glabel(g), g.pub_instance),
 	  [gi](World& w) -> std::optional<std::string> {
 	    auto& g = w.gws[gi];
 	    if (g.pub_epoch > w.olh_epoch) {
@@ -1108,20 +1134,20 @@ void gw_actions_v(const World& w0, size_t gi, std::vector<Action>& acts)
 	  }});
       break;
     case V_PUB_PUBLISH:
-      acts.push_back({fmt::format("gw{} publish {}", inc, sname(g.step_cs)),
+      acts.push_back({fmt::format("gw{} publish {}", glabel(g), sname(g.step_cs)),
 	  [gi, inc](World& w) -> std::optional<std::string> {
 	    auto& g = w.gws[gi];
 	    fsio::replace_in in;
 	    in.mode = fsio::replace_mode::PUBLISH;
 	    in.versioned = true;
-	    in.caller = gh(inc);
+	    in.caller = hd(g);
 	    in.shadow = g.step_cs;
 	    fsio::replace_out out;
 	    cls_rgw_fsio_effects fx;
 	    auto save = w.head;
 	    if (fsio::replace_head(w.head, in, out, fx) < 0) {
 	      w.head = save;
-	      w.hints.erase(publish_ih(g.pub_instance, g.inc));
+	      w.hints.erase(publish_ih(g.pub_instance, hd(g)));
 	      g.release_failed = 1;           // keeps its hint (H1)
 	      g.step = NONE;
 	      return std::nullopt;
@@ -1135,18 +1161,18 @@ void gw_actions_v(const World& w0, size_t gi, std::vector<Action>& acts)
     case V_PUB_HINT:
       /* §4.2 step 1:  an instance id and a token, and a publish hint
        * naming the instance head */
-      acts.push_back({fmt::format("gw{} publish-hint", inc),
+      acts.push_back({fmt::format("gw{} publish-hint", glabel(g)),
 	  [gi](World& w) -> std::optional<std::string> {
 	    auto& g = w.gws[gi];
 	    g.pub_instance = fmt::format("I{}", w.next_i++);
 	    g.pub_token = fmt::format("k{}", w.next_tag++);
-	    w.hints.insert(publish_ih(g.pub_instance, g.inc));
+	    w.hints.insert(publish_ih(g.pub_instance, hd(g)));
 	    g.step = V_PLACE;
 	    return std::nullopt;
 	  }});
       break;
     case V_PLACE:
-      acts.push_back({fmt::format("gw{} placeholder {}", inc, g.pub_instance),
+      acts.push_back({fmt::format("gw{} placeholder {}", glabel(g), g.pub_instance),
 	  [gi](World& w) -> std::optional<std::string> {
 	    auto& g = w.gws[gi];
 	    Version v;                           // exclusive create
@@ -1159,7 +1185,7 @@ void gw_actions_v(const World& w0, size_t gi, std::vector<Action>& acts)
       break;
     case V_LEAVE:
       /* §4.2 step 2:  the leave records the instance, token and epoch */
-      acts.push_back({fmt::format("gw{} close-leave {}", inc,
+      acts.push_back({fmt::format("gw{} close-leave {}", glabel(g),
 				  sname(g.step_cs)),
 	  [gi, inc](World& w) -> std::optional<std::string> {
 	    auto& g = w.gws[gi];
@@ -1168,7 +1194,7 @@ void gw_actions_v(const World& w0, size_t gi, std::vector<Action>& acts)
 	    fsio::publish_intent intent{g.pub_instance, g.pub_token,
 					w.next_epoch};
 	    auto save = w.head;
-	    if (fsio::leave(w.head, gh(inc), g.step_cs, true, w.dead(), out, fx,
+	    if (fsio::leave(w.head, hd(g), g.step_cs, true, w.dead(), out, fx,
 			    &intent) < 0) {
 	      w.head = save;
 	      g.release_failed = 1;         // keeps its hint (H1)
@@ -1190,7 +1216,7 @@ void gw_actions_v(const World& w0, size_t gi, std::vector<Action>& acts)
 	  }});
       break;
     case V_UNPLACE:
-      acts.push_back({fmt::format("gw{} unplace {}", inc, g.pub_instance),
+      acts.push_back({fmt::format("gw{} unplace {}", glabel(g), g.pub_instance),
 	  [gi](World& w) -> std::optional<std::string> {
 	    auto& g = w.gws[gi];
 	    auto vi = w.versions.find(g.pub_instance);
@@ -1198,17 +1224,17 @@ void gw_actions_v(const World& w0, size_t gi, std::vector<Action>& acts)
 		vi->second.ih.id_tag.empty()) {
 	      w.versions.erase(vi);            // guarded:  claim == token
 	    }
-	    w.hints.erase(publish_ih(g.pub_instance, g.inc));
+	    w.hints.erase(publish_ih(g.pub_instance, hd(g)));
 	    g.step = NONE;
 	    return std::nullopt;
 	  }});
       break;
     case V_PUB_UNHINT:
-      acts.push_back({fmt::format("gw{} publish-unhint {}", inc,
+      acts.push_back({fmt::format("gw{} publish-unhint {}", glabel(g),
 				  g.pub_instance),
 	  [gi](World& w) -> std::optional<std::string> {
 	    auto& g = w.gws[gi];
-	    w.hints.erase(publish_ih(g.pub_instance, g.inc));
+	    w.hints.erase(publish_ih(g.pub_instance, hd(g)));
 	    if (g.step_drained) {
 	      g.step = DRAIN_SEND;
 	      g.step_cs = *g.step_drained;
@@ -1220,7 +1246,7 @@ void gw_actions_v(const World& w0, size_t gi, std::vector<Action>& acts)
 	  }});
       break;
     case DRAIN_SEND:
-      acts.push_back({fmt::format("gw{} drain {}", inc, sname(g.step_cs)),
+      acts.push_back({fmt::format("gw{} drain {}", glabel(g), sname(g.step_cs)),
 	  [gi](World& w) -> std::optional<std::string> {
 	    auto& g = w.gws[gi];
 	    const auto* e = w.head.hdr ? w.head.hdr->find(g.step_cs) : nullptr;
@@ -1245,7 +1271,7 @@ void gw_actions_v(const World& w0, size_t gi, std::vector<Action>& acts)
 	}
       }
       if (!named) {
-	acts.push_back({fmt::format("gw{} unplace-aborted {}", inc,
+	acts.push_back({fmt::format("gw{} unplace-aborted {}", glabel(g),
 				    g.pub_instance),
 	    [gi](World& w) -> std::optional<std::string> {
 	      auto& g = w.gws[gi];
@@ -1260,7 +1286,7 @@ void gw_actions_v(const World& w0, size_t gi, std::vector<Action>& acts)
 		  vi->second.ih.id_tag.empty()) {
 		w.versions.erase(vi);
 	      }
-	      w.hints.erase(publish_ih(g.pub_instance, g.inc));
+	      w.hints.erase(publish_ih(g.pub_instance, hd(g)));
 	      g.pub_incs.clear();
 	      g.step = g.pub_retry ? V_PUB_HINT : NONE;
 	      g.pub_retry = 0;
@@ -1270,11 +1296,11 @@ void gw_actions_v(const World& w0, size_t gi, std::vector<Action>& acts)
       break;
     }
     case V_REL_RELEASE:
-      acts.push_back({fmt::format("gw{} publish-release {}", inc,
+      acts.push_back({fmt::format("gw{} publish-release {}", glabel(g),
 				  sname(g.step_cs)),
 	  [gi](World& w) -> std::optional<std::string> {
 	    auto& g = w.gws[gi];
-	    if (fsio::publish_release(w.head, gh(g.inc), g.step_cs) < 0) {
+	    if (fsio::publish_release(w.head, hd(g), g.step_cs) < 0) {
 	      g.release_failed = 1;          // the expirer took the shadow over
 	    } else {
 	      g.pub_retry = 1;               // its idle timer publishes again
@@ -1293,7 +1319,7 @@ void gw_actions_v(const World& w0, size_t gi, std::vector<Action>& acts)
 	(g.step == V_PUB_READ || g.step == V_PUB_WRITE ||
 	 (FSIO_SKIP_CHECK(W10_RELEASE_ONLY_WITH_LIVE_CLAIM) &&
 	  (g.step == V_PUB_LINK || g.step == V_PUB_PUBLISH)))) {
-      acts.push_back({fmt::format("gw{} release-abort {}", inc,
+      acts.push_back({fmt::format("gw{} release-abort {}", glabel(g),
 				  g.pub_instance),
 	  [gi](World& w) -> std::optional<std::string> {
 	    auto& g = w.gws[gi];
@@ -1325,7 +1351,7 @@ void gw_actions_v(const World& w0, size_t gi, std::vector<Action>& acts)
     if (writer ? (g.did_write || g.role == 'r') : (g.did_read || g.role == 'w')) {
       continue;
     }
-    acts.push_back({fmt::format("gw{} read-olh-{}", inc,
+    acts.push_back({fmt::format("gw{} read-olh-{}", glabel(g),
 				writer ? "write" : "read"),
 	[gi, writer](World& w) -> std::optional<std::string> {
 	  auto& g = w.gws[gi];
@@ -1345,7 +1371,7 @@ void gw_actions_v(const World& w0, size_t gi, std::vector<Action>& acts)
   for (size_t oi = 0; oi < g.opens.size(); ++oi) {
     const auto& o = g.opens[oi];
     if (o.writer && !g.did_io) {
-      acts.push_back({fmt::format("gw{} write {}", inc, o.storage),
+      acts.push_back({fmt::format("gw{} write {}", glabel(g), o.storage),
 	  [gi, oi](World& w) -> std::optional<std::string> {
 	    auto& g = w.gws[gi];
 	    g.did_io = 1;
@@ -1373,11 +1399,11 @@ void gw_actions_v(const World& w0, size_t gi, std::vector<Action>& acts)
 	auto to = t->id;
 	/* as written:  a rebind takes no count (W7(a));  into a ready or a
 	 * publishing shadow, as fsio_rebind allows (§3) */
-	acts.push_back({fmt::format("gw{} follow {}", inc, sname(to)),
+	acts.push_back({fmt::format("gw{} follow {}", glabel(g), sname(to)),
 	    [gi, oi, inc, to](World& w) -> std::optional<std::string> {
 	      auto& g = w.gws[gi];
 	      auto& o = g.opens[oi];
-	      if (fsio::rebind(w.head, gh(inc), o.cs, to, 1) == 0) {
+	      if (fsio::rebind(w.head, hd(g), o.cs, to, 1) == 0) {
 		g.did_follow = 1;
 		o.cs = to;
 		o.storage = sname(to);
@@ -1386,7 +1412,7 @@ void gw_actions_v(const World& w0, size_t gi, std::vector<Action>& acts)
 	    }});
       }
     }
-    acts.push_back({fmt::format("gw{} close-{} {}", inc,
+    acts.push_back({fmt::format("gw{} close-{} {}", glabel(g),
 				o.writer ? "write" : "read", o.storage),
 	[gi, oi, inc](World& w) -> std::optional<std::string> {
 	  auto& g = w.gws[gi];
@@ -1407,7 +1433,7 @@ void gw_actions_v(const World& w0, size_t gi, std::vector<Action>& acts)
 	    fsio::leave_out out;
 	    cls_rgw_fsio_effects fx;
 	    auto save = w.head;
-	    if (fsio::leave(w.head, gh(inc), o.cs, true, w.dead(), out, fx) < 0) {
+	    if (fsio::leave(w.head, hd(g), o.cs, true, w.dead(), out, fx) < 0) {
 	      w.head = save;
 	      g.release_failed = 1;         // keeps its hint (H1)
 	      return std::nullopt;
@@ -1422,7 +1448,7 @@ void gw_actions_v(const World& w0, size_t gi, std::vector<Action>& acts)
 	  fsio::leave_out out;
 	  cls_rgw_fsio_effects fx;
 	  auto save = w.head;
-	  if (fsio::leave(w.head, gh(inc), o.cs, false, w.dead(), out, fx) < 0) {
+	  if (fsio::leave(w.head, hd(g), o.cs, false, w.dead(), out, fx) < 0) {
 	    w.head = save;
 	    g.release_failed = 1;         // keeps its hint (H1)
 	    return std::nullopt;
@@ -1462,22 +1488,22 @@ void gw_actions_v(const World& w0, size_t gi, std::vector<Action>& acts)
 	continue;
       }
     }
-    acts.push_back({fmt::format("gw{} uncount {}", inc, inst),
+    acts.push_back({fmt::format("gw{} uncount {}", glabel(g), inst),
 	[gi, inc, inst](World& w) -> std::optional<std::string> {
 	  auto& g = w.gws[gi];
 	  g.counted.erase(inst);
 	  auto v = w.versions.find(inst);
 	  if (v == w.versions.end()) {
-	    w.hints.erase(presence_ih(inst, inc));
+	    w.hints.erase(presence_ih(inst, hd(g)));
 	    return std::nullopt;
 	  }
 	  fsio::ocnt_drain d;
-	  fsio::ocnt_remove(v->second.ih, gh(inc), d);
+	  fsio::ocnt_remove(v->second.ih, hd(g), d);
 	  if (d.drained) {
 	    g.step = V_OCNT_SEND;            // the hint goes after the send
 	    g.step_inst = inst;
 	  } else {
-	    w.hints.erase(presence_ih(inst, inc));
+	    w.hints.erase(presence_ih(inst, hd(g)));
 	  }
 	  return std::nullopt;
 	}});
@@ -1996,7 +2022,7 @@ void expirer_actions_v(const World& w0, std::vector<Action>& acts)
 	    w.ex_inst = fmt::format("I{}", w.next_i++);
 	    w.ex_token = fmt::format("k{}", w.next_tag++);
 	    if (!FSIO_SKIP_CHECK(V3_FINALIZER_HINTS_PLACEHOLDER)) {
-	      w.hints.insert(publish_ih(w.ex_inst, w.ex_inc));
+	      w.hints.insert(publish_ih(w.ex_inst, xh(w.ex_inc)));
 	    }
 	    w.ex = VF_PLACE;
 	    return std::nullopt;
@@ -2025,7 +2051,7 @@ void expirer_actions_v(const World& w0, std::vector<Action>& acts)
 	      if (vi != w.versions.end() && vi->second.claim == w.ex_token) {
 		w.versions.erase(vi);        // its own placeholder
 	      }
-	      w.hints.erase(publish_ih(w.ex_inst, w.ex_inc));
+	      w.hints.erase(publish_ih(w.ex_inst, xh(w.ex_inc)));
 	      w.ex = EX_IDLE;
 	      return std::nullopt;
 	    }
@@ -2124,7 +2150,7 @@ void expirer_actions_v(const World& w0, std::vector<Action>& acts)
 				 sname(w.ex_to), r);
 	    }
 	    apply_remove_head(w, fx);
-	    w.hints.erase(publish_ih(w.ex_inst, w.ex_inc));   // its own (V3)
+	    w.hints.erase(publish_ih(w.ex_inst, xh(w.ex_inc)));   // its own (V3)
 	    w.ex = EX_IDLE;
 	    return std::nullopt;
 	  }});
@@ -2399,7 +2425,7 @@ void presence_hints(const World& w0, size_t gi, std::vector<Action>& acts,
     }
     auto inner = std::move(acts[i].run);
     acts[i].run = [gi, inner](World& w) -> std::optional<std::string> {
-      const auto h = presence_head(w.gws[gi].inc);
+      const auto h = presence_head(hd(w.gws[gi]));
       const bool before = holds_head(w.gws[gi]);
       if (!before && !FSIO_SKIP_CHECK(PRESENCE_HINT_BEFORE_JOIN)) {
 	w.hints.insert(h);
@@ -2421,20 +2447,20 @@ void presence_hints(const World& w0, size_t gi, std::vector<Action>& acts,
     return;
   }
   if (g.owe_head_hint) {
-    acts.push_back({fmt::format("gw{} presence-hint", g.inc),
+    acts.push_back({fmt::format("gw{} presence-hint", glabel(g)),
 	[gi](World& w) -> std::optional<std::string> {
 	  auto& g = w.gws[gi];
-	  w.hints.insert(presence_head(g.inc));
+	  w.hints.insert(presence_head(hd(g)));
 	  g.owe_head_hint = 0;
 	  return std::nullopt;
 	}});
   }
   if (!g.owe_ih_hint.empty()) {
-    acts.push_back({fmt::format("gw{} presence-hint {}", g.inc, g.owe_ih_hint),
+    acts.push_back({fmt::format("gw{} presence-hint {}", glabel(g), g.owe_ih_hint),
 	[gi](World& w) -> std::optional<std::string> {
 	  auto& g = w.gws[gi];
 	  if (g.counted.count(g.owe_ih_hint)) {
-	    w.hints.insert(presence_ih(g.owe_ih_hint, g.inc));
+	    w.hints.insert(presence_ih(g.owe_ih_hint, hd(g)));
 	  }
 	  g.owe_ih_hint.clear();
 	  return std::nullopt;
@@ -2493,7 +2519,7 @@ std::optional<std::string> check_state(const World& w)
     if (!g.alive || g.zombie) continue;   // a zombie's read fails:  a reopen
     for (const auto& o : g.opens) {
       if (!w.storage.count(o.storage)) {
-	return fmt::format("gw{}'s open reads {}, collected", g.inc,
+	return fmt::format("gw{}'s open reads {}, collected", glabel(g),
 			   o.storage);
       }
     }
@@ -2816,9 +2842,23 @@ World initial(const std::string& roles, int s3_ops)
     w.head.id_tag = "t0";
     w.head.manifest = tok_bl("C0");
   }
+  /* a role letter per handle;  "+" joins the next one to the previous
+   * gateway, as its second FSIOObject on the head (Z4):  "w+r" is one
+   * gateway with a writer handle and a reader handle */
+  uint64_t inc = 0, handle = 0;
   for (size_t i = 0; i < roles.size(); ++i) {
+    if (roles[i] == '+') {
+      continue;
+    }
+    if (i > 0 && roles[i - 1] == '+') {
+      ++handle;
+    } else {
+      ++inc;
+      handle = 1;
+    }
     Gw g;
-    g.inc = i + 1;
+    g.inc = inc;
+    g.handle = handle;
     g.role = roles[i];
     w.gws.push_back(g);
   }
