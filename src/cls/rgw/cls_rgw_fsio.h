@@ -66,6 +66,7 @@ enum class cls_rgw_fsio_check : uint8_t {
   W10_RELEASE_ABORTS_CLAIM_FIRST,      // the gateway's versioned release (model)
   W15_CONSTRUCTOR_MAY_ABANDON,         // fsio_leave, a constructing shadow
   W20_RELEASE_CHECKS_PUBLISHER,        // fsio_publish_release
+  RESUME_RESOLVES_CLAIM,               // the expirer's resumed versioned finalize (model)
 };
 
 #ifdef CLS_RGW_FSIO_SKIP_CHECKS

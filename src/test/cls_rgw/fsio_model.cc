@@ -2306,6 +2306,19 @@ void expirer_actions_v(const World& w0, std::vector<Action>& acts)
 	  }
 	  w.ex_from = from;
 	  adopt_to(w, to);
+	  /* §3.7 step 4:  `to`'s claim resolved as §4.2 does before the
+	   * finalize goes on:  written, it completes through set_olh();
+	   * written then removed, it publishes */
+	  auto vi = w.versions.find(w.ex_inst);
+	  if (FSIO_SKIP_CHECK(RESUME_RESOLVES_CLAIM)) {
+	    return std::nullopt;
+	  }
+	  if (vi == w.versions.end() ||
+	      (!vi->second.claim && vi->second.ih.id_tag.empty())) {
+	    w.ex = VF_PUBLISH;
+	  } else if (!vi->second.claim) {
+	    w.ex = VF_LINK;
+	  }
 	  return std::nullopt;
 	}});
   }
@@ -2800,8 +2813,7 @@ struct Explorer {
 	++states;
       }
       if (path.size() >= max_depth) {
-	found_one(fmt::format("path exceeds {} steps:  a cycle drawing new ids",
-			      max_depth));
+	found_one(fmt::format("walk exceeds {} steps without an end", max_depth));
 	return;
       }
       auto acts = actions_of(w);
@@ -2844,31 +2856,101 @@ struct Explorer {
     }
   }
 
+  /* the livelock check (FSIO_MODEL_LIVELOCK, on by default;  off with
+   * SHORTEST):  every explored state must still reach an end state.
+   * Tarjan's strongly connected components, run in the search:  per
+   * state its DFS index, lowlink, whether it is on the component stack,
+   * and whether an end state is reachable from it.  A component that
+   * finishes with no end state reachable is a livelock.  States whose
+   * successors were not all explored (the state limit, the depth limit,
+   * a violation, a prefix step) count as reaching an end:  never
+   * reported, never trusted */
+  struct Node {
+    uint32_t index = 0, low = 0;
+    bool on_stack = false, reach = false;
+  };
+  bool livelock = true;
+  std::unordered_map<XXH128_hash_t, Node, StateHash, StateEq> nodes;
+  std::vector<XXH128_hash_t> component;
+  uint32_t next_index = 0;
+  static constexpr uint32_t NO_LOW = UINT32_MAX;
+  struct Visit {
+    uint32_t low = NO_LOW;       // a lowlink for the caller, if on the stack
+    bool reach = true;
+  };
+
+  /* a state's successors are done:  if it is its component's root, the
+   * component is complete, and stuck if no member reaches an end */
+  Visit finish(const XXH128_hash_t& hash, bool lv, uint32_t low, bool reach) {
+    if (!lv) {
+      return {};
+    }
+    auto& me = nodes[hash];
+    me.low = low;
+    me.reach = me.reach || reach;
+    if (me.low != me.index) {
+      return {me.low, me.reach};       // the component goes on above
+    }
+    const bool r = me.reach;
+    size_t n = 0;
+    for (;;) {
+      auto h = component.back();
+      component.pop_back();
+      auto& m = nodes[h];
+      m.on_stack = false;
+      m.reach = r;
+      ++n;
+      if (XXH128_isEqual(h, hash)) {
+	break;
+      }
+    }
+    if (!r) {
+      report(fmt::format("livelock:  {} states from which no end state is "
+			 "reachable", n));
+    }
+    return {NO_LOW, r};
+  }
+
   uint64_t transitions = 0, revisits = 0, background_only = 0;
-  void dfs(const World& w) {
-    if (states >= limit) return;
-    if (stop_at_first && !found.empty()) return;
+  Visit dfs(const World& w) {
+    if (states >= limit) return {};
+    if (stop_at_first && !found.empty()) return {};
     if (path.size() >= max_depth) {
       report(fmt::format("path exceeds {} steps:  a cycle drawing new ids",
 			 max_depth));
-      return;
+      return {};
     }
     if (path.size() > bound) {
       cut = true;
-      return;
+      return {};
     }
+    const bool lv = livelock && !shortest;
     auto k = w.key();
     auto hash = XXH3_128bits(k.data(), k.size());
     if (shortest) {
       auto [i, fresh] = seen_at.try_emplace(hash, path.size());
       if (!fresh) {
-	if (i->second <= path.size()) return;
+	if (i->second <= path.size()) return {};
 	i->second = path.size();         // reached shallower:  explore again
       }
+    } else if (lv) {
+      auto [i, fresh] = nodes.try_emplace(hash);
+      if (!fresh) {
+	++revisits;
+	/* on the stack:  the same component, its reach not yet known;
+	 * finished:  its reach is */
+	return i->second.on_stack ? Visit{i->second.index, false} :
+	  Visit{NO_LOW, i->second.reach};
+      }
+      i->second.index = i->second.low = next_index++;
+      i->second.on_stack = true;
+      component.push_back(hash);
     } else if (!seen.insert(hash).second) {
       ++revisits;
-      return;
+      return {};
     }
+    uint32_t low = lv ? nodes[hash].index : NO_LOW;
+    bool reach = false;
     ++states;
     if (progress && states % progress == 0) {
       status();
@@ -2893,9 +2975,10 @@ struct Explorer {
     if (std::all_of(acts.begin(), acts.end(),
 		    [](const Action& a) { return a.failure; })) {
       ++ends;
+      reach = true;
       if (auto v = check_end(w)) report(*v);
       if (acts.empty()) {
-	return;
+	return finish(hash, lv, low, reach);
       }
     }
     if (path.size() < prefix.size()) {
@@ -2913,13 +2996,14 @@ struct Explorer {
 	  std::cerr << std::flush;
 	}
 	prefix_missed = true;
-	return;
+	return finish(hash, lv, low, true);
       }
       auto a = std::move(*i);
       acts.clear();
       acts.push_back(std::move(a));
+      reach = true;                      // its other successors unexplored
     } else if (prefix_only && !prefix.empty()) {
-      return;
+      return finish(hash, lv, low, true);
     }
     for (auto& a : acts) {
       ++transitions;
@@ -2929,11 +3013,15 @@ struct Explorer {
       if (!v) v = check_state(n);
       if (v) {
 	report(*v);
+	reach = true;
       } else {
-	dfs(n);
+	auto r = dfs(n);
+	low = std::min(low, r.low);
+	reach = reach || r.reach;
       }
       path.pop_back();
     }
+    return finish(hash, lv, low, reach);
   }
 };
 
@@ -3025,6 +3113,7 @@ TEST(FSIOModel, Explore)
   x.max_depth = env_int("FSIO_MODEL_MAX_DEPTH", 200);
   x.stop_at_first = env_int("FSIO_MODEL_STOP_AT_FIRST", 0);
   x.commute_sample = env_int("FSIO_MODEL_COMMUTE_SAMPLE", 0);
+  x.livelock = env_int("FSIO_MODEL_LIVELOCK", 1);
   if (auto c = std::getenv("FSIO_MODEL_SKIP_CHECK")) {
     const std::map<std::string, cls_rgw_fsio_check> checks = {
       {"W5_FINALIZE_RECHECKS_STATE", cls_rgw_fsio_check::W5_FINALIZE_RECHECKS_STATE},
@@ -3077,6 +3166,7 @@ TEST(FSIOModel, Explore)
        cls_rgw_fsio_check::W10_RELEASE_ABORTS_CLAIM_FIRST},
       {"W15_CONSTRUCTOR_MAY_ABANDON",
        cls_rgw_fsio_check::W15_CONSTRUCTOR_MAY_ABANDON},
+      {"RESUME_RESOLVES_CLAIM", cls_rgw_fsio_check::RESUME_RESOLVES_CLAIM},
       {"W20_RELEASE_CHECKS_PUBLISHER",
        cls_rgw_fsio_check::W20_RELEASE_CHECKS_PUBLISHER},
     };

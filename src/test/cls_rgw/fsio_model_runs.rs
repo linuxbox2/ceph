@@ -174,6 +174,10 @@ fn skip_table() -> Vec<Check> {
         ("W10_RELEASE_ONLY_WITH_LIVE_CLAIM", ver, none, true),
         ("W10_RELEASE_ABORTS_CLAIM_FIRST", ver, none, true),
         ("W15_CONSTRUCTOR_MAY_ABANDON", unv, none, true),
+        /* a livelock:  the livelock check is off under SHORTEST */
+        ("RESUME_RESOLVES_CLAIM", ver,
+         &[("FSIO_MODEL_ROLES", "w"), ("FSIO_MODEL_S3_OPS", "0"), ("FSIO_MODEL_SHORTEST", "0")],
+         true),
         ("W20_RELEASE_CHECKS_PUBLISHER", null,
          &[("FSIO_MODEL_ROLES", "ww"), ("FSIO_MODEL_S3_OPS", "0"), ("FSIO_MODEL_CRASHES", "0"),
            ("FSIO_MODEL_EXPIRER_CRASHES", "0")], true),
