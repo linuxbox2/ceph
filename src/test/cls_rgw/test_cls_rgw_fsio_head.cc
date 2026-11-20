@@ -759,3 +759,32 @@ TEST_F(FsioHead, PublishingRecordNamesTheIdentity)
   ASSERT_TRUE(e && e->publishing);
   EXPECT_EQ("carol", e->publishing->identity);
 }
+
+/* A11, §3.1:  the join's reply, from the OSD, carries what the joining
+ * gateway needs:  a second writer learns the shadow's state, its hint
+ * and its highest run, and that another handle is bound */
+TEST_F(FsioHead, JoinReplyCarriesTheShadow)
+{
+  std::string key;
+  const auto head = make_head(key);
+  const auto w1 = join(head, 31, true);
+  ASSERT_TRUE(w1.construct);
+  EXPECT_FALSE(w1.others);
+  cls_rgw_fsio_runs_op rop;
+  rop.caller = GW1;
+  rop.cs = w1.bound;
+  rop.runs = {{0, 2}};
+  rop.size = 42;
+  rop.mtime = ceph::real_time(std::chrono::seconds(9));
+  ASSERT_EQ(0, call(head, cls::rgw::method::fsio_ready, rop,
+		    (cls_rgw_fsio_flags_ret*)nullptr));
+  const auto w2 = join(head, 32, true, GW2);
+  EXPECT_EQ(w1.bound, w2.bound);
+  EXPECT_FALSE(w2.construct);
+  EXPECT_EQ(static_cast<uint8_t>(cls_rgw_fsio_cs_state::READY), w2.state);
+  EXPECT_TRUE(w2.others);
+  EXPECT_EQ(42u, w2.size_hint);
+  EXPECT_EQ(ceph::real_time(std::chrono::seconds(9)), w2.mtime_hint);
+  ASSERT_TRUE(w2.last_run);
+  EXPECT_EQ((cls_rgw_fsio_run{0, 2}), *w2.last_run);
+}

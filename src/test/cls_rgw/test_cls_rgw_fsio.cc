@@ -557,7 +557,10 @@ TEST(cls_rgw_fsio, replies_fit_the_reply_cap)
     encode(r, bl);
     return bl.length();
   };
-  cls_rgw_fsio_join_ret j{big, true, true};
+  cls_rgw_fsio_join_ret j{big, true, true, 0xff, true, UINT64_MAX,
+			  UINT64_MAX,
+			  ceph::real_time(std::chrono::seconds(UINT32_MAX)),
+			  cls_rgw_fsio_run{UINT64_MAX, UINT64_MAX}};
   EXPECT_LE(size(j), cap);
   cls_rgw_fsio_leave_ret l{true, true, true, UINT64_MAX,
 			   std::string(32, 'i'), big};   // OBJ_INSTANCE_LEN
@@ -1399,6 +1402,42 @@ TEST(cls_rgw_fsio_identity, writer_identity_updates_a_writer)
   EXPECT_EQ(0, fsio::writer_identity(h, GW1, j.bound, "carol"));   // a repeat
   const auto r = join_reader(h, GW2);
   EXPECT_EQ(-EINVAL, fsio::writer_identity(h, GW2, r, "dave"));
+}
+
+/* A11, §3.1:  the join's reply carries what the joining gateway needs,
+ * as the join saw it:  the bound chunk set's state, whether another
+ * handle is bound, and a shadow's epoch, hints and highest run */
+TEST(cls_rgw_fsio_join_reply, carries_what_the_gateway_needs)
+{
+  auto h = head("C0");
+  fsio::join_out w1;
+  cls_rgw_fsio_effects fx;
+  ASSERT_EQ(0, fsio::join(h, {GW1, next_seq(), true, 1, 10, {}}, w1, fx));
+  ASSERT_TRUE(w1.construct);
+  EXPECT_EQ(cls_rgw_fsio_cs_state::CONSTRUCTING, w1.state);
+  EXPECT_FALSE(w1.others);                         // alone
+  EXPECT_FALSE(w1.last_run);                       // nothing reserved yet
+  ASSERT_EQ(0, fsio::ready(h, GW1, w1.bound, {{0, 3}}, 100, secs(5)));
+  ASSERT_EQ(0, fsio::extend(h, GW1, w1.bound, {8, 9}));
+  fsio::hint_out ho;
+  ASSERT_EQ(0, fsio::hint(h, GW1, w1.bound, 0, 300, secs(7), ho));
+
+  fsio::join_out w2;
+  ASSERT_EQ(0, fsio::join(h, {GW2, next_seq(), true, 1, 10, {}}, w2, fx));
+  EXPECT_EQ(w1.bound, w2.bound);
+  EXPECT_EQ(cls_rgw_fsio_cs_state::READY, w2.state);
+  EXPECT_TRUE(w2.others);                          // GW1's writer
+  EXPECT_EQ(0u, w2.trunc_epoch);
+  EXPECT_EQ(300u, w2.size_hint);
+  EXPECT_EQ(secs(7), w2.mtime_hint);
+  ASSERT_TRUE(w2.last_run);
+  EXPECT_EQ((cls_rgw_fsio_run{8, 9}), *w2.last_run);
+
+  fsio::join_out r;
+  ASSERT_EQ(0, fsio::join(h, {GW3, next_seq(), false, 1, 10, {}}, r, fx));
+  EXPECT_EQ(cls_rgw_fsio_cs_state::PUBLISHED, r.state);
+  EXPECT_FALSE(r.last_run);                        // no shadow record
+  EXPECT_EQ(0u, r.size_hint);
 }
 
 TEST(cls_rgw_fsio, each_check_is_detected)

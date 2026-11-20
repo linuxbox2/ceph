@@ -205,6 +205,13 @@ struct join_out {
   cls_rgw_fsio_id bound;
   bool construct = false;
   bool already_applied = false;
+  /* §3.1:  what the joining gateway needs, as the join saw it */
+  cls_rgw_fsio_cs_state state{};        // the bound chunk set's
+  bool others = false;                  // another handle bound here (Z4)
+  uint64_t trunc_epoch = 0;             // a shadow's:  its record's
+  uint64_t size_hint = 0;
+  ceph::real_time mtime_hint;
+  std::optional<cls_rgw_fsio_run> last_run;   // extent's highest run (Y23)
 };
 int join(cls_rgw_fsio_head& h, const join_in& in, join_out& out,
 	 cls_rgw_fsio_effects& fx);

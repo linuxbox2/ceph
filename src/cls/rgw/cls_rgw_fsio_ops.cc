@@ -401,6 +401,12 @@ int rgw_fsio_join(cls_method_context_t hctx, ceph::buffer::list* in,
     ret.bound = jout.bound;
     ret.construct = jout.construct;
     ret.already_applied = jout.already_applied;
+    ret.state = static_cast<uint8_t>(jout.state);
+    ret.others = jout.others;
+    ret.trunc_epoch = jout.trunc_epoch;
+    ret.size_hint = jout.size_hint;
+    ret.mtime_hint = jout.mtime_hint;
+    ret.last_run = jout.last_run;
     return r;
   });
   if (r < 0) {

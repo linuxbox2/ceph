@@ -334,6 +334,27 @@ int rebind(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& caller,
 
 namespace {
 
+/* Z4:  another handle, a sibling in the same process included, with an
+ * open bound to the chunk set or to the published chunk set */
+bool others_bound(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& caller,
+		  const cls_rgw_fsio_id& cs)
+{
+  const auto* pub = published_chunk_set(*h.hdr);
+  for (const auto& [inc, o] : h.opens) {
+    for (const auto& [hdl, ho] : o.handles) {
+      if (cls_rgw_fsio_handle{inc, hdl} == caller) {
+	continue;
+      }
+      for (const auto& [id, c] : ho.chunk_sets) {
+	if ((id == cs || (pub && id == pub->id)) && (c.readers || c.writers)) {
+	  return true;
+	}
+      }
+    }
+  }
+  return false;
+}
+
 int join_once(cls_rgw_fsio_head& h, const join_in& in, join_out& out,
 	      cls_rgw_fsio_effects& fx)
 {
@@ -431,6 +452,20 @@ int join_once(cls_rgw_fsio_head& h, const join_in& in, join_out& out,
     ++c.readers;
   }
   out.bound = bind;
+  /* §3.1:  the reply carries what the gateway needs from the join, as
+   * the join saw it, so it need not read the head again */
+  if (const auto* e = hdr.find(bind)) {
+    out.state = e->state;
+    if (e->shadow) {
+      out.trunc_epoch = e->shadow->trunc_epoch;
+      out.size_hint = e->shadow->size_hint;
+      out.mtime_hint = e->shadow->mtime_hint;
+      if (!e->shadow->extent.empty()) {
+	out.last_run = e->shadow->extent.back();
+      }
+    }
+  }
+  out.others = others_bound(h, in.caller, bind);
   return 0;
 }
 
@@ -587,21 +622,7 @@ int hint(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& caller,
   }
   out.trunc_epoch = sh.trunc_epoch;
   out.size = sh.size_hint;
-  /* Z4:  another handle, a sibling in the same process included, with an
-   * open bound to the shadow or to the published chunk set */
-  const auto* pub = published_chunk_set(*h.hdr);
-  for (const auto& [inc, o] : h.opens) {
-    for (const auto& [hdl, ho] : o.handles) {
-      if (cls_rgw_fsio_handle{inc, hdl} == caller) {
-	continue;
-      }
-      for (const auto& [id, c] : ho.chunk_sets) {
-	if ((id == cs || (pub && id == pub->id)) && (c.readers || c.writers)) {
-	  out.others = true;
-	}
-      }
-    }
-  }
+  out.others = others_bound(h, caller, cs);
   return 0;
 }
 

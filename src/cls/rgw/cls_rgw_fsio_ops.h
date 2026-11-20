@@ -117,12 +117,25 @@ struct cls_rgw_fsio_join_ret {
   cls_rgw_fsio_id bound;
   bool construct = false;
   bool already_applied = false;
+  /* §3.1:  what the joining gateway needs, as the join saw it */
+  uint8_t state = 0;             // cls_rgw_fsio_cs_state:  the bound chunk set's
+  bool others = false;           // another handle bound here (Z4)
+  uint64_t trunc_epoch = 0;      // a shadow's:  its record's
+  uint64_t size_hint = 0;
+  ceph::real_time mtime_hint;
+  std::optional<cls_rgw_fsio_run> last_run;   // extent's highest run (Y23)
 
   void encode(ceph::buffer::list& bl) const {
     ENCODE_START(1, 1, bl);
     encode(bound, bl);
     encode(construct, bl);
     encode(already_applied, bl);
+    encode(state, bl);
+    encode(others, bl);
+    encode(trunc_epoch, bl);
+    encode(size_hint, bl);
+    encode(mtime_hint, bl);
+    encode(last_run, bl);
     ENCODE_FINISH(bl);
   }
   void decode(ceph::buffer::list::const_iterator& bl) {
@@ -130,6 +143,12 @@ struct cls_rgw_fsio_join_ret {
     decode(bound, bl);
     decode(construct, bl);
     decode(already_applied, bl);
+    decode(state, bl);
+    decode(others, bl);
+    decode(trunc_epoch, bl);
+    decode(size_hint, bl);
+    decode(mtime_hint, bl);
+    decode(last_run, bl);
     DECODE_FINISH(bl);
   }
   void dump(ceph::Formatter *f) const;

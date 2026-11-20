@@ -454,7 +454,12 @@ int m_join(cls_rgw_fsio_head& h, const fsio::join_in& in, fsio::join_out& out,
   if (cl.on && r == 0 && reply.length()) {
     if (auto ret = dec<cls_rgw_fsio_join_ret>("fsio_join", reply);
 	ret && (ret->bound != out.bound || ret->construct != out.construct ||
-		ret->already_applied != out.already_applied)) {
+		ret->already_applied != out.already_applied ||
+		ret->state != static_cast<uint8_t>(out.state) ||
+		ret->others != out.others || ret->trunc_epoch != out.trunc_epoch ||
+		ret->size_hint != out.size_hint ||
+		ret->mtime_hint != out.mtime_hint ||
+		ret->last_run != out.last_run)) {
       cl.reply_mismatch("fsio_join", fmt::format(
 	"bound {} construct {:d} already_applied {:d};  the core {} {:d} {:d}",
 	ret->bound.to_str(), ret->construct, ret->already_applied,

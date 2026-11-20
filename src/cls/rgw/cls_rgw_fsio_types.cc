@@ -396,6 +396,12 @@ void cls_rgw_fsio_join_ret::dump(ceph::Formatter *f) const
   encode_json("bound", bound, f);
   encode_json("construct", construct, f);
   encode_json("already_applied", already_applied, f);
+  encode_json("state", static_cast<int>(state), f);
+  encode_json("others", others, f);
+  encode_json("trunc_epoch", trunc_epoch, f);
+  encode_json("size_hint", size_hint, f);
+  encode_json("mtime_hint", mtime_hint, f);
+  encode_json("last_run", last_run, f);
 }
 
 std::list<cls_rgw_fsio_join_ret> cls_rgw_fsio_join_ret::generate_test_instances()
@@ -405,6 +411,12 @@ std::list<cls_rgw_fsio_join_ret> cls_rgw_fsio_join_ret::generate_test_instances(
   i.bound = cls_rgw_fsio_id{1, 7};
   i.construct = true;
   i.already_applied = true;
+  i.state = 2;
+  i.others = true;
+  i.trunc_epoch = 4;
+  i.size_hint = 5;
+  i.mtime_hint = ceph::real_time(std::chrono::seconds(6));
+  i.last_run = cls_rgw_fsio_run{7, 9};
   o.push_back(std::move(i));
   o.emplace_back();
   return o;
