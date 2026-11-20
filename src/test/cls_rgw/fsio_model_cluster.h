@@ -298,8 +298,12 @@ public:
       return;
     }
     if (r_core != r_cls) {
+      /* §3, Z28:  the model sends every incarnation's calls from one
+       * client, so the OSDs' origin check must be off */
       diverge(fmt::format("cluster:  {} on {} returned {};  the core returned "
-			  "{}", method, oid, err(r_cls), err(r_core)));
+			  "{}{}", method, oid, err(r_cls), err(r_core),
+			  r_cls == -EPERM ? "  (is rgw_fsio_check_origin off on "
+			  "the OSDs?)" : ""));
       return;
     }
     Obj got;

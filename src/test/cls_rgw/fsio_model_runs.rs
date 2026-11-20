@@ -35,7 +35,10 @@ edition = "2021"
 //!            call also sent to a RADOS cluster as its CLS method and
 //!            compared (FSIO_MODEL_CLUSTER, fsio_model_cluster.h);  needs
 //!            CEPH_CONF and a running vstart, whose keyring is root's:
-//!            the tier asks for sudo once and runs the model under it
+//!            the tier asks for sudo once and runs the model under it;
+//!            and the OSDs' origin check off, since the model sends
+//!            every incarnation's calls from one client:
+//!            `ceph config set osd rgw_fsio_check_origin false`
 //!
 //! A run passes when it is clean, or, for a skip check, when it finds a
 //! violation;  a run that reaches FSIO_MODEL_LIMIT is reported as a
