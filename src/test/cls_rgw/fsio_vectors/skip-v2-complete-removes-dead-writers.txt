@@ -1,8 +1,14 @@
-# V2_COMPLETE_REMOVES_DEAD_WRITERS:  the shortest trace the search finds with the check
-# skipped (5422365 states by search, 2026-11-18);  replayed alone it
-# reproduces the violation at once.
+# V2_COMPLETE_REMOVES_DEAD_WRITERS:  the publisher dies after its link;
+# the expirer completes its publish.  Skipped, the dead writer's count
+# stays on the published S1.10, so no end state is reachable from here
+# (the search from this prefix:  10199 states, a livelock;  with the
+# check, 28217 states and 165 end states, 2026-11-20).  Until 2026-11-20
+# the reader's open here started a new generation and the violation was
+# a second published entry at once;  a reader joining with the linked
+# instance now binds to S1.10 (design §3.1 step 4).
 # skip: V2_COMPLETE_REMOVES_DEAD_WRITERS
-# env: FSIO_MODEL_VERSIONED=1 FSIO_MODEL_ROLES=wr FSIO_MODEL_S3_OPS=1
+# replay: search
+# env: FSIO_MODEL_VERSIONED=1 FSIO_MODEL_ROLES=wr FSIO_MODEL_S3_OPS=1 FSIO_MODEL_LIVELOCK=1
 gw1 read-olh-write
 gw1 count I1
 gw1 open-write I1
@@ -20,4 +26,4 @@ gw2 count I2
 gw2 open-read I2
 expirer hint I2 for 1
 expirer complete I2
-# => two chunk-set entries publish S1.10
+# => livelock:  1 states from which no end state is reachable

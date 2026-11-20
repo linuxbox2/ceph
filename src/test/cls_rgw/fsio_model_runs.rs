@@ -146,10 +146,13 @@ fn read_vectors(src: &Path) -> Vec<Vector> {
         .filter(|p| p.extension().map_or(false, |e| e == "txt"))
         .map(|p| {
             let text = std::fs::read_to_string(&p).unwrap_or_default();
-            let mut v = Vector { path: p, skip: None, env: Vec::new(), walk: false };
+            let mut v = Vector { path: p, skip: None, env: Vec::new(), walk: false,
+                                 search: false };
             for l in text.lines() {
                 if l.trim() == "# replay: walk" {
                     v.walk = true;
+                } else if l.trim() == "# replay: search" {
+                    v.search = true;
                 } else if let Some(c) = l.strip_prefix("# skip: ") {
                     v.skip = Some(c.trim().to_string());
                 } else if let Some(e) = l.strip_prefix("# env: ") {
@@ -175,7 +178,7 @@ fn vector_run(v: &Vector) -> Run {
     }
     if let Some(c) = &v.skip {
         r.env.push(("FSIO_MODEL_SKIP_CHECK".into(), c.clone()));
-        if !v.walk {
+        if !v.walk && !v.search {
             r.env.push(("FSIO_MODEL_PREFIX_ONLY".into(), "1".into()));
         }
         r.env.push(("FSIO_MODEL_STOP_AT_FIRST".into(), "1".into()));
