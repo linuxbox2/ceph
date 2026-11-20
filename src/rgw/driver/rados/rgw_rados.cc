@@ -6473,6 +6473,18 @@ constexpr std::string_view FSIO_ATTR_HDR = "user.rgw.fsio.hdr";
 constexpr std::string_view FSIO_ATTR_OCNT = "user.rgw.fsio.ocnt";
 constexpr std::string_view FSIO_ATTR_GEN = "user.rgw.fsio.gen";
 
+/* §2.2:  a tracking-only head, FSIO's records and none of an ID tag, a
+ * manifest or OLH info:  its S3 object was deleted under FSIO opens */
+bool fsio_tracking_only(const std::map<std::string, buffer::list>& attrs)
+{
+  if (attrs.count(RGW_ATTR_ID_TAG) || attrs.count(RGW_ATTR_MANIFEST) ||
+      attrs.count(RGW_ATTR_OLH_INFO)) {
+    return false;
+  }
+  const auto i = attrs.lower_bound(std::string(FSIO_ATTR_PREFIX));
+  return i != attrs.end() && i->first.starts_with(FSIO_ATTR_PREFIX);
+}
+
 /* a hint shard's hints naming the bucket, by shard */
 struct fsio_listed_hint {
   uint32_t shard;
@@ -8054,6 +8066,12 @@ int RGWRados::get_obj_state_impl(const DoutPrefixProvider *dpp, RGWObjectCtx *oc
   s->exists = true;
   s->has_attrs = true;
   s->accounted_size = s->size;
+  /* §2.2, A33:  a tracking-only head is a deleted name, absent to S3;  a
+   * head write over it still replaces it (prepare_atomic_modification()) */
+  if (fsio_tracking_only(s->attrset)) {
+    s->exists = false;
+    return 0;
+  }
 
   auto iter = s->attrset.find(RGW_ATTR_ETAG);
   if (iter != s->attrset.end()) {
@@ -8501,7 +8519,10 @@ int RGWRados::Object::prepare_atomic_modification(const DoutPrefixProvider *dpp,
   }
 
   if (reset_obj) {
-    if (state->exists) {
+    /* a tracking-only head reads as absent but is there:  replaced, as
+     * an exclusive create would fail EEXIST, which _do_write_meta()
+     * takes for success (§2.2, A33) */
+    if (state->exists || fsio_tracking_only(state->attrset)) {
       op.create(false);
       replace_head(dpp, op, y);
     } else {

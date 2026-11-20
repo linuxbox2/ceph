@@ -367,6 +367,24 @@ void remove(const std::string& name)
   ASSERT_EQ(0, rgw_unlink(fs, bucket_fh, name.c_str(), RGW_UNLINK_FLAG_NONE));
 }
 
+/* whether S3 sees `name` in the bucket:  RGW's own object state, as a GET
+ * or HEAD reads it, not librgw's handle cache */
+bool s3_exists(const std::string& name)
+{
+  const DoutPrefix dp(g_ceph_context, ceph_subsys_rgw, "fsio_put test: ");
+  auto* driver = rgw::g_rgwlib->get_driver();
+  std::unique_ptr<rgw::sal::Bucket> b;
+  rgw_bucket key;
+  key.name = bucket_name;
+  EXPECT_EQ(0, driver->load_bucket(&dp, key, &b, null_yield));
+  if (!b) {
+    return false;
+  }
+  auto obj = b->get_object(rgw_obj_key(name));
+  EXPECT_EQ(0, obj->load_obj_state(&dp, null_yield));
+  return obj->exists();
+}
+
 /* a DELETE under an FSIO reader:  the head stays, tracking-only, and the
  * tail the reader holds through the leaf clone is not collected (§3.6) */
 TEST(FsioPut, DeleteUnderAReader) {
@@ -397,6 +415,24 @@ TEST(FsioPut, DeleteUnderAReader) {
   EXPECT_EQ(1u, leaf_clones_of(marker, name).size());
   for (const auto& t : tails) {
     EXPECT_TRUE(exists(t) && !gc.count(t)) << t << " collected under a reader";
+  }
+  /* A33, §2.2:  the tracking-only head is a deleted name to S3 */
+  EXPECT_FALSE(s3_exists(name)) << "S3 sees the deleted name";
+
+  /* …and RGW's PUT over it replaces it:  the new content, the reader's
+   * chunk set still retired at its leaf clone, its tail still kept */
+  put(name, 'c');
+  EXPECT_TRUE(s3_exists(name));
+  EXPECT_LE(0, data.getxattr(head, "user.rgw.idtag", bl));
+  buffer::list first;
+  ASSERT_LE(0, data.read(head, first, 1, 0));
+  EXPECT_EQ('c', first[0]);
+  EXPECT_LE(0, data.getxattr(head, "user.rgw.fsio.hdr", bl));
+  EXPECT_EQ(1u, leaf_clones_of(marker, name).size());
+  const auto gc2 = in_gc();
+  for (const auto& t : tails) {
+    EXPECT_TRUE(exists(t) && !gc2.count(t)) << t << " collected under a "
+					      "reader after the PUT";
   }
 }
 
