@@ -1,0 +1,23 @@
+# gw2's new read open binds to S1.10, but the OLH names C1
+# Found by the cluster tier (cluster-v-wr-2, walk 140 of seed 5),
+# 2026-11-20, in memory as well:  a write open of a versioned bucket's
+# version I1;  S3 suspends versioning and puts the null version;  the
+# writer's close publishes onto the head (the null version), with no
+# link;  a reader joining with the null version was bound to that
+# publishing shadow by design §3.1 step 4's first case, which applies
+# only to a versioned publish.  Kept as a regression, expected clean.
+# replay: walk
+# env: FSIO_MODEL_VERSIONED=1 FSIO_MODEL_ROLES=wr FSIO_MODEL_S3_OPS=2
+gw1 read-olh-write
+gw1 count I1
+gw1 open-write I1
+s3 suspend-versioning
+s3 put (suspended)
+gw1 resend join
+gw1 ready S1.10
+gw1 uncount I1
+gw1 close-write S1.10
+gw1 publish-hint
+gw2 read-olh-read
+gw2 open-read null
+# => (clean;  was:  gw2's new read open binds to S1.10, but the OLH names C1)

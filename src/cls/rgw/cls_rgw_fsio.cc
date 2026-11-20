@@ -382,14 +382,31 @@ int join_once(cls_rgw_fsio_head& h, const join_in& in, join_out& out,
   auto& hdr = *h.hdr;
   /* §2.5a:  joining the null version is as in an unversioned bucket */
   const bool versioned = !is_null(in.instance);
-  /* 4. versioned:  the OLH names another instance, a new current
-   * generation;  the old version's published entry stays at INSTANCE */
+  /* 4. versioned:  a reader joining with the instance a publish in
+   * flight has linked binds to its shadow, the current generation's or a
+   * deferred one's, counted by its own ocnt_add;  not a publish onto the
+   * null version, which has no link before it lands;  otherwise the OLH
+   * names another instance, a new current generation, the old version's
+   * published entry staying at INSTANCE */
+  const cls_rgw_fsio_chunk_set* linked = nullptr;
   if (!in.instance.empty() && !same_instance(in.instance, hdr.cur_instance)) {
-    hdr.cur_instance = in.instance;
-    hdr.cur_shadow.reset();
+    if (!in.writer && !FSIO_SKIP_CHECK(JOIN_BINDS_LINKED_PUBLISH)) {
+      for (const auto& e : hdr.chunk_sets) {
+	if (e.state == state::PUBLISHING && e.publishing &&
+	    !is_null(e.publishing->instance) &&
+	    same_instance(e.publishing->instance, in.instance)) {
+	  linked = &e;
+	  break;
+	}
+      }
+    }
+    if (!linked) {
+      hdr.cur_instance = in.instance;
+      hdr.cur_shadow.reset();
+    }
   }
   /* 5. */
-  {
+  if (!linked) {
     auto* sh = current_shadow(hdr);
     if (in.writer && sh && (sh->state == state::CONSTRUCTING ||
 			    sh->state == state::PUBLISHING)) {
@@ -401,7 +418,9 @@ int join_once(cls_rgw_fsio_head& h, const join_in& in, join_out& out,
   }
   /* 6., 7. */
   cls_rgw_fsio_id bind;
-  if (!in.writer) {
+  if (linked) {
+    bind = linked->id;
+  } else if (!in.writer) {
     auto* p = published_chunk_set(hdr);
     if (!p) {
       cls_rgw_fsio_chunk_set cs;

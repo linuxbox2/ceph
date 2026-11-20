@@ -78,6 +78,7 @@ enum class cls_rgw_fsio_check : uint8_t {
   Z6_RESOLUTION_TESTS_ID_TAG,          // the claim resolution and hint rule (model)
   A29_CLEAR_RECHECKS_CONSTRUCTOR,      // fsio_expire's clear
   A13_REWRITE_DEFERS,                  // fsio_replace_head on an instance head
+  JOIN_BINDS_LINKED_PUBLISH,           // fsio_join, §3.1 step 4
 };
 
 #ifdef CLS_RGW_FSIO_SKIP_CHECKS

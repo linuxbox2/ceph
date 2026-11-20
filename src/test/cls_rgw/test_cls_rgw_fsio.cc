@@ -1440,6 +1440,91 @@ TEST(cls_rgw_fsio_join_reply, carries_what_the_gateway_needs)
   EXPECT_EQ(0u, r.size_hint);
 }
 
+/* §3.1 step 4:  a reader joining with the instance a publish in flight
+ * has linked binds to the publishing shadow, counted by its own ocnt_add;
+ * a new generation there gave the instance two published entries */
+void join_binds_linked_publish()
+{
+  auto h = head("C0");
+  const auto p1 = join_reader(h, GW2, "v1");
+  fsio::join_out jout;
+  cls_rgw_fsio_effects fx;
+  ASSERT_EQ(0, fsio::join(h, {GW1, next_seq(), true, 1, 10, {}, "v1"},
+			  jout, fx));
+  ASSERT_EQ(0, fsio::ready(h, GW1, jout.bound, {{0, 0}}));
+  fsio::publish_intent pi{"v2", "t1"};
+  fsio::leave_out lout;
+  ASSERT_EQ(0, fsio::leave(h, GW1, next_seq(), jout.bound, true, {}, lout,
+			   fx, &pi));
+  ASSERT_TRUE(lout.publishing);
+  /* the OLH now names v2:  a new open joins with it, no wait */
+  fsio::join_out rout;
+  ASSERT_EQ(0, fsio::join(h, {GW3, next_seq(), false, 1, 10, {}, "v2"},
+			  rout, fx));
+  EXPECT_EQ(jout.bound, rout.bound);
+  EXPECT_EQ(std::optional{jout.bound}, h.hdr->cur_shadow);
+  EXPECT_EQ("v1", h.hdr->cur_instance);
+  /* a reader of v1 still waits (W7) */
+  EXPECT_EQ(-CLS_RGW_ERR_FSIO_BUSY,
+	    fsio::join(h, {GW2, next_seq(), false, 1, 10, {}, "v1"}, rout, fx));
+  (void)p1;
+}
+
+TEST(cls_rgw_fsio_join, linked_publish_binds_its_shadow)
+{
+  join_binds_linked_publish();
+}
+
+/* …but not a publish onto the null version (a suspended bucket's), which
+ * has no link:  the OLH names the null version before it lands, and a
+ * reader joining with it binds the published content (found by the
+ * cluster tier, cluster-v-wr-2 walk 140) */
+TEST(cls_rgw_fsio_join, publish_onto_null_is_not_linked)
+{
+  auto h = head("C0");
+  fsio::join_out jout;
+  cls_rgw_fsio_effects fx;
+  ASSERT_EQ(0, fsio::join(h, {GW1, next_seq(), true, 1, 10, {}, "v1"},
+			  jout, fx));
+  ASSERT_EQ(0, fsio::ready(h, GW1, jout.bound, {{0, 0}}));
+  leave_writer(h, GW1, jout.bound);     // publishing, onto the head
+  fsio::join_out rout;
+  ASSERT_EQ(0, fsio::join(h, {GW3, next_seq(), false, 1, 10, {}, "null"},
+			  rout, fx));
+  EXPECT_NE(jout.bound, rout.bound);
+  EXPECT_EQ(cls_rgw_fsio_cs_state::PUBLISHED,
+	    h.hdr->find(rout.bound)->state);
+}
+
+/* …a deferred generation's shadow too:  an S3 delete of the version the
+ * writer opened lands between the reader's count and its join */
+TEST(cls_rgw_fsio_join, linked_publish_of_a_deferred_generation)
+{
+  auto h = head("C0");
+  fsio::join_out jout;
+  cls_rgw_fsio_effects fx;
+  ASSERT_EQ(0, fsio::join(h, {GW1, next_seq(), true, 1, 10, {}, "v1"},
+			  jout, fx));
+  ASSERT_EQ(0, fsio::ready(h, GW1, jout.bound, {{0, 0}}));
+  fsio::publish_intent pi{"v2", "t1"};
+  fsio::leave_out lout;
+  ASSERT_EQ(0, fsio::leave(h, GW1, next_seq(), jout.bound, true, {}, lout,
+			   fx, &pi));
+  ASSERT_TRUE(lout.publishing);
+  ASSERT_EQ(0, supersede(h));           // the generation deferred
+  ASSERT_FALSE(h.hdr->cur_shadow);
+  fsio::join_out rout;
+  ASSERT_EQ(0, fsio::join(h, {GW3, next_seq(), false, 1, 10, {}, "v2"},
+			  rout, fx));
+  EXPECT_EQ(jout.bound, rout.bound);
+  int published_at_v2 = 0;
+  for (const auto& e : h.hdr->chunk_sets) {
+    published_at_v2 += e.state == cls_rgw_fsio_cs_state::PUBLISHED &&
+      e.instance && *e.instance == "v2";
+  }
+  EXPECT_EQ(0, published_at_v2);
+}
+
 TEST(cls_rgw_fsio, each_check_is_detected)
 {
   const std::pair<cls_rgw_fsio_check, void (*)()> table[] = {
@@ -1448,6 +1533,7 @@ TEST(cls_rgw_fsio, each_check_is_detected)
     {cls_rgw_fsio_check::W6_EXPIRE_TAKES_OVER_PUBLISH, w6_expire_takes_over_zombie_publish},
     {cls_rgw_fsio_check::A29_CLEAR_RECHECKS_CONSTRUCTOR, a29_clear_rechecks_constructor},
     {cls_rgw_fsio_check::A13_REWRITE_DEFERS, a13_rewrite_version_defers},
+    {cls_rgw_fsio_check::JOIN_BINDS_LINKED_PUBLISH, join_binds_linked_publish},
     {cls_rgw_fsio_check::W3_FINALIZE_CREATES_TO_PUBLISHING, w3_finalize_publishes_to},
     {cls_rgw_fsio_check::W3_PUBLISHING_TO_RETIRES_FROM, w3_finalize_publishes_to},
     {cls_rgw_fsio_check::W3_RESUMED_FINALIZE_TAKES_OVER, w3_resumed_finalize_takes_over},

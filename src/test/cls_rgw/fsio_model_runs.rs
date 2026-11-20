@@ -257,6 +257,9 @@ fn skip_table() -> Vec<Check> {
         /* the model has no in-place rewrite of a version;  the unit test
          * detects it */
         ("A13_REWRITE_DEFERS", ver, NARROW, false),
+        /* a second read open between a publish's link and its publish
+         * on the head (§3.1 step 4);  kept as a vector */
+        ("JOIN_BINDS_LINKED_PUBLISH", ver, NARROW, false),
         /* Z22:  resends (FSIO_MODEL_RESENDS, on by default) */
         ("Z22_COUNTED_CALL_CHECKS_SEQ", unv,
          &[("FSIO_MODEL_ROLES", "wr"), ("FSIO_MODEL_S3_OPS", "0")], true),
