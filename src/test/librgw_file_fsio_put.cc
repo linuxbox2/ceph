@@ -338,6 +338,39 @@ TEST(FsioPut, OverwriteUnderAReader) {
   }
 }
 
+/* A9, §2.6:  RGW's reads of a head never carry FSIO's records, so no
+ * copy, rewrite or response does:  the head holds them in RADOS, and the
+ * object's attributes as RGW reads them show none */
+TEST(FsioPut, AttributesHideFsioRecords) {
+  if (!ready) {
+    GTEST_SKIP() << "INIT failed";
+  }
+  if (fsio_off) {
+    GTEST_SKIP() << "needs FSIO's records";
+  }
+  const auto name = fmt::format("hidden-{}", getpid());
+  put(name, 'a');
+  const auto head = head_of(name);
+  ASSERT_FALSE(head.empty());
+  join_reader(head, marker_of(head, name));
+  buffer::list bl;
+  ASSERT_LE(0, data.getxattr(head, "user.rgw.fsio.hdr", bl));
+
+  const DoutPrefix dp(g_ceph_context, ceph_subsys_rgw, "fsio_put test: ");
+  auto* driver = rgw::g_rgwlib->get_driver();
+  std::unique_ptr<rgw::sal::Bucket> b;
+  rgw_bucket key;
+  key.name = bucket_name;
+  ASSERT_EQ(0, driver->load_bucket(&dp, key, &b, null_yield));
+  auto obj = b->get_object(rgw_obj_key(name));
+  ASSERT_EQ(0, obj->load_obj_state(&dp, null_yield));
+  ASSERT_TRUE(obj->exists());
+  EXPECT_TRUE(obj->get_attrs().count(RGW_ATTR_ID_TAG));
+  for (const auto& [k, v] : obj->get_attrs()) {
+    EXPECT_FALSE(k.starts_with("user.rgw.fsio.")) << k << " in RGW's attrs";
+  }
+}
+
 /* an overwrite with no FSIO open:  no leaf clone, the old tail to GC */
 TEST(FsioPut, OverwriteWithNoReader) {
   if (!ready) {

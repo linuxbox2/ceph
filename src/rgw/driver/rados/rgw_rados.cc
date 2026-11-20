@@ -6475,14 +6475,23 @@ constexpr std::string_view FSIO_ATTR_GEN = "user.rgw.fsio.gen";
 
 /* §2.2:  a tracking-only head, FSIO's records and none of an ID tag, a
  * manifest or OLH info:  its S3 object was deleted under FSIO opens */
-bool fsio_tracking_only(const std::map<std::string, buffer::list>& attrs)
+bool fsio_tracking_only(const RGWObjState& s)
 {
-  if (attrs.count(RGW_ATTR_ID_TAG) || attrs.count(RGW_ATTR_MANIFEST) ||
-      attrs.count(RGW_ATTR_OLH_INFO)) {
-    return false;
+  return !s.fsio_attrs.empty() && !s.attrset.count(RGW_ATTR_ID_TAG) &&
+    !s.attrset.count(RGW_ATTR_MANIFEST) && !s.attrset.count(RGW_ATTR_OLH_INFO);
+}
+
+/* §2.6:  FSIO's records out of an attribute set, into `fsio` if given */
+void fsio_split_attrs(std::map<std::string, buffer::list>& attrs,
+                      std::map<std::string, buffer::list>* fsio)
+{
+  auto i = attrs.lower_bound(std::string(FSIO_ATTR_PREFIX));
+  while (i != attrs.end() && i->first.starts_with(FSIO_ATTR_PREFIX)) {
+    if (fsio) {
+      (*fsio)[i->first] = std::move(i->second);
+    }
+    i = attrs.erase(i);
   }
-  const auto i = attrs.lower_bound(std::string(FSIO_ATTR_PREFIX));
-  return i != attrs.end() && i->first.starts_with(FSIO_ATTR_PREFIX);
 }
 
 /* a hint shard's hints naming the bucket, by shard */
@@ -8042,7 +8051,8 @@ int RGWRados::get_obj_state_impl(const DoutPrefixProvider *dpp, RGWObjectCtx *oc
   int r = -ENOENT;
 
   if (!assume_noent) {
-    r = RGWRados::raw_obj_stat(dpp, raw_obj, &s->size, &s->mtime, &s->epoch, &s->attrset, (s->prefetch_data ? &s->data : NULL), &s->objv_tracker, y);
+    s->fsio_attrs.clear();
+    r = RGWRados::raw_obj_stat(dpp, raw_obj, &s->size, &s->mtime, &s->epoch, &s->attrset, (s->prefetch_data ? &s->data : NULL), &s->objv_tracker, y, &s->fsio_attrs);
   }
 
   if (r == -ENOENT) {
@@ -8068,7 +8078,7 @@ int RGWRados::get_obj_state_impl(const DoutPrefixProvider *dpp, RGWObjectCtx *oc
   s->accounted_size = s->size;
   /* §2.2, A33:  a tracking-only head is a deleted name, absent to S3;  a
    * head write over it still replaces it (prepare_atomic_modification()) */
-  if (fsio_tracking_only(s->attrset)) {
+  if (fsio_tracking_only(*s)) {
     s->exists = false;
     return 0;
   }
@@ -8346,6 +8356,7 @@ int RGWRados::Object::Stat::wait(const DoutPrefixProvider *dpp)
 
 int RGWRados::Object::Stat::finish(const DoutPrefixProvider *dpp)
 {
+  fsio_split_attrs(result.attrs, nullptr);   // §2.6
   map<string, bufferlist>::iterator iter = result.attrs.find(RGW_ATTR_MANIFEST);
   if (iter != result.attrs.end()) {
     bufferlist& bl = iter->second;
@@ -8522,7 +8533,7 @@ int RGWRados::Object::prepare_atomic_modification(const DoutPrefixProvider *dpp,
     /* a tracking-only head reads as absent but is there:  replaced, as
      * an exclusive create would fail EEXIST, which _do_write_meta()
      * takes for success (§2.2, A33) */
-    if (state->exists || fsio_tracking_only(state->attrset)) {
+    if (state->exists || fsio_tracking_only(*state)) {
       op.create(false);
       replace_head(dpp, op, y);
     } else {
@@ -11281,7 +11292,8 @@ int RGWRados::follow_olh(const DoutPrefixProvider *dpp, RGWBucketInfo& bucket_in
 int RGWRados::raw_obj_stat(const DoutPrefixProvider *dpp,
                            rgw_raw_obj& obj, uint64_t *psize, real_time *pmtime, uint64_t *epoch,
                            map<string, bufferlist> *attrs, bufferlist *first_chunk,
-                           RGWObjVersionTracker *objv_tracker, optional_yield y)
+                           RGWObjVersionTracker *objv_tracker, optional_yield y,
+                           map<string, buffer::list> *fsio_attrs)
 {
   rgw_rados_ref ref;
   int r = get_raw_obj_ref(dpp, obj, &ref);
@@ -11318,6 +11330,7 @@ int RGWRados::raw_obj_stat(const DoutPrefixProvider *dpp,
     *pmtime = ceph::real_clock::from_timespec(mtime_ts);
   if (attrs) {
     rgw_filter_attrset(unfiltered_attrset, RGW_ATTR_PREFIX, attrs);
+    fsio_split_attrs(*attrs, fsio_attrs);   // §2.6
   }
 
   return 0;

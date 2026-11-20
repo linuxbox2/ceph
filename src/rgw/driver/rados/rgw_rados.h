@@ -1479,10 +1479,13 @@ int restore_obj_from_cloud(RGWLCCloudTierCtx& tier_ctx,
    * a simple object read without keeping state
    */
 
+  /* attrs never holds FSIO's records (§2.6);  fsio_attrs, if given,
+   * receives them */
   int raw_obj_stat(const DoutPrefixProvider *dpp,
                    rgw_raw_obj& obj, uint64_t *psize, ceph::real_time *pmtime, uint64_t *epoch,
                    std::map<std::string, bufferlist> *attrs, bufferlist *first_chunk,
-                   RGWObjVersionTracker *objv_tracker, optional_yield y);
+                   RGWObjVersionTracker *objv_tracker, optional_yield y,
+                   std::map<std::string, buffer::list> *fsio_attrs = nullptr);
 
   int obj_operate(const DoutPrefixProvider *dpp, const RGWBucketInfo& bucket_info, const rgw_obj& obj, librados::ObjectWriteOperation&& op, optional_yield y);
   int obj_operate(const DoutPrefixProvider *dpp, const RGWBucketInfo& bucket_info, const rgw_obj& obj, librados::ObjectReadOperation&& op, optional_yield y);

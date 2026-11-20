@@ -50,6 +50,9 @@ struct RGWObjState {
   RGWObjVersionTracker objv_tracker;
 
   std::map<std::string, ceph::buffer::list> attrset;
+  /* FSIO's records on the head (user.rgw.fsio.), kept out of attrset so
+   * no read, copy or response carries them (FSIO_RADOS_DESIGN.md §2.6) */
+  std::map<std::string, ceph::buffer::list> fsio_attrs;
 
   RGWObjState() {};
   RGWObjState(const RGWObjState &rhs) : obj(rhs.obj) {
