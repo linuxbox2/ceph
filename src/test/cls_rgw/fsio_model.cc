@@ -3279,6 +3279,19 @@ std::optional<std::string> check_state(const World& w)
     if (v.ih.exists && !v.ih.id_tag.empty() && !w.storage.count(v.tail)) {
       return fmt::format("live version {}'s tail {} collected", i, v.tail);
     }
+    /* §4.3, the presence hint over-approximates:  every handle in a
+     * version's open count has its presence hint on that instance head,
+     * in every state, since the hint is added before the count (the
+     * handle's own ocnt_add, or a publisher's instance write) and removed
+     * only after the handle leaves it */
+    if (v.ih.ocnt) {
+      for (const auto& c : v.ih.ocnt->holders) {
+	if (!w.hints.count(presence_ih(i, c))) {
+	  return fmt::format("{}'s open count holds {}.{} with no presence "
+			     "hint", i, c.incarnation, c.handle);
+	}
+      }
+    }
     if (v.ih.ocnt && !v.ih.ocnt->holders.empty()) {
       for (const auto& d : v.ih.ocnt->deferred) {
 	if (!w.storage.count(tok(d.manifest))) {
