@@ -1,0 +1,26 @@
+# gw2's open reads S1.10, collected
+# Found by the model's in-place rewrite, 2026-11-20:  a versioned
+# publish links I2, whose tail is the shadow's chunks;  S3 rewrites I2
+# in place before gw2 counts itself, so nothing defers the old tail, and
+# it goes to GC.  gw2's join with I2 binds to the publishing shadow
+# (design §3.1 step 4, first case);  reading the shadow's chunks, it
+# read collected storage.  The reader reads the version through its
+# instance head.  Kept as a regression, expected clean.
+# replay: walk
+# env: FSIO_MODEL_VERSIONED=1 FSIO_MODEL_VSTART=null FSIO_MODEL_ROLES=wr FSIO_MODEL_S3_OPS=1 FSIO_MODEL_ZOMBIES=0 FSIO_MODEL_EXPIRER_CRASHES=0
+gw1 read-olh-write
+gw1 open-write null
+gw1 ready S1.10
+gw1 close-write S1.10
+gw1 publish-hint
+gw1 placeholder I2
+gw1 close-leave S1.10
+gw1 publish-read S1.10
+gw1 instance-write I2
+gw1 link I2
+gw2 read-olh-read
+s3 rewrite-version I2
+gw2 count I2
+gw2 open-read I2
+gc S1.10
+# => (clean;  was:  gw2's open reads S1.10, collected)

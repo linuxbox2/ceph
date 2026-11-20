@@ -278,9 +278,8 @@ fn skip_table() -> Vec<Check> {
         /* the model's expirer clears only a dead constructor's shadow;  the
          * unit test detects it */
         ("A29_CLEAR_RECHECKS_CONSTRUCTOR", unv, NARROW, false),
-        /* the model has no in-place rewrite of a version;  the unit test
-         * detects it */
-        ("A13_REWRITE_DEFERS", ver, NARROW, false),
+        /* a reader of a version rewritten in place */
+        ("A13_REWRITE_DEFERS", ver, &[("FSIO_MODEL_ROLES", "r")], true),
         /* a second read open between a publish's link and its publish
          * on the head (§3.1 step 4);  kept as a vector */
         ("JOIN_BINDS_LINKED_PUBLISH", ver, NARROW, false),

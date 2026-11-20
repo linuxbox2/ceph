@@ -778,6 +778,45 @@ int m_remove_version(const std::string& inst, cls_rgw_fsio_instance_head& ih,
   return r;
 }
 
+/* §2.5, Y6, A13:  a version rewritten in place (a lifecycle or cloud-tier
+ * transition, a restore, an admin rewrite):  fsio_replace_head's
+ * supersede on its instance head, before RGW's write of the new content */
+int m_rewrite_version(const std::string& inst, cls_rgw_fsio_instance_head& ih,
+		      const fid_t& rr, fsio::remove_out& out,
+		      cls_rgw_fsio_effects& fx)
+{
+  if (!cl.on) {
+    return fsio::rewrite_version(ih, rr, false, out, fx);
+  }
+  const auto pre = fc::instance_obj(ih);
+  const int r = fsio::rewrite_version(ih, rr, false, out, fx);
+  cls_rgw_fsio_replace_op op;
+  op.mode = static_cast<uint8_t>(fsio::replace_mode::SUPERSEDE);
+  op.r = rr;
+  op.marker = cl.marker;
+  /* the instance head recreated with its open count alone;  RGW's write
+   * of the new content follows in its op */
+  fc::Obj want;
+  want.exists = true;
+  if (ih.ocnt) {
+    encode(*ih.ocnt, want.attrs[std::string(fc::OCNT)]);
+  }
+  ceph::buffer::list reply;
+  const auto oid = cl.instance_oid(inst);
+  const int rc = cl.call(oid, pre, fx, cls::rgw::method::fsio_replace_head, enc(op), reply);
+  cl.check("fsio_replace_head", oid, r, rc, pre, want, fx);
+  if (rc == 0) {
+    cl.count("fsio_replace_head(rewrite)");
+  }
+  if (r == 0 && rc == 0) {
+    if (auto ret = dec<cls_rgw_fsio_replace_ret>("fsio_replace_head", reply);
+	ret && ret->keep_tail != out.keep_tail) {
+      cl.reply_mismatch("fsio_replace_head", "keep_tail differs");
+    }
+  }
+  return r;
+}
+
 
 /* the sequenced calls, numbered per handle and kept for a resend (Z22).
  * A call takes the next number when it applies:  a failed call changes
@@ -859,6 +898,15 @@ struct World {
   int ex_crashes = 1;            // expirer crashes allowed
   std::map<std::string, int> acked;              // shadow -> writes acked
   std::map<std::string, std::string> base;       // shadow -> token cloned from
+  /* storage -> the data it holds, where that is another token's:  an
+   * in-place rewrite moves a version's data to new storage unchanged
+   * (§2.5, Y6).  What a reader sees compares data;  what must stay alive
+   * compares storage */
+  std::map<std::string, std::string> same_data;
+  std::string data(const std::string& s) const {
+    auto i = same_data.find(s);
+    return i == same_data.end() ? s : i->second;
+  }
   std::map<std::string, std::string> recloned;   // to -> from
   std::map<std::string, int> published;          // shadow -> times published
   uint64_t next_c = 1, next_r = 1000, next_tag = 1, next_nonce = 1;
@@ -913,6 +961,7 @@ struct World {
     encode(del_tok, bl); encode((uint8_t)ex, bl); encode(ex_to, bl);
     encode(ex_from, bl); encode(ex_inc, bl); encode(ex_crashes, bl);
     encode(acked, bl); encode(base, bl); encode(recloned, bl);
+    encode(same_data, bl);
     encode(published, bl);
     encode(next_c, bl); encode(next_r, bl); encode(next_tag, bl);
     encode(next_nonce, bl);
@@ -1605,12 +1654,14 @@ void gw_actions_v(const World& w0, size_t gi, std::vector<Action>& acts)
 	    const auto cur = w.versions.at(w.olh_cur).tail;
 	    if (!g.pending_writer) {
 	      const auto* e = w.head.hdr->find(out.bound);
-	      auto t = entry_tail(w, *e);
+	      /* §3.1 step 4, first case:  bound to a publishing shadow, the
+	       * reader reads the version through its instance head */
+	      auto t = e->state == state::PUBLISHING ? cur : entry_tail(w, *e);
 	      g.opens.push_back(LOpen{false, out.bound, t, g.pending});
 	      if (g.read_tok.empty()) {
 		g.read_tok = g.pending;
 	      }
-	      if (t != cur) {
+	      if (w.data(t) != w.data(cur)) {
 		return fmt::format("gw{}'s new read open binds to {}, but the "
 				   "OLH names {}", inc, t, cur);
 	      }
@@ -1627,7 +1678,7 @@ void gw_actions_v(const World& w0, size_t gi, std::vector<Action>& acts)
 	      w.pms[sn] = cur;
 	      g.step = CONSTRUCT;
 	      g.step_cs = out.bound;
-	    } else if (w.base[sn] != cur) {
+	    } else if (w.data(w.base[sn]) != w.data(cur)) {
 	      return fmt::format("gw{}'s new write open joins {}, built on {}, "
 				 "but the OLH names {}", inc, sn, w.base[sn],
 				 cur);
@@ -2611,6 +2662,33 @@ void s3_actions_v(const World& w0, std::vector<Action>& acts)
 	  if (w.olh_cur == inst) {
 	    relink(w);
 	  }
+	  return std::nullopt;
+	}});
+    if (inst == "null") {
+      continue;                  // the null version's rewrite is the head's
+    }
+    /* §2.5, Y6, A13:  rewritten in place, the version stays;  under an
+     * open count its old content is deferred, else collected */
+    acts.push_back({fmt::format("s3 rewrite-version {}", inst),
+	[inst](World& w) -> std::optional<std::string> {
+	  --w.s3_budget;
+	  auto& v = w.versions.at(inst);
+	  fsio::remove_out out;
+	  cls_rgw_fsio_effects fx;
+	  fid_t r{w.next_r++, 0};
+	  m_rewrite_version(inst, v.ih, r, out, fx);
+	  if (out.keep_tail) {
+	    w.storage.insert(fmt::format("B{}", r.counter));   // the sibling
+	  } else {
+	    w.gcq.push_back({v.tail});
+	  }
+	  /* the same data in new storage */
+	  auto c = fmt::format("C{}", w.next_c++);
+	  w.storage.insert(c);
+	  w.same_data[c] = w.data(v.tail);
+	  v.tail = c;
+	  v.ih.manifest = tok_bl(c);
+	  v.ih.id_tag = fmt::format("t{}", w.next_tag++);
 	  return std::nullopt;
 	}});
   }
