@@ -178,6 +178,18 @@ bool exists(const std::string& oid)
   return data.stat(oid, &size, &mtime) == 0;
 }
 
+/* a clone, under its head's locator:  listed in the pool, whatever the
+ * locator;  exists() would look for it under its own name's */
+bool listed(const std::string& oid)
+{
+  for (const auto& [o, loc] : objects()) {
+    if (o == oid) {
+      return true;
+    }
+  }
+  return false;
+}
+
 /* what the overwrite left, for a failure's reading */
 void report(const std::string& head, const std::set<std::string>& tails)
 {
@@ -980,7 +992,7 @@ TEST(FsioPut, PurgeFsio) {
   const auto gc = in_gc();
   EXPECT_FALSE(bucket_exists(bname));
   EXPECT_FALSE(exists(gone_head)) << "the tracking-only head kept";
-  EXPECT_FALSE(exists(*leaves.begin())) << "the leaf clone kept";
+  EXPECT_FALSE(listed(*leaves.begin())) << "the leaf clone kept";
   EXPECT_FALSE(exists(live_head));
   for (const auto& t : gone_tails) {
     EXPECT_TRUE(!exists(t) || gc.count(t)) << t << " not collected";
@@ -1031,11 +1043,95 @@ TEST(FsioPut, PurgeFsioVersion) {
   const auto gc = in_gc();
   EXPECT_FALSE(bucket_exists(bname));
   EXPECT_FALSE(exists(ih)) << "the instance head kept";
-  EXPECT_FALSE(exists(*sibs.begin())) << "the sibling kept";
+  EXPECT_FALSE(listed(*sibs.begin())) << "the sibling kept";
   for (const auto& t : tails) {
     EXPECT_TRUE(!exists(t) || gc.count(t)) << t << " not collected";
   }
   EXPECT_EQ(0u, hints_on(ih));
+}
+
+/* --purge-fsio over a tail-keeping write's leaf clone (§3.6, Y2;  A26):
+ * a copy onto itself under a reader, made as RGW's head write makes it,
+ * leaves a leaf clone whose record names no manifest;  the strip
+ * collects the clone and never the tail the live object still uses */
+TEST(FsioPut, PurgeFsioKeepsAReusedTail) {
+  if (!ready) {
+    GTEST_SKIP() << "INIT failed";
+  }
+  if (fsio_off) {
+    GTEST_SKIP() << "needs FSIO's supersede";
+  }
+  const auto bname = fmt::format("fsio-pfk-{}", getpid());
+  struct stat st{};
+  st.st_mode = 0755;
+  struct rgw_file_handle* fh = nullptr;
+  ASSERT_EQ(0, rgw_mkdir(fs, fs->root_fh, bname.c_str(), &st,
+			 RGW_SETATTR_MODE, &fh, RGW_MKDIR_FLAG_NONE));
+  const auto name = fmt::format("kept-{}", getpid());
+  const auto before = all_tails();
+  put(name, 'a', fh);
+  rgw_fh_rele(fs, fh, 0);
+  const auto head = head_of(name);
+  ASSERT_FALSE(head.empty());
+  const auto marker = marker_of(head, name);
+  const auto tails = written_tails(before);
+  ASSERT_FALSE(tails.empty());
+  join_reader(head, marker);
+  hint(bname, marker, name, head, true);
+
+  /* a copy onto itself:  the supersede with keep_tail, then the head's
+   * data and RGW's attributes written back after the replacement (§3,
+   * the ordering rule), the manifest unchanged */
+  {
+    buffer::list body;
+    ASSERT_LE(0, data.read(head, body, 0, 0));
+    std::map<std::string, buffer::list> attrs;
+    ASSERT_EQ(0, data.getxattrs(head, attrs));
+    ObjectWriteOperation op;
+    cls_rgw_fsio_replace_op call;
+    call.mode = static_cast<uint8_t>(cls_rgw_fsio::replace_mode::SUPERSEDE);
+    call.r = cls_rgw_fsio_id{0x4a26, 7};
+    call.keep_attr_prefixes = {"user.rgw.olh."};
+    call.marker = marker;
+    call.keep_tail = true;
+    buffer::list out;
+    int rval = 0;
+    cls_rgw_fsio_replace_head(op, call, &out, &rval);
+    op.write_full(body);
+    for (auto& [k, v] : attrs) {
+      if (!k.starts_with("user.rgw.fsio.")) {
+	op.setxattr(k.c_str(), v);
+      }
+    }
+    ASSERT_EQ(0, data.operate(head, &op, OPERATION_RETURNVEC));
+  }
+  const auto leaves = leaf_clones_of(marker, name);
+  ASSERT_EQ(1u, leaves.size());
+
+  /* the strip alone:  the clone collected, the reused tail untouched */
+  {
+    const DoutPrefix dp(g_ceph_context, ceph_subsys_rgw, "fsio_put test: ");
+    std::unique_ptr<rgw::sal::Bucket> b;
+    rgw_bucket key;
+    key.name = bname;
+    auto* driver = rgw::g_rgwlib->get_driver();
+    ASSERT_EQ(0, driver->load_bucket(&dp, key, &b, null_yield));
+    ASSERT_EQ(0, static_cast<rgw::sal::RadosStore*>(driver)->getRados()->
+	      fsio_purge(&dp, b->get_info(), null_yield));
+  }
+  const auto gc = in_gc();
+  EXPECT_FALSE(listed(*leaves.begin())) << "the leaf clone kept";
+  for (const auto& t : tails) {
+    EXPECT_TRUE(exists(t) && !gc.count(t)) << t << " collected under the "
+					     "live object";
+  }
+  buffer::list idtag;
+  EXPECT_LE(0, data.getxattr(head, "user.rgw.idtag", idtag))
+    << "the live head removed";
+  EXPECT_EQ(0u, hints_on(head));
+
+  ASSERT_EQ(0, purge_fsio(bname));
+  EXPECT_FALSE(bucket_exists(bname));
 }
 
 TEST(FsioPut, SHUTDOWN) {
