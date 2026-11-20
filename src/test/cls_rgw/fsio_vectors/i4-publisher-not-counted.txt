@@ -4,8 +4,11 @@
 # publishing leave returns I4;  taken as "counted in I4", it skips the
 # presence hint when it later counts I4 as a reader, then crashes:
 # nothing leads the expirer to the count.  Replayed with the check
-# skipped, it reproduces the violation.
-# skip: I4_PUBLISHER_NOT_COUNTED
+# skipped, it reproduced the violation until 2026-11-20, when the
+# presence hint came to be added before every ocnt_add (design §4.3):
+# a later count no longer skips it, so the skip shows nothing.  The
+# check is kept (Matt:  "removing it doesn't seem strongly motivated at
+# this point"), and the trace kept as a regression, expected clean.
 # replay: walk
 # env: FSIO_MODEL_VERSIONED=1
 s3 stop

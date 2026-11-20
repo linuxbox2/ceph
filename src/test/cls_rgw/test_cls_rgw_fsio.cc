@@ -629,16 +629,28 @@ TEST(cls_rgw_fsio_versioned, ocnt_add_and_remove)
   EXPECT_FALSE(ih.ocnt);                           // removed on empty (§2.2)
 }
 
-TEST(cls_rgw_fsio_versioned, ocnt_add_to_a_removed_version_fails)
+/* §3, §4.3:  a version that is gone adds nothing and returns gone, with
+ * held telling the caller whether to keep its presence hint */
+TEST(cls_rgw_fsio_versioned, ocnt_add_to_a_removed_version_returns_gone)
 {
   auto ih = instance_head("C1");
   ASSERT_EQ(0, fsio::ocnt_add(ih, GW1));
   fsio::remove_out ro;
   cls_rgw_fsio_effects fx;
   ASSERT_EQ(0, fsio::remove_version(ih, cls_rgw_fsio_id{3000, 0}, ro, fx));
-  EXPECT_EQ(-ENOENT, fsio::ocnt_add(ih, GW2));
+  fsio::ocnt_add_out o;
+  ASSERT_EQ(0, fsio::ocnt_add(ih, GW2, &o));
+  EXPECT_TRUE(o.gone);
+  EXPECT_FALSE(o.held);
+  EXPECT_FALSE(ih.ocnt->holders.count(GW2));      // nothing added
+  ASSERT_EQ(0, fsio::ocnt_add(ih, GW1, &o));
+  EXPECT_TRUE(o.gone);
+  EXPECT_TRUE(o.held);                             // counted before removal
   cls_rgw_fsio_instance_head absent;
-  EXPECT_EQ(-ENOENT, fsio::ocnt_add(absent, GW2));
+  ASSERT_EQ(0, fsio::ocnt_add(absent, GW2, &o));
+  EXPECT_TRUE(o.gone);
+  EXPECT_FALSE(o.held);
+  EXPECT_FALSE(absent.ocnt);
 }
 
 TEST(cls_rgw_fsio_versioned, remove_version_with_open_count_defers)

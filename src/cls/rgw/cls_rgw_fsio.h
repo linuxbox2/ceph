@@ -64,6 +64,8 @@ enum class cls_rgw_fsio_check : uint8_t {
   H3_PUBLISH_HINT_REMOVES_READER_HINTS, // the expirer's publish-hint rule (model)
   H3_PUBLISHER_CLEANUP_REMOVES_READER_HINTS,  // the gateway's aborted-placeholder cleanup (model)
   I4_PUBLISHER_NOT_COUNTED,            // the gateway's versioned publish (model)
+  HINT_BEFORE_EVERY_OCNT_ADD,          // the gateway's versioned open (model)
+  GONE_KEEPS_HINT_ONLY_IF_HELD,        // the gateway's versioned open (model)
   W10_RELEASE_ONLY_WITH_LIVE_CLAIM,    // the gateway's versioned release (model)
   W10_RELEASE_ABORTS_CLAIM_FIRST,      // the gateway's versioned release (model)
   W15_CONSTRUCTOR_MAY_ABANDON,         // fsio_leave, a constructing shadow
@@ -353,7 +355,14 @@ struct ocnt_drain {
   bool removed = false;
 };
 
-int ocnt_add(cls_rgw_fsio_instance_head& ih, const cls_rgw_fsio_handle& holder);
+/* §3, §4.3:  on a version that is gone (absent, or its count removed),
+ * nothing is added:  gone, and whether the count holds the holder */
+struct ocnt_add_out {
+  bool gone = false;
+  bool held = false;
+};
+int ocnt_add(cls_rgw_fsio_instance_head& ih, const cls_rgw_fsio_handle& holder,
+	     ocnt_add_out* out = nullptr);
 int ocnt_remove(cls_rgw_fsio_instance_head& ih, const cls_rgw_fsio_handle& holder,
 		ocnt_drain& out);
 int ocnt_expire(cls_rgw_fsio_instance_head& ih, const expired_t& expired,

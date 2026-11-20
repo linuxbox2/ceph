@@ -425,6 +425,29 @@ struct cls_rgw_fsio_flags_ret {
 };
 WRITE_CLASS_ENCODER(cls_rgw_fsio_flags_ret)
 
+/* fsio_ocnt_add's reply:  on a version that is gone, nothing added, and
+ * whether the count holds the caller's handle (§3, §4.3) */
+struct cls_rgw_fsio_ocnt_add_ret {
+  bool gone = false;
+  bool held = false;
+
+  void encode(ceph::buffer::list& bl) const {
+    ENCODE_START(1, 1, bl);
+    encode(gone, bl);
+    encode(held, bl);
+    ENCODE_FINISH(bl);
+  }
+  void decode(ceph::buffer::list::const_iterator& bl) {
+    DECODE_START(1, bl);
+    decode(gone, bl);
+    decode(held, bl);
+    DECODE_FINISH(bl);
+  }
+  void dump(ceph::Formatter *f) const;
+  static std::list<cls_rgw_fsio_ocnt_add_ret> generate_test_instances();
+};
+WRITE_CLASS_ENCODER(cls_rgw_fsio_ocnt_add_ret)
+
 /* fsio_rebind's reply */
 struct cls_rgw_fsio_rebind_ret {
   bool already_applied = false;

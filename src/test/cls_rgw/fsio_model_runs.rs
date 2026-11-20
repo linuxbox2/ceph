@@ -251,7 +251,17 @@ fn skip_table() -> Vec<Check> {
          &[("FSIO_MODEL_ROLES", "w"), ("FSIO_MODEL_S3_OPS", "0")], true),
         ("H3_PUBLISHER_HINTS_READERS", ver, NARROW_W_R, true),
         /* a gateway that both publishes and later reads its version */
-        ("I4_PUBLISHER_NOT_COUNTED", ver, &[("FSIO_MODEL_ROLES", "f")], true),
+        /* kept, though the hint before every ocnt_add (2026-11-20) now
+         * covers its case:  skipped, nothing shows */
+        ("I4_PUBLISHER_NOT_COUNTED", ver, &[("FSIO_MODEL_ROLES", "f")], false),
+        /* a second read open after the publish its first open followed */
+        ("HINT_BEFORE_EVERY_OCNT_ADD", ver,
+         &[("FSIO_MODEL_ROLES", "w+r"), ("FSIO_MODEL_S3_OPS", "0"), ("FSIO_MODEL_REOPEN", "1"),
+           ("FSIO_MODEL_RESENDS", "0"), ("FSIO_MODEL_ZOMBIES", "0"),
+           ("FSIO_MODEL_EXPIRER_CRASHES", "0")], true),
+        /* a live gateway's open that finds its version deleted */
+        ("GONE_KEEPS_HINT_ONLY_IF_HELD", null,
+         &[("FSIO_MODEL_ZOMBIES", "0"), ("FSIO_MODEL_EXPIRER_CRASHES", "0")], true),
         ("H3_TRACKING_ONLY_IS_REMOVED", null,
          &[("FSIO_MODEL_ZOMBIES", "0"), ("FSIO_MODEL_EXPIRER_CRASHES", "0")], false),
         ("H3_HINT_WAITS_FOR_LIVE_CLAIM", null, NARROW, true),

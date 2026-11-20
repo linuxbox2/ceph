@@ -682,13 +682,21 @@ int m_replace_head(cls_rgw_fsio_head& h, const fsio::replace_in& in,
 }
 
 int m_ocnt_add(const std::string& inst, cls_rgw_fsio_instance_head& ih,
-	       const cls_rgw_fsio_handle& holder)
+	       const cls_rgw_fsio_handle& holder, fsio::ocnt_add_out& out)
 {
   cls_rgw_fsio_ocnt_op op;
   op.holder = holder;
   cls_rgw_fsio_effects fx;
-  return on_cluster_instance("fsio_ocnt_add", cls::rgw::method::fsio_ocnt_add, inst, ih, fx, op,
-			     [&] { return fsio::ocnt_add(ih, holder); });
+  ceph::buffer::list reply;
+  const int r = on_cluster_instance("fsio_ocnt_add", cls::rgw::method::fsio_ocnt_add, inst, ih, fx, op,
+				    [&] { return fsio::ocnt_add(ih, holder, &out); }, &reply);
+  if (cl.on && r == 0 && reply.length()) {
+    if (auto ret = dec<cls_rgw_fsio_ocnt_add_ret>("fsio_ocnt_add", reply);
+	ret && (ret->gone != out.gone || ret->held != out.held)) {
+      cl.reply_mismatch("fsio_ocnt_add", "gone or held differs");
+    }
+  }
+  return r;
 }
 
 int m_ocnt_remove(const std::string& inst, cls_rgw_fsio_instance_head& ih,
@@ -1534,8 +1542,11 @@ void gw_actions_v(const World& w0, size_t gi, std::vector<Action>& acts)
       acts.push_back({fmt::format("gw{} count {}", glabel(g), g.pending),
 	  [gi, inc](World& w) -> std::optional<std::string> {
 	    auto& g = w.gws[gi];
-	    /* §4.3:  the presence hint on the instance head comes first */
-	    const bool had = g.counted.count(g.pending);
+	    /* §4.3:  the presence hint on the instance head comes first,
+	     * before every ocnt_add, kept if it fails:  whether a publisher
+	     * counted this handle and hinted it is not knowable here */
+	    const bool every = !FSIO_SKIP_CHECK(HINT_BEFORE_EVERY_OCNT_ADD);
+	    const bool had = !every && g.counted.count(g.pending);
 	    if (!had) {
 	      if (FSIO_SKIP_CHECK(PRESENCE_HINT_BEFORE_OCNT)) {
 		g.owe_ih_hint = g.pending;   // in a step of its own, after
@@ -1543,11 +1554,24 @@ void gw_actions_v(const World& w0, size_t gi, std::vector<Action>& acts)
 		w.hints.insert(presence_ih(g.pending, hd(g)));
 	      }
 	    }
+	    /* §3, §4.3:  a version that is gone (absent, or its count
+	     * removed) adds nothing;  the hint stays only if the count
+	     * holds the handle (held) */
 	    auto v = w.versions.find(g.pending);
-	    if (v == w.versions.end() ||
-		m_ocnt_add(v->first, v->second.ih, hd(g)) < 0) {
+	    fsio::ocnt_add_out ao;
+	    int r = 0;
+	    if (v == w.versions.end()) {
+	      ao.gone = true;
+	    } else {
+	      r = m_ocnt_add(v->first, v->second.ih, hd(g), ao);
+	    }
+	    if (r < 0 || ao.gone) {
 	      if (!had) {
-		w.hints.erase(presence_ih(g.pending, hd(g)));
+		const bool keep = every &&
+		  (FSIO_SKIP_CHECK(GONE_KEEPS_HINT_ONLY_IF_HELD) || ao.held);
+		if (!keep) {
+		  w.hints.erase(presence_ih(g.pending, hd(g)));
+		}
 		g.owe_ih_hint.clear();
 	      }
 	      g.step = NONE;                 // the open fails
@@ -3941,6 +3965,10 @@ TEST(FSIOModel, Explore)
        cls_rgw_fsio_check::H2_HINT_DROPPED_AFTER_GRACE},
       {"H3_PUBLISHER_HINTS_READERS",
        cls_rgw_fsio_check::H3_PUBLISHER_HINTS_READERS},
+      {"GONE_KEEPS_HINT_ONLY_IF_HELD",
+       cls_rgw_fsio_check::GONE_KEEPS_HINT_ONLY_IF_HELD},
+      {"HINT_BEFORE_EVERY_OCNT_ADD",
+       cls_rgw_fsio_check::HINT_BEFORE_EVERY_OCNT_ADD},
       {"I4_PUBLISHER_NOT_COUNTED",
        cls_rgw_fsio_check::I4_PUBLISHER_NOT_COUNTED},
       {"H3_TRACKING_ONLY_IS_REMOVED",

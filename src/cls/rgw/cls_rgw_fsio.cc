@@ -1251,10 +1251,23 @@ int drop_seqs(cls_rgw_fsio_head& h, uint64_t incarnation,
 
 /* §2.5:  before joining on the OLH head, a gateway adds its incarnation;  a version
  * that is gone gains no opens */
-int ocnt_add(cls_rgw_fsio_instance_head& ih, const cls_rgw_fsio_handle& holder)
+int ocnt_add(cls_rgw_fsio_instance_head& ih, const cls_rgw_fsio_handle& holder,
+	     ocnt_add_out* out)
 {
-  if (!ih.exists || ih.id_tag.empty() || (ih.ocnt && ih.ocnt->removed)) {
-    return -ENOENT;
+  ocnt_add_out o;
+  if (!ih.exists || (ih.ocnt && ih.ocnt->removed)) {
+    o.gone = true;
+    o.held = ih.ocnt && ih.ocnt->holders.count(holder);
+    if (out) {
+      *out = o;
+    }
+    return 0;
+  }
+  if (out) {
+    *out = o;
+  }
+  if (ih.id_tag.empty()) {
+    return -ENOENT;                  // a placeholder:  the OLH never names one
   }
   if (!ih.ocnt) {
     ih.ocnt.emplace();

@@ -692,9 +692,28 @@ int rgw_fsio_ocnt_add(cls_method_context_t hctx, ceph::buffer::list* in,
   if (int r = check_origin(hctx, op.holder.incarnation); r < 0) {
     return r;
   }
-  return on_instance(hctx, {}, [&](auto& ih, auto&) {
-    return fsio::ocnt_add(ih, op.holder);
+  cls_rgw_fsio_ocnt_add_ret ret;
+  bool found = false;
+  int r = on_instance(hctx, {}, [&](auto& ih, auto&) {
+    found = true;
+    fsio::ocnt_add_out o;
+    int r = fsio::ocnt_add(ih, op.holder, &o);
+    ret.gone = o.gone;
+    ret.held = o.held;
+    return r;
   });
+  if (r == -ENOENT && !found) {
+    /* §3:  an absent instance head is a version that is gone, holding
+     * nothing;  a placeholder's ENOENT comes from the core */
+    ret.gone = true;
+    ret.held = false;
+    r = 0;
+  }
+  if (r < 0) {
+    return r;
+  }
+  encode(ret, *out);
+  return 0;
 }
 
 int rgw_fsio_ocnt_remove(cls_method_context_t hctx, ceph::buffer::list* in,

@@ -602,6 +602,23 @@ std::list<cls_rgw_fsio_rebind_op> cls_rgw_fsio_rebind_op::generate_test_instance
   return o;
 }
 
+void cls_rgw_fsio_ocnt_add_ret::dump(ceph::Formatter *f) const
+{
+  encode_json("gone", gone, f);
+  encode_json("held", held, f);
+}
+
+std::list<cls_rgw_fsio_ocnt_add_ret> cls_rgw_fsio_ocnt_add_ret::generate_test_instances()
+{
+  std::list<cls_rgw_fsio_ocnt_add_ret> o;
+  cls_rgw_fsio_ocnt_add_ret i;
+  i.gone = true;
+  i.held = true;
+  o.push_back(std::move(i));
+  o.emplace_back();
+  return o;
+}
+
 void cls_rgw_fsio_flags_ret::dump(ceph::Formatter *f) const
 {
   encode_json("already_applied", already_applied, f);

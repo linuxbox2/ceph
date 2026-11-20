@@ -788,3 +788,59 @@ TEST_F(FsioHead, JoinReplyCarriesTheShadow)
   ASSERT_TRUE(w2.last_run);
   EXPECT_EQ((cls_rgw_fsio_run{0, 2}), *w2.last_run);
 }
+
+/* §3, §4.3:  fsio_ocnt_add on a version that is gone adds nothing and
+ * returns gone, with held;  on an absent instance head it creates
+ * nothing */
+TEST_F(FsioHead, OcntAddOnAGoneVersionReturnsHeld)
+{
+  std::string key;
+  make_head(key);
+  const auto ih = instance_of(key);
+  {
+    ObjectWriteOperation op;
+    buffer::list d, t, m, tt;
+    op.create(true);
+    d.append("v1");
+    t.append("i0");
+    m.append("C0");
+    tt.append("tail0");
+    op.write_full(d);
+    op.setxattr("user.rgw.idtag", t);
+    op.setxattr("user.rgw.manifest", m);
+    op.setxattr("user.rgw.tail_tag", tt);
+    ASSERT_EQ(0, ioctx.operate(ih, &op));
+  }
+  cls_rgw_fsio_ocnt_op add;
+  add.holder = GW1;
+  cls_rgw_fsio_ocnt_add_ret ret;
+  ASSERT_EQ(0, call(ih, cls::rgw::method::fsio_ocnt_add, add, &ret));
+  EXPECT_FALSE(ret.gone);
+  {
+    ObjectWriteOperation op;
+    buffer::list out;
+    int rval = 0;
+    cls_rgw_fsio_remove_version_op rv;
+    rv.r = cls_rgw_fsio_id{1011, 7};
+    rv.marker = MARKER;
+    cls_rgw_fsio_remove_version(op, rv, &out, &rval);
+    ASSERT_EQ(0, ioctx.operate(ih, &op, OPERATION_RETURNVEC));
+  }
+  ASSERT_EQ(0, call(ih, cls::rgw::method::fsio_ocnt_add, add, &ret));
+  EXPECT_TRUE(ret.gone);
+  EXPECT_TRUE(ret.held);
+  add.holder = GW2;                    // from GW2's own client (Z28)
+  ASSERT_EQ(0, call(ih, cls::rgw::method::fsio_ocnt_add, add, &ret,
+		    &ioctx2));
+  EXPECT_TRUE(ret.gone);
+  EXPECT_FALSE(ret.held);
+  /* an absent instance head:  gone, nothing held, nothing created */
+  const auto absent = ih + "-absent";
+  ASSERT_EQ(0, call(absent, cls::rgw::method::fsio_ocnt_add, add, &ret,
+		    &ioctx2));
+  EXPECT_TRUE(ret.gone);
+  EXPECT_FALSE(ret.held);
+  uint64_t size;
+  time_t mtime;
+  EXPECT_EQ(-ENOENT, ioctx.stat(absent, &size, &mtime));
+}
