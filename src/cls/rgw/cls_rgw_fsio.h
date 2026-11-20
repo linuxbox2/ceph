@@ -81,6 +81,8 @@ enum class cls_rgw_fsio_check : uint8_t {
   A29_CLEAR_RECHECKS_CONSTRUCTOR,      // fsio_expire's clear
   A13_REWRITE_DEFERS,                  // fsio_replace_head on an instance head
   JOIN_BINDS_LINKED_PUBLISH,           // fsio_join, §3.1 step 4
+  A26_KEEP_TAIL_RECORDS_NO_MANIFEST,   // fsio_replace_head's supersede, §3.6
+  SHARED_TAIL_AFTER_LAST_READER,       // fsio_replace_head, §3.6
 };
 
 #ifdef CLS_RGW_FSIO_SKIP_CHECKS
@@ -328,8 +330,11 @@ int publish_release(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& caller,
 int drop_seqs(cls_rgw_fsio_head& h, uint64_t incarnation,
 	      cls_rgw_fsio_effects& fx);
 
+/* §3.4, §3.6:  `drained`, a chunk set the removal let drain (a shared
+ * tail's holder), which the caller sends and forgets in turn */
 int forget(cls_rgw_fsio_head& h, const cls_rgw_fsio_id& cs,
-	   cls_rgw_fsio_effects& fx);
+	   cls_rgw_fsio_effects& fx,
+	   std::optional<cls_rgw_fsio_id>* drained = nullptr);
 
 int fenced_finalize(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& finalizer,
 		    const cls_rgw_fsio_id& from, const expired_t& expired,

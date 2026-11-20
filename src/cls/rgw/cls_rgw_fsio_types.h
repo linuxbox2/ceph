@@ -195,6 +195,8 @@ struct cls_rgw_fsio_chunk_set {
   std::optional<cls_rgw_fsio_shadow> shadow;
   std::optional<cls_rgw_fsio_publishing> publishing;
   bool drained = false;
+  bool shares_tail = false;              // a tail-keeping write retired it (§3.6)
+  std::set<cls_rgw_fsio_id> after;       // drains only after these have (§3.6)
 
   bool is_shadow() const {
     return state == cls_rgw_fsio_cs_state::CONSTRUCTING ||
@@ -212,6 +214,8 @@ struct cls_rgw_fsio_chunk_set {
     encode(shadow, bl);
     encode(publishing, bl);
     encode(drained, bl);
+    encode(shares_tail, bl);
+    encode(after, bl);
     ENCODE_FINISH(bl);
   }
   void decode(ceph::buffer::list::const_iterator& bl) {
@@ -227,6 +231,8 @@ struct cls_rgw_fsio_chunk_set {
     decode(shadow, bl);
     decode(publishing, bl);
     decode(drained, bl);
+    decode(shares_tail, bl);
+    decode(after, bl);
     DECODE_FINISH(bl);
   }
   void dump(ceph::Formatter *f) const;

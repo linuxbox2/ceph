@@ -1276,7 +1276,7 @@ TEST(cls_rgw_fsio_repeat, release_after_publish_is_einval)
  * still retires the bound chunk set, but its record names no manifest,
  * so its drain collects the clone and never the live object's tail;  the
  * GC tag is kept */
-TEST(cls_rgw_fsio_supersede, keep_tail_records_no_manifest)
+void a26_keep_tail_records_no_manifest()
 {
   for (bool keep : {false, true}) {
     auto h = head("C0");
@@ -1295,6 +1295,71 @@ TEST(cls_rgw_fsio_supersede, keep_tail_records_no_manifest)
     EXPECT_EQ(keep ? 0u : 2u, rec.manifest.length()) << "keep_tail " << keep;
     EXPECT_EQ("t0", rec.gc_tag);
   }
+}
+
+TEST(cls_rgw_fsio_supersede, keep_tail_records_no_manifest)
+{
+  a26_keep_tail_records_no_manifest();
+}
+
+/* §3.6:  a tail shared by a run of tail-keeping writes is collected after
+ * its last reader:  the next replacement keeps it in a chunk set that
+ * drains once every sharer is gone, reported by the last one's forget */
+void shared_tail_after_last_reader()
+{
+  auto h = head("C0");
+  auto keep = [&](uint64_t r) {
+    fsio::replace_in in;
+    in.mode = fsio::replace_mode::SUPERSEDE;
+    in.r = cls_rgw_fsio_id{r, 0};
+    in.keep_tail = true;
+    fsio::replace_out out;
+    cls_rgw_fsio_effects fx;
+    EXPECT_EQ(0, fsio::replace_head(h, in, out, fx));
+  };
+  const auto p0 = join_reader(h, GW1);
+  keep(2000);                          // a copy onto itself:  p0 shares
+  const auto p1 = join_reader(h, GW2);
+  keep(2001);                          // again:  p1 shares
+  ASSERT_TRUE(h.hdr->find(p0)->shares_tail);
+  ASSERT_TRUE(h.hdr->find(p1)->shares_tail);
+  /* a PUT:  nothing bound to the head, but the sharers hold the tail */
+  fsio::replace_in in;
+  in.mode = fsio::replace_mode::SUPERSEDE;
+  in.r = cls_rgw_fsio_id{2002, 0};
+  fsio::replace_out out;
+  cls_rgw_fsio_effects fx;
+  ASSERT_EQ(0, fsio::replace_head(h, in, out, fx));
+  ASSERT_TRUE(out.keep_tail);
+  ASSERT_EQ(1u, fx.clones.size());
+  EXPECT_EQ(2u, fx.clones[0].record.manifest.length());   // the full record
+  const cls_rgw_fsio_chunk_set* t = nullptr;
+  for (const auto& e : h.hdr->chunk_sets) {
+    if (e.clone && *e.clone == cls_rgw_fsio_id{2002, 0}) {
+      t = &e;
+    }
+  }
+  ASSERT_TRUE(t);
+  const auto tid = t->id;
+  EXPECT_FALSE(h.hdr->find(p0)->shares_tail);
+  /* the sharers drain;  the holder waits until both are forgotten */
+  fsio::leave_out l;
+  ASSERT_EQ(0, fsio::leave(h, GW1, next_seq(), p0, false, {}, l, fx));
+  ASSERT_EQ(std::optional{p0}, l.drained);
+  ASSERT_EQ(0, fsio::leave(h, GW2, next_seq(), p1, false, {}, l, fx));
+  ASSERT_EQ(std::optional{p1}, l.drained);
+  EXPECT_FALSE(h.hdr->find(tid)->drained);
+  std::optional<cls_rgw_fsio_id> next;
+  ASSERT_EQ(0, fsio::forget(h, p0, fx, &next));
+  EXPECT_FALSE(next);
+  ASSERT_EQ(0, fsio::forget(h, p1, fx, &next));
+  ASSERT_EQ(std::optional{tid}, next);  // the last sharer's forget
+  EXPECT_TRUE(h.hdr->find(tid)->drained);
+}
+
+TEST(cls_rgw_fsio_supersede, shared_tail_after_last_reader)
+{
+  shared_tail_after_last_reader();
 }
 
 /* A18, §3.3:  W12's revalidate in a versioned bucket:  a reader left on
@@ -1546,6 +1611,10 @@ TEST(cls_rgw_fsio, each_check_is_detected)
     {cls_rgw_fsio_check::A29_CLEAR_RECHECKS_CONSTRUCTOR, a29_clear_rechecks_constructor},
     {cls_rgw_fsio_check::A13_REWRITE_DEFERS, a13_rewrite_version_defers},
     {cls_rgw_fsio_check::JOIN_BINDS_LINKED_PUBLISH, join_binds_linked_publish},
+    {cls_rgw_fsio_check::A26_KEEP_TAIL_RECORDS_NO_MANIFEST,
+     a26_keep_tail_records_no_manifest},
+    {cls_rgw_fsio_check::SHARED_TAIL_AFTER_LAST_READER,
+     shared_tail_after_last_reader},
     {cls_rgw_fsio_check::W3_FINALIZE_CREATES_TO_PUBLISHING, w3_finalize_publishes_to},
     {cls_rgw_fsio_check::W3_PUBLISHING_TO_RETIRES_FROM, w3_finalize_publishes_to},
     {cls_rgw_fsio_check::W3_RESUMED_FINALIZE_TAKES_OVER, w3_resumed_finalize_takes_over},

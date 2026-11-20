@@ -425,6 +425,25 @@ struct cls_rgw_fsio_flags_ret {
 };
 WRITE_CLASS_ENCODER(cls_rgw_fsio_flags_ret)
 
+/* fsio_forget's reply:  a chunk set the removal let drain (§3.4, §3.6) */
+struct cls_rgw_fsio_forget_ret {
+  std::optional<cls_rgw_fsio_id> drained;
+
+  void encode(ceph::buffer::list& bl) const {
+    ENCODE_START(1, 1, bl);
+    encode(drained, bl);
+    ENCODE_FINISH(bl);
+  }
+  void decode(ceph::buffer::list::const_iterator& bl) {
+    DECODE_START(1, bl);
+    decode(drained, bl);
+    DECODE_FINISH(bl);
+  }
+  void dump(ceph::Formatter *f) const;
+  static std::list<cls_rgw_fsio_forget_ret> generate_test_instances();
+};
+WRITE_CLASS_ENCODER(cls_rgw_fsio_forget_ret)
+
 /* fsio_ocnt_add's reply:  on a version that is gone, nothing added, and
  * whether the count holds the caller's handle (§3, §4.3) */
 struct cls_rgw_fsio_ocnt_add_ret {

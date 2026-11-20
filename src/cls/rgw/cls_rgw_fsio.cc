@@ -122,6 +122,30 @@ cls_rgw_fsio_chunk_set* head_chunk_set(cls_rgw_fsio_hdr& hdr)
   return nullptr;
 }
 
+/* §3.6:  the chunk sets tail-keeping writes retired that still have
+ * readers:  they share the head's tail */
+std::set<cls_rgw_fsio_id> tail_sharers(const cls_rgw_fsio_head& h)
+{
+  std::set<cls_rgw_fsio_id> s;
+  for (const auto& cs : h.hdr->chunk_sets) {
+    if (cs.shares_tail && !cs.drained) {
+      auto b = h.bound(cs.id);
+      if (b.readers || b.writers) {
+	s.insert(cs.id);
+      }
+    }
+  }
+  return s;
+}
+
+/* §3.6:  the head's replacement, not keeping the tail, ends the sharing */
+void end_tail_sharing(cls_rgw_fsio_hdr& hdr)
+{
+  for (auto& cs : hdr.chunk_sets) {
+    cs.shares_tail = false;
+  }
+}
+
 /* the published chunk set:  the entry at HEAD, or at INSTANCE for a
  * bound non-null version in a versioned bucket (§2.2, §2.5a) */
 cls_rgw_fsio_chunk_set* published_chunk_set(cls_rgw_fsio_hdr& hdr)
@@ -190,7 +214,13 @@ void settle(cls_rgw_fsio_head& h, std::vector<cls_rgw_fsio_id>& drained,
 	i = v.erase(i);
 	continue;
       }
-      if (idle && i->state == state::RETIRED && !i->drained) {
+      /* §3.6:  an entry holding a shared tail drains once its sharers
+       * are gone, so the fsio_forget of the last reports it */
+      const bool waits = std::any_of(i->after.begin(), i->after.end(),
+				     [&](const cls_rgw_fsio_id& a) {
+				       return h.hdr->find(a) != nullptr;
+				     });
+      if (idle && i->state == state::RETIRED && !i->drained && !waits) {
 	i->drained = true;
 	drained.push_back(i->id);
       }
@@ -891,18 +921,27 @@ int replace_head(cls_rgw_fsio_head& h, const replace_in& in, replace_out& out,
     auto* prev = head_chunk_set(hdr);
     fx.clones.push_back(
       cls_rgw_fsio_clone{in.r, 'G', record_of_head(h)});
-    if (prev && prev->id != sh_id) {
-      auto b = h.bound(prev->id);
-      if (b.readers || b.writers) {
-	prev->state = state::RETIRED;
-	prev->manifest_at = at::CLONE;
-	prev->clone = in.r;
-      } else {
-	out.born_drained = true;
-      }
+    /* §3.6:  the record holding the head's tail waits on its sharers */
+    const auto sharers = FSIO_SKIP_CHECK(SHARED_TAIL_AFTER_LAST_READER) ?
+      std::set<cls_rgw_fsio_id>{} : tail_sharers(h);
+    if (prev && prev->id != sh_id &&
+	(h.bound(prev->id).readers || h.bound(prev->id).writers)) {
+      prev->state = state::RETIRED;
+      prev->manifest_at = at::CLONE;
+      prev->clone = in.r;
+      prev->after = sharers;
+    } else if (!sharers.empty()) {
+      cls_rgw_fsio_chunk_set t;
+      t.id = hdr.draw();
+      t.state = state::RETIRED;
+      t.manifest_at = at::CLONE;
+      t.clone = in.r;
+      t.after = sharers;
+      hdr.chunk_sets.push_back(t);
     } else {
       out.born_drained = true;
     }
+    end_tail_sharing(hdr);
     sh = hdr.find(sh_id);
     sh->state = state::PUBLISHED;
     sh->manifest_at = at::HEAD;
@@ -971,21 +1010,38 @@ int replace_head(cls_rgw_fsio_head& h, const replace_in& in, replace_out& out,
   auto& hdr = *h.hdr;
   auto* p = head_chunk_set(hdr);
   bool kept = false;
-  if (p) {
-    auto b = h.bound(p->id);
-    if (b.readers || b.writers) {
-      /* §3.6, Y2:  an append or a copy onto itself reuses the tail;  the
-       * record names none, so the drain collects the clone only */
-      auto rec = record_of_head(h);
-      if (in.mode == replace_mode::SUPERSEDE && in.keep_tail) {
-	rec.manifest.clear();
-      }
-      fx.clones.push_back(cls_rgw_fsio_clone{in.r, 'G', rec});
-      p->state = state::RETIRED;
-      p->manifest_at = at::CLONE;
-      p->clone = in.r;
-      kept = true;
+  const bool keeps = in.mode == replace_mode::SUPERSEDE && in.keep_tail;
+  /* §3.6:  a replacement that does not keep the tail ends the sharing;
+   * the record holding the tail waits on the sharers */
+  const auto sharers = keeps || FSIO_SKIP_CHECK(SHARED_TAIL_AFTER_LAST_READER) ?
+    std::set<cls_rgw_fsio_id>{} : tail_sharers(h);
+  if (p && (h.bound(p->id).readers || h.bound(p->id).writers)) {
+    /* §3.6, Y2:  an append or a copy onto itself reuses the tail;  the
+     * record names none, so the drain collects the clone only */
+    auto rec = record_of_head(h);
+    if (keeps && !FSIO_SKIP_CHECK(A26_KEEP_TAIL_RECORDS_NO_MANIFEST)) {
+      rec.manifest.clear();
     }
+    fx.clones.push_back(cls_rgw_fsio_clone{in.r, 'G', rec});
+    p->state = state::RETIRED;
+    p->manifest_at = at::CLONE;
+    p->clone = in.r;
+    p->shares_tail = keeps;
+    p->after = sharers;
+    kept = true;
+  } else if (!sharers.empty()) {
+    fx.clones.push_back(cls_rgw_fsio_clone{in.r, 'G', record_of_head(h)});
+    cls_rgw_fsio_chunk_set t;
+    t.id = hdr.draw();
+    t.state = state::RETIRED;
+    t.manifest_at = at::CLONE;
+    t.clone = in.r;
+    t.after = sharers;
+    hdr.chunk_sets.push_back(t);
+    kept = true;
+  }
+  if (!keeps) {
+    end_tail_sharing(hdr);
   }
   if (!FSIO_SKIP_CHECK(CUR_SHADOW_SUPERSEDE)) {
     hdr.cur_shadow.reset();        // a new generation
@@ -1024,7 +1080,7 @@ int publish_release(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& caller,
 }
 
 int forget(cls_rgw_fsio_head& h, const cls_rgw_fsio_id& cs,
-	   cls_rgw_fsio_effects& fx)
+	   cls_rgw_fsio_effects& fx, std::optional<cls_rgw_fsio_id>* out)
 {
   if (!h.hdr) {
     return 0;
@@ -1036,6 +1092,9 @@ int forget(cls_rgw_fsio_head& h, const cls_rgw_fsio_id& cs,
 	  v.end());
   std::vector<cls_rgw_fsio_id> drained;
   settle(h, drained, fx);
+  if (out && !drained.empty()) {
+    *out = drained.front();
+  }
   return 0;
 }
 

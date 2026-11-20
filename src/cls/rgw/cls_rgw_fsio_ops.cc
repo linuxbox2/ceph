@@ -656,9 +656,15 @@ int rgw_fsio_forget(cls_method_context_t hctx, ceph::buffer::list* in,
   if (int r = check_origin(hctx, op.caller.incarnation); r < 0) {
     return r;
   }
-  return on_head(hctx, {}, [&](auto& h, auto& fx) {
-    return fsio::forget(h, op.cs, fx);
+  cls_rgw_fsio_forget_ret ret;
+  int r = on_head(hctx, {}, [&](auto& h, auto& fx) {
+    return fsio::forget(h, op.cs, fx, &ret.drained);
   });
+  if (r < 0) {
+    return r;
+  }
+  encode(ret, *out);
+  return 0;
 }
 
 int rgw_fsio_drop_seqs(cls_method_context_t hctx, ceph::buffer::list* in,

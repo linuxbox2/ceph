@@ -115,6 +115,12 @@ void cls_rgw_fsio_chunk_set::dump(ceph::Formatter *f) const
   encode_json("shadow", shadow, f);
   encode_json("publishing", publishing, f);
   encode_json("drained", drained, f);
+  encode_json("shares_tail", shares_tail, f);
+  f->open_array_section("after");
+  for (const auto& a : after) {
+    encode_json("id", a, f);
+  }
+  f->close_section();
 }
 
 std::list<cls_rgw_fsio_chunk_set> cls_rgw_fsio_chunk_set::generate_test_instances()
@@ -127,6 +133,8 @@ std::list<cls_rgw_fsio_chunk_set> cls_rgw_fsio_chunk_set::generate_test_instance
   i.shadow = cls_rgw_fsio_shadow::generate_test_instances().front();
   i.publishing = cls_rgw_fsio_publishing::generate_test_instances().front();
   i.drained = true;
+  i.shares_tail = true;
+  i.after = {cls_rgw_fsio_id{2, 7}, cls_rgw_fsio_id{3, 7}};
   o.push_back(std::move(i));
   o.emplace_back();
   return o;
@@ -597,6 +605,21 @@ std::list<cls_rgw_fsio_rebind_op> cls_rgw_fsio_rebind_op::generate_test_instance
   i.from = cls_rgw_fsio_id{3, 7};
   i.to = cls_rgw_fsio_id{4, 7};
   i.readers = 5;
+  o.push_back(std::move(i));
+  o.emplace_back();
+  return o;
+}
+
+void cls_rgw_fsio_forget_ret::dump(ceph::Formatter *f) const
+{
+  encode_json("drained", drained, f);
+}
+
+std::list<cls_rgw_fsio_forget_ret> cls_rgw_fsio_forget_ret::generate_test_instances()
+{
+  std::list<cls_rgw_fsio_forget_ret> o;
+  cls_rgw_fsio_forget_ret i;
+  i.drained = cls_rgw_fsio_id{9, 7};
   o.push_back(std::move(i));
   o.emplace_back();
   return o;
