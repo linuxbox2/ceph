@@ -322,6 +322,7 @@ struct Config {
   bool vstart_null = false;      // FSIO_MODEL_VSTART=null
   int resends = 1;               // FSIO_MODEL_RESENDS:  per handle (Z22)
   bool reopen = false;           // FSIO_MODEL_REOPEN:  a second read open (W12)
+  bool keep_tail = false;        // FSIO_MODEL_KEEP_TAIL:  a copy onto itself (§3.6)
 };
 
 /* versioned:  one instance head and what it holds */
@@ -553,12 +554,25 @@ int m_publish_release(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& caller,
 			 [&] { return fsio::publish_release(h, caller, cs); });
 }
 
-int m_forget(cls_rgw_fsio_head& h, const fid_t& cs, cls_rgw_fsio_effects& fx)
+int m_forget(cls_rgw_fsio_head& h, const fid_t& cs, cls_rgw_fsio_effects& fx,
+	     std::optional<fid_t>* drained = nullptr)
 {
   cls_rgw_fsio_cs_op op;
   op.cs = cs;
-  return on_cluster_head("fsio_forget", cls::rgw::method::fsio_forget, h, fx, op,
-			 [&] { return fsio::forget(h, cs, fx); });
+  std::optional<fid_t> d;
+  ceph::buffer::list reply;
+  const int r = on_cluster_head("fsio_forget", cls::rgw::method::fsio_forget, h, fx, op,
+				[&] { return fsio::forget(h, cs, fx, &d); }, &reply);
+  if (cl.on && r == 0 && reply.length()) {
+    if (auto ret = dec<cls_rgw_fsio_forget_ret>("fsio_forget", reply);
+	ret && ret->drained != d) {
+      cl.reply_mismatch("fsio_forget", "drained differs");
+    }
+  }
+  if (drained) {
+    *drained = d;
+  }
+  return r;
 }
 
 int m_drop_seqs(cls_rgw_fsio_head& h, uint64_t incarnation,
@@ -637,6 +651,7 @@ int m_replace_head(cls_rgw_fsio_head& h, const fsio::replace_in& in,
   op.versioned = in.versioned;
   op.complete = in.complete;
   op.expired = in.expired;
+  op.keep_tail = in.keep_tail;
   op.keep_attr_prefixes = {std::string(fc::OLH_PREFIX)};
   op.marker = cl.marker;
 
@@ -794,11 +809,12 @@ int m_rewrite_version(const std::string& inst, cls_rgw_fsio_instance_head& ih,
   op.mode = static_cast<uint8_t>(fsio::replace_mode::SUPERSEDE);
   op.r = rr;
   op.marker = cl.marker;
-  /* the instance head recreated with its open count alone;  RGW's write
-   * of the new content follows in its op */
+  /* with an open count, the instance head recreated with it alone
+   * (rewrite_instance);  without, the head path removes it, nothing kept.
+   * RGW's write of the new content follows in its op */
   fc::Obj want;
-  want.exists = true;
   if (ih.ocnt) {
+    want.exists = true;
     encode(*ih.ocnt, want.attrs[std::string(fc::OCNT)]);
   }
   ceph::buffer::list reply;
@@ -1076,7 +1092,9 @@ void apply_clones(World& w, const cls_rgw_fsio_effects& fx,
     if (c.role == 'G') {
       auto rn = rname(c.r);
       w.storage.insert(rn);
-      w.records[rn] = head_tok;
+      /* the record as the core wrote it:  the head's manifest, or none
+       * for a tail-keeping write (§3.6, Y2) */
+      w.records[rn] = c.record.manifest.length() ? head_tok : "";
     } else if (c.role == 'a') {
       w.pms[sname(c.r)] = tok(c.pm);
     }
@@ -1327,8 +1345,13 @@ void gw_actions(const World& w0, size_t gi, std::vector<Action>& acts)
 	      }
 	      w.gcq.push_back(drain_objects(w, *e));
 	      cls_rgw_fsio_effects fx;
-	      m_forget(w.head, g.step_cs, fx);
+	      std::optional<fid_t> next;
+	      m_forget(w.head, g.step_cs, fx, &next);
 	      apply_remove_head(w, fx);
+	      if (next) {
+		g.step_cs = *next;           // §3.4:  the drain it let happen
+		return std::nullopt;
+	      }
 	    }
 	    g.step = NONE;
 	    return std::nullopt;
@@ -1930,8 +1953,13 @@ void gw_actions_v(const World& w0, size_t gi, std::vector<Action>& acts)
 	    if (e) {
 	      w.gcq.push_back(drain_objects(w, *e));
 	      cls_rgw_fsio_effects fx;
-	      m_forget(w.head, g.step_cs, fx);
+	      std::optional<fid_t> next;
+	      m_forget(w.head, g.step_cs, fx, &next);
 	      apply_remove_head(w, fx);
+	      if (next) {
+		g.step_cs = *next;           // §3.4:  the drain it let happen
+		return std::nullopt;
+	      }
 	    }
 	    g.step = NONE;
 	    return std::nullopt;
@@ -2224,6 +2252,27 @@ void s3_actions(const World& w0, std::vector<Action>& acts)
 	  w.head.id_tag = fmt::format("t{}", w.next_tag++);
 	  return std::nullopt;
 	}});
+    /* §3.6, Y2:  a copy onto itself (or an append) reuses the tail:  the
+     * head's data stays in its storage, under a new ID tag */
+    if (cfg.keep_tail && w0.head_real() && !cfg.versioned) {
+      acts.push_back({"s3 copy-onto-itself",
+	  [](World& w) -> std::optional<std::string> {
+	    --w.s3_budget;
+	    auto old = w.head_tok();
+	    fsio::replace_in in;
+	    in.mode = fsio::replace_mode::SUPERSEDE;
+	    in.r = fid_t{w.next_r++, 0};
+	    in.keep_tail = true;
+	    fsio::replace_out out;
+	    cls_rgw_fsio_effects fx;
+	    m_replace_head(w.head, in, out, fx);
+	    apply_clones(w, fx, old);
+	    w.head.exists = true;
+	    w.head.manifest = tok_bl(old);
+	    w.head.id_tag = fmt::format("t{}", w.next_tag++);
+	    return std::nullopt;
+	  }});
+    }
     if (w0.head_real()) {
       acts.push_back({"s3 delete-read",
 	  [](World& w) -> std::optional<std::string> {
@@ -2422,7 +2471,8 @@ void expirer_actions(const World& w0, std::vector<Action>& acts)
 	      }
 	    }
 	  }
-	  for (auto& id : all) {
+	  for (size_t k = 0; k < all.size(); ++k) {
+	    const auto id = all[k];
 	    const auto* e = w.head.hdr ? w.head.hdr->find(id) : nullptr;
 	    if (!e) continue;
 	    if (e->manifest_at == at::SHADOW) {
@@ -2432,8 +2482,12 @@ void expirer_actions(const World& w0, std::vector<Action>& acts)
 	    }
 	    w.gcq.push_back(drain_objects(w, *e));
 	    cls_rgw_fsio_effects f2;
-	    m_forget(w.head, id, f2);
+	    std::optional<fid_t> next;
+	    m_forget(w.head, id, f2, &next);
 	    fx.remove_head |= f2.remove_head;
+	    if (next) {
+	      all.push_back(*next);          // §3.4:  the drain it let happen
+	    }
 	  }
 	  apply_remove_head(w, fx);
 	  return std::nullopt;
@@ -3370,7 +3424,11 @@ std::optional<std::string> check_state(const World& w)
 	}
       }
     }
-    if (v.ih.ocnt && !v.ih.ocnt->holders.empty()) {
+    /* a removed version takes no new holders, so its holders may read
+     * what was deferred;  a version rewritten in place takes new opens,
+     * which read its new content (readers of the old are the open
+     * check's, above) */
+    if (v.ih.ocnt && v.ih.ocnt->removed && !v.ih.ocnt->holders.empty()) {
       for (const auto& d : v.ih.ocnt->deferred) {
 	if (!w.storage.count(tok(d.manifest))) {
 	  return fmt::format("{}'s deferred tail {} collected while its open "
@@ -4022,6 +4080,10 @@ TEST(FSIOModel, Explore)
       {"A29_CLEAR_RECHECKS_CONSTRUCTOR", cls_rgw_fsio_check::A29_CLEAR_RECHECKS_CONSTRUCTOR},
       {"A13_REWRITE_DEFERS", cls_rgw_fsio_check::A13_REWRITE_DEFERS},
       {"JOIN_BINDS_LINKED_PUBLISH", cls_rgw_fsio_check::JOIN_BINDS_LINKED_PUBLISH},
+      {"SHARED_TAIL_AFTER_LAST_READER",
+       cls_rgw_fsio_check::SHARED_TAIL_AFTER_LAST_READER},
+      {"A26_KEEP_TAIL_RECORDS_NO_MANIFEST",
+       cls_rgw_fsio_check::A26_KEEP_TAIL_RECORDS_NO_MANIFEST},
       {"W3_FINALIZE_CREATES_TO_PUBLISHING", cls_rgw_fsio_check::W3_FINALIZE_CREATES_TO_PUBLISHING},
       {"W3_RESUMED_FINALIZE_TAKES_OVER", cls_rgw_fsio_check::W3_RESUMED_FINALIZE_TAKES_OVER},
       {"W3_PUBLISHING_TO_RETIRES_FROM", cls_rgw_fsio_check::W3_PUBLISHING_TO_RETIRES_FROM},
@@ -4109,6 +4171,7 @@ TEST(FSIOModel, Explore)
   cfg.expirer_crashes = env_int("FSIO_MODEL_EXPIRER_CRASHES", 1);
   cfg.resends = env_int("FSIO_MODEL_RESENDS", 1);
   cfg.reopen = env_int("FSIO_MODEL_REOPEN", 0) != 0;
+  cfg.keep_tail = env_int("FSIO_MODEL_KEEP_TAIL", 0) != 0;
   cfg.versioned = env_int("FSIO_MODEL_VERSIONED", 0);
   if (auto v = std::getenv("FSIO_MODEL_VSTART")) {
     cfg.vstart_null = std::string(v) == "null";

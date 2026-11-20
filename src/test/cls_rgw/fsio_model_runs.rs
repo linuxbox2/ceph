@@ -114,6 +114,10 @@ fn quick() -> Vec<Run> {
      * (FSIO_MODEL_REOPEN, off elsewhere) */
     v.push(run("quick-w+r-reopen", &[("FSIO_MODEL_ROLES", "w+r"), ("FSIO_MODEL_S3_OPS", "0"),
                                      ("FSIO_MODEL_REOPEN", "1"), ("FSIO_MODEL_RESENDS", "0")]));
+    /* §3.6:  a tail-keeping write, a copy onto itself (FSIO_MODEL_KEEP_TAIL,
+     * off elsewhere) */
+    v.push(run("quick-w+r-keep-tail", &[("FSIO_MODEL_ROLES", "w+r"), ("FSIO_MODEL_S3_OPS", "1"),
+                                        ("FSIO_MODEL_KEEP_TAIL", "1"), ("FSIO_MODEL_RESENDS", "0")]));
     v.push(run("quick-v-w+r-reopen", &[("FSIO_MODEL_VERSIONED", "1"), ("FSIO_MODEL_ROLES", "w+r"),
                                        ("FSIO_MODEL_S3_OPS", "0"), ("FSIO_MODEL_REOPEN", "1"),
                                        ("FSIO_MODEL_RESENDS", "0"), ("FSIO_MODEL_ZOMBIES", "0"),
@@ -278,6 +282,12 @@ fn skip_table() -> Vec<Check> {
         /* the model's expirer clears only a dead constructor's shadow;  the
          * unit test detects it */
         ("A29_CLEAR_RECHECKS_CONSTRUCTOR", unv, NARROW, false),
+        /* a reader of a tail two writes share;  kept as a vector */
+        ("SHARED_TAIL_AFTER_LAST_READER", unv, &[("FSIO_MODEL_ROLES", "f"), ("FSIO_MODEL_S3_OPS", "2"),
+                                                 ("FSIO_MODEL_KEEP_TAIL", "1")], true),
+        /* a reader of the head when S3 copies the object onto itself */
+        ("A26_KEEP_TAIL_RECORDS_NO_MANIFEST", unv, &[("FSIO_MODEL_ROLES", "r"),
+                                                     ("FSIO_MODEL_KEEP_TAIL", "1")], true),
         /* a reader of a version rewritten in place */
         ("A13_REWRITE_DEFERS", ver, &[("FSIO_MODEL_ROLES", "r")], true),
         /* a second read open between a publish's link and its publish

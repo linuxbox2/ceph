@@ -1,0 +1,23 @@
+# SHARED_TAIL_AFTER_LAST_READER:  found by quick-f2, 2026-11-20.  gw1's
+# reader follows gw1's write, published as S1.11;  S3 copies the object
+# onto itself (the tail kept:  S1.11's chunk set retired, its record
+# naming no manifest);  S3 then puts new content, which finds nothing
+# bound to the head and sends the shared tail to GC under the reader.
+# Skipped, the search from this prefix finds the reader's storage
+# collected;  with the check, the replacement keeps the tail in a chunk
+# set that drains after the sharer (design §3.6).
+# skip: SHARED_TAIL_AFTER_LAST_READER
+# replay: search
+# env: FSIO_MODEL_ROLES=f FSIO_MODEL_S3_OPS=2 FSIO_MODEL_KEEP_TAIL=1
+gw1 open-read
+gw1 open-write
+gw1 ready S1.11
+gw1 follow S1.11
+gw1 write S1.11
+gw1 close-write S1.11
+gw1 publish-hint
+gw1 publish S1.11
+gw1 publish-gc
+s3 copy-onto-itself
+s3 put
+# => gw1's open reads S1.11, collected
