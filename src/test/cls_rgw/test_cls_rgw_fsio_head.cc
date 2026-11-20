@@ -383,6 +383,72 @@ TEST_F(FsioHead, RemoveCountedVersionKeepsItsTail)
   EXPECT_EQ(-ENODATA, getxattr(ih, "user.rgw.tail_tag"));
 }
 
+/* §2.5, Y6 (A13):  a version rewritten in place under its open count,
+ * as a lifecycle transition or an admin rewrite writes it:  the head
+ * write's supersede clones it to the sibling and defers it in the count,
+ * which the recreated instance head keeps;  RGW's write then lands */
+TEST_F(FsioHead, RewriteCountedVersionKeepsItsTail)
+{
+  std::string key;
+  make_head(key);                      // for its key;  the instance next
+  const auto ih = instance_of(key);
+  {
+    ObjectWriteOperation op;
+    buffer::list d, t, m, tt;
+    op.create(true);
+    d.append("v1");
+    t.append("i0");
+    m.append("C0");
+    tt.append("tail0");
+    op.write_full(d);
+    op.setxattr("user.rgw.idtag", t);
+    op.setxattr("user.rgw.manifest", m);
+    op.setxattr("user.rgw.tail_tag", tt);
+    ASSERT_EQ(0, ioctx.operate(ih, &op));
+  }
+  cls_rgw_fsio_ocnt_op add;
+  add.holder = GW1;
+  ASSERT_EQ(0, call(ih, cls::rgw::method::fsio_ocnt_add, add,
+		    (cls_rgw_fsio_flags_ret*)nullptr));
+  ObjectWriteOperation op;
+  buffer::list out, d2, t2, m2;
+  int rval = 0;
+  auto in = replace(fsio::replace_mode::SUPERSEDE, 1013);
+  cls_rgw_fsio_replace_head(op, in, &out, &rval);
+  d2.append("v2");
+  t2.append("i1");
+  m2.append("C1");
+  op.write_full(d2);
+  op.setxattr("user.rgw.idtag", t2);
+  op.setxattr("user.rgw.manifest", m2);
+  ASSERT_EQ(0, ioctx.operate(ih, &op, OPERATION_RETURNVEC));
+  cls_rgw_fsio_replace_ret ret;
+  auto it = out.cbegin();
+  decode(ret, it);
+  EXPECT_TRUE(ret.keep_tail);
+  /* the version rewritten:  RGW's write stands, the count kept */
+  std::string v;
+  ASSERT_LE(0, getxattr(ih, "user.rgw.idtag", &v));
+  EXPECT_EQ("i1", v);
+  EXPECT_EQ("v2", read(ih, ioctx));
+  /* the old content on the sibling, deferred in the count */
+  const auto sib = fmt::format("{}~fsio_G{}_{}", MARKER,
+			       cls_rgw_fsio_id{1013, 7}.to_str(),
+			       ih.substr(MARKER.size() + 1));
+  auto io = keyed(ih);
+  EXPECT_EQ("v1", read(sib, io));
+  buffer::list o;
+  ASSERT_LE(0, ioctx.getxattr(ih, "user.rgw.fsio.ocnt", o));
+  cls_rgw_fsio_ocnt oc;
+  auto oit = o.cbegin();
+  decode(oc, oit);
+  EXPECT_EQ(1u, oc.holders.size());
+  EXPECT_FALSE(oc.removed);
+  ASSERT_EQ(1u, oc.deferred.size());
+  EXPECT_EQ("tail0", oc.deferred[0].gc_tag);
+  EXPECT_EQ("C0", oc.deferred[0].manifest.to_str());
+}
+
 /* §2.5:  a version no open count holds goes, as it always has */
 TEST_F(FsioHead, RemoveUncountedVersionRemovesIt)
 {

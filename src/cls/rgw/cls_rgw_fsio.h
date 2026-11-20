@@ -79,6 +79,7 @@ enum class cls_rgw_fsio_check : uint8_t {
   Z6_INSTANCE_WRITE_DROPS_CLAIM,       // the versioned instance write's post op (model)
   Z6_RESOLUTION_TESTS_ID_TAG,          // the claim resolution and hint rule (model)
   A29_CLEAR_RECHECKS_CONSTRUCTOR,      // fsio_expire's clear
+  A13_REWRITE_DEFERS,                  // fsio_replace_head on an instance head
 };
 
 #ifdef CLS_RGW_FSIO_SKIP_CHECKS
@@ -741,5 +742,12 @@ struct remove_out {
 };
 int remove_version(cls_rgw_fsio_instance_head& ih, const cls_rgw_fsio_id& r,
 		   remove_out& out, cls_rgw_fsio_effects& fx);
+/* §2.5, Y6:  a version rewritten in place (a lifecycle or cloud-tier
+ * transition, a restore, an admin rewrite) under a non-empty open count:
+ * its old content cloned to a sibling and recorded in `deferred`, the
+ * tail kept;  the version stays.  A write reusing the tail records no
+ * manifest (§3.6, Y2) */
+int rewrite_version(cls_rgw_fsio_instance_head& ih, const cls_rgw_fsio_id& r,
+		    bool keep_tail, remove_out& out, cls_rgw_fsio_effects& fx);
 
 } // namespace cls_rgw_fsio

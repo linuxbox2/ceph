@@ -652,6 +652,65 @@ TEST(FsioPut, RemoveVersionUnderAReader) {
   }
 }
 
+/* a version rewritten in place under its open count (an admin rewrite,
+ * as a lifecycle transition or a cloud restore rewrites it):  the old
+ * content is deferred as a removal's is, to a sibling named in the
+ * count's deferred list, and its tail is kept for the reader (§2.7, Y6;
+ * design audit A13) */
+TEST(FsioPut, RewriteVersionUnderAReader) {
+  if (!ready) {
+    GTEST_SKIP() << "INIT failed";
+  }
+  if (fsio_off) {
+    GTEST_SKIP() << "needs FSIO's open count";
+  }
+  const auto name = fmt::format("rewrite-under-reader-{}", getpid());
+  std::string older;
+  std::set<std::string> tails;
+  two_versions(name, older, tails);
+  ASSERT_FALSE(tails.empty());
+  const auto ih = instance_head_of(name, older);
+  ASSERT_FALSE(ih.empty());
+  count_open(ih);
+
+  const DoutPrefix dp(g_ceph_context, ceph_subsys_rgw, "fsio_put test: ");
+  auto* driver = rgw::g_rgwlib->get_driver();
+  std::unique_ptr<rgw::sal::Bucket> b;
+  rgw_bucket key;
+  key.name = versioned_name;
+  ASSERT_EQ(0, driver->load_bucket(&dp, key, &b, null_yield));
+  auto info = b->get_info();
+  const rgw_obj obj(b->get_key(), rgw_obj_key(name, older));
+  ASSERT_EQ(0, static_cast<rgw::sal::RadosStore*>(driver)->getRados()->
+	    rewrite_obj(info, obj, &dp, null_yield));
+
+  const auto gc = in_gc();
+  report(ih, tails);
+  const auto v = versions_of(name);
+  ASSERT_EQ(2u, v.size());             // the version still there
+  buffer::list bl;
+  ASSERT_LE(0, data.getxattr(ih, "user.rgw.fsio.ocnt", bl));
+  cls_rgw_fsio_ocnt ocnt;
+  auto it = bl.cbegin();
+  decode(ocnt, it);
+  EXPECT_EQ(1u, ocnt.holders.size());
+  EXPECT_FALSE(ocnt.removed);
+  EXPECT_EQ(1u, ocnt.deferred.size()) << "the replaced content not deferred";
+  const auto sibs = siblings_of(ih);
+  EXPECT_EQ(1u, sibs.size()) << "no sibling holds the replaced content";
+  if (sibs.size() == 1) {
+    IoCtx keyed;
+    keyed.dup(data);
+    keyed.locator_set_key(ih);
+    bl.clear();
+    ASSERT_LE(0, keyed.read(*sibs.begin(), bl, 1, 0));
+    EXPECT_EQ('a', bl[0]);             // the replaced content
+  }
+  for (const auto& t : tails) {
+    EXPECT_TRUE(exists(t) && !gc.count(t)) << t << " collected under a reader";
+  }
+}
+
 /* a version's removal with no open count:  it goes, as it always has */
 TEST(FsioPut, RemoveVersionWithNoReader) {
   if (!ready) {
@@ -1248,8 +1307,9 @@ int main(int argc, char* argv[])
     std::cout << argv[0] << " no AWS credentials, exiting" << std::endl;
     return EPERM;
   }
+  /* after gtest takes its own flags out of argv, which shortens it */
+  ::testing::InitGoogleTest(&argc, argv);
   saved_args.argc = argc;
   saved_args.argv = argv;
-  ::testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();
 }

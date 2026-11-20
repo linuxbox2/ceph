@@ -150,6 +150,7 @@ int load_instance(cls_method_context_t hctx, cls_rgw_fsio_instance_head& ih,
   if (r < 0 || !ih.exists) {
     return r;
   }
+  l.all = attrs;
   try {
     for (auto& [k, v] : attrs) {
       if (k == ID_TAG) {
@@ -701,6 +702,57 @@ std::map<std::string, ceph::buffer::list> records_of(const cls_rgw_fsio_head& h)
  * and the new FSIO records, as rgw_obj_remove() removes a head.  The
  * caller's own writes come after this call in its op (§3, the ordering
  * rule). */
+/* §2.5, Y6:  fsio_replace_head's supersede on an instance head:  the
+ * clone to the sibling first, then the head recreated with the caller's
+ * prefixes and the open count, RGW's write following */
+int rewrite_instance(cls_method_context_t hctx,
+		     const cls_rgw_fsio_replace_op& op, ceph::buffer::list* out)
+{
+  cls_rgw_fsio_instance_head ih;
+  loaded l;
+  int r = load_instance(hctx, ih, l);
+  if (r < 0) {
+    return r;
+  }
+  const auto& all = l.all;
+  fsio::remove_out rout;
+  cls_rgw_fsio_effects fx;
+  if ((r = fsio::rewrite_version(ih, op.r, op.keep_tail, rout, fx)) < 0) {
+    return r;
+  }
+  if ((r = apply(hctx, op.marker, fx)) < 0) {
+    return r;
+  }
+  std::map<std::string, ceph::buffer::list> kept;
+  for (const auto& prefix : op.keep_attr_prefixes) {
+    for (auto i = all.lower_bound(prefix);
+	 i != all.end() && i->first.starts_with(prefix); ++i) {
+      if (!i->first.starts_with(FSIO_PREFIX)) {
+	kept[i->first] = i->second;
+      }
+    }
+  }
+  if (ih.ocnt) {
+    encode(*ih.ocnt, kept[std::string(OCNT)]);
+  }
+  if ((r = cls_cxx_remove(hctx)) < 0) {
+    CLS_ERR("ERROR: %s: cls_cxx_remove returned %d", __func__, r);
+    return r;
+  }
+  if ((r = cls_cxx_create(hctx, false)) < 0) {
+    return r;
+  }
+  for (auto& [name, v] : kept) {
+    if ((r = cls_cxx_setxattr(hctx, name.c_str(), &v)) < 0) {
+      CLS_ERR("ERROR: %s: setting %s returned %d", __func__, name.c_str(), r);
+      return r;
+    }
+  }
+  cls_rgw_fsio_replace_ret ret{rout.keep_tail, false, std::nullopt};
+  encode(ret, *out);
+  return 0;
+}
+
 int rgw_fsio_replace_head(cls_method_context_t hctx, ceph::buffer::list* in,
 			  ceph::buffer::list* out)
 {
@@ -718,6 +770,12 @@ int rgw_fsio_replace_head(cls_method_context_t hctx, ceph::buffer::list* in,
     return r;
   }
   const auto in_core = op.to_core();
+  /* §2.5, Y6:  a head write on an instance head with an open count, a
+   * version rewritten in place:  its content deferred in the count */
+  if (in_core.mode == fsio::replace_mode::SUPERSEDE &&
+      l.all.count(std::string(OCNT))) {
+    return rewrite_instance(hctx, op, out);
+  }
   fsio::replace_out rout;
   cls_rgw_fsio_effects fx;
   if ((r = fsio::replace_head(h, in_core, rout, fx)) < 0) {

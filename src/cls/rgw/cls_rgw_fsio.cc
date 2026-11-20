@@ -1252,6 +1252,28 @@ int ocnt_forget(cls_rgw_fsio_instance_head& ih, cls_rgw_fsio_effects& fx)
  * with incarnations in the open count, the instance head is cloned to
  * its sibling, the content deferred and the version removed in one op;
  * without, the caller collects as today */
+int rewrite_version(cls_rgw_fsio_instance_head& ih, const cls_rgw_fsio_id& r,
+		    bool keep_tail, remove_out& out, cls_rgw_fsio_effects& fx)
+{
+  if (!ih.exists) {
+    return -ENOENT;
+  }
+  out.keep_tail = false;
+  if (!ih.ocnt || ih.ocnt->holders.empty() || ih.id_tag.empty() ||
+      FSIO_SKIP_CHECK(A13_REWRITE_DEFERS)) {
+    return 0;
+  }
+  cls_rgw_fsio_gen rec;
+  if (!keep_tail) {
+    rec.manifest = ih.manifest;
+  }
+  rec.gc_tag = gc_tag_of(ih.tail_tag, ih.id_tag);
+  fx.clones.push_back(cls_rgw_fsio_clone{r, 'G', rec});
+  ih.ocnt->deferred.push_back(cls_rgw_fsio_replaced{rec.manifest, rec.gc_tag, r});
+  out.keep_tail = true;
+  return 0;
+}
+
 int remove_version(cls_rgw_fsio_instance_head& ih, const cls_rgw_fsio_id& r,
 		   remove_out& out, cls_rgw_fsio_effects& fx)
 {

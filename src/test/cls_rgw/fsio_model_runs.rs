@@ -251,6 +251,9 @@ fn skip_table() -> Vec<Check> {
         /* the model's expirer clears only a dead constructor's shadow;  the
          * unit test detects it */
         ("A29_CLEAR_RECHECKS_CONSTRUCTOR", unv, NARROW, false),
+        /* the model has no in-place rewrite of a version;  the unit test
+         * detects it */
+        ("A13_REWRITE_DEFERS", ver, NARROW, false),
         /* Z22:  resends (FSIO_MODEL_RESENDS, on by default) */
         ("Z22_COUNTED_CALL_CHECKS_SEQ", unv,
          &[("FSIO_MODEL_ROLES", "wr"), ("FSIO_MODEL_S3_OPS", "0")], true),

@@ -673,6 +673,68 @@ TEST(cls_rgw_fsio_versioned, remove_version_without_open_count_collects)
   EXPECT_FALSE(ih.exists);
 }
 
+/* A13, §2.5, Y6:  a version rewritten in place under its open count:
+ * the old content to a sibling, recorded in deferred, the tail kept, the
+ * version not removed;  its drain collects the sibling and its tail, and
+ * leaves the instance head */
+void a13_rewrite_version_defers()
+{
+  auto ih = instance_head("C1");
+  ASSERT_EQ(0, fsio::ocnt_add(ih, GW1));
+  fsio::remove_out ro;
+  cls_rgw_fsio_effects fx;
+  ASSERT_EQ(0, fsio::rewrite_version(ih, cls_rgw_fsio_id{3100, 0}, false,
+				     ro, fx));
+  EXPECT_TRUE(ro.keep_tail);
+  ASSERT_EQ(1u, fx.clones.size());                 // the sibling
+  EXPECT_EQ(2u, fx.clones[0].record.manifest.length());
+  ASSERT_TRUE(ih.ocnt);
+  EXPECT_FALSE(ih.ocnt->removed);
+  ASSERT_EQ(1u, ih.ocnt->deferred.size());
+  fsio::ocnt_drain d;
+  ASSERT_EQ(0, fsio::ocnt_remove(ih, GW1, d));
+  EXPECT_TRUE(d.drained);
+  EXPECT_FALSE(d.removed);
+  EXPECT_EQ(1u, d.deferred.size());
+  cls_rgw_fsio_effects ffx;
+  ASSERT_EQ(0, fsio::ocnt_forget(ih, ffx));
+  EXPECT_FALSE(ffx.remove_head);                   // the version lives
+}
+
+TEST(cls_rgw_fsio_versioned, A13_rewrite_version_defers)
+{
+  a13_rewrite_version_defers();
+}
+
+/* …a rewrite that reuses its tail records no manifest (§3.6, Y2) */
+TEST(cls_rgw_fsio_versioned, rewrite_version_keep_tail_records_no_manifest)
+{
+  auto ih = instance_head("C1");
+  ASSERT_EQ(0, fsio::ocnt_add(ih, GW1));
+  fsio::remove_out ro;
+  cls_rgw_fsio_effects fx;
+  ASSERT_EQ(0, fsio::rewrite_version(ih, cls_rgw_fsio_id{3101, 0}, true,
+				     ro, fx));
+  EXPECT_TRUE(ro.keep_tail);
+  ASSERT_EQ(1u, fx.clones.size());
+  EXPECT_EQ(0u, fx.clones[0].record.manifest.length());
+  ASSERT_EQ(1u, ih.ocnt->deferred.size());
+  EXPECT_EQ(0u, ih.ocnt->deferred[0].manifest.length());
+}
+
+/* …with no open count, the rewrite collects as it always has */
+TEST(cls_rgw_fsio_versioned, rewrite_version_without_open_count_collects)
+{
+  auto ih = instance_head("C1");
+  fsio::remove_out ro;
+  cls_rgw_fsio_effects fx;
+  ASSERT_EQ(0, fsio::rewrite_version(ih, cls_rgw_fsio_id{3102, 0}, false,
+				     ro, fx));
+  EXPECT_FALSE(ro.keep_tail);
+  EXPECT_TRUE(fx.clones.empty());
+  EXPECT_TRUE(ih.exists);
+}
+
 TEST(cls_rgw_fsio_versioned, ocnt_expire_removes_only_the_dead)
 {
   auto ih = instance_head("C1");
@@ -1279,6 +1341,7 @@ TEST(cls_rgw_fsio, each_check_is_detected)
      w5_finalize_of_published_shadow_with_follower},
     {cls_rgw_fsio_check::W6_EXPIRE_TAKES_OVER_PUBLISH, w6_expire_takes_over_zombie_publish},
     {cls_rgw_fsio_check::A29_CLEAR_RECHECKS_CONSTRUCTOR, a29_clear_rechecks_constructor},
+    {cls_rgw_fsio_check::A13_REWRITE_DEFERS, a13_rewrite_version_defers},
     {cls_rgw_fsio_check::W3_FINALIZE_CREATES_TO_PUBLISHING, w3_finalize_publishes_to},
     {cls_rgw_fsio_check::W3_PUBLISHING_TO_RETIRES_FROM, w3_finalize_publishes_to},
     {cls_rgw_fsio_check::W3_RESUMED_FINALIZE_TAKES_OVER, w3_resumed_finalize_takes_over},
