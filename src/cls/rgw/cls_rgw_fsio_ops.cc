@@ -235,6 +235,28 @@ uint64_t osd_epoch()
     ceph::real_clock::now().time_since_epoch()).count();
 }
 
+/* §3, Z28:  the caller's incarnation is the op's origin, the RADOS
+ * client whose watches decide its liveness;  the incarnations a call
+ * names as others' (expired, a hint's, a dropped seq) are not checked */
+int check_origin(cls_method_context_t hctx, uint64_t incarnation)
+{
+  if (!cls_get_config(hctx).get_val<bool>("rgw_fsio_check_origin")) {
+    return 0;
+  }
+  entity_inst_t origin;
+  if (int r = cls_get_request_origin(hctx, &origin); r < 0) {
+    return r;
+  }
+  if (!origin.name.is_client() ||
+      origin.name.num() != static_cast<int64_t>(incarnation)) {
+    CLS_LOG(1, "fsio:  caller incarnation %llu is not the op's origin "
+	    "(type %d, num %lld)", (unsigned long long)incarnation,
+	    (int)origin.name.type(), (long long)origin.name.num());
+    return -EPERM;
+  }
+  return 0;
+}
+
 /* the effects:  each clone by CLONE_TO, FSIO's records dropped from it
  * and its own record set;  a head with nothing left removed */
 int apply(cls_method_context_t hctx, const std::string& marker,
@@ -345,6 +367,9 @@ int rgw_fsio_join(cls_method_context_t hctx, ceph::buffer::list* in,
   if (int r = decode_op(in, op, __func__); r < 0) {
     return r;
   }
+  if (int r = check_origin(hctx, op.caller.incarnation); r < 0) {
+    return r;
+  }
   cls_rgw_fsio_join_ret ret;
   int r = on_head(hctx, op.marker, [&](auto& h, auto& fx) {
     fsio::join_in jin{op.caller, op.seq, op.writer, op.nonce, op.counter_seed,
@@ -370,6 +395,9 @@ int rgw_fsio_ready(cls_method_context_t hctx, ceph::buffer::list* in,
   if (int r = decode_op(in, op, __func__); r < 0) {
     return r;
   }
+  if (int r = check_origin(hctx, op.caller.incarnation); r < 0) {
+    return r;
+  }
   return on_head(hctx, {}, [&](auto& h, auto&) {
     return fsio::ready(h, op.caller, op.cs, op.runs, op.size, op.mtime);
   });
@@ -380,6 +408,9 @@ int rgw_fsio_hint(cls_method_context_t hctx, ceph::buffer::list* in,
 {
   cls_rgw_fsio_hint_size_op op;
   if (int r = decode_op(in, op, __func__); r < 0) {
+    return r;
+  }
+  if (int r = check_origin(hctx, op.caller.incarnation); r < 0) {
     return r;
   }
   cls_rgw_fsio_hint_size_ret ret;
@@ -407,6 +438,9 @@ int rgw_fsio_truncate(cls_method_context_t hctx, ceph::buffer::list* in,
   if (int r = decode_op(in, op, __func__); r < 0) {
     return r;
   }
+  if (int r = check_origin(hctx, op.caller.incarnation); r < 0) {
+    return r;
+  }
   cls_rgw_fsio_truncate_ret ret;
   int r = on_head(hctx, {}, [&](auto& h, auto&) {
     fsio::truncate_out tout;
@@ -430,6 +464,9 @@ int rgw_fsio_extend(cls_method_context_t hctx, ceph::buffer::list* in,
   if (int r = decode_op(in, op, __func__); r < 0) {
     return r;
   }
+  if (int r = check_origin(hctx, op.caller.incarnation); r < 0) {
+    return r;
+  }
   if (op.runs.size() != 1) {
     return -EINVAL;
   }
@@ -443,6 +480,9 @@ int rgw_fsio_leave(cls_method_context_t hctx, ceph::buffer::list* in,
 {
   cls_rgw_fsio_leave_op op;
   if (int r = decode_op(in, op, __func__); r < 0) {
+    return r;
+  }
+  if (int r = check_origin(hctx, op.caller.incarnation); r < 0) {
     return r;
   }
   cls_rgw_fsio_leave_ret ret;
@@ -477,6 +517,9 @@ int rgw_fsio_rebind(cls_method_context_t hctx, ceph::buffer::list* in,
   if (int r = decode_op(in, op, __func__); r < 0) {
     return r;
   }
+  if (int r = check_origin(hctx, op.caller.incarnation); r < 0) {
+    return r;
+  }
   cls_rgw_fsio_rebind_ret ret;
   int r = on_head(hctx, {}, [&](auto& h, auto&) {
     fsio::rebind_out rout;
@@ -500,6 +543,9 @@ int rgw_fsio_publish_release(cls_method_context_t hctx, ceph::buffer::list* in,
   if (int r = decode_op(in, op, __func__); r < 0) {
     return r;
   }
+  if (int r = check_origin(hctx, op.caller.incarnation); r < 0) {
+    return r;
+  }
   return on_head(hctx, {}, [&](auto& h, auto&) {
     return fsio::publish_release(h, op.caller, op.cs);
   });
@@ -510,6 +556,9 @@ int rgw_fsio_fenced_finalize(cls_method_context_t hctx, ceph::buffer::list* in,
 {
   cls_rgw_fsio_finalize_op op;
   if (int r = decode_op(in, op, __func__); r < 0) {
+    return r;
+  }
+  if (int r = check_origin(hctx, op.finalizer.incarnation); r < 0) {
     return r;
   }
   cls_rgw_fsio_finalize_ret ret;
@@ -536,6 +585,9 @@ int rgw_fsio_expire(cls_method_context_t hctx, ceph::buffer::list* in,
   if (int r = decode_op(in, op, __func__); r < 0) {
     return r;
   }
+  if (int r = check_origin(hctx, op.caller.incarnation); r < 0) {
+    return r;
+  }
   cls_rgw_fsio_expire_ret ret;
   int r = on_head(hctx, {}, [&](auto& h, auto& fx) {
     fsio::expire_out eout;
@@ -556,6 +608,9 @@ int rgw_fsio_forget(cls_method_context_t hctx, ceph::buffer::list* in,
 {
   cls_rgw_fsio_cs_op op;
   if (int r = decode_op(in, op, __func__); r < 0) {
+    return r;
+  }
+  if (int r = check_origin(hctx, op.caller.incarnation); r < 0) {
     return r;
   }
   return on_head(hctx, {}, [&](auto& h, auto& fx) {
@@ -591,6 +646,9 @@ int rgw_fsio_ocnt_add(cls_method_context_t hctx, ceph::buffer::list* in,
   if (int r = decode_op(in, op, __func__); r < 0) {
     return r;
   }
+  if (int r = check_origin(hctx, op.holder.incarnation); r < 0) {
+    return r;
+  }
   return on_instance(hctx, {}, [&](auto& ih, auto&) {
     return fsio::ocnt_add(ih, op.holder);
   });
@@ -601,6 +659,9 @@ int rgw_fsio_ocnt_remove(cls_method_context_t hctx, ceph::buffer::list* in,
 {
   cls_rgw_fsio_ocnt_op op;
   if (int r = decode_op(in, op, __func__); r < 0) {
+    return r;
+  }
+  if (int r = check_origin(hctx, op.holder.incarnation); r < 0) {
     return r;
   }
   fsio::ocnt_drain d;
@@ -759,6 +820,11 @@ int rgw_fsio_replace_head(cls_method_context_t hctx, ceph::buffer::list* in,
   cls_rgw_fsio_replace_op op;
   if (int r = decode_op(in, op, __func__); r < 0) {
     return r;
+  }
+  if (op.mode == static_cast<uint8_t>(fsio::replace_mode::PUBLISH)) {
+    if (int r = check_origin(hctx, op.caller.incarnation); r < 0) {
+      return r;
+    }
   }
   cls_rgw_fsio_head h;
   loaded l;

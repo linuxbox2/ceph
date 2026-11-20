@@ -67,12 +67,14 @@ int hint_shards = 127;               // rgw_fsio_open_hints_num_shards
 bool fsio_off = false;
 bool ready = false;                  // INIT succeeded
 
-Rados cluster;
-IoCtx data;
+Rados cluster, cluster2;
+IoCtx data, data2;                   // data2:  GW2's
 
 constexpr size_t SIZE = 8 << 20;     // past the 4 MiB head:  a tail
-constexpr cls_rgw_fsio_handle GW{0x7e57, 1};
-constexpr cls_rgw_fsio_handle GW2{0x7e58, 1};   // a second gateway
+/* the test's gateways, each its own RADOS client, an incarnation being
+ * the op's origin (§3, Z28):  set at INIT */
+cls_rgw_fsio_handle GW;
+cls_rgw_fsio_handle GW2;             // a second gateway
 
 struct {
   int argc;
@@ -99,6 +101,7 @@ void put(const std::string& name, char fill,
   rgw_fh_rele(fs, fh, 0);
   if (!data.is_valid()) {
     ASSERT_EQ(0, cluster.ioctx_create(data_pool.c_str(), data));
+    ASSERT_EQ(0, cluster2.ioctx_create(data_pool.c_str(), data2));
   }
 }
 
@@ -295,9 +298,14 @@ TEST(FsioPut, INIT) {
   null_fh = fh;
   ASSERT_EQ(0, cluster.init_with_context(g_ceph_context));
   ASSERT_EQ(0, cluster.connect());
+  ASSERT_EQ(0, cluster2.init_with_context(g_ceph_context));
+  ASSERT_EQ(0, cluster2.connect());
+  GW = cls_rgw_fsio_handle{cluster.get_instance_id(), 1};
+  GW2 = cls_rgw_fsio_handle{cluster2.get_instance_id(), 1};
   /* open now if an earlier run created it, so the first test's snapshot
    * of the pool's tails sees theirs */
   (void)cluster.ioctx_create(data_pool.c_str(), data);
+  (void)cluster2.ioctx_create(data_pool.c_str(), data2);
   ready = true;
 }
 
@@ -777,7 +785,7 @@ cls_rgw_fsio_id join_writer(const std::string& head, const std::string& marker,
   int rval = 0;
   ObjectWriteOperation w;
   w.exec(cls::rgw::method::fsio_join, in, &out, &rval);
-  EXPECT_EQ(0, data.operate(head, &w, OPERATION_RETURNVEC));
+  EXPECT_EQ(0, data2.operate(head, &w, OPERATION_RETURNVEC));
   cls_rgw_fsio_join_ret ret;
   auto it = out.cbegin();
   decode(ret, it);

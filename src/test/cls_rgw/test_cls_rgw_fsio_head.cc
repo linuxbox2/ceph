@@ -18,26 +18,33 @@ using namespace librados;
 
 namespace {
 
-constexpr cls_rgw_fsio_handle GW1{1, 1}, GW2{2, 1};
+/* two gateways, each its own RADOS client:  an incarnation is the op's
+ * origin (§3, Z28);  set once the clients connect */
+cls_rgw_fsio_handle GW1, GW2;
 const std::string MARKER = "zone.4125.1";
 const std::string HDR = "user.rgw.fsio.hdr";
 
 class FsioHead : public ::testing::Test {
 protected:
-  static Rados rados;
+  static Rados rados, rados2;
   static std::string pool;
-  IoCtx ioctx;
+  IoCtx ioctx, ioctx2;
   static uint64_t next;
 
   static void SetUpTestSuite() {
     pool = get_temp_pool_name();
     ASSERT_EQ("", create_one_pool_pp(pool, rados));
+    ASSERT_EQ("", connect_cluster_pp(rados2));
+    GW1 = cls_rgw_fsio_handle{rados.get_instance_id(), 1};
+    GW2 = cls_rgw_fsio_handle{rados2.get_instance_id(), 1};
   }
   static void TearDownTestSuite() {
+    rados2.shutdown();
     ASSERT_EQ(0, destroy_one_pool_pp(pool, rados));
   }
   void SetUp() override {
     ASSERT_EQ(0, rados.ioctx_create(pool.c_str(), ioctx));
+    ASSERT_EQ(0, rados2.ioctx_create(pool.c_str(), ioctx2));
   }
 
   /* a fresh RGW head:  <marker>_<key>, data, ID tag and manifest */
@@ -57,15 +64,16 @@ protected:
     return head;
   }
 
+  /* sent from `io`, GW1's client unless given */
   template <typename Method, typename In, typename Ret>
   int call(const std::string& oid, const Method& method, const In& in,
-	   Ret* ret) {
+	   Ret* ret, IoCtx* io = nullptr) {
     ObjectWriteOperation op;
     buffer::list inbl, out;
     encode(in, inbl);
     int rval = 0;
     op.exec(method, inbl, &out, &rval);
-    int r = ioctx.operate(oid, &op, OPERATION_RETURNVEC);
+    int r = (io ? *io : ioctx).operate(oid, &op, OPERATION_RETURNVEC);
     if (r == 0 && ret) {
       auto it = out.cbegin();
       decode(*ret, it);
@@ -85,7 +93,8 @@ protected:
     op.counter_seed = 10;
     op.marker = MARKER;
     cls_rgw_fsio_join_ret ret;
-    EXPECT_EQ(0, call(head, cls::rgw::method::fsio_join, op, &ret));
+    EXPECT_EQ(0, call(head, cls::rgw::method::fsio_join, op, &ret,
+		      caller == GW2 ? &ioctx2 : nullptr));
     return ret;
   }
 
@@ -168,6 +177,7 @@ protected:
   }
 };
 Rados FsioHead::rados;
+Rados FsioHead::rados2;
 std::string FsioHead::pool;
 uint64_t FsioHead::next = 0;
 
@@ -680,4 +690,23 @@ TEST_F(FsioHead, PublishKeepsTags)
     ASSERT_LE(0, getxattr(head, "user.rgw.x-amz-tagging", &v));
     EXPECT_EQ("tagB", v);
   }
+}
+
+/* §3, Z28 (A14):  a call naming an incarnation that is not its op's
+ * origin returns EPERM and changes nothing */
+TEST_F(FsioHead, ForeignIncarnationReturnsEperm)
+{
+  std::string key;
+  const auto head = make_head(key);
+  cls_rgw_fsio_join_op op;
+  op.caller = GW2;                     // sent from GW1's client
+  op.seq = 1;
+  op.nonce = 1;
+  op.counter_seed = 10;
+  op.marker = MARKER;
+  cls_rgw_fsio_join_ret ret;
+  EXPECT_EQ(-EPERM, call(head, cls::rgw::method::fsio_join, op, &ret));
+  EXPECT_EQ(-ENODATA, getxattr(head, HDR));
+  EXPECT_EQ(0, call(head, cls::rgw::method::fsio_join, op, &ret, &ioctx2));
+  EXPECT_LE(0, getxattr(head, HDR));
 }

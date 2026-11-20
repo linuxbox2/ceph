@@ -31,7 +31,9 @@ using namespace std::literals;
 
 /* each test has its own pool, so one key serves */
 constexpr auto oid = "key"sv;
-constexpr cls_rgw_fsio_handle GW1{1, 1};
+/* the test's gateway:  its own RADOS client, an incarnation being the
+ * op's origin (§3, Z28);  set by FsioTest for each test */
+cls_rgw_fsio_handle GW1;
 const std::string MARKER = "zone.4125.1";
 
 /* an RGW head:  <marker>_<key>, with its ID tag and manifest */
@@ -63,18 +65,28 @@ cls_rgw_fsio_join_op join_op(uint64_t seq, bool writer,
 }
 
 const std::string HDR = "user.rgw.fsio.hdr";
-const std::string M1 = fmt::format("user.rgw.fsio.m.{:016x}", GW1.incarnation);
+std::string M1;                      // GW1's FSIO-open record
+
+class FsioTest : public NeoRadosTest {
+protected:
+  boost::asio::awaitable<void> CoSetUp() override {
+    co_await NeoRadosTest::CoSetUp();
+    GW1 = cls_rgw_fsio_handle{rados().instance_id(), 1};
+    M1 = fmt::format("user.rgw.fsio.m.{:016x}", GW1.incarnation);
+    co_return;
+  }
+};
 
 } // anonymous namespace
 
-CORO_TEST_F(NeoRadosClsRgwFsio, AbsentHeadIsEnoent, NeoRadosTest) {
+CORO_TEST_F(NeoRadosClsRgwFsio, AbsentHeadIsEnoent, FsioTest) {
   co_await expect_error_code(
     execute(head_of(oid), WriteOp{}.exec(f::join(join_op(1, false)))),
     sys::errc::no_such_file_or_directory);
   co_return;
 }
 
-CORO_TEST_F(NeoRadosClsRgwFsio, ReaderJoinAndLeave, NeoRadosTest) {
+CORO_TEST_F(NeoRadosClsRgwFsio, ReaderJoinAndLeave, FsioTest) {
   const auto head = head_of(oid);
   co_await execute(head, make_head());
   cls_rgw_fsio_join_ret jret;
@@ -104,7 +116,7 @@ CORO_TEST_F(NeoRadosClsRgwFsio, ReaderJoinAndLeave, NeoRadosTest) {
   co_return;
 }
 
-CORO_TEST_F(NeoRadosClsRgwFsio, ResendIsAlreadyApplied, NeoRadosTest) {
+CORO_TEST_F(NeoRadosClsRgwFsio, ResendIsAlreadyApplied, FsioTest) {
   const auto head = head_of(oid);
   co_await execute(head, make_head());
   cls_rgw_fsio_join_ret first, again;
@@ -115,7 +127,7 @@ CORO_TEST_F(NeoRadosClsRgwFsio, ResendIsAlreadyApplied, NeoRadosTest) {
   co_return;
 }
 
-CORO_TEST_F(NeoRadosClsRgwFsio, WriterJoinClonesTheHead, NeoRadosTest) {
+CORO_TEST_F(NeoRadosClsRgwFsio, WriterJoinClonesTheHead, FsioTest) {
   const auto head = head_of(oid);
   co_await execute(head, make_head());
   cls_rgw_fsio_join_ret jret;
@@ -142,7 +154,7 @@ CORO_TEST_F(NeoRadosClsRgwFsio, WriterJoinClonesTheHead, NeoRadosTest) {
   co_return;
 }
 
-CORO_TEST_F(NeoRadosClsRgwFsio, WrongMarkerIsEinval, NeoRadosTest) {
+CORO_TEST_F(NeoRadosClsRgwFsio, WrongMarkerIsEinval, FsioTest) {
   const auto head = head_of(oid);
   co_await execute(head, make_head());
   co_await expect_error_code(
@@ -187,7 +199,7 @@ cls_rgw_fsio_hint_op hint_op(uint64_t incarnation, uint64_t handle,
 
 /* the key the class builds:  {incarnation:016x}_{handle:016x}_{kind}_
  * {target oid}[_{r}] */
-CORO_TEST_F(NeoRadosClsRgwFsio, OpenHintKey, NeoRadosTest) {
+CORO_TEST_F(NeoRadosClsRgwFsio, OpenHintKey, FsioTest) {
   auto presence = hint_op(0xa1, 2, "b1", "k1");
   auto publish = hint_op(0xa1, 2, "b1", "k1");
   publish.hint.kind = cls_rgw_fsio_hint_kind::PUBLISH;
@@ -210,7 +222,7 @@ CORO_TEST_F(NeoRadosClsRgwFsio, OpenHintKey, NeoRadosTest) {
 
 /* the record comes back whole;  pages follow the marker;  a removal, and
  * a removal of an absent hint, succeed */
-CORO_TEST_F(NeoRadosClsRgwFsio, OpenHintAddListRemove, NeoRadosTest) {
+CORO_TEST_F(NeoRadosClsRgwFsio, OpenHintAddListRemove, FsioTest) {
   for (uint64_t h = 1; h <= 3; ++h) {
     co_await execute(shard, WriteOp{}.exec(
                        f::open_hint_add(hint_op(0xa1, h, "b1", "k1"))));
@@ -260,7 +272,7 @@ CORO_TEST_F(NeoRadosClsRgwFsio, OpenHintAddListRemove, NeoRadosTest) {
 
 /* by incarnation:  only its hints, the others' keys not read;  by
  * bucket:  only the hints naming it */
-CORO_TEST_F(NeoRadosClsRgwFsio, OpenHintListFilters, NeoRadosTest) {
+CORO_TEST_F(NeoRadosClsRgwFsio, OpenHintListFilters, FsioTest) {
   co_await execute(shard, WriteOp{}.exec(
                      f::open_hint_add(hint_op(0xa1, 1, "b1", "k1"))));
   co_await execute(shard, WriteOp{}.exec(
@@ -305,7 +317,7 @@ CORO_TEST_F(NeoRadosClsRgwFsio, OpenHintListFilters, NeoRadosTest) {
 /* §3.3:  a writer's hint merges by max in its epoch;  a truncate sets
  * the size exactly in a new epoch;  a hint from the old epoch merges
  * nothing and gets the current epoch and size */
-CORO_TEST_F(NeoRadosClsRgwFsio, HintAndTruncate, NeoRadosTest) {
+CORO_TEST_F(NeoRadosClsRgwFsio, HintAndTruncate, FsioTest) {
   const auto head = head_of(oid);
   co_await execute(head, make_head());
   cls_rgw_fsio_join_ret jret;
@@ -374,7 +386,7 @@ CORO_TEST_F(NeoRadosClsRgwFsio, HintAndTruncate, NeoRadosTest) {
 /* A2, A3 (§2.2):  fsio_ready and fsio_publish_release are idempotent by
  * their effect:  a repeat finding the state reached succeeds and stores
  * nothing new */
-CORO_TEST_F(NeoRadosClsRgwFsio, ReadyAndReleaseRepeat, NeoRadosTest) {
+CORO_TEST_F(NeoRadosClsRgwFsio, ReadyAndReleaseRepeat, FsioTest) {
   const auto head = head_of(oid);
   co_await execute(head, make_head());
   cls_rgw_fsio_join_ret jret;

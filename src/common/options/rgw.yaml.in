@@ -2868,6 +2868,18 @@ options:
   default: 127
   services:
   - rgw
+- name: rgw_fsio_check_origin
+  type: bool
+  level: dev
+  desc: FSIO's methods check the caller's incarnation is the op's origin
+  long_desc: Each cls_rgw fsio_* method that names its caller's incarnation
+    returns EPERM unless the op came from that RADOS client, so FSIO state
+    is recorded under the client whose watches decide its liveness.  Off
+    only for the FSIO model checker's cluster tier, which sends many
+    incarnations' calls from one client.
+  default: true
+  services:
+  - osd
 # maximum number of entries in a single operation when processing objexp data
 - name: rgw_objexp_chunk_size
   type: uint
