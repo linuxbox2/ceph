@@ -250,7 +250,9 @@ struct Gw {
   bool alive = true;
   std::vector<LOpen> opens;
   uint8_t did_read = 0, did_write = 0, did_io = 0, did_follow = 0,
-    did_crash = 0;
+    did_crash = 0, did_reopen = 0;
+  std::string read_tok;          // the content the first read open bound:
+				 // its token, or versioned its instance
   uint8_t zombie = 0;            // presumed dead, still running
   Step step = NONE;
   fid_t step_cs;
@@ -283,6 +285,7 @@ struct Gw {
     for (auto& o : opens) o.encode(bl);
     encode(did_read, bl); encode(did_write, bl); encode(did_io, bl);
     encode(did_follow, bl); encode(did_crash, bl); encode(zombie, bl);
+    encode(did_reopen, bl); encode(read_tok, bl);
     encode((uint8_t)step, bl); encode(step_cs, bl); encode(step_r, bl);
     encode(step_born, bl); encode(step_drained, bl);
     encode(owe_head_hint, bl); encode(owe_ih_hint, bl);
@@ -318,6 +321,7 @@ struct Config {
   int versioned = 0;
   bool vstart_null = false;      // FSIO_MODEL_VSTART=null
   int resends = 1;               // FSIO_MODEL_RESENDS:  per handle (Z22)
+  bool reopen = false;           // FSIO_MODEL_REOPEN:  a second read open (W12)
 };
 
 /* versioned:  one instance head and what it holds */
@@ -1295,6 +1299,34 @@ void gw_actions(const World& w0, size_t gi, std::vector<Action>& acts)
 	  }
 	  w.took_nonce();
 	  g.opens.push_back(LOpen{false, out.bound, w.head_tok()});
+	  g.read_tok = w.head_tok();
+	  return std::nullopt;
+	}});
+  }
+  /* W12, §3.3:  an open after the published content moved, by an S3
+   * overwrite or an NFS publish, joins as reader and binds the published
+   * content;  the first open keeps what it opened */
+  if (cfg.reopen && g.did_read && !g.did_reopen && g.role != 'w' &&
+      !g.read_tok.empty() && w0.head_tok() != g.read_tok) {
+    acts.push_back({fmt::format("gw{} reopen-read", glabel(g)),
+	[gi, inc](World& w) -> std::optional<std::string> {
+	  auto& g = w.gws[gi];
+	  g.did_reopen = 1;
+	  fsio::join_in in{hd(g), 0, false, w.nonce_for_join(), 10, w.dead()};
+	  fsio::join_out out;
+	  cls_rgw_fsio_effects fx;
+	  auto save = w.head;
+	  if (counted_join(w.head, g, in, out, fx) < 0) {
+	    w.head = save;
+	    return std::nullopt;
+	  }
+	  w.took_nonce();
+	  g.opens.push_back(LOpen{false, out.bound, w.head_tok()});
+	  const auto* e = w.head.hdr->find(out.bound);
+	  if (!e || e->state != state::PUBLISHED) {
+	    return fmt::format("gw{}'s second read open binds {}, not the "
+			       "published content", inc, sname(out.bound));
+	  }
 	  return std::nullopt;
 	}});
   }
@@ -1551,6 +1583,9 @@ void gw_actions_v(const World& w0, size_t gi, std::vector<Action>& acts)
 	      const auto* e = w.head.hdr->find(out.bound);
 	      auto t = entry_tail(w, *e);
 	      g.opens.push_back(LOpen{false, out.bound, t, g.pending});
+	      if (g.read_tok.empty()) {
+		g.read_tok = g.pending;
+	      }
 	      if (t != cur) {
 		return fmt::format("gw{}'s new read open binds to {}, but the "
 				   "OLH names {}", inc, t, cur);
@@ -1913,16 +1948,25 @@ void gw_actions_v(const World& w0, size_t gi, std::vector<Action>& acts)
     return;
   }
 
-  /* an open:  read the OLH first (§2.5) */
+  /* an open:  read the OLH first (§2.5).  W12, §3.3:  a second read
+   * open once the OLH names another version */
   for (int writer = 0; writer < 2; ++writer) {
-    if (writer ? (g.did_write || g.role == 'r') : (g.did_read || g.role == 'w')) {
+    const bool reopen = cfg.reopen && !writer && g.did_read &&
+      !g.did_reopen && g.role != 'w' && !g.read_tok.empty() &&
+      w0.olh_cur != g.read_tok;
+    if (!reopen &&
+	(writer ? (g.did_write || g.role == 'r') : (g.did_read || g.role == 'w'))) {
       continue;
     }
-    acts.push_back({fmt::format("gw{} read-olh-{}", glabel(g),
-				writer ? "write" : "read"),
-	[gi, writer](World& w) -> std::optional<std::string> {
+    acts.push_back({fmt::format("gw{} {}read-olh-{}", glabel(g),
+				reopen ? "re" : "", writer ? "write" : "read"),
+	[gi, writer, reopen](World& w) -> std::optional<std::string> {
 	  auto& g = w.gws[gi];
-	  (writer ? g.did_write : g.did_read) = 1;
+	  if (reopen) {
+	    g.did_reopen = 1;
+	  } else {
+	    (writer ? g.did_write : g.did_read) = 1;
+	  }
 	  if (w.olh_cur.empty()) {
 	    return std::nullopt;             // a delete marker:  ENOENT
 	  }
@@ -3945,6 +3989,7 @@ TEST(FSIOModel, Explore)
   cfg.zombies = env_int("FSIO_MODEL_ZOMBIES", 1);
   cfg.expirer_crashes = env_int("FSIO_MODEL_EXPIRER_CRASHES", 1);
   cfg.resends = env_int("FSIO_MODEL_RESENDS", 1);
+  cfg.reopen = env_int("FSIO_MODEL_REOPEN", 0) != 0;
   cfg.versioned = env_int("FSIO_MODEL_VERSIONED", 0);
   if (auto v = std::getenv("FSIO_MODEL_VSTART")) {
     cfg.vstart_null = std::string(v) == "null";

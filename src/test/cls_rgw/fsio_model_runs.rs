@@ -110,18 +110,29 @@ fn quick() -> Vec<Run> {
     v.push(run("quick-wr-resend", &[("FSIO_MODEL_ROLES", "wr"), ("FSIO_MODEL_S3_OPS", "0")]));
     v.push(run("quick-v-w-resend", &[("FSIO_MODEL_VERSIONED", "1"), ("FSIO_MODEL_ROLES", "w"),
                                      ("FSIO_MODEL_S3_OPS", "0")]));
+    /* W12:  a second read open after the published content moved
+     * (FSIO_MODEL_REOPEN, off elsewhere) */
+    v.push(run("quick-w+r-reopen", &[("FSIO_MODEL_ROLES", "w+r"), ("FSIO_MODEL_S3_OPS", "0"),
+                                     ("FSIO_MODEL_REOPEN", "1"), ("FSIO_MODEL_RESENDS", "0")]));
+    v.push(run("quick-v-w+r-reopen", &[("FSIO_MODEL_VERSIONED", "1"), ("FSIO_MODEL_ROLES", "w+r"),
+                                       ("FSIO_MODEL_S3_OPS", "0"), ("FSIO_MODEL_REOPEN", "1"),
+                                       ("FSIO_MODEL_RESENDS", "0"), ("FSIO_MODEL_ZOMBIES", "0"),
+                                       ("FSIO_MODEL_EXPIRER_CRASHES", "0")]));
     v
 }
 
 /* a vector's header:  "# skip: CHECK" makes it a skipped check's
  * reproducer, expected caught;  "# env: K=V ..." is the configuration it
  * runs in;  "# replay: walk" replays it as one walk, which a livelock
- * needs (a search stops where the loop revisits a state) */
+ * needs (a search stops where the loop revisits a state);  "# replay:
+ * search" searches on from a skipped check's prefix rather than
+ * replaying it alone, which a state with no end state reachable needs */
 struct Vector {
     path: PathBuf,
     skip: Option<String>,
     env: Vec<(String, String)>,
     walk: bool,
+    search: bool,
 }
 
 fn read_vectors(src: &Path) -> Vec<Vector> {
