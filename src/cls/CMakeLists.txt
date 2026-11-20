@@ -203,6 +203,7 @@ if (WITH_RADOSGW)
     rgw/cls_rgw.cc
     rgw/cls_rgw_fsio.cc
     rgw/cls_rgw_fsio_ops.cc
+    rgw/cls_rgw_fsio_types.cc
     rgw/cls_rgw_ops.cc
     rgw/cls_rgw_types.cc
     ${CMAKE_SOURCE_DIR}/src/common/ceph_json.cc)
@@ -224,6 +225,7 @@ if (WITH_RADOSGW)
 
   set(cls_rgw_client_srcs
     rgw/cls_rgw_client.cc
+    rgw/cls_rgw_fsio_types.cc
     rgw/cls_rgw_types.cc
     rgw/cls_rgw_ops.cc)
   add_library(cls_rgw_client STATIC ${cls_rgw_client_srcs})

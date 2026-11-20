@@ -10,6 +10,7 @@
 
 #pragma once
 
+#include <list>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -18,7 +19,6 @@
 #include "include/encoding.h"
 #include "include/rados/cls_traits.hpp"
 #include "cls/rgw/cls_rgw_ops.h"
-#include "cls/rgw/cls_rgw_fsio.h"
 
 /* the claim a versioned publish or finalize carries (§4.2) */
 struct cls_rgw_fsio_intent {
@@ -26,9 +26,6 @@ struct cls_rgw_fsio_intent {
   std::string token;
   uint64_t now_epoch = 0;        // ignored:  the OSD's is used (§4.2, X31)
 
-  cls_rgw_fsio::publish_intent to_core() const {
-    return {instance, token, now_epoch};
-  }
   void encode(ceph::buffer::list& bl) const {
     ENCODE_START(1, 1, bl);
     encode(instance, bl);
@@ -43,6 +40,8 @@ struct cls_rgw_fsio_intent {
     decode(now_epoch, bl);
     DECODE_FINISH(bl);
   }
+  void dump(ceph::Formatter *f) const;
+  static std::list<cls_rgw_fsio_intent> generate_test_instances();
 };
 WRITE_CLASS_ENCODER(cls_rgw_fsio_intent)
 
@@ -84,6 +83,8 @@ struct cls_rgw_fsio_join_op {
     decode(identity, bl);
     DECODE_FINISH(bl);
   }
+  void dump(ceph::Formatter *f) const;
+  static std::list<cls_rgw_fsio_join_op> generate_test_instances();
 };
 WRITE_CLASS_ENCODER(cls_rgw_fsio_join_op)
 
@@ -107,6 +108,8 @@ struct cls_rgw_fsio_identity_op {
     decode(identity, bl);
     DECODE_FINISH(bl);
   }
+  void dump(ceph::Formatter *f) const;
+  static std::list<cls_rgw_fsio_identity_op> generate_test_instances();
 };
 WRITE_CLASS_ENCODER(cls_rgw_fsio_identity_op)
 
@@ -129,6 +132,8 @@ struct cls_rgw_fsio_join_ret {
     decode(already_applied, bl);
     DECODE_FINISH(bl);
   }
+  void dump(ceph::Formatter *f) const;
+  static std::list<cls_rgw_fsio_join_ret> generate_test_instances();
 };
 WRITE_CLASS_ENCODER(cls_rgw_fsio_join_ret)
 
@@ -158,6 +163,8 @@ struct cls_rgw_fsio_runs_op {
     decode(mtime, bl);
     DECODE_FINISH(bl);
   }
+  void dump(ceph::Formatter *f) const;
+  static std::list<cls_rgw_fsio_runs_op> generate_test_instances();
 };
 WRITE_CLASS_ENCODER(cls_rgw_fsio_runs_op)
 
@@ -190,6 +197,8 @@ struct cls_rgw_fsio_leave_op {
     decode(intent, bl);
     DECODE_FINISH(bl);
   }
+  void dump(ceph::Formatter *f) const;
+  static std::list<cls_rgw_fsio_leave_op> generate_test_instances();
 };
 WRITE_CLASS_ENCODER(cls_rgw_fsio_leave_op)
 
@@ -221,6 +230,8 @@ struct cls_rgw_fsio_leave_ret {
     decode(drained, bl);
     DECODE_FINISH(bl);
   }
+  void dump(ceph::Formatter *f) const;
+  static std::list<cls_rgw_fsio_leave_ret> generate_test_instances();
 };
 WRITE_CLASS_ENCODER(cls_rgw_fsio_leave_ret)
 
@@ -251,6 +262,8 @@ struct cls_rgw_fsio_hint_size_op {
     decode(mtime, bl);
     DECODE_FINISH(bl);
   }
+  void dump(ceph::Formatter *f) const;
+  static std::list<cls_rgw_fsio_hint_size_op> generate_test_instances();
 };
 WRITE_CLASS_ENCODER(cls_rgw_fsio_hint_size_op)
 
@@ -279,6 +292,8 @@ struct cls_rgw_fsio_hint_size_ret {
     decode(size, bl);
     DECODE_FINISH(bl);
   }
+  void dump(ceph::Formatter *f) const;
+  static std::list<cls_rgw_fsio_hint_size_ret> generate_test_instances();
 };
 WRITE_CLASS_ENCODER(cls_rgw_fsio_hint_size_ret)
 
@@ -308,6 +323,8 @@ struct cls_rgw_fsio_truncate_op {
     decode(mtime, bl);
     DECODE_FINISH(bl);
   }
+  void dump(ceph::Formatter *f) const;
+  static std::list<cls_rgw_fsio_truncate_op> generate_test_instances();
 };
 WRITE_CLASS_ENCODER(cls_rgw_fsio_truncate_op)
 
@@ -327,6 +344,8 @@ struct cls_rgw_fsio_truncate_ret {
     decode(already_applied, bl);
     DECODE_FINISH(bl);
   }
+  void dump(ceph::Formatter *f) const;
+  static std::list<cls_rgw_fsio_truncate_ret> generate_test_instances();
 };
 WRITE_CLASS_ENCODER(cls_rgw_fsio_truncate_ret)
 
@@ -356,6 +375,8 @@ struct cls_rgw_fsio_rebind_op {
     decode(readers, bl);
     DECODE_FINISH(bl);
   }
+  void dump(ceph::Formatter *f) const;
+  static std::list<cls_rgw_fsio_rebind_op> generate_test_instances();
 };
 WRITE_CLASS_ENCODER(cls_rgw_fsio_rebind_op)
 
@@ -380,6 +401,8 @@ struct cls_rgw_fsio_flags_ret {
     decode(removed, bl);
     DECODE_FINISH(bl);
   }
+  void dump(ceph::Formatter *f) const;
+  static std::list<cls_rgw_fsio_flags_ret> generate_test_instances();
 };
 WRITE_CLASS_ENCODER(cls_rgw_fsio_flags_ret)
 
@@ -400,6 +423,8 @@ struct cls_rgw_fsio_rebind_ret {
     decode(drained, bl);
     DECODE_FINISH(bl);
   }
+  void dump(ceph::Formatter *f) const;
+  static std::list<cls_rgw_fsio_rebind_ret> generate_test_instances();
 };
 WRITE_CLASS_ENCODER(cls_rgw_fsio_rebind_ret)
 
@@ -420,6 +445,8 @@ struct cls_rgw_fsio_cs_op {
     decode(cs, bl);
     DECODE_FINISH(bl);
   }
+  void dump(ceph::Formatter *f) const;
+  static std::list<cls_rgw_fsio_cs_op> generate_test_instances();
 };
 WRITE_CLASS_ENCODER(cls_rgw_fsio_cs_op)
 
@@ -449,6 +476,8 @@ struct cls_rgw_fsio_finalize_op {
     decode(aborted, bl);
     DECODE_FINISH(bl);
   }
+  void dump(ceph::Formatter *f) const;
+  static std::list<cls_rgw_fsio_finalize_op> generate_test_instances();
 };
 WRITE_CLASS_ENCODER(cls_rgw_fsio_finalize_op)
 
@@ -465,6 +494,8 @@ struct cls_rgw_fsio_finalize_ret {
     decode(to, bl);
     DECODE_FINISH(bl);
   }
+  void dump(ceph::Formatter *f) const;
+  static std::list<cls_rgw_fsio_finalize_ret> generate_test_instances();
 };
 WRITE_CLASS_ENCODER(cls_rgw_fsio_finalize_ret)
 
@@ -488,6 +519,8 @@ struct cls_rgw_fsio_expire_op {
     decode(clear, bl);
     DECODE_FINISH(bl);
   }
+  void dump(ceph::Formatter *f) const;
+  static std::list<cls_rgw_fsio_expire_op> generate_test_instances();
 };
 WRITE_CLASS_ENCODER(cls_rgw_fsio_expire_op)
 
@@ -509,6 +542,8 @@ struct cls_rgw_fsio_expire_ret {
     decode(finalize, bl);
     DECODE_FINISH(bl);
   }
+  void dump(ceph::Formatter *f) const;
+  static std::list<cls_rgw_fsio_expire_ret> generate_test_instances();
 };
 WRITE_CLASS_ENCODER(cls_rgw_fsio_expire_ret)
 
@@ -526,6 +561,8 @@ struct cls_rgw_fsio_drop_seqs_op {
     decode(incarnation, bl);
     DECODE_FINISH(bl);
   }
+  void dump(ceph::Formatter *f) const;
+  static std::list<cls_rgw_fsio_drop_seqs_op> generate_test_instances();
 };
 WRITE_CLASS_ENCODER(cls_rgw_fsio_drop_seqs_op)
 
@@ -547,6 +584,8 @@ struct cls_rgw_fsio_ocnt_op {
     decode(expired, bl);
     DECODE_FINISH(bl);
   }
+  void dump(ceph::Formatter *f) const;
+  static std::list<cls_rgw_fsio_ocnt_op> generate_test_instances();
 };
 WRITE_CLASS_ENCODER(cls_rgw_fsio_ocnt_op)
 
@@ -567,6 +606,8 @@ struct cls_rgw_fsio_remove_version_op {
     decode(marker, bl);
     DECODE_FINISH(bl);
   }
+  void dump(ceph::Formatter *f) const;
+  static std::list<cls_rgw_fsio_remove_version_op> generate_test_instances();
 };
 WRITE_CLASS_ENCODER(cls_rgw_fsio_remove_version_op)
 
@@ -583,6 +624,8 @@ struct cls_rgw_fsio_remove_version_ret {
     decode(keep_tail, bl);
     DECODE_FINISH(bl);
   }
+  void dump(ceph::Formatter *f) const;
+  static std::list<cls_rgw_fsio_remove_version_ret> generate_test_instances();
 };
 WRITE_CLASS_ENCODER(cls_rgw_fsio_remove_version_ret)
 
@@ -603,19 +646,6 @@ struct cls_rgw_fsio_replace_op {
   ceph::buffer::list tags;       // publish onto a tracking-only head:  the
                                  // tags the content had (§3.5, Z15)
 
-  cls_rgw_fsio::replace_in to_core() const {
-    cls_rgw_fsio::replace_in in;
-    in.mode = static_cast<cls_rgw_fsio::replace_mode>(mode);
-    in.r = r;
-    in.expected_id_tag = expected_id_tag;
-    in.caller = caller;
-    in.shadow = shadow;
-    in.versioned = versioned;
-    in.complete = complete;
-    in.expired = expired;
-    in.keep_tail = keep_tail;
-    return in;
-  }
   void encode(ceph::buffer::list& bl) const {
     ENCODE_START(1, 1, bl);
     encode(mode, bl);
@@ -648,6 +678,8 @@ struct cls_rgw_fsio_replace_op {
     decode(tags, bl);
     DECODE_FINISH(bl);
   }
+  void dump(ceph::Formatter *f) const;
+  static std::list<cls_rgw_fsio_replace_op> generate_test_instances();
 };
 WRITE_CLASS_ENCODER(cls_rgw_fsio_replace_op)
 
@@ -670,68 +702,10 @@ struct cls_rgw_fsio_replace_ret {
     decode(drained, bl);
     DECODE_FINISH(bl);
   }
+  void dump(ceph::Formatter *f) const;
+  static std::list<cls_rgw_fsio_replace_ret> generate_test_instances();
 };
 WRITE_CLASS_ENCODER(cls_rgw_fsio_replace_ret)
-
-/* §2.7, E2:  a clone of a head (or instance head) lives after the
- * bucket's heads, <marker>~fsio_<role><id>_<key part>, the key part being
- * the head's oid after <marker>_;  the class and RGW name clones by it */
-inline std::string cls_rgw_fsio_clone_name(std::string_view marker, char role,
-					   const cls_rgw_fsio_id& id,
-					   std::string_view head_oid)
-{
-  return fmt::format("{}~fsio_{}{}_{}", marker, role, id.to_str(),
-		     head_oid.substr(marker.size() + 1));
-}
-
-/* the FSIO open hints (FSIO_RADOS_DESIGN.md §2.7, §4.3):  omap items of
- * the shard objects fsio_open_hint.NNNNNNNNNN in the zone's log pool,
- * the shard chosen by the hash of the target's oid */
-enum class cls_rgw_fsio_hint_kind : uint8_t {
-  PRESENCE = 1,   // the incarnation holds FSIO state on the target
-  PUBLISH  = 2,   // one publish's leftovers on the target
-};
-enum class cls_rgw_fsio_hint_target : uint8_t {
-  HEAD          = 1,  // a head:  the OLH head, in a versioned bucket
-  INSTANCE_HEAD = 2,  // a version's instance head
-};
-
-struct cls_rgw_fsio_hint {
-  cls_rgw_fsio_hint_kind kind = cls_rgw_fsio_hint_kind::PRESENCE;
-  cls_rgw_fsio_hint_target target = cls_rgw_fsio_hint_target::HEAD;
-  rgw_bucket bucket;              // to reach the bucket index and the OLH
-  rgw_obj_key key;                // the name;  with its instance, for INSTANCE_HEAD
-  uint64_t incarnation = 0;       // whose state it covers
-  uint64_t handle = 0;            // which of its handles (Z4)
-  std::optional<cls_rgw_fsio_id> r;  // PUBLISH on a HEAD:  the leaf clone
-
-  void encode(ceph::buffer::list& bl) const {
-    ENCODE_START(1, 1, bl);
-    encode(static_cast<uint8_t>(kind), bl);
-    encode(static_cast<uint8_t>(target), bl);
-    encode(bucket, bl);
-    encode(key, bl);
-    encode(incarnation, bl);
-    encode(handle, bl);
-    encode(r, bl);
-    ENCODE_FINISH(bl);
-  }
-  void decode(ceph::buffer::list::const_iterator& bl) {
-    DECODE_START(1, bl);
-    uint8_t k, t;
-    decode(k, bl);
-    decode(t, bl);
-    kind = static_cast<cls_rgw_fsio_hint_kind>(k);
-    target = static_cast<cls_rgw_fsio_hint_target>(t);
-    decode(bucket, bl);
-    decode(key, bl);
-    decode(incarnation, bl);
-    decode(handle, bl);
-    decode(r, bl);
-    DECODE_FINISH(bl);
-  }
-};
-WRITE_CLASS_ENCODER(cls_rgw_fsio_hint)
 
 /* fsio_open_hint_add, fsio_open_hint_remove:  the hint and its target's
  * oid;  the class builds the omap key from both,
@@ -752,6 +726,8 @@ struct cls_rgw_fsio_hint_op {
     decode(oid, bl);
     DECODE_FINISH(bl);
   }
+  void dump(ceph::Formatter *f) const;
+  static std::list<cls_rgw_fsio_hint_op> generate_test_instances();
 };
 WRITE_CLASS_ENCODER(cls_rgw_fsio_hint_op)
 
@@ -779,6 +755,8 @@ struct cls_rgw_fsio_hint_list_op {
     decode(incarnation, bl);
     DECODE_FINISH(bl);
   }
+  void dump(ceph::Formatter *f) const;
+  static std::list<cls_rgw_fsio_hint_list_op> generate_test_instances();
 };
 WRITE_CLASS_ENCODER(cls_rgw_fsio_hint_list_op)
 
@@ -803,6 +781,8 @@ struct cls_rgw_fsio_hint_list_ret {
     decode(truncated, bl);
     DECODE_FINISH(bl);
   }
+  void dump(ceph::Formatter *f) const;
+  static std::list<cls_rgw_fsio_hint_list_ret> generate_test_instances();
 };
 WRITE_CLASS_ENCODER(cls_rgw_fsio_hint_list_ret)
 

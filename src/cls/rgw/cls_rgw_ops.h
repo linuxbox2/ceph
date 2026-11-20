@@ -1982,3 +1982,4 @@ constexpr auto get_bucket_resharding = ClsMethod<RdTag, ClassId>(RGW_GET_BUCKET_
 }
 }
 
+#include "cls/rgw/cls_rgw_fsio_ops.h"

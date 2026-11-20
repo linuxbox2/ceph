@@ -48,6 +48,7 @@
 #include "cls/rgw/cls_rgw_ops.h"
 #include "cls/rgw/cls_rgw_client.h"
 #include "cls/rgw/cls_rgw_fsio_ops.h"
+#include "cls/rgw/cls_rgw_fsio.h"
 #include "cls/rgw/cls_rgw_const.h"
 #include "cls/refcount/cls_refcount_client.h"
 #include "cls/version/cls_version_client.h"

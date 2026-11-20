@@ -34,6 +34,7 @@
 #include "include/rados/rgw_file.h"
 #include "include/rados/librados.hpp"
 #include "cls/rgw/cls_rgw_fsio_ops.h"
+#include "cls/rgw/cls_rgw_fsio.h"
 #include "cls/rgw_gc/cls_rgw_gc_client.h"
 #include "cls/rgw/cls_rgw_client.h"
 #include "common/ceph_argparse.h"

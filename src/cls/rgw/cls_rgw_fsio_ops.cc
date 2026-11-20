@@ -12,6 +12,7 @@
 #include "objclass/objclass.h"
 #include "osd/osd_types.h"
 #include "cls/rgw/cls_rgw_fsio_ops.h"
+#include "cls/rgw/cls_rgw_fsio.h"
 
 namespace fsio = cls_rgw_fsio;
 
@@ -255,6 +256,27 @@ int check_origin(cls_method_context_t hctx, uint64_t incarnation)
     return -EPERM;
   }
   return 0;
+}
+
+/* the ops' fields as the core's inputs */
+fsio::publish_intent to_core(const cls_rgw_fsio_intent& i)
+{
+  return {i.instance, i.token, i.now_epoch};
+}
+
+fsio::replace_in to_core(const cls_rgw_fsio_replace_op& op)
+{
+  fsio::replace_in in;
+  in.mode = static_cast<fsio::replace_mode>(op.mode);
+  in.r = op.r;
+  in.expected_id_tag = op.expected_id_tag;
+  in.caller = op.caller;
+  in.shadow = op.shadow;
+  in.versioned = op.versioned;
+  in.complete = op.complete;
+  in.expired = op.expired;
+  in.keep_tail = op.keep_tail;
+  return in;
 }
 
 /* the effects:  each clone by CLONE_TO, FSIO's records dropped from it
@@ -504,7 +526,7 @@ int rgw_fsio_leave(cls_method_context_t hctx, ceph::buffer::list* in,
   int r = on_head(hctx, {}, [&](auto& h, auto& fx) {
     std::optional<fsio::publish_intent> intent;
     if (op.intent) {
-      intent = op.intent->to_core();
+      intent = to_core(*op.intent);
       intent->now_epoch = osd_epoch();
     }
     fsio::leave_out lout;
@@ -580,7 +602,7 @@ int rgw_fsio_fenced_finalize(cls_method_context_t hctx, ceph::buffer::list* in,
   int r = on_head(hctx, {}, [&](auto& h, auto&) {
     std::optional<fsio::publish_intent> intent;
     if (op.intent) {
-      intent = op.intent->to_core();
+      intent = to_core(*op.intent);
       intent->now_epoch = osd_epoch();
     }
     return fsio::fenced_finalize(h, op.finalizer, op.from, op.expired, ret.to,
@@ -850,7 +872,7 @@ int rgw_fsio_replace_head(cls_method_context_t hctx, ceph::buffer::list* in,
   if ((r = require(h.exists)) < 0) {
     return r;
   }
-  const auto in_core = op.to_core();
+  const auto in_core = to_core(op);
   /* §2.5, Y6:  a head write on an instance head with an open count, a
    * version rewritten in place:  its content deferred in the count */
   if (in_core.mode == fsio::replace_mode::SUPERSEDE &&

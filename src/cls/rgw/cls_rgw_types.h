@@ -1469,3 +1469,5 @@ struct cls_rgw_reshard_entry
   void get_key(std::string *key) const;
 };
 WRITE_CLASS_ENCODER(cls_rgw_reshard_entry)
+
+#include "cls/rgw/cls_rgw_fsio_types.h"

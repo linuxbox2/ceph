@@ -9,6 +9,7 @@
 
 #include "cls/rgw/cls_rgw_client.h"
 #include "cls/rgw/cls_rgw_fsio_ops.h"
+#include "cls/rgw/cls_rgw_fsio.h"
 #include "gtest/gtest.h"
 #include "include/rados/librados.hpp"
 #include "test/librados/test_cxx.h"
