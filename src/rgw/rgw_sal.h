@@ -1239,10 +1239,10 @@ class Object {
 
       virtual int fstat(struct stat* st, uint32_t flags) = 0;
       virtual int fgetattr(const DoutPrefixProvider* dpp,
-			    const std::string& name, bufferlist& dest,
+			    const std::string& name, buffer::list& dest,
 			    uint32_t flags) = 0;
       virtual int fsetattr(const DoutPrefixProvider* dpp,
-			    const std::string& name, const bufferlist& val,
+			    const std::string& name, const buffer::list& val,
 			    uint32_t flags) = 0;
       virtual int fgetattrs(const DoutPrefixProvider* dpp,
 			     Attrs& attrs, uint32_t flags) = 0;

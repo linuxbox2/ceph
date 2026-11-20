@@ -586,7 +586,7 @@ class RGWOpen : public RGWOp {
   int verify_permission(optional_yield y) override;
   void execute(optional_yield y) override;
   void pre_exec() override { /* NOP? */};
-  virtual void send_response_data(bufferlist& bl) = 0;
+  virtual void send_response_data(buffer::list& bl) = 0;
   const char* name() const override { return "open"; }
   std::string canonical_name() const override {
     return fmt::format("NFS.{}.OPEN", s->info.method); }

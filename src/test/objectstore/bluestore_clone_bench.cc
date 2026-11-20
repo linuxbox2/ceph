@@ -82,7 +82,7 @@ struct Bench {
    * stream;  the extents BlueStore actually made are counted afterwards */
   void write_pieces(const ghobject_t& o, uint64_t size, unsigned pieces) {
     const uint64_t psz = size / pieces;
-    bufferlist bl;
+    buffer::list bl;
     bl.append(std::string(psz, 'x'));
     for (unsigned pass = 0; pass < 2; ++pass) {
       for (unsigned i = pass; i < pieces; i += 2) {
@@ -217,7 +217,7 @@ int main(int argc, char** argv)
 
       /* a 4 KiB overwrite in the middle:  into a shared blob (a sibling),
        * and into an unshared one (a fresh object of the same shape) */
-      bufferlist w;
+      buffer::list w;
       w.append(std::string(4096, 'y'));
       const uint64_t off = (size / 2) & ~uint64_t{4095};
       const auto a0 = b.statfs().allocated;

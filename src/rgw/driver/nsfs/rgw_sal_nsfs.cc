@@ -46,7 +46,7 @@ static bool decode_raw_attr(rgw::sal::Attrs& attrs, const char* name, T& val) {
   if (it == attrs.end()) {
     return false;
   }
-  bufferlist bl = it->second;
+  buffer::list bl = it->second;
   try {
     auto it = bl.cbegin();
     decode(val, it);
@@ -58,7 +58,7 @@ static bool decode_raw_attr(rgw::sal::Attrs& attrs, const char* name, T& val) {
 
 template <typename T>
 static void encode_attr(rgw::sal::Attrs& attrs, const char* name, const T& val) {
-  bufferlist bl;
+  buffer::list bl;
   encode(val, bl);
   attrs[name] = std::move(bl);
 }
@@ -349,7 +349,7 @@ static bool nsfs_apply_non_md5_etag(const DoutPrefixProvider* dpp, int fd,
     return false;
   }
   std::string etag = nsfs_version_id_from_statx(stx);
-  bufferlist bl;
+  buffer::list bl;
   bl.append(etag);
   attrs[RGW_ATTR_ETAG] = std::move(bl);
   if (fd >= 0) {
@@ -1282,7 +1282,7 @@ static int assemble_parts(const DoutPrefixProvider* dpp,
   return 0;
 }
 
-static inline bool get_attr(Attrs& attrs, const char* name, bufferlist& bl)
+static inline bool get_attr(Attrs& attrs, const char* name, buffer::list& bl)
 {
   auto iter = attrs.find(name);
   if (iter == attrs.end()) {
@@ -1295,7 +1295,7 @@ static inline bool get_attr(Attrs& attrs, const char* name, bufferlist& bl)
 
 template <typename F>
 static bool decode_attr(Attrs &attrs, const char *name, F &f) {
-  bufferlist bl;
+  buffer::list bl;
   if (!get_attr(attrs, name, bl)) {
     return false;
   }
@@ -1403,7 +1403,7 @@ static int get_x_attrs(optional_yield y, const DoutPrefixProvider* dpp, int fd,
       return -ret;
     }
 
-    bufferlist bl;
+    buffer::list bl;
     bl.append(vp, vallen);
     attrs.emplace(std::move(key), std::move(bl)); /* key and bl are r-value refs */
 
@@ -1415,7 +1415,7 @@ static int get_x_attrs(optional_yield y, const DoutPrefixProvider* dpp, int fd,
 }
 
 static int write_x_attr(const DoutPrefixProvider* dpp, optional_yield y, int fd,
-			const std::string& key, bufferlist& value,
+			const std::string& key, buffer::list& value,
 			const std::string& display)
 {
   int ret;
@@ -1587,7 +1587,7 @@ int FSEnt::write_attrs(const DoutPrefixProvider* dpp, optional_yield y, Attrs& a
   need_fsync = true;
 
   /* Set the type */
-  bufferlist type_bl;
+  buffer::list type_bl;
   ObjectType type{get_type()};
   type.encode(type_bl);
   attrs[RGW_NSFS_ATTR_OBJECT_TYPE] = type_bl;
@@ -1763,7 +1763,7 @@ int FSEnt::make_dir_entry(const DoutPrefixProvider *dpp, optional_yield y,
   bde.meta.mtime = from_statx_timestamp(stx.stx_mtime);
   bde.meta.storage_class = RGW_STORAGE_CLASS_STANDARD;
   bde.meta.appendable = true;
-  bufferlist etag_bl;
+  buffer::list etag_bl;
   if (rgw::sal::get_attr(attrs, RGW_ATTR_ETAG, etag_bl)) {
     bde.meta.etag = etag_bl.to_str();
   } else {
@@ -1906,7 +1906,7 @@ int File::stat(const DoutPrefixProvider* dpp, bool force)
   return 0;
 }
 
-int File::write(int64_t ofs, bufferlist& bl, const DoutPrefixProvider* dpp,
+int File::write(int64_t ofs, buffer::list& bl, const DoutPrefixProvider* dpp,
 		       optional_yield y)
 {
   need_fsync = true;
@@ -1969,7 +1969,7 @@ int File::write(int64_t ofs, bufferlist& bl, const DoutPrefixProvider* dpp,
   return 0;
 }
 
-int File::read(int64_t ofs, int64_t left, bufferlist& bl,
+int File::read(int64_t ofs, int64_t left, buffer::list& bl,
 		      const DoutPrefixProvider* dpp, optional_yield y)
 {
   int64_t read_chunk_size =
@@ -2249,13 +2249,13 @@ int Directory::remove(const DoutPrefixProvider* dpp, optional_yield y, bool dele
   return delete_directory(parent->get_fd(), fname.c_str(), delete_children, dpp);
 }
 
-int Directory::write(int64_t ofs, bufferlist& bl, const DoutPrefixProvider* dpp,
+int Directory::write(int64_t ofs, buffer::list& bl, const DoutPrefixProvider* dpp,
 		     optional_yield y)
 {
   return -EINVAL;
 }
 
-int Directory::read(int64_t ofs, int64_t left, bufferlist &bl,
+int Directory::read(int64_t ofs, int64_t left, buffer::list &bl,
                     const DoutPrefixProvider *dpp, optional_yield y)
 {
   return -EINVAL;
@@ -2540,7 +2540,7 @@ int Directory::fill_cache(const DoutPrefixProvider *dpp, optional_yield y,
       bde.meta.mtime = from_statx_timestamp(ent->get_stx().stx_mtime);
       bde.meta.storage_class = RGW_STORAGE_CLASS_STANDARD;
 
-      bufferlist etag_bl;
+      buffer::list etag_bl;
       if (rgw::sal::get_attr(attrs, RGW_ATTR_ETAG, etag_bl)) {
         bde.meta.etag = etag_bl.to_str();
       } else {
@@ -2660,7 +2660,7 @@ int Directory::fill_cache(const DoutPrefixProvider *dpp, optional_yield y,
               bde.meta.owner_display_name = acl_owner.display_name;
             }
 
-            bufferlist etag_bl;
+            buffer::list etag_bl;
             if (rgw::sal::get_attr(attrs, RGW_ATTR_ETAG, etag_bl)) {
               bde.meta.etag = etag_bl.to_str();
             }
@@ -2729,7 +2729,7 @@ int MPDirectory::create(const DoutPrefixProvider* dpp, bool* existed, bool temp_
   return 0;
 }
 
-int MPDirectory::read(int64_t ofs, int64_t left, bufferlist &bl,
+int MPDirectory::read(int64_t ofs, int64_t left, buffer::list &bl,
                     const DoutPrefixProvider *dpp, optional_yield y)
 {
   std::string pname;
@@ -3006,7 +3006,7 @@ int NSFSDriver::initialize(CephContext *cct, const DoutPrefixProvider *dpp)
 	  upi.etag = pi.etag;
 	  upi.mtime = pi.mtime;
 	  upi.cksum = pi.cksum;
-	  bufferlist bl;
+	  buffer::list bl;
 	  encode(upi, bl);
 	  std::string xn = std::string(NSFS_XATTR_PREFIX) + RGW_NSFS_ATTR_MPUPLOAD;
 	  ::fsetxattr(pfd, xn.c_str(), bl.c_str(), bl.length(), 0);
@@ -4596,7 +4596,7 @@ int NSFSBucket::set_acl(const DoutPrefixProvider* dpp,
 			 RGWAccessControlPolicy& acl,
 			 optional_yield y)
 {
-  bufferlist aclbl;
+  buffer::list aclbl;
 
   acls = acl;
   acl.encode(aclbl);
@@ -4704,7 +4704,7 @@ int NSFSBucket::write_attrs(const DoutPrefixProvider* dpp, optional_yield y)
     return ret;
   }
 
-  bufferlist bl;
+  buffer::list bl;
   encode(info, bl);
   Attrs extra_attrs;
   extra_attrs[RGW_NSFS_ATTR_BUCKET_INFO] = bl;
@@ -5310,7 +5310,7 @@ int NSFSObject::copy_object(const ACLOwner& owner,
   /* check copy-source preconditions against the source object */
   if (if_match) {
     std::string if_match_str = rgw_string_unquote(if_match);
-    bufferlist etag_bl;
+    buffer::list etag_bl;
     if (get_attr(RGW_ATTR_ETAG, etag_bl) &&
 	if_match_str.compare(0, etag_bl.length(), etag_bl.c_str(), etag_bl.length()) != 0) {
       return -ERR_PRECONDITION_FAILED;
@@ -5318,7 +5318,7 @@ int NSFSObject::copy_object(const ACLOwner& owner,
   }
   if (if_nomatch) {
     std::string if_nomatch_str = rgw_string_unquote(if_nomatch);
-    bufferlist etag_bl;
+    buffer::list etag_bl;
     if (get_attr(RGW_ATTR_ETAG, etag_bl) &&
 	if_nomatch_str.compare(0, etag_bl.length(), etag_bl.c_str(), etag_bl.length()) == 0) {
       return -ERR_PRECONDITION_FAILED;
@@ -5423,16 +5423,16 @@ int NSFSObject::copy_object(const ACLOwner& owner,
   src_attrs.erase(RGW_ATTR_OBJECT_LEGAL_HOLD);
   /* Some attrs, if they exist, always come from the call */
   src_attrs[RGW_ATTR_ACL] = attrs[RGW_ATTR_ACL];
-  bufferlist rt;
+  buffer::list rt;
   if (get_attr(RGW_ATTR_OBJECT_RETENTION, rt)) {
     src_attrs[RGW_ATTR_OBJECT_RETENTION] = rt;
   }
-  bufferlist lh;
+  buffer::list lh;
   if (get_attr(RGW_ATTR_OBJECT_LEGAL_HOLD, lh)) {
     src_attrs[RGW_ATTR_OBJECT_LEGAL_HOLD] = lh;
   }
 
-  bufferlist tt;
+  buffer::list tt;
   switch (attrs_mod) {
   case ATTRSMOD_REPLACE:
     /* Keep tags if not set */
@@ -5459,15 +5459,15 @@ int NSFSObject::copy_object(const ACLOwner& owner,
   }
 
   /* Some attrs always come from the source */
-  bufferlist com;
+  buffer::list com;
   if (rgw::sal::get_attr(src_attrs, RGW_ATTR_COMPRESSION, com)) {
     attrs[RGW_ATTR_COMPRESSION] = com;
   }
-  bufferlist mpu;
+  buffer::list mpu;
   if (rgw::sal::get_attr(src_attrs, RGW_NSFS_ATTR_MPUPLOAD, mpu)) {
     attrs[RGW_NSFS_ATTR_MPUPLOAD] = mpu;
   }
-  bufferlist pot;
+  buffer::list pot;
   if (rgw::sal::get_attr(src_attrs, RGW_NSFS_ATTR_OBJECT_TYPE, pot)) {
     attrs[RGW_NSFS_ATTR_OBJECT_TYPE] = pot;
   }
@@ -5959,7 +5959,7 @@ Object::FSIOResult NSFSObject::get_fsio_handle(const DoutPrefixProvider* dpp,
     policy.set_owner(acl_owner);
     policy.get_acl().create_default(acl_owner.id,
 				    acl_owner.display_name);
-    bufferlist acl_bl;
+    buffer::list acl_bl;
     policy.encode(acl_bl);
     std::string xname = make_xattr_name(RGW_ATTR_ACL);
     if (::fsetxattr(build_fd, xname.c_str(),
@@ -6103,7 +6103,7 @@ int NSFSObject::NSFSFSIOObject::publish(const DoutPrefixProvider* dpp, uint32_t 
    * the quoted ETag header and makes If-Match compare unequal, since
    * rgw_string_unquote() yields 32 bytes and the attribute is 33. */
   {
-    bufferlist etag_bl;
+    buffer::list etag_bl;
     struct statx estx;
 
     /* rgw_non_md5_etag reaches this path too.  RGWPutObj::execute()'s
@@ -6231,7 +6231,7 @@ int NSFSObject::NSFSFSIOObject::publish(const DoutPrefixProvider* dpp, uint32_t 
 	   * synthesized change token is for objects that carry no etag,
 	   * i.e. sideloaded files, and reporting it here disagreed with
 	   * HEAD for every object published from NFS */
-	  bufferlist etag_bl;
+	  buffer::list etag_bl;
 	  if (rgw::sal::get_attr(shadow_attrs, RGW_ATTR_ETAG, etag_bl)) {
 	    bde.meta.etag = etag_bl.to_str();
 	  }
@@ -6359,7 +6359,7 @@ int NSFSObject::NSFSFSIOObject::fstat(struct stat* st, uint32_t flags)
 }
 
 int NSFSObject::NSFSFSIOObject::fgetattr(const DoutPrefixProvider* dpp, const std::string& name,
-					  bufferlist& dest, uint32_t flags)
+					  buffer::list& dest, uint32_t flags)
 {
   if (shadow_fd < 0) {
     return -EBADF;
@@ -6384,7 +6384,7 @@ int NSFSObject::NSFSFSIOObject::fgetattr(const DoutPrefixProvider* dpp, const st
 }
 
 int NSFSObject::NSFSFSIOObject::fsetattr(const DoutPrefixProvider* dpp, const std::string& name,
-					  const bufferlist& val,
+					  const buffer::list& val,
 					  uint32_t flags)
 {
   if (shadow_fd < 0) {
@@ -6574,7 +6574,7 @@ int NSFSObject::get_obj_attrs(optional_yield y, const DoutPrefixProvider* dpp)
     state.has_attrs = false;
 
   if (state.has_attrs && state.attrset.find(RGW_ATTR_ETAG) == state.attrset.end()) {
-    bufferlist bl;
+    buffer::list bl;
     std::string etag = synthesize_etag(ent->get_stx());
     bl.append(etag);
     state.attrset[RGW_ATTR_ETAG] = std::move(bl);
@@ -6586,7 +6586,7 @@ int NSFSObject::get_obj_attrs(optional_yield y, const DoutPrefixProvider* dpp)
     if (dot != std::string::npos && dot < name.size() - 1) {
       auto mime = rgw_find_mime_by_ext(name.substr(dot + 1));
       if (!mime.empty()) {
-        bufferlist bl;
+        buffer::list bl;
         bl.append(mime.data(), mime.size());
         state.attrset[RGW_ATTR_CONTENT_TYPE] = std::move(bl);
       }
@@ -6596,7 +6596,7 @@ int NSFSObject::get_obj_attrs(optional_yield y, const DoutPrefixProvider* dpp)
   return ret;
 }
 
-int NSFSObject::modify_obj_attrs(const char* attr_name, bufferlist& attr_val,
+int NSFSObject::modify_obj_attrs(const char* attr_name, buffer::list& attr_val,
                                optional_yield y, const DoutPrefixProvider* dpp, uint32_t flags)
 {
   state.attrset[attr_name] = attr_val;
@@ -6736,7 +6736,7 @@ int NSFSObject::omap_get_vals_by_keys(const DoutPrefixProvider *dpp, const std::
   return 0;
 }
 
-int NSFSObject::omap_set_val_by_key(const DoutPrefixProvider *dpp, const std::string& key, bufferlist& val,
+int NSFSObject::omap_set_val_by_key(const DoutPrefixProvider *dpp, const std::string& key, buffer::list& val,
 					bool must_exist, optional_yield y)
 {
   /* TODO Figure out omap */
@@ -7154,7 +7154,7 @@ int NSFSObject::close()
   return 0;
 }
 
-int NSFSObject::read(int64_t ofs, int64_t left, bufferlist& bl,
+int NSFSObject::read(int64_t ofs, int64_t left, buffer::list& bl,
 		      const DoutPrefixProvider* dpp, optional_yield y)
 {
   if (!ent)
@@ -7162,7 +7162,7 @@ int NSFSObject::read(int64_t ofs, int64_t left, bufferlist& bl,
   return ent->read(ofs, left, bl, dpp, y);
 }
 
-int NSFSObject::write(int64_t ofs, bufferlist& bl, const DoutPrefixProvider* dpp,
+int NSFSObject::write(int64_t ofs, buffer::list& bl, const DoutPrefixProvider* dpp,
 		       optional_yield y)
 {
   return ent->write(ofs, bl, dpp, y);
@@ -7194,7 +7194,7 @@ int NSFSObject::NSFSReadOp::prepare(optional_yield y, const DoutPrefixProvider* 
   if (ret < 0)
     return ret;
 
-  bufferlist etag_bl;
+  buffer::list etag_bl;
   if (!source->get_attr(RGW_ATTR_ETAG, etag_bl)) {
     /* Sideloaded file.  Generate necessary attributes. Only done once. */
     int ret = source->generate_attrs(dpp, y);
@@ -7303,7 +7303,7 @@ int NSFSObject::NSFSReadOp::prepare(optional_yield y, const DoutPrefixProvider* 
   return 0;
 }
 
-int NSFSObject::NSFSReadOp::read(int64_t ofs, int64_t end, bufferlist& bl,
+int NSFSObject::NSFSReadOp::read(int64_t ofs, int64_t end, buffer::list& bl,
 				     optional_yield y, const DoutPrefixProvider* dpp)
 {
   return source->read(ofs + part_ofs, end + 1, bl, dpp, y);
@@ -7344,7 +7344,7 @@ int NSFSObject::generate_etag(const DoutPrefixProvider* dpp, optional_yield y)
   unsigned char m[CEPH_CRYPTO_MD5_DIGESTSIZE];
 
   while (left > 0) {
-    bufferlist bl;
+    buffer::list bl;
     int len = read(cur_ofs, left, bl, dpp, y);
     if (len < 0) {
 	ldpp_dout(dpp, 0) << " ERROR: could not read " << get_name() <<
@@ -7361,7 +7361,7 @@ int NSFSObject::generate_etag(const DoutPrefixProvider* dpp, optional_yield y)
   }
 
   hash.Final(m);
-  bufferlist etag_bl;
+  buffer::list etag_bl;
   append_bl(etag_bl, CEPH_CRYPTO_MD5_DIGESTSIZE * 2 + 1, [&](auto iter) {
     iter = buf_to_hex(m, iter);
     *iter++ = '\0';
@@ -7427,7 +7427,7 @@ int NSFSObject::NSFSReadOp::iterate(const DoutPrefixProvider* dpp, int64_t ofs,
       }
       UringReadWindow win(dpp, y, fd, qd, chunk, dio);
       int r = win.iterate(cur_ofs, left,
-          [dpp, cb, source = source](bufferlist& bl, int len) {
+          [dpp, cb, source = source](buffer::list& bl, int len) {
             int ret = cb->handle_data(bl, 0, len);
             if (ret < 0) {
               ldpp_dout(dpp, 0) << " ERROR: callback failed on "
@@ -7456,7 +7456,7 @@ int NSFSObject::NSFSReadOp::iterate(const DoutPrefixProvider* dpp, int64_t ofs,
     throttle.emplace(y.get_yield_context(), 1);
   }
 
-  bufferlist slots[2];
+  buffer::list slots[2];
   int cur = 0;
   int prefetch_len = 0;
   bool prefetch_pending = false;
@@ -7522,7 +7522,7 @@ int NSFSObject::NSFSReadOp::iterate(const DoutPrefixProvider* dpp, int64_t ofs,
   return 0;
 }
 
-int NSFSObject::NSFSReadOp::get_attr(const DoutPrefixProvider* dpp, const char* name, bufferlist& dest, optional_yield y)
+int NSFSObject::NSFSReadOp::get_attr(const DoutPrefixProvider* dpp, const char* name, buffer::list& dest, optional_yield y)
 {
   if (!source->check_exists(dpp)) {
     return -ENOENT;
@@ -7929,7 +7929,7 @@ int NSFSObject::NSFSDeleteOp::delete_obj(const DoutPrefixProvider* dpp,
             ssize_t elen = ::fgetxattr(ver_fd, etag_x.c_str(),
                                        ebuf, sizeof(ebuf));
             if (elen > 0) {
-              bufferlist bl;
+              buffer::list bl;
               bl.append(ebuf, elen);
               ver_attrs[RGW_ATTR_ETAG] = std::move(bl);
             }
@@ -8169,7 +8169,7 @@ int NSFSObject::NSFSDeleteOp::delete_obj(const DoutPrefixProvider* dpp,
                 dm_ver_id.c_str(), dm_ver_id.size(), 0);
 
     /* copy ACL from the source object so the DM has owner info */
-    bufferlist acl_bl;
+    buffer::list acl_bl;
     if (rgw::sal::get_attr(source->get_attrs(), RGW_ATTR_ACL, acl_bl)) {
       std::string acl_xattr = make_xattr_name(RGW_ATTR_ACL);
       ::fsetxattr(dm_fd, acl_xattr.c_str(),
@@ -8212,7 +8212,7 @@ int NSFSObject::NSFSDeleteOp::delete_obj(const DoutPrefixProvider* dpp,
     {
       /* its own digest, as HEAD reports it;  the synthesized change
        * token is for objects that carry no etag */
-      bufferlist etag_bl;
+      buffer::list etag_bl;
       if (rgw::sal::get_attr(source->get_attrs(), RGW_ATTR_ETAG, etag_bl)) {
 	dem_bde.meta.etag = etag_bl.to_str();
       } else {
@@ -8413,7 +8413,7 @@ int NSFSMultipartUpload::init(const DoutPrefixProvider *dpp, optional_yield y,
   mp_obj.upload_info.dest_placement = dest_placement;
   mp_obj.owner = owner;
 
-  bufferlist bl;
+  buffer::list bl;
   encode(mp_obj, bl);
 
   attrs[RGW_NSFS_ATTR_MPUPLOAD] = bl;
@@ -8642,7 +8642,7 @@ int NSFSMultipartUpload::complete(const DoutPrefixProvider *dpp,
   } while (truncated);
   hash.Final((unsigned char *)final_etag);
 
-  bufferlist etag_bl;
+  buffer::list etag_bl;
   append_bl(etag_bl, CEPH_CRYPTO_MD5_DIGESTSIZE * 2 + 16, [&](auto iter) {
     iter = buf_to_hex(final_etag, iter);
     iter = fmt::format_to(iter, "-{}", part_etags.size());
@@ -8653,7 +8653,7 @@ int NSFSMultipartUpload::complete(const DoutPrefixProvider *dpp,
 
   if (compressed) {
     // write compression attribute to full object
-    bufferlist tmp;
+    buffer::list tmp;
     encode(cs_info, tmp);
     attrs[RGW_ATTR_COMPRESSION] = tmp;
   }
@@ -8687,7 +8687,7 @@ int NSFSMultipartUpload::complete(const DoutPrefixProvider *dpp,
   // encode object type as FILE
   ObjectType file_type;
   file_type.type = ObjectType::FILE;
-  bufferlist type_bl;
+  buffer::list type_bl;
   file_type.encode(type_bl);
   attrs[RGW_NSFS_ATTR_OBJECT_TYPE] = std::move(type_bl);
 
@@ -9010,7 +9010,7 @@ int NSFSMultipartWriter::prepare(optional_yield y)
   return part_file->open(dpp);
 }
 
-int NSFSMultipartWriter::process(bufferlist&& data, uint64_t offset)
+int NSFSMultipartWriter::process(buffer::list&& data, uint64_t offset)
 {
   if (posix_try_use_uring(dpp, yield, /*nsfs=*/true) && part_file &&
       part_file->get_fd() >= 0) {
@@ -9033,7 +9033,7 @@ int NSFSMultipartWriter::process(bufferlist&& data, uint64_t offset)
       "rgw_nsfs_put_iodepth");
   bool pipeline = iodepth >= 2;
   return pending_write.process(std::move(data), offset, pipeline,
-      [this](uint64_t ofs, bufferlist& bl) {
+      [this](uint64_t ofs, buffer::list& bl) {
         return part_file->write(ofs, bl, dpp, null_yield);
       });
 }
@@ -9042,7 +9042,7 @@ int NSFSMultipartWriter::complete(
 		       size_t accounted_size,
 		       const std::string& etag,
                        ceph::real_time *mtime, ceph::real_time set_mtime,
-                       std::map<std::string, bufferlist>& attrs,
+                       std::map<std::string, buffer::list>& attrs,
 		       const std::optional<rgw::cksum::Cksum>& cksum,
                        ceph::real_time delete_at,
                        const char *if_match, const char *if_nomatch,
@@ -9075,7 +9075,7 @@ int NSFSMultipartWriter::complete(
       }
     } else {
       Attrs attrs;
-      bufferlist bl;
+      buffer::list bl;
       ret = part_file->read_attrs(rctx.dpp, rctx.y, attrs);
       if (ret < 0) {
         return -ERR_PRECONDITION_FAILED;
@@ -9096,7 +9096,7 @@ int NSFSMultipartWriter::complete(
      * the helper's own fsetxattr() would only write the etag twice */
     if (sret == 0 && nsfs_apply_non_md5_etag(dpp, -1,
                                              part_file->get_stx(), attrs)) {
-      bufferlist bl;
+      buffer::list bl;
       if (get_attr(attrs, RGW_ATTR_ETAG, bl)) {
         part_etag.assign(bl.c_str(), bl.length());
       }
@@ -9114,7 +9114,7 @@ int NSFSMultipartWriter::complete(
     {static_cast<uint32_t>(part_num), accounted_size, part_etag, set_mtime, cksum}) : false;
 
   if (!added || mc->policy == file::listing::MultipartCachePolicy::writethrough) {
-    bufferlist bl;
+    buffer::list bl;
     encode(info, bl);
     attrs[RGW_NSFS_ATTR_MPUPLOAD] = bl;
 
@@ -9169,7 +9169,7 @@ int NSFSAtomicWriter::prepare(optional_yield y)
   return obj->open(dpp, true, true);
 }
 
-int NSFSAtomicWriter::process(bufferlist&& data, uint64_t offset)
+int NSFSAtomicWriter::process(buffer::list&& data, uint64_t offset)
 {
   int fd = nsfs_data_file_fd(obj->get_fsent());
   if (posix_try_use_uring(dpp, yield, /*nsfs=*/true) && fd >= 0) {
@@ -9193,14 +9193,14 @@ int NSFSAtomicWriter::process(bufferlist&& data, uint64_t offset)
       "rgw_nsfs_put_iodepth");
   bool pipeline = iodepth >= 2;
   return pending_write.process(std::move(data), offset, pipeline,
-      [this](uint64_t ofs, bufferlist& bl) {
+      [this](uint64_t ofs, buffer::list& bl) {
         return obj->write(ofs, bl, dpp, null_yield);
       });
 }
 
 int NSFSAtomicWriter::complete(size_t accounted_size, const std::string& etag,
                        ceph::real_time *mtime, ceph::real_time set_mtime,
-                       std::map<std::string, bufferlist>& attrs,
+                       std::map<std::string, buffer::list>& attrs,
 		       const std::optional<rgw::cksum::Cksum>& cksum,
                        ceph::real_time delete_at,
                        const char *if_match, const char *if_nomatch,
@@ -9238,7 +9238,7 @@ int NSFSAtomicWriter::complete(size_t accounted_size, const std::string& etag,
       if (!exists) {
 	return -ENOENT;
       }
-      bufferlist bl;
+      buffer::list bl;
       if (!get_attr(obj->get_attrs(), RGW_ATTR_ETAG, bl)) {
         return -ERR_PRECONDITION_FAILED;
       }
@@ -9254,7 +9254,7 @@ int NSFSAtomicWriter::complete(size_t accounted_size, const std::string& etag,
 	return -ERR_PRECONDITION_FAILED;
       }
     } else {
-      bufferlist bl;
+      buffer::list bl;
       if (get_attr(obj->get_attrs(), RGW_ATTR_ETAG, bl)) {
         std::string if_nomatch_str = rgw_string_unquote(if_nomatch);
         if (if_nomatch_str.compare(0, bl.length(), bl.c_str(), bl.length()) == 0) {

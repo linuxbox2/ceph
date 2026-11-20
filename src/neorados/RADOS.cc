@@ -723,7 +723,7 @@ WriteOp& WriteOp::create(bool exclusive) & {
 
 WriteOp& WriteOp::clone_to(std::string dest,
                            std::vector<std::string> drop_attr_prefixes,
-                           std::map<std::string, bufferlist> set_attrs) & {
+                           std::map<std::string, buffer::list> set_attrs) & {
   reinterpret_cast<OpImpl*>(&impl)->op.clone_to(std::move(dest),
                                                 std::move(drop_attr_prefixes),
                                                 std::move(set_attrs));

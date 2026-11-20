@@ -6599,7 +6599,7 @@ int RGWRados::fsio_purge(const DoutPrefixProvider *dpp,
     /* C3:  read, collect, then strip under the version read;  an fsio_*
      * write in between moves it, and the strip returns ERANGE */
     for (int attempt = 0; ; ++attempt) {
-      std::map<std::string, bufferlist> attrs;
+      std::map<std::string, buffer::list> attrs;
       uint64_t size = 0;
       int rattrs = 0, rstat = 0;
       version_t ver = 0;
@@ -6631,7 +6631,7 @@ int RGWRados::fsio_purge(const DoutPrefixProvider *dpp,
             }
             const auto clone = cls_rgw_fsio_clone_name(info.bucket.marker, 'G',
                                                       *cs.clone, ref.obj.oid);
-            bufferlist g;
+            buffer::list g;
             r = clone_ioctx.getxattr(clone, FSIO_ATTR_GEN.data(), g);
             if (r == -ENOENT || r == -ENODATA) {
               continue;                // collected on an earlier attempt

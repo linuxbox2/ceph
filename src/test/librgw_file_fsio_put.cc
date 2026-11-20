@@ -183,7 +183,7 @@ void report(const std::string& head, const std::set<std::string>& tails)
 {
   int8_t release = -1;
   cluster.get_min_compatible_osd(&release);
-  bufferlist hdr;
+  buffer::list hdr;
   const int h = data.getxattr(head, "user.rgw.fsio.hdr", hdr);
   std::cout << "  OSD release floor " << int(release)
 	    << ";  head's user.rgw.fsio.hdr " << (h >= 0 ? "kept" : "gone")
@@ -225,7 +225,7 @@ std::set<std::string> in_gc()
     truncated = true;
     while (truncated) {
       ObjectReadOperation op;
-      bufferlist out;
+      buffer::list out;
       cls_rgw_gc_list(op, marker, 1000, false, out);
       std::list<cls_rgw_gc_obj_info> entries;
       if (gc.operate(fmt::format("gc.{}", i), &op, nullptr) < 0 ||
@@ -252,7 +252,7 @@ void join_reader(const std::string& head, const std::string& marker)
   op.nonce = 1;
   op.counter_seed = 10;
   op.marker = marker;
-  bufferlist in, out;
+  buffer::list in, out;
   encode(op, in);
   int rval = 0;
   ObjectWriteOperation w;
@@ -318,7 +318,7 @@ TEST(FsioPut, OverwriteUnderAReader) {
   IoCtx keyed;
   keyed.dup(data);
   keyed.locator_set_key(head);
-  bufferlist bl;
+  buffer::list bl;
   ASSERT_LE(0, keyed.read(*leaves.begin(), bl, 1, 0));
   EXPECT_EQ('a', bl[0]);               // the old head's content
   for (const auto& t : tails) {
@@ -378,7 +378,7 @@ TEST(FsioPut, DeleteUnderAReader) {
     return;
   }
   ASSERT_TRUE(exists(head));
-  bufferlist bl;
+  buffer::list bl;
   EXPECT_EQ(-ENODATA, data.getxattr(head, "user.rgw.idtag", bl));
   EXPECT_EQ(-ENODATA, data.getxattr(head, "user.rgw.manifest", bl));
   EXPECT_LE(0, data.getxattr(head, "user.rgw.fsio.hdr", bl));
@@ -486,7 +486,7 @@ void count_open(const std::string& ih)
 {
   cls_rgw_fsio_ocnt_op op;
   op.holder = GW;
-  bufferlist in, out;
+  buffer::list in, out;
   encode(op, in);
   int rval = 0;
   ObjectWriteOperation w;
@@ -554,7 +554,7 @@ TEST(FsioPut, RemoveVersionUnderAReader) {
     return;
   }
   ASSERT_TRUE(exists(ih));
-  bufferlist bl;
+  buffer::list bl;
   EXPECT_EQ(-ENODATA, data.getxattr(ih, "user.rgw.idtag", bl));
   EXPECT_EQ(-ENODATA, data.getxattr(ih, "user.rgw.manifest", bl));
   EXPECT_LE(0, data.getxattr(ih, "user.rgw.fsio.ocnt", bl));
@@ -632,7 +632,7 @@ cls_rgw_fsio_id join_writer(const std::string& head, const std::string& marker,
   op.nonce = 2;
   op.counter_seed = 20;
   op.marker = marker;
-  bufferlist in, out;
+  buffer::list in, out;
   encode(op, in);
   int rval = 0;
   ObjectWriteOperation w;
@@ -646,7 +646,7 @@ cls_rgw_fsio_id join_writer(const std::string& head, const std::string& marker,
 
 std::optional<cls_rgw_fsio_id> cur_shadow_of(const std::string& head)
 {
-  bufferlist bl;
+  buffer::list bl;
   if (data.getxattr(head, "user.rgw.fsio.hdr", bl) < 0) {
     return std::nullopt;
   }
@@ -687,7 +687,7 @@ TEST(FsioPut, RemoveNullVersionUnderAReader) {
   ASSERT_EQ(1u, v.size());             // the null version gone from the index
   EXPECT_NE("null", v[0].id);
   ASSERT_TRUE(exists(head));           // the OLH
-  bufferlist bl;
+  buffer::list bl;
   EXPECT_LE(0, data.getxattr(head, "user.rgw.olh.info", bl));
   if (fsio_off) {
     EXPECT_TRUE(leaf_clones_of(marker, name).empty());
@@ -730,7 +730,7 @@ TEST(FsioPut, RemoveNullVersionWithNoReader) {
   ASSERT_EQ(1u, v.size());
   EXPECT_NE("null", v[0].id);
   ASSERT_TRUE(exists(head));
-  bufferlist bl;
+  buffer::list bl;
   EXPECT_LE(0, data.getxattr(head, "user.rgw.olh.info", bl));
   EXPECT_TRUE(leaf_clones_of(marker, name).empty());
   for (const auto& t : tails) {
@@ -758,7 +758,7 @@ void hint(const std::string& bucket, const std::string& bucket_id,
   op.hint.incarnation = GW.incarnation;
   op.hint.handle = GW.handle;
   op.oid = head;
-  bufferlist in, out;
+  buffer::list in, out;
   encode(op, in);
   ObjectWriteOperation w;
   w.exec(add ? cls::rgw::method::fsio_open_hint_add :
@@ -970,7 +970,7 @@ TEST(FsioPut, PurgeFsio) {
     ASSERT_EQ(0, static_cast<rgw::sal::RadosStore*>(driver)->getRados()->
 	      fsio_purge(&dp, b->get_info(), null_yield));
     ASSERT_EQ(0, data.stat2(live_head, &size, &after));
-    bufferlist bl;
+    buffer::list bl;
     EXPECT_EQ(-ENODATA, data.getxattr(live_head, "user.rgw.fsio.hdr", bl));
     EXPECT_EQ(before.tv_sec, after.tv_sec);
     EXPECT_EQ(before.tv_nsec, after.tv_nsec);

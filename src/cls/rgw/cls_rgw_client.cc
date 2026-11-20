@@ -193,18 +193,18 @@ void cls_rgw_remove_obj(librados::ObjectWriteOperation& o, list<string>& keep_at
 
 void cls_rgw_fsio_replace_head(librados::ObjectWriteOperation& o,
 			       const cls_rgw_fsio_replace_op& call,
-			       bufferlist* out, int* prval)
+			       buffer::list* out, int* prval)
 {
-  bufferlist in;
+  buffer::list in;
   encode(call, in);
   o.exec(method::fsio_replace_head, in, out, prval);
 }
 
 void cls_rgw_fsio_remove_version(librados::ObjectWriteOperation& o,
 				 const cls_rgw_fsio_remove_version_op& call,
-				 bufferlist* out, int* prval)
+				 buffer::list* out, int* prval)
 {
-  bufferlist in;
+  buffer::list in;
   encode(call, in);
   o.exec(method::fsio_remove_version, in, out, prval);
 }

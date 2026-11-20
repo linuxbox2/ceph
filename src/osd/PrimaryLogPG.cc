@@ -7251,13 +7251,13 @@ int PrimaryLogPG::do_osd_ops(OpContext *ctx, vector<OSDOp>& ops)
 	doi.version = ctx->at_version;
 	doi.prior_version =
 	  dobc->obs.exists ? dobc->obs.oi.version : eversion_t();
-	bufferlist oibl;
+	buffer::list oibl;
 	encode(doi, oibl,
 	       get_osdmap()->get_features(CEPH_ENTITY_TYPE_OSD, nullptr));
 	/* the destination is a head, which carries a SnapSet */
 	SnapSet dss;
 	dss.seq = ctx->new_snapset.seq;
-	bufferlist ssbl;
+	buffer::list ssbl;
 	encode(dss, ssbl);
 
 	t->clone(dest, soid);
@@ -7265,7 +7265,7 @@ int PrimaryLogPG::do_osd_ops(OpContext *ctx, vector<OSDOp>& ops)
 	t->setattr(dest, OI_ATTR, oibl);
 	t->setattr(dest, SS_ATTR, ssbl);
 	if (!cto.drop_attr_prefixes.empty()) {
-	  map<string, bufferlist, less<>> attrs;
+	  map<string, buffer::list, less<>> attrs;
 	  result = getattrs_maybe_cache(ctx->obc, &attrs);
 	  if (result < 0) {
 	    break;

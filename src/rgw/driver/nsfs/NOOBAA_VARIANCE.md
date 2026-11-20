@@ -49,7 +49,7 @@ const XATTR_VERSION_ID   = XATTR_NOOBAA_INTERNAL_PREFIX + 'version_id';
 
 NooBaa stores all xattr values as **UTF-8 strings** — numbers are
 decimal strings, structured data is JSON.  Our driver uses **Ceph
-binary encoding** (`ENCODE_START`/`ENCODE_FINISH` with bufferlist
+binary encoding** (`ENCODE_START`/`ENCODE_FINISH` with buffer::list
 serialization).  These are completely incompatible wire formats.
 
 ### Complete attribute mapping

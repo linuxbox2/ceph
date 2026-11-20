@@ -79,11 +79,11 @@ int main(int argc, char** argv)
     R::IOContext ioc(r.lookup_pool(pool_name, ca::use_blocked));
 
     if (populate) {
-      bufferlist data;
+      buffer::list data;
       data.append(std::string(uint64_t{4} << 20, 'x'));
       for (unsigned i = 0; i < objects; ++i) {
         const auto s = fmt::format("p{}", i);
-        r.execute(s, ioc, R::WriteOp{}.write_full(bufferlist{data}),
+        r.execute(s, ioc, R::WriteOp{}.write_full(buffer::list{data}),
                   ca::use_blocked);
         r.execute(s, ioc,
                   R::WriteOp{}.clone_to(fmt::format("{}~{:016x}{:016x}", s, 1,
@@ -100,12 +100,12 @@ int main(int argc, char** argv)
 
     for (uint64_t size : {uint64_t{64} << 10, uint64_t{1} << 20,
                           uint64_t{4} << 20}) {
-      bufferlist data;
+      buffer::list data;
       data.append(std::string(size, 'x'));
       std::vector<std::string> src;
       for (unsigned i = 0; i < objects; ++i) {
         src.push_back(fmt::format("s{}.{}", size, i));
-        r.execute(src.back(), ioc, R::WriteOp{}.write_full(bufferlist{data}),
+        r.execute(src.back(), ioc, R::WriteOp{}.write_full(buffer::list{data}),
                   ca::use_blocked);
       }
 
@@ -123,14 +123,14 @@ int main(int argc, char** argv)
       t0 = clk::now();
       for (unsigned i = 0; i < objects; ++i) {
         r.execute(fmt::format("w{}.{}", size, i), ioc,
-                  R::WriteOp{}.write_full(bufferlist{data}), ca::use_blocked);
+                  R::WriteOp{}.write_full(buffer::list{data}), ca::use_blocked);
       }
       const double write_us = usec(clk::now() - t0) / objects;
 
       /* copy:  read the source, write it to a new object */
       t0 = clk::now();
       for (unsigned i = 0; i < objects; ++i) {
-        bufferlist got;
+        buffer::list got;
         r.execute(src[i], ioc, R::ReadOp{}.read(0, 0, &got), nullptr,
                   ca::use_blocked);
         r.execute(fmt::format("c{}.{}", size, i), ioc,

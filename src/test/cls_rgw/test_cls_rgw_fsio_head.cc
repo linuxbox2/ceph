@@ -46,7 +46,7 @@ protected:
     const auto head = MARKER + "_" + key;
     ObjectWriteOperation op;
     op.create(true);
-    bufferlist d, t, m;
+    buffer::list d, t, m;
     d.append("old");
     t.append("t0");
     m.append("C0");
@@ -61,7 +61,7 @@ protected:
   int call(const std::string& oid, const Method& method, const In& in,
 	   Ret* ret) {
     ObjectWriteOperation op;
-    bufferlist inbl, out;
+    buffer::list inbl, out;
     encode(in, inbl);
     int rval = 0;
     op.exec(method, inbl, &out, &rval);
@@ -99,13 +99,13 @@ protected:
   }
 
   std::string read(const std::string& oid, const IoCtx& io) {
-    bufferlist bl;
+    buffer::list bl;
     EXPECT_LE(0, const_cast<IoCtx&>(io).read(oid, bl, 0, 0));
     return bl.to_str();
   }
   int getxattr(const std::string& oid, const std::string& name,
 	       std::string* v = nullptr) {
-    bufferlist bl;
+    buffer::list bl;
     int r = ioctx.getxattr(oid, name.c_str(), bl);
     if (r >= 0 && v) {
       *v = bl.to_str();
@@ -144,7 +144,7 @@ protected:
   int publish(const std::string& head, const cls_rgw_fsio_id& s, uint64_t r,
 	      cls_rgw_fsio_replace_ret& ret, const std::string& tags = {}) {
     ObjectWriteOperation op;
-    bufferlist out, t, m;
+    buffer::list out, t, m;
     int rval = 0;
     auto in = replace(fsio::replace_mode::PUBLISH, r);
     in.caller = GW1;
@@ -181,7 +181,7 @@ TEST_F(FsioHead, SupersedeWithReaderKeepsTheOldContent)
   const auto head = make_head(key);
   join(head, 1, false);
   ObjectWriteOperation op;
-  bufferlist out, d, t, m;
+  buffer::list out, d, t, m;
   int rval = 0;
   cls_rgw_fsio_replace_head(op, replace(fsio::replace_mode::SUPERSEDE, 1000),
 			    &out, &rval);
@@ -203,7 +203,7 @@ TEST_F(FsioHead, SupersedeWithReaderKeepsTheOldContent)
   EXPECT_LE(0, getxattr(head, HDR));
   auto io = keyed(head);
   EXPECT_EQ("old", read(leaf(key, 1000), io));
-  bufferlist g;
+  buffer::list g;
   EXPECT_LE(0, io.getxattr(leaf(key, 1000), "user.rgw.fsio.gen", g));
 }
 
@@ -215,7 +215,7 @@ TEST_F(FsioHead, CloneRecordsTheTailTag)
   const auto head = make_head(key);
   {
     ObjectWriteOperation op;
-    bufferlist tt, rc;
+    buffer::list tt, rc;
     tt.append("tail0");
     rc.append("tags");
     op.setxattr("user.rgw.tail_tag", tt);
@@ -224,14 +224,14 @@ TEST_F(FsioHead, CloneRecordsTheTailTag)
   }
   join(head, 1, false);
   ObjectWriteOperation op;
-  bufferlist out;
+  buffer::list out;
   int rval = 0;
   auto in = replace(fsio::replace_mode::DELETE, 1002);
   in.expected_id_tag = "t0";
   cls_rgw_fsio_replace_head(op, in, &out, &rval);
   ASSERT_EQ(0, ioctx.operate(head, &op, OPERATION_RETURNVEC));
   auto io = keyed(head);
-  bufferlist g;
+  buffer::list g;
   ASSERT_LE(0, io.getxattr(leaf(key, 1002), "user.rgw.fsio.gen", g));
   cls_rgw_fsio_gen rec;
   auto it = g.cbegin();
@@ -240,7 +240,7 @@ TEST_F(FsioHead, CloneRecordsTheTailTag)
   EXPECT_EQ("C0", rec.manifest.to_str());
   /* A7, A8:  the clone drops the head's manifest (its record carries it)
    * and cls_refcount's tags (X16) */
-  bufferlist m;
+  buffer::list m;
   EXPECT_EQ(-ENODATA, io.getxattr(leaf(key, 1002), "user.rgw.manifest", m));
   EXPECT_EQ(-ENODATA, io.getxattr(leaf(key, 1002), "refcount", m));
 }
@@ -254,14 +254,14 @@ TEST_F(FsioHead, KeepTailSupersedeRecordsNoManifest)
   const auto head = make_head(key);
   join(head, 1, false);
   ObjectWriteOperation op;
-  bufferlist out;
+  buffer::list out;
   int rval = 0;
   auto in = replace(fsio::replace_mode::SUPERSEDE, 1003);
   in.keep_tail = true;
   cls_rgw_fsio_replace_head(op, in, &out, &rval);
   ASSERT_EQ(0, ioctx.operate(head, &op, OPERATION_RETURNVEC));
   auto io = keyed(head);
-  bufferlist g;
+  buffer::list g;
   ASSERT_LE(0, io.getxattr(leaf(key, 1003), "user.rgw.fsio.gen", g));
   cls_rgw_fsio_gen rec;
   auto it = g.cbegin();
@@ -278,7 +278,7 @@ TEST_F(FsioHead, DeleteWithReaderLeavesTrackingOnly)
   const auto head = make_head(key);
   join(head, 1, false);
   ObjectWriteOperation op;
-  bufferlist out;
+  buffer::list out;
   int rval = 0;
   auto in = replace(fsio::replace_mode::DELETE, 1001);
   in.expected_id_tag = "t0";
@@ -297,7 +297,7 @@ TEST_F(FsioHead, DeleteWithStaleIdTagConflicts)
   const auto head = make_head(key);
   join(head, 1, false);
   ObjectWriteOperation op;
-  bufferlist out;
+  buffer::list out;
   int rval = 0;
   auto in = replace(fsio::replace_mode::DELETE, 1006);
   in.expected_id_tag = "stale";
@@ -327,7 +327,7 @@ TEST_F(FsioHead, RemoveCountedVersionKeepsItsTail)
   const auto ih = instance_of(key);
   {
     ObjectWriteOperation op;
-    bufferlist d, t, m, tt;
+    buffer::list d, t, m, tt;
     op.create(true);
     d.append("v1");
     t.append("i0");
@@ -344,7 +344,7 @@ TEST_F(FsioHead, RemoveCountedVersionKeepsItsTail)
   ASSERT_EQ(0, call(ih, cls::rgw::method::fsio_ocnt_add, add,
 		    (cls_rgw_fsio_flags_ret*)nullptr));
   ObjectWriteOperation op;
-  bufferlist out;
+  buffer::list out;
   int rval = 0;
   cls_rgw_fsio_remove_version_op rv;
   rv.r = cls_rgw_fsio_id{1007, 7};
@@ -367,13 +367,13 @@ TEST_F(FsioHead, RemoveCountedVersionKeepsItsTail)
   auto io = keyed(ih);
   EXPECT_EQ("v1", read(sib, io));
   /* E5:  its record, and the open count's, name the tail tag */
-  bufferlist g;
+  buffer::list g;
   ASSERT_LE(0, io.getxattr(sib, "user.rgw.fsio.gen", g));
   cls_rgw_fsio_gen rec;
   auto git = g.cbegin();
   decode(rec, git);
   EXPECT_EQ("tail0", rec.gc_tag);
-  bufferlist o;
+  buffer::list o;
   ASSERT_LE(0, ioctx.getxattr(ih, "user.rgw.fsio.ocnt", o));
   cls_rgw_fsio_ocnt oc;
   auto oit = o.cbegin();
@@ -391,7 +391,7 @@ TEST_F(FsioHead, RemoveUncountedVersionRemovesIt)
   const auto ih = instance_of(key);
   {
     ObjectWriteOperation op;
-    bufferlist d, t;
+    buffer::list d, t;
     op.create(true);
     d.append("v1");
     t.append("i0");
@@ -400,7 +400,7 @@ TEST_F(FsioHead, RemoveUncountedVersionRemovesIt)
     ASSERT_EQ(0, ioctx.operate(ih, &op));
   }
   ObjectWriteOperation op;
-  bufferlist out;
+  buffer::list out;
   int rval = 0;
   cls_rgw_fsio_remove_version_op rv;
   rv.r = cls_rgw_fsio_id{1008, 7};
@@ -425,7 +425,7 @@ TEST_F(FsioHead, VersionedPublish)
   const auto head = MARKER + "_" + key;
   {
     ObjectWriteOperation op;
-    bufferlist olh;
+    buffer::list olh;
     olh.append("olh");
     op.create(true);
     op.setxattr("user.rgw.olh.info", olh);
@@ -497,7 +497,7 @@ TEST_F(FsioHead, DeleteWithoutFsioStateRemoves)
   std::string key;
   const auto head = make_head(key);
   ObjectWriteOperation op;
-  bufferlist out;
+  buffer::list out;
   int rval = 0;
   auto in = replace(fsio::replace_mode::DELETE, 1002);
   in.expected_id_tag = "t0";
@@ -516,7 +516,7 @@ TEST_F(FsioHead, WritesBeforeTheReplacementAreDiscarded)
   const auto head = make_head(key);
   join(head, 1, false);
   ObjectWriteOperation op;
-  bufferlist out, b, a;
+  buffer::list out, b, a;
   int rval = 0;
   b.append("b");
   a.append("a");
@@ -561,7 +561,7 @@ TEST_F(FsioHead, UnversionedPublishWithReader)
   cls_rgw_fsio_replace_ret ret;
   ASSERT_EQ(0, publish(head, s, 1005, ret));
   EXPECT_FALSE(ret.born_drained);
-  bufferlist hb;
+  buffer::list hb;
   ASSERT_LE(0, ioctx.getxattr(head, HDR.c_str(), hb));
   cls_rgw_fsio_hdr hdr;
   auto hit = hb.cbegin();
@@ -586,7 +586,7 @@ TEST_F(FsioHead, PublishKeepsTags)
   {
     std::string key;
     const auto head = make_head(key);
-    bufferlist tg;
+    buffer::list tg;
     tg.append("tagA");
     ASSERT_EQ(0, ioctx.setxattr(head, "user.rgw.x-amz-tagging", tg));
     const auto s = write_and_close(head);
@@ -601,7 +601,7 @@ TEST_F(FsioHead, PublishKeepsTags)
     const auto head = make_head(key);
     const auto s = write_and_close(head);
     ObjectWriteOperation op;
-    bufferlist out;
+    buffer::list out;
     int rval = 0;
     auto in = replace(fsio::replace_mode::DELETE, 1011);
     in.expected_id_tag = "t0";

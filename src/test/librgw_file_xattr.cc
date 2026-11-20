@@ -369,7 +369,7 @@ TEST(LibRGW, SETXATTR_EMPTY_PRESERVES) {
 
   /* An empty value means "leave this attr alone", which is what
    * RGWRados::set_attrs() has always done -- it skips a zero-length
-   * bufferlist rather than storing it.  nsfs stored it, so an empty
+   * buffer::list rather than storing it.  nsfs stored it, so an empty
    * write replaced a good value with one that does not decode;  that is
    * how an empty ACL became "could not decode policy" and EIO.
    *

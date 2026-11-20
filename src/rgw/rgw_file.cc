@@ -1204,7 +1204,7 @@ namespace rgw {
     req.emplace_attr(RGW_ATTR_UNIX_KEY1, std::move(ux_key));
     req.emplace_attr(RGW_ATTR_UNIX1, std::move(ux_attrs));
     /* only stamp etag and acl when we have them--writing an empty
-     * bufferlist over a good policy leaves it undecodable.  after a
+     * buffer::list over a good policy leaves it undecodable.  after a
      * truncate, publish() has already stamped an etag for the new
      * content, so the handle's cached one is stale as well */
     if ((! truncated) && etag.length()) {
@@ -1281,7 +1281,7 @@ namespace rgw {
 	  ? std::string{xattr.key.val, xattr.key.len}
 	  : prefix_xattr_keystr(xattr.key);
 
-	bufferlist bl;
+	buffer::list bl;
 	int rc = f->fsio_hdl->fgetattr(&xdp, k, bl, 0);
 	if (rc < 0) {
 	  continue;
@@ -1501,10 +1501,10 @@ namespace rgw {
 	  continue;
 	}
 	string k = prefix_xattr_keystr(xattr.key);
-	bufferlist bl;
+	buffer::list bl;
 	/* Store it as S3 would.  rgw_get_request_metadata() appends the
 	 * terminator and counts it, so that a reader can treat the value
-	 * as a C string;  on a filesystem backend the bufferlist's bytes
+	 * as a C string;  on a filesystem backend the buffer::list's bytes
 	 * are the file's xattr, so the same metadata set over NFS has to
 	 * land in the same bytes as it would over S3, or the two protocols
 	 * disagree about an object they both see.  getxattrs() takes the

@@ -70,13 +70,13 @@ struct ObjectType {
   bool operator==(const ObjectType &t) const { return (type == t.type); }
   bool operator==(const ObjectType::Type &t) const { return (type == t); }
 
-  void encode(bufferlist &bl) const {
+  void encode(buffer::list &bl) const {
     ENCODE_START(1, 1, bl);
     encode(type, bl);
     ENCODE_FINISH(bl);
   }
 
-  void decode(bufferlist::const_iterator &bl) {
+  void decode(buffer::list::const_iterator &bl) {
     DECODE_START(1, bl);
     ceph::decode(type, bl);
     DECODE_FINISH(bl);
@@ -165,8 +165,8 @@ public:
   virtual int close() = 0;
   virtual int stat(const DoutPrefixProvider *dpp, bool force = false);
   virtual int remove(const DoutPrefixProvider* dpp, optional_yield y, bool delete_children) = 0;
-  virtual int write(int64_t ofs, bufferlist& bl, const DoutPrefixProvider* dpp, optional_yield y) = 0;
-  virtual int read(int64_t ofs, int64_t end, bufferlist& bl, const DoutPrefixProvider* dpp, optional_yield y) = 0;
+  virtual int write(int64_t ofs, buffer::list& bl, const DoutPrefixProvider* dpp, optional_yield y) = 0;
+  virtual int read(int64_t ofs, int64_t end, buffer::list& bl, const DoutPrefixProvider* dpp, optional_yield y) = 0;
   virtual int write_attrs(const DoutPrefixProvider* dpp, optional_yield y, Attrs& attrs, Attrs* extra_attrs,
 			  AttrWriteMode mode = AttrWriteMode::REPLACE_ALL,
 			  const std::vector<std::string>* rmattrs = nullptr);
@@ -206,8 +206,8 @@ public:
   virtual int close() override;
   virtual int stat(const DoutPrefixProvider *dpp, bool force = false) override;
   virtual int remove(const DoutPrefixProvider* dpp, optional_yield y, bool delete_children) override;
-  virtual int write(int64_t ofs, bufferlist& bl, const DoutPrefixProvider* dpp, optional_yield y) override;
-  virtual int read(int64_t ofs, int64_t end, bufferlist& bl, const DoutPrefixProvider* dpp, optional_yield y) override;
+  virtual int write(int64_t ofs, buffer::list& bl, const DoutPrefixProvider* dpp, optional_yield y) override;
+  virtual int read(int64_t ofs, int64_t end, buffer::list& bl, const DoutPrefixProvider* dpp, optional_yield y) override;
   virtual int copy(const DoutPrefixProvider *dpp, optional_yield y, Directory* dst_dir, const std::string& name) override;
   virtual int rename(const DoutPrefixProvider* dpp, optional_yield y, Directory* dst_dir, const std::string& dst_name);
   virtual int link_temp_file(const DoutPrefixProvider* dpp, optional_yield y, std::string target_fname) override;
@@ -242,8 +242,8 @@ public:
   template <typename F>
     int for_each(const DoutPrefixProvider* dpp, const F& func);
   virtual int rename(const DoutPrefixProvider* dpp, optional_yield y, Directory* dst_dir, std::string dst_name);
-  virtual int write(int64_t ofs, bufferlist& bl, const DoutPrefixProvider* dpp, optional_yield y) override;
-  virtual int read(int64_t ofs, int64_t end, bufferlist& bl, const DoutPrefixProvider* dpp, optional_yield y) override;
+  virtual int write(int64_t ofs, buffer::list& bl, const DoutPrefixProvider* dpp, optional_yield y) override;
+  virtual int read(int64_t ofs, int64_t end, buffer::list& bl, const DoutPrefixProvider* dpp, optional_yield y) override;
   virtual std::unique_ptr<FSEnt> clone_base() override {
     return std::make_unique<Directory>(*this);
   }
@@ -279,7 +279,7 @@ public:
 
   virtual ObjectType get_type() override { return ObjectType::MULTIPART; };
   virtual int create(const DoutPrefixProvider *dpp, bool* existed = nullptr, bool temp_file = false) override;
-  virtual int read(int64_t ofs, int64_t end, bufferlist& bl, const DoutPrefixProvider* dpp, optional_yield y) override;
+  virtual int read(int64_t ofs, int64_t end, buffer::list& bl, const DoutPrefixProvider* dpp, optional_yield y) override;
   virtual int link_temp_file(const DoutPrefixProvider* dpp, optional_yield y, std::string target_fname) override;
   virtual int remove(const DoutPrefixProvider* dpp, optional_yield y, bool delete_children) override;
   virtual int stat(const DoutPrefixProvider *dpp, bool force = false) override;
@@ -709,7 +709,7 @@ public:
   virtual RGWCoroutinesManagerRegistry* get_cr_registry() override { return NULL; }
 
   virtual int log_usage(const DoutPrefixProvider *dpp, std::map<rgw_user_bucket, RGWUsageBatch>& usage_info, optional_yield y) override { return 0; }
-  virtual int log_op(const DoutPrefixProvider *dpp, std::string& oid, bufferlist& bl) override { return 0; }
+  virtual int log_op(const DoutPrefixProvider *dpp, std::string& oid, buffer::list& bl) override { return 0; }
   virtual int register_to_service_map(const DoutPrefixProvider *dpp, const std::string& daemon_type,
 				      const std::map<std::string, std::string>& meta) override { return 0; }
   virtual void get_quota(RGWQuota& quota) override { return ; }
@@ -729,7 +729,7 @@ public:
 			     RGWUsageIter& usage_iter,
 			     std::map<rgw_user_bucket, rgw_usage_log_entry>& usage) override { return 0; }
   virtual int trim_all_usage(const DoutPrefixProvider *dpp, uint64_t start_epoch, uint64_t end_epoch, optional_yield y) override { return 0; }
-  virtual int get_config_key_val(std::string name, bufferlist* bl) override { return -ENOTSUP; }
+  virtual int get_config_key_val(std::string name, buffer::list* bl) override { return -ENOTSUP; }
   virtual int meta_list_keys_init(const DoutPrefixProvider *dpp, const std::string& section, const std::string& marker, void** phandle) override;
   virtual int meta_list_keys_next(const DoutPrefixProvider *dpp, void* handle, int max, std::list<std::string>& keys, bool* truncated) override;
   virtual void meta_list_keys_complete(void* handle) override;
@@ -1075,12 +1075,12 @@ public:
     virtual ~NSFSReadOp() = default;
 
     virtual int prepare(optional_yield y, const DoutPrefixProvider* dpp) override;
-    virtual int read(int64_t ofs, int64_t left, bufferlist& bl, optional_yield y,
+    virtual int read(int64_t ofs, int64_t left, buffer::list& bl, optional_yield y,
 		     const DoutPrefixProvider* dpp) override;
     virtual int iterate(const DoutPrefixProvider* dpp, int64_t ofs, int64_t end,
 			RGWGetDataCB* cb, optional_yield y) override;
     virtual int get_attr(const DoutPrefixProvider* dpp, const char* name,
-			 bufferlist& dest, optional_yield y) override;
+			 buffer::list& dest, optional_yield y) override;
   };
 
   struct NSFSDeleteOp : DeleteOp {
@@ -1173,7 +1173,7 @@ public:
   virtual int set_obj_attrs(const DoutPrefixProvider* dpp, Attrs* setattrs,
 			    Attrs* delattrs, optional_yield y, uint32_t flags) override;
   virtual int get_obj_attrs(optional_yield y, const DoutPrefixProvider* dpp) override;
-  virtual int modify_obj_attrs(const char* attr_name, bufferlist& attr_val,
+  virtual int modify_obj_attrs(const char* attr_name, buffer::list& attr_val,
 			       optional_yield y, const DoutPrefixProvider* dpp,
 			       uint32_t flags = rgw::sal::FLAG_LOG_OP) override;
   virtual int delete_obj_attrs(const DoutPrefixProvider* dpp, const char* attr_name,
@@ -1217,7 +1217,7 @@ public:
 				    const std::set<std::string>& keys,
 				    Attrs* vals) override;
   virtual int omap_set_val_by_key(const DoutPrefixProvider *dpp, const std::string& key,
-				  bufferlist& val, bool must_exist, optional_yield y) override;
+				  buffer::list& val, bool must_exist, optional_yield y) override;
   virtual int chown(const DoutPrefixProvider* dpp,
                     const rgw_owner& new_owner,
                     const std::string& new_owner_name,
@@ -1229,7 +1229,7 @@ public:
   nsfs::FSEnt* get_fsent() { return ent.get(); }
   int open(const DoutPrefixProvider *dpp, bool create = false, bool temp_file = false);
   int close();
-  int write(int64_t ofs, bufferlist& bl, const DoutPrefixProvider* dpp, optional_yield y);
+  int write(int64_t ofs, buffer::list& bl, const DoutPrefixProvider* dpp, optional_yield y);
   int write_attrs(const DoutPrefixProvider* dpp, optional_yield y,
 		  const std::vector<std::string>* rmattrs = nullptr);
   int link_temp_file(const DoutPrefixProvider* dpp, optional_yield y);
@@ -1278,10 +1278,10 @@ public:
 
     virtual int fstat(struct stat* st, uint32_t flags) override;
     virtual int fgetattr(const DoutPrefixProvider* dpp,
-			  const std::string& name, bufferlist& dest,
+			  const std::string& name, buffer::list& dest,
 			  uint32_t flags) override;
     virtual int fsetattr(const DoutPrefixProvider* dpp,
-			  const std::string& name, const bufferlist& val,
+			  const std::string& name, const buffer::list& val,
 			  uint32_t flags) override;
     virtual int fgetattrs(const DoutPrefixProvider* dpp,
 			   Attrs& attrs, uint32_t flags) override;
@@ -1294,7 +1294,7 @@ public:
   }; /* NSFSFSIOObject */
 
 protected:
-  int read(int64_t ofs, int64_t end, bufferlist& bl, const DoutPrefixProvider* dpp, optional_yield y);
+  int read(int64_t ofs, int64_t end, buffer::list& bl, const DoutPrefixProvider* dpp, optional_yield y);
   int generate_attrs(const DoutPrefixProvider* dpp, optional_yield y);
 private:
   int generate_mp_etag(const DoutPrefixProvider* dpp, optional_yield y);
@@ -1341,7 +1341,7 @@ struct NSFSMPObj {
     meta = "";
     upload_id = "";
   }
-  void encode(bufferlist& bl) const {
+  void encode(buffer::list& bl) const {
     ENCODE_START(1, 1, bl);
     encode(oid, bl);
     encode(upload_id, bl);
@@ -1351,7 +1351,7 @@ struct NSFSMPObj {
     ENCODE_FINISH(bl);
   }
 
-  void decode(bufferlist::const_iterator& bl) {
+  void decode(buffer::list::const_iterator& bl) {
     DECODE_START(1, bl);
     decode(oid, bl);
     decode(upload_id, bl);
@@ -1370,7 +1370,7 @@ struct NSFSUploadPartInfo {
   ceph::real_time mtime;
   std::optional<rgw::cksum::Cksum> cksum;
 
-  void encode(bufferlist& bl) const {
+  void encode(buffer::list& bl) const {
     ENCODE_START(3, 1, bl);
     encode(num, bl);
     encode(etag, bl);
@@ -1379,7 +1379,7 @@ struct NSFSUploadPartInfo {
     encode(size, bl);
     ENCODE_FINISH(bl);
   }
-  void decode(bufferlist::const_iterator& bl) {
+  void decode(buffer::list::const_iterator& bl) {
     DECODE_START_LEGACY_COMPAT_LEN(3, 1, 1, bl);
     decode(num, bl);
     decode(etag, bl);
@@ -1519,10 +1519,10 @@ public:
   virtual ~NSFSAtomicWriter() = default;
 
   virtual int prepare(optional_yield y) override;
-  virtual int process(bufferlist&& data, uint64_t offset) override;
+  virtual int process(buffer::list&& data, uint64_t offset) override;
   virtual int complete(size_t accounted_size, const std::string& etag,
                        ceph::real_time *mtime, ceph::real_time set_mtime,
-		       std::map<std::string, bufferlist>& attrs,
+		       std::map<std::string, buffer::list>& attrs,
 		       const std::optional<rgw::cksum::Cksum>& cksum,
 		       ceph::real_time delete_at,
 		       const char *if_match, const char *if_nomatch,
@@ -1567,10 +1567,10 @@ public:
   virtual ~NSFSMultipartWriter() = default;
 
   virtual int prepare(optional_yield y) override;
-  virtual int process(bufferlist&& data, uint64_t offset) override;
+  virtual int process(buffer::list&& data, uint64_t offset) override;
   virtual int complete(size_t accounted_size, const std::string& etag,
                        ceph::real_time *mtime, ceph::real_time set_mtime,
-		       std::map<std::string, bufferlist>& attrs,
+		       std::map<std::string, buffer::list>& attrs,
 		       const std::optional<rgw::cksum::Cksum>& cksum,
 		       ceph::real_time delete_at,
 		       const char *if_match, const char *if_nomatch,

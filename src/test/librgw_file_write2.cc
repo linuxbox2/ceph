@@ -1400,7 +1400,7 @@ TEST(OPEN2, MULTIPART_ASSEMBLY_BUFFERED)
     ASSERT_NE(writer, nullptr) << "no writer for part " << pnum;
     ASSERT_EQ(writer->prepare(null_yield), 0);
 
-    bufferlist bl;
+    buffer::list bl;
     bl.append(parts[i].c_str(), parts[i].length());
     ASSERT_EQ(writer->process(std::move(bl), 0), 0);
 
@@ -1783,7 +1783,7 @@ TEST(OPEN2, XATTR_PERSIST)
  * RGW stores request metadata as a counted string whose length includes
  * the terminator (rgw_get_request_metadata, rgw_op.h) so that a reader can
  * treat the value as a C string.  On rados that is invisible;  on a
- * filesystem backend the bufferlist's bytes ARE the file's xattr, so the
+ * filesystem backend the buffer::list's bytes ARE the file's xattr, so the
  * convention becomes on-disk format and the two protocols have to agree
  * about an object they both see.
  *

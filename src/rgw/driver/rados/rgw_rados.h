@@ -788,7 +788,7 @@ public:
     /* fsio_replace_head's reply, when this head write carries it
      * (FSIO_RADOS_DESIGN.md §3);  reset by each prepare */
     struct fsio_reply {
-      bufferlist out;
+      buffer::list out;
       int rval;
       bool version_removal;         // fsio_remove_version's reply, not replace's
       fsio_reply() : rval(0), version_removal(false) {}
