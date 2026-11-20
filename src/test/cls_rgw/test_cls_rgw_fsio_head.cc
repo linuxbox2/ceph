@@ -710,3 +710,51 @@ TEST_F(FsioHead, ForeignIncarnationReturnsEperm)
   EXPECT_EQ(0, call(head, cls::rgw::method::fsio_join, op, &ret, &ioctx2));
   EXPECT_LE(0, getxattr(head, HDR));
 }
+
+/* A23, §3.5, Y16, Z14:  a writer's join carries its identity, a later
+ * write open's fsio_writer_identity updates it, and the freeze records
+ * the publisher's in the publishing record */
+TEST_F(FsioHead, PublishingRecordNamesTheIdentity)
+{
+  std::string key;
+  const auto head = make_head(key);
+  cls_rgw_fsio_join_op op;
+  op.caller = GW1;
+  op.seq = 21;
+  op.writer = true;
+  op.nonce = 1;
+  op.counter_seed = 10;
+  op.marker = MARKER;
+  op.identity = "alice";
+  cls_rgw_fsio_join_ret j;
+  ASSERT_EQ(0, call(head, cls::rgw::method::fsio_join, op, &j));
+  ASSERT_TRUE(j.construct);
+  cls_rgw_fsio_runs_op rop;
+  rop.caller = GW1;
+  rop.cs = j.bound;
+  rop.runs = {{0, 0}};
+  ASSERT_EQ(0, call(head, cls::rgw::method::fsio_ready, rop,
+		    (cls_rgw_fsio_flags_ret*)nullptr));
+  cls_rgw_fsio_identity_op iop;
+  iop.caller = GW1;
+  iop.cs = j.bound;
+  iop.identity = "carol";
+  ASSERT_EQ(0, call(head, cls::rgw::method::fsio_writer_identity, iop,
+		    (cls_rgw_fsio_flags_ret*)nullptr));
+  cls_rgw_fsio_leave_op lop;
+  lop.caller = GW1;
+  lop.seq = 22;
+  lop.cs = j.bound;
+  lop.writer = true;
+  cls_rgw_fsio_leave_ret lret;
+  ASSERT_EQ(0, call(head, cls::rgw::method::fsio_leave, lop, &lret));
+  ASSERT_TRUE(lret.publishing);
+  buffer::list hb;
+  ASSERT_LE(0, ioctx.getxattr(head, HDR.c_str(), hb));
+  cls_rgw_fsio_hdr hdr;
+  auto it = hb.cbegin();
+  decode(hdr, it);
+  const auto* e = hdr.find(j.bound);
+  ASSERT_TRUE(e && e->publishing);
+  EXPECT_EQ("carol", e->publishing->identity);
+}

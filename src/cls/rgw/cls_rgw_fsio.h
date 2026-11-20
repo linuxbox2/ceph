@@ -205,6 +205,7 @@ struct cls_rgw_fsio_publishing {
   std::string instance;
   std::string token;
   uint64_t olh_epoch = 0;
+  std::string identity;           // whose PUT the publish is (§3.5, Z14)
 
   void encode(ceph::buffer::list& bl) const {
     ENCODE_START(1, 1, bl);
@@ -212,6 +213,7 @@ struct cls_rgw_fsio_publishing {
     encode(instance, bl);
     encode(token, bl);
     encode(olh_epoch, bl);
+    encode(identity, bl);
     ENCODE_FINISH(bl);
   }
   void decode(ceph::buffer::list::const_iterator& bl) {
@@ -220,6 +222,7 @@ struct cls_rgw_fsio_publishing {
     decode(instance, bl);
     decode(token, bl);
     decode(olh_epoch, bl);
+    decode(identity, bl);
     DECODE_FINISH(bl);
   }
 };
@@ -591,6 +594,7 @@ struct join_in {
   uint64_t counter_seed = 0;
   expired_t expired;
   std::string instance;             // versioned:  the instance the OLH named
+  std::string identity;             // a writer:  its NFS open's (§3.5, Y16)
 };
 struct join_out {
   cls_rgw_fsio_id bound;
@@ -607,6 +611,12 @@ constexpr size_t extent_max_runs = 64;
  * max_runs the adjacent pair with the smallest gap merges (§2.7, Z11) */
 void add_run(std::vector<cls_rgw_fsio_run>& extent, cls_rgw_fsio_run run,
 	     size_t max_runs);
+
+/* §3.5, Y16:  a later write open on the handle with another identity:
+ * its writer count on the chunk set takes it;  idempotent by its
+ * effect, so not a sequenced call */
+int writer_identity(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& caller,
+		    const cls_rgw_fsio_id& cs, const std::string& identity);
 
 /* the constructor's clones done:  the shadow is ready, its extent the
  * runs it cloned, its hint the published object's size and mtime */

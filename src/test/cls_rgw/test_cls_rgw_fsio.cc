@@ -1334,6 +1334,73 @@ TEST(cls_rgw_fsio_rebind, from_retired_drains)
   EXPECT_TRUE(h.hdr->find(old)->drained);
 }
 
+/* A23, §3.5, Y16, Z14:  a writer's join records its identity and the
+ * order it joined in;  the freeze records the publisher's identity */
+TEST(cls_rgw_fsio_identity, join_and_freeze_record_it)
+{
+  auto h = head("C0");
+  fsio::join_out j1, j2;
+  cls_rgw_fsio_effects fx;
+  ASSERT_EQ(0, fsio::join(h, {GW1, next_seq(), true, 1, 10, {}, {}, "alice"},
+			  j1, fx));
+  ASSERT_EQ(0, fsio::ready(h, GW1, j1.bound, {{0, 0}}));
+  ASSERT_EQ(0, fsio::join(h, {GW2, next_seq(), true, 1, 10, {}, {}, "bob"},
+			  j2, fx));
+  const auto& a = h.find(GW1)->chunk_sets[j1.bound];
+  const auto& b = h.find(GW2)->chunk_sets[j2.bound];
+  EXPECT_EQ("alice", a.writer_identity);
+  EXPECT_EQ("bob", b.writer_identity);
+  EXPECT_LT(a.joined_seq, b.joined_seq);           // bob joined later
+
+  /* alice leaves, bob is the last writer:  his freeze names him */
+  fsio::leave_out lo;
+  ASSERT_EQ(0, fsio::leave(h, GW1, next_seq(), j1.bound, true, {}, lo, fx));
+  EXPECT_FALSE(lo.publishing);
+  ASSERT_EQ(0, fsio::leave(h, GW2, next_seq(), j2.bound, true, {}, lo, fx));
+  ASSERT_TRUE(lo.publishing);
+  EXPECT_EQ("bob", h.hdr->find(j2.bound)->publishing->identity);
+}
+
+/* …a fenced finalize publishes under the dead writer that joined last,
+ * recorded in both publishing records, so a finalizer that takes over
+ * has it though the writers' records are gone */
+TEST(cls_rgw_fsio_identity, finalize_records_the_last_joined)
+{
+  constexpr cls_rgw_fsio_handle EXPIRER2{101, 0};
+  auto h = head("C0");
+  fsio::join_out j1, j2;
+  cls_rgw_fsio_effects fx;
+  ASSERT_EQ(0, fsio::join(h, {GW1, next_seq(), true, 1, 10, {}, {}, "alice"},
+			  j1, fx));
+  ASSERT_EQ(0, fsio::ready(h, GW1, j1.bound, {{0, 0}}));
+  ASSERT_EQ(0, fsio::join(h, {GW2, next_seq(), true, 1, 10, {}, {}, "bob"},
+			  j2, fx));
+  cls_rgw_fsio_id to, to2;
+  ASSERT_EQ(0, fsio::fenced_finalize(h, EXPIRER, j1.bound, {I1, I2}, to));
+  EXPECT_EQ("bob", h.hdr->find(to)->publishing->identity);
+  EXPECT_EQ("bob", h.hdr->find(j1.bound)->publishing->identity);
+  ASSERT_EQ(0, fsio::fenced_finalize(h, EXPIRER2, j1.bound, {I1, I2, IX},
+				     to2));
+  EXPECT_EQ(to, to2);
+  EXPECT_EQ("bob", h.hdr->find(to)->publishing->identity);
+}
+
+/* …a later write open with another identity updates the writer's count;
+ * a handle with no writer there gets EINVAL */
+TEST(cls_rgw_fsio_identity, writer_identity_updates_a_writer)
+{
+  auto h = head("C0");
+  fsio::join_out j;
+  cls_rgw_fsio_effects fx;
+  ASSERT_EQ(0, fsio::join(h, {GW1, next_seq(), true, 1, 10, {}, {}, "alice"},
+			  j, fx));
+  ASSERT_EQ(0, fsio::writer_identity(h, GW1, j.bound, "carol"));
+  EXPECT_EQ("carol", h.find(GW1)->chunk_sets[j.bound].writer_identity);
+  EXPECT_EQ(0, fsio::writer_identity(h, GW1, j.bound, "carol"));   // a repeat
+  const auto r = join_reader(h, GW2);
+  EXPECT_EQ(-EINVAL, fsio::writer_identity(h, GW2, r, "dave"));
+}
+
 TEST(cls_rgw_fsio, each_check_is_detected)
 {
   const std::pair<cls_rgw_fsio_check, void (*)()> table[] = {

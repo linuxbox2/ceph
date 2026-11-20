@@ -423,6 +423,10 @@ int join_once(cls_rgw_fsio_head& h, const join_in& in, join_out& out,
   auto& c = h.counts(in.caller, bind);
   if (in.writer) {
     ++c.writers;
+    /* §3.5, Y16, Z14:  the writer's identity, and the order it joined in
+     * (a counter value drawn here, so no two writers tie) */
+    c.writer_identity = in.identity;
+    c.joined_seq = hdr.draw().counter;
   } else {
     ++c.readers;
   }
@@ -497,6 +501,21 @@ int ready(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& caller,
   for (const auto& r : runs) {
     add_run(e->shadow->extent, r, max_runs);
   }
+  return 0;
+}
+
+int writer_identity(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& caller,
+		    const cls_rgw_fsio_id& cs, const std::string& identity)
+{
+  auto* o = h.find(caller);
+  if (!h.hdr || !o) {
+    return -EINVAL;
+  }
+  auto c = o->chunk_sets.find(cs);
+  if (c == o->chunk_sets.end() || c->second.writers == 0) {
+    return -EINVAL;
+  }
+  c->second.writer_identity = identity;
   return 0;
 }
 
@@ -667,6 +686,7 @@ int leave_once(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& caller,
       e->state = state::PUBLISHING;
       e->publishing.emplace();
       e->publishing->publisher = caller;
+      e->publishing->identity = c.writer_identity;   // §3.5, Z14
       if (intent) {
 	/* versioned:  the claim and the OSD's epoch (§4.2 step 2) */
 	e->publishing->instance = intent->instance;
@@ -1047,6 +1067,21 @@ int fenced_finalize(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& finalizer,
       }
     }
   }
+  /* §3.5, Z14:  the publishing identity, the dead writer's that joined
+   * last, chosen here, in the op that removes the records it is chosen
+   * from, and kept in the publishing records for any finalizer */
+  std::string identity = f->publishing ? f->publishing->identity : "";
+  uint64_t last = 0;
+  for (const auto& [inc, o] : h.opens) {
+    for (const auto& [hd, ho] : o.handles) {
+      auto c = ho.chunk_sets.find(from);
+      if (c != ho.chunk_sets.end() && c->second.writers &&
+	  c->second.joined_seq >= last) {
+	last = c->second.joined_seq;
+	identity = c->second.writer_identity;
+      }
+    }
+  }
   for (auto& [inc, o] : h.opens) {
     for (auto& [hd, ho] : o.handles) {
       auto c = ho.chunk_sets.find(from);
@@ -1068,6 +1103,7 @@ int fenced_finalize(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& finalizer,
   } else {
     t.publishing.emplace();
     t.publishing->publisher = finalizer;
+    t.publishing->identity = identity;
     if (intent) {
       /* versioned:  the claim, created first (§3.7 step 1) */
       t.publishing->instance = intent->instance;
@@ -1082,6 +1118,7 @@ int fenced_finalize(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& finalizer,
   f->state = state::PUBLISHING;
   f->publishing.emplace();
   f->publishing->publisher = finalizer;
+  f->publishing->identity = identity;
   return 0;
 }
 

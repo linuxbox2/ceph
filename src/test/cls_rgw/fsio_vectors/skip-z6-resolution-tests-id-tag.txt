@@ -24,7 +24,7 @@ expirer publish-hint for S1.10
 expirer placeholder I2
 gw2 resend leave
 expirer fenced-finalize S1.10
-expirer reclone S1.12
+expirer reclone S1.13
 expirer instance-write I2
 expirer link I2
 expirer crash
@@ -33,6 +33,6 @@ expirer decide-finalize S1.10
 expirer publish-hint for S1.10
 expirer placeholder I3
 expirer fenced-finalize S1.10
-expirer reclone S1.12
+expirer reclone S1.13
 expirer instance-write I3
-# => S1.12 linked as a version twice
+# => S1.13 linked as a version twice

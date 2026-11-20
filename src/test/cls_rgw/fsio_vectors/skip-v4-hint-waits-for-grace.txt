@@ -29,11 +29,11 @@ expirer decide-finalize S2.10
 expirer publish-hint for S2.10
 expirer placeholder I4
 expirer fenced-finalize S2.10
-expirer reclone S2.11
+expirer reclone S2.12
 expirer instance-write I4
 expirer link I4
 gw2 crash
-expirer publish S2.11
+expirer publish S2.12
 expirer grace 2
 expirer expire
 gc S2.10

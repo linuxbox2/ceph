@@ -373,7 +373,7 @@ int rgw_fsio_join(cls_method_context_t hctx, ceph::buffer::list* in,
   cls_rgw_fsio_join_ret ret;
   int r = on_head(hctx, op.marker, [&](auto& h, auto& fx) {
     fsio::join_in jin{op.caller, op.seq, op.writer, op.nonce, op.counter_seed,
-		      op.expired, op.instance};
+		      op.expired, op.instance, op.identity};
     fsio::join_out jout;
     int r = fsio::join(h, jin, jout, fx);
     ret.bound = jout.bound;
@@ -455,6 +455,21 @@ int rgw_fsio_truncate(cls_method_context_t hctx, ceph::buffer::list* in,
   }
   encode(ret, *out);
   return 0;
+}
+
+int rgw_fsio_writer_identity(cls_method_context_t hctx,
+			     ceph::buffer::list* in, ceph::buffer::list* out)
+{
+  cls_rgw_fsio_identity_op op;
+  if (int r = decode_op(in, op, __func__); r < 0) {
+    return r;
+  }
+  if (int r = check_origin(hctx, op.caller.incarnation); r < 0) {
+    return r;
+  }
+  return on_head(hctx, {}, [&](auto& h, auto&) {
+    return fsio::writer_identity(h, op.caller, op.cs, op.identity);
+  });
 }
 
 int rgw_fsio_extend(cls_method_context_t hctx, ceph::buffer::list* in,
@@ -1010,7 +1025,7 @@ void cls_rgw_fsio_register(cls_handle_t h_class)
 {
   using namespace cls::rgw::method;
   ClassRegistrar<cls::rgw::ClassId> cls(h_class);
-  static cls_method_handle_t h[21];
+  static cls_method_handle_t h[22];
   cls.register_cxx_method(fsio_join, rgw_fsio_join, &h[0]);
   cls.register_cxx_method(fsio_ready, rgw_fsio_ready, &h[1]);
   cls.register_cxx_method(fsio_extend, rgw_fsio_extend, &h[2]);
@@ -1033,4 +1048,6 @@ void cls_rgw_fsio_register(cls_handle_t h_class)
   cls.register_cxx_method(fsio_open_hint_list, rgw_fsio_open_hint_list, &h[18]);
   cls.register_cxx_method(fsio_hint, rgw_fsio_hint, &h[19]);
   cls.register_cxx_method(fsio_truncate, rgw_fsio_truncate, &h[20]);
+  cls.register_cxx_method(fsio_writer_identity, rgw_fsio_writer_identity,
+			  &h[21]);
 }

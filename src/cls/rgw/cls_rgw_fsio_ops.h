@@ -56,6 +56,7 @@ struct cls_rgw_fsio_join_op {
   std::set<uint64_t> expired;
   std::string instance;          // versioned:  the instance the OLH named
   std::string marker;            // the bucket's, to name a head clone (§2.7)
+  std::string identity;          // a writer:  its NFS open's (§3.5, Y16)
 
   void encode(ceph::buffer::list& bl) const {
     ENCODE_START(1, 1, bl);
@@ -67,6 +68,7 @@ struct cls_rgw_fsio_join_op {
     encode(expired, bl);
     encode(instance, bl);
     encode(marker, bl);
+    encode(identity, bl);
     ENCODE_FINISH(bl);
   }
   void decode(ceph::buffer::list::const_iterator& bl) {
@@ -79,10 +81,34 @@ struct cls_rgw_fsio_join_op {
     decode(expired, bl);
     decode(instance, bl);
     decode(marker, bl);
+    decode(identity, bl);
     DECODE_FINISH(bl);
   }
 };
 WRITE_CLASS_ENCODER(cls_rgw_fsio_join_op)
+
+/* fsio_writer_identity (§3.5, Y16) */
+struct cls_rgw_fsio_identity_op {
+  cls_rgw_fsio_handle caller;
+  cls_rgw_fsio_id cs;
+  std::string identity;
+
+  void encode(ceph::buffer::list& bl) const {
+    ENCODE_START(1, 1, bl);
+    encode(caller, bl);
+    encode(cs, bl);
+    encode(identity, bl);
+    ENCODE_FINISH(bl);
+  }
+  void decode(ceph::buffer::list::const_iterator& bl) {
+    DECODE_START(1, bl);
+    decode(caller, bl);
+    decode(cs, bl);
+    decode(identity, bl);
+    DECODE_FINISH(bl);
+  }
+};
+WRITE_CLASS_ENCODER(cls_rgw_fsio_identity_op)
 
 struct cls_rgw_fsio_join_ret {
   cls_rgw_fsio_id bound;
@@ -795,6 +821,8 @@ constexpr auto fsio_fenced_finalize =
 constexpr auto fsio_expire = ClsMethod<RdWrTag, ClassId>("fsio_expire");
 constexpr auto fsio_forget = ClsMethod<RdWrTag, ClassId>("fsio_forget");
 constexpr auto fsio_drop_seqs = ClsMethod<RdWrTag, ClassId>("fsio_drop_seqs");
+constexpr auto fsio_writer_identity =
+  ClsMethod<RdWrTag, ClassId>("fsio_writer_identity");
 constexpr auto fsio_ocnt_add = ClsMethod<RdWrTag, ClassId>("fsio_ocnt_add");
 constexpr auto fsio_ocnt_remove = ClsMethod<RdWrTag, ClassId>("fsio_ocnt_remove");
 constexpr auto fsio_ocnt_expire = ClsMethod<RdWrTag, ClassId>("fsio_ocnt_expire");

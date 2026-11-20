@@ -10,10 +10,10 @@ gw2 open-read
 gw2 follow S1.10
 expirer decide-finalize S1.10
 expirer fenced-finalize S1.10
-expirer reclone S1.12
-expirer publish S1.12
+expirer reclone S1.13
+expirer publish S1.13
 gw2 close-read S1.10
 expirer expire
 gw1 resend join
 gw2 drain S1.10
-# => drain: manifest for S1.10 is S1.12, chunks named from C0
+# => drain: manifest for S1.10 is S1.13, chunks named from C0

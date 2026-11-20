@@ -1,5 +1,5 @@
 # W20_RELEASE_CHECKS_PUBLISHER:  the shortest trace the search finds with the check
-# skipped (1463332 states by search, 2026-11-18);  replayed alone it
+# skipped (7075180 states by search, 2026-11-18);  replayed alone it
 # reproduces the violation at once.
 # skip: W20_RELEASE_CHECKS_PUBLISHER
 # env: FSIO_MODEL_VERSIONED=1 FSIO_MODEL_VSTART=null FSIO_MODEL_ROLES=ww FSIO_MODEL_S3_OPS=0 FSIO_MODEL_CRASHES=0 FSIO_MODEL_EXPIRER_CRASHES=0
@@ -25,5 +25,5 @@ gw2 placeholder I4
 gw2 close-leave S1.10
 gw2 publish-read S1.10
 gw2 instance-write I4
-expirer reclone S1.11
+expirer reclone S1.12
 # => fenced finalize of S1.10, already published
