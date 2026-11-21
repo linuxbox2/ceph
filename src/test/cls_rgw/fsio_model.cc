@@ -46,6 +46,11 @@
  * a suspended bucket writes the null version in place, on the head
  * (§2.5a).  FSIO_MODEL_VSTART=null starts with versioning just enabled
  * over content FSIO has open, the head holding the null version.
+ * FSIO_MODEL_DUP names calls that are not sequence-numbered (a comma
+ * list of method names, or all), each of whose applications is followed
+ * at once by a second:  its first reply lost beyond the PG log's dup
+ * window, the caller sees the second's (§3;  the plan's resends of the
+ * calls that are not sequence-numbered).
  * FSIO_MODEL_SHORTEST=1 searches by iterative deepening:  depth-first to
  * a bound raised one step at a time, so the first violation found has the
  * shortest trace;  for STOP_AT_FIRST and skipped-check runs.
@@ -86,6 +91,7 @@
 #include <gtest/gtest.h>
 
 #include "cls/rgw/cls_rgw_fsio.h"
+#include "common/split.h"
 #include "fsio_model_cluster.h"
 
 namespace {
@@ -346,6 +352,7 @@ struct Config {
   bool keep_tail = false;        // FSIO_MODEL_KEEP_TAIL:  a copy onto itself (§3.6)
   bool sizes = false;            // FSIO_MODEL_SIZES:  the size hint (§3.3)
   bool lost_reply = false;       // FSIO_MODEL_LOST_REPLY:  a reply lost (Z22)
+  std::set<std::string> dup;     // FSIO_MODEL_DUP:  calls applied twice
 };
 
 /* versioned:  one instance head and what it holds */
@@ -415,6 +422,20 @@ std::optional<cls_rgw_fsio_intent> op_intent(const fsio::publish_intent* i)
     return std::nullopt;
   }
   return cls_rgw_fsio_intent{i->instance, i->token, i->now_epoch};
+}
+
+/* FSIO_MODEL_DUP:  a call that is not sequence-numbered, applied, its
+ * reply lost, and applied again;  the caller sees the second reply.  A
+ * head the first removed returns ENOENT to the second (require()) */
+template <typename Once>
+int twice(const char* method, const cls_rgw_fsio_effects& fx, Once&& once)
+{
+  if (cfg.dup.count(method) || cfg.dup.count("all")) {
+    if (once() == 0 && fx.remove_head) {
+      return -ENOENT;
+    }
+  }
+  return once();
 }
 
 /* a head method with no reply to compare */
@@ -565,8 +586,10 @@ int m_ready(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& caller,
   op.cs = cs;
   op.runs = runs;
   cls_rgw_fsio_effects fx;
-  return on_cluster_head("fsio_ready", cls::rgw::method::fsio_ready, h, fx, op,
-			 [&] { return fsio::ready(h, caller, cs, runs); });
+  return twice("fsio_ready", fx, [&] {
+    return on_cluster_head("fsio_ready", cls::rgw::method::fsio_ready, h, fx, op,
+			   [&] { return fsio::ready(h, caller, cs, runs); });
+  });
 }
 
 int m_publish_release(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& caller,
@@ -576,8 +599,10 @@ int m_publish_release(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& caller,
   op.caller = caller;
   op.cs = cs;
   cls_rgw_fsio_effects fx;
-  return on_cluster_head("fsio_publish_release", cls::rgw::method::fsio_publish_release, h, fx, op,
-			 [&] { return fsio::publish_release(h, caller, cs); });
+  return twice("fsio_publish_release", fx, [&] {
+    return on_cluster_head("fsio_publish_release", cls::rgw::method::fsio_publish_release, h, fx, op,
+			   [&] { return fsio::publish_release(h, caller, cs); });
+  });
 }
 
 int m_forget(cls_rgw_fsio_head& h, const fid_t& cs, cls_rgw_fsio_effects& fx,
@@ -586,15 +611,19 @@ int m_forget(cls_rgw_fsio_head& h, const fid_t& cs, cls_rgw_fsio_effects& fx,
   cls_rgw_fsio_cs_op op;
   op.cs = cs;
   std::optional<fid_t> d;
-  ceph::buffer::list reply;
-  const int r = on_cluster_head("fsio_forget", cls::rgw::method::fsio_forget, h, fx, op,
-				[&] { return fsio::forget(h, cs, fx, &d); }, &reply);
-  if (cl.on && r == 0 && reply.length()) {
-    if (auto ret = dec<cls_rgw_fsio_forget_ret>("fsio_forget", reply);
-	ret && ret->drained != d) {
-      cl.reply_mismatch("fsio_forget", "drained differs");
+  const int r = twice("fsio_forget", fx, [&] {
+    d.reset();
+    ceph::buffer::list reply;
+    const int r = on_cluster_head("fsio_forget", cls::rgw::method::fsio_forget, h, fx, op,
+				  [&] { return fsio::forget(h, cs, fx, &d); }, &reply);
+    if (cl.on && r == 0 && reply.length()) {
+      if (auto ret = dec<cls_rgw_fsio_forget_ret>("fsio_forget", reply);
+	  ret && ret->drained != d) {
+	cl.reply_mismatch("fsio_forget", "drained differs");
+      }
     }
-  }
+    return r;
+  });
   if (drained) {
     *drained = d;
   }
@@ -612,18 +641,20 @@ int m_hint_size(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& caller,
   op.trunc_epoch = epoch;
   op.size = size;
   cls_rgw_fsio_effects fx;
-  ceph::buffer::list reply;
-  const int r = on_cluster_head("fsio_hint", cls::rgw::method::fsio_hint, h, fx, op, [&] {
-      return fsio::hint(h, caller, cs, epoch, size, {}, out);
-    }, &reply);
-  if (cl.on && r == 0 && reply.length()) {
-    if (auto ret = dec<cls_rgw_fsio_hint_size_ret>("fsio_hint", reply);
-	ret && (ret->stale != out.stale || ret->trunc_epoch != out.trunc_epoch ||
-		ret->size != out.size)) {
-      cl.reply_mismatch("fsio_hint", "stale, trunc_epoch or size differs");
+  return twice("fsio_hint", fx, [&] {
+    ceph::buffer::list reply;
+    const int r = on_cluster_head("fsio_hint", cls::rgw::method::fsio_hint, h, fx, op, [&] {
+	return fsio::hint(h, caller, cs, epoch, size, {}, out);
+      }, &reply);
+    if (cl.on && r == 0 && reply.length()) {
+      if (auto ret = dec<cls_rgw_fsio_hint_size_ret>("fsio_hint", reply);
+	  ret && (ret->stale != out.stale || ret->trunc_epoch != out.trunc_epoch ||
+		  ret->size != out.size)) {
+	cl.reply_mismatch("fsio_hint", "stale, trunc_epoch or size differs");
+      }
     }
-  }
-  return r;
+    return r;
+  });
 }
 
 int m_truncate(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& caller,
@@ -661,8 +692,10 @@ int m_drop_seqs(cls_rgw_fsio_head& h, uint64_t incarnation,
 {
   cls_rgw_fsio_drop_seqs_op op;
   op.incarnation = incarnation;
-  return on_cluster_head("fsio_drop_seqs", cls::rgw::method::fsio_drop_seqs, h, fx, op,
-			 [&] { return fsio::drop_seqs(h, incarnation, fx); });
+  return twice("fsio_drop_seqs", fx, [&] {
+    return on_cluster_head("fsio_drop_seqs", cls::rgw::method::fsio_drop_seqs, h, fx, op,
+			   [&] { return fsio::drop_seqs(h, incarnation, fx); });
+  });
 }
 
 int m_fenced_finalize(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& finalizer,
@@ -677,19 +710,21 @@ int m_fenced_finalize(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& finalizer
   op.intent = op_intent(intent);
   op.aborted = aborted;
   cls_rgw_fsio_effects fx;
-  ceph::buffer::list reply;
-  const int r = on_cluster_head("fsio_fenced_finalize", cls::rgw::method::fsio_fenced_finalize, h, fx, op, [&] {
-      return fsio::fenced_finalize(h, finalizer, from, expired, to, intent,
-				   aborted);
-    }, &reply);
-  if (cl.on && r == 0 && reply.length()) {
-    if (auto ret = dec<cls_rgw_fsio_finalize_ret>("fsio_fenced_finalize", reply);
-	ret && ret->to != to) {
-      cl.reply_mismatch("fsio_fenced_finalize", fmt::format(
-	"to {};  the core {}", ret->to.to_str(), to.to_str()));
+  return twice("fsio_fenced_finalize", fx, [&] {
+    ceph::buffer::list reply;
+    const int r = on_cluster_head("fsio_fenced_finalize", cls::rgw::method::fsio_fenced_finalize, h, fx, op, [&] {
+	return fsio::fenced_finalize(h, finalizer, from, expired, to, intent,
+				     aborted);
+      }, &reply);
+    if (cl.on && r == 0 && reply.length()) {
+      if (auto ret = dec<cls_rgw_fsio_finalize_ret>("fsio_fenced_finalize", reply);
+	  ret && ret->to != to) {
+	cl.reply_mismatch("fsio_fenced_finalize", fmt::format(
+	  "to {};  the core {}", ret->to.to_str(), to.to_str()));
+      }
     }
-  }
-  return r;
+    return r;
+  });
 }
 
 int m_expire(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& caller,
@@ -701,18 +736,21 @@ int m_expire(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& caller,
   op.caller = caller;
   op.expired = expired;
   op.clear = clear;
-  ceph::buffer::list reply;
-  const int r = on_cluster_head("fsio_expire", cls::rgw::method::fsio_expire, h, fx, op, [&] {
-      return fsio::expire(h, caller, expired, clear, out, fx);
-    }, &reply);
-  if (cl.on && r == 0 && reply.length()) {
-    if (auto ret = dec<cls_rgw_fsio_expire_ret>("fsio_expire", reply);
-	ret && (ret->drained != !out.drained.empty() ||
-		ret->finalize != out.finalize)) {
-      cl.reply_mismatch("fsio_expire", "drained or finalize differs");
+  return twice("fsio_expire", fx, [&] {
+    out = fsio::expire_out{};
+    ceph::buffer::list reply;
+    const int r = on_cluster_head("fsio_expire", cls::rgw::method::fsio_expire, h, fx, op, [&] {
+	return fsio::expire(h, caller, expired, clear, out, fx);
+      }, &reply);
+    if (cl.on && r == 0 && reply.length()) {
+      if (auto ret = dec<cls_rgw_fsio_expire_ret>("fsio_expire", reply);
+	  ret && (ret->drained != !out.drained.empty() ||
+		  ret->finalize != out.finalize)) {
+	cl.reply_mismatch("fsio_expire", "drained or finalize differs");
+      }
     }
-  }
-  return r;
+    return r;
+  });
 }
 
 int m_replace_head(cls_rgw_fsio_head& h, const fsio::replace_in& in,
@@ -783,16 +821,18 @@ int m_ocnt_add(const std::string& inst, cls_rgw_fsio_instance_head& ih,
   cls_rgw_fsio_ocnt_op op;
   op.holder = holder;
   cls_rgw_fsio_effects fx;
-  ceph::buffer::list reply;
-  const int r = on_cluster_instance("fsio_ocnt_add", cls::rgw::method::fsio_ocnt_add, inst, ih, fx, op,
-				    [&] { return fsio::ocnt_add(ih, holder, &out); }, &reply);
-  if (cl.on && r == 0 && reply.length()) {
-    if (auto ret = dec<cls_rgw_fsio_ocnt_add_ret>("fsio_ocnt_add", reply);
-	ret && (ret->gone != out.gone || ret->held != out.held)) {
-      cl.reply_mismatch("fsio_ocnt_add", "gone or held differs");
+  return twice("fsio_ocnt_add", fx, [&] {
+    ceph::buffer::list reply;
+    const int r = on_cluster_instance("fsio_ocnt_add", cls::rgw::method::fsio_ocnt_add, inst, ih, fx, op,
+				      [&] { return fsio::ocnt_add(ih, holder, &out); }, &reply);
+    if (cl.on && r == 0 && reply.length()) {
+      if (auto ret = dec<cls_rgw_fsio_ocnt_add_ret>("fsio_ocnt_add", reply);
+	  ret && (ret->gone != out.gone || ret->held != out.held)) {
+	cl.reply_mismatch("fsio_ocnt_add", "gone or held differs");
+      }
     }
-  }
-  return r;
+    return r;
+  });
 }
 
 int m_ocnt_remove(const std::string& inst, cls_rgw_fsio_instance_head& ih,
@@ -801,17 +841,20 @@ int m_ocnt_remove(const std::string& inst, cls_rgw_fsio_instance_head& ih,
   cls_rgw_fsio_ocnt_op op;
   op.holder = holder;
   cls_rgw_fsio_effects fx;
-  ceph::buffer::list reply;
-  const int r = on_cluster_instance("fsio_ocnt_remove", cls::rgw::method::fsio_ocnt_remove, inst, ih, fx, op,
-				    [&] { return fsio::ocnt_remove(ih, holder, d); },
-				    &reply);
-  if (cl.on && r == 0 && reply.length()) {
-    if (auto ret = dec<cls_rgw_fsio_flags_ret>("fsio_ocnt_remove", reply);
-	ret && (ret->drained != d.drained || ret->removed != d.removed)) {
-      cl.reply_mismatch("fsio_ocnt_remove", "drained or removed differs");
+  return twice("fsio_ocnt_remove", fx, [&] {
+    d = fsio::ocnt_drain{};
+    ceph::buffer::list reply;
+    const int r = on_cluster_instance("fsio_ocnt_remove", cls::rgw::method::fsio_ocnt_remove, inst, ih, fx, op,
+				      [&] { return fsio::ocnt_remove(ih, holder, d); },
+				      &reply);
+    if (cl.on && r == 0 && reply.length()) {
+      if (auto ret = dec<cls_rgw_fsio_flags_ret>("fsio_ocnt_remove", reply);
+	  ret && (ret->drained != d.drained || ret->removed != d.removed)) {
+	cl.reply_mismatch("fsio_ocnt_remove", "drained or removed differs");
+      }
     }
-  }
-  return r;
+    return r;
+  });
 }
 
 int m_ocnt_expire(const std::string& inst, cls_rgw_fsio_instance_head& ih,
@@ -820,25 +863,30 @@ int m_ocnt_expire(const std::string& inst, cls_rgw_fsio_instance_head& ih,
   cls_rgw_fsio_ocnt_op op;
   op.expired = expired;
   cls_rgw_fsio_effects fx;
-  ceph::buffer::list reply;
-  const int r = on_cluster_instance("fsio_ocnt_expire", cls::rgw::method::fsio_ocnt_expire, inst, ih, fx, op,
-				    [&] { return fsio::ocnt_expire(ih, expired, d); },
-				    &reply);
-  if (cl.on && r == 0 && reply.length()) {
-    if (auto ret = dec<cls_rgw_fsio_flags_ret>("fsio_ocnt_expire", reply);
-	ret && (ret->drained != d.drained || ret->removed != d.removed)) {
-      cl.reply_mismatch("fsio_ocnt_expire", "drained or removed differs");
+  return twice("fsio_ocnt_expire", fx, [&] {
+    d = fsio::ocnt_drain{};
+    ceph::buffer::list reply;
+    const int r = on_cluster_instance("fsio_ocnt_expire", cls::rgw::method::fsio_ocnt_expire, inst, ih, fx, op,
+				      [&] { return fsio::ocnt_expire(ih, expired, d); },
+				      &reply);
+    if (cl.on && r == 0 && reply.length()) {
+      if (auto ret = dec<cls_rgw_fsio_flags_ret>("fsio_ocnt_expire", reply);
+	  ret && (ret->drained != d.drained || ret->removed != d.removed)) {
+	cl.reply_mismatch("fsio_ocnt_expire", "drained or removed differs");
+      }
     }
-  }
-  return r;
+    return r;
+  });
 }
 
 int m_ocnt_forget(const std::string& inst, cls_rgw_fsio_instance_head& ih,
 		  cls_rgw_fsio_effects& fx)
 {
   cls_rgw_fsio_ocnt_op op;
-  return on_cluster_instance("fsio_ocnt_forget", cls::rgw::method::fsio_ocnt_forget, inst, ih, fx, op,
-			     [&] { return fsio::ocnt_forget(ih, fx); });
+  return twice("fsio_ocnt_forget", fx, [&] {
+    return on_cluster_instance("fsio_ocnt_forget", cls::rgw::method::fsio_ocnt_forget, inst, ih, fx, op,
+			       [&] { return fsio::ocnt_forget(ih, fx); });
+  });
 }
 
 int m_remove_version(const std::string& inst, cls_rgw_fsio_instance_head& ih,
@@ -4857,6 +4905,11 @@ TEST(FSIOModel, Explore)
   cfg.keep_tail = env_int("FSIO_MODEL_KEEP_TAIL", 0) != 0;
   cfg.sizes = env_int("FSIO_MODEL_SIZES", 0) != 0;
   cfg.lost_reply = env_int("FSIO_MODEL_LOST_REPLY", 0) != 0;
+  if (auto d = std::getenv("FSIO_MODEL_DUP")) {
+    for (auto m : ceph::split(d, ",")) {
+      cfg.dup.emplace(m);
+    }
+  }
   cfg.versioned = env_int("FSIO_MODEL_VERSIONED", 0);
   if (auto v = std::getenv("FSIO_MODEL_VSTART")) {
     cfg.vstart_null = std::string(v) == "null";
