@@ -218,7 +218,7 @@ enum Step : uint8_t { NONE, CONSTRUCT, PUBLISH_WRITE, PUBLISH_GC, DRAIN_SEND,
   V_REL_RELEASE,
   /* a sequenced call's reply lost (§3, Z22):  the resend, then the reply
    * rebuilt from the head */
-  LOST_LEAVE, LOST_JOIN };
+  LOST_LEAVE, LOST_JOIN, LOST_REBIND };
 
 /* a handle's latest sequenced call, as sent (§3, Z22):  resent with the
  * same sequence number, it models a reply lost past the PG log's dup
@@ -275,6 +275,8 @@ struct Gw {
   uint8_t lost_check = 0;        // after the work handed back:  the hint (Z22)
   uint64_t lost_nonce = 0;       // a lost fsio_join's nonce
   uint8_t did_lose_join = 0;
+  fid_t lost_to;                 // a lost fsio_rebind's target
+  uint8_t did_lose_rebind = 0;
   /* versioned */
   std::string pending;           // the instance an open in progress read
   bool pending_writer = false;
@@ -303,6 +305,7 @@ struct Gw {
     encode(did_trunc, bl);
     encode(lost_seq, bl); encode(lost_writer, bl); encode(did_lose, bl);
     encode(lost_check, bl); encode(lost_nonce, bl); encode(did_lose_join, bl);
+    encode(lost_to, bl); encode(did_lose_rebind, bl);
     encode((uint8_t)step, bl); encode(step_cs, bl); encode(step_r, bl);
     encode(step_born, bl); encode(step_drained, bl);
     encode(owe_head_hint, bl); encode(owe_ih_hint, bl);
@@ -526,7 +529,7 @@ int m_leave(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& caller,
 
 int m_rebind(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& caller,
 	     uint64_t seq, const fid_t& from, const fid_t& to,
-	     uint32_t readers)
+	     uint32_t readers, fsio::rebind_out* pout = nullptr)
 {
   cls_rgw_fsio_rebind_op op;
   op.caller = caller;
@@ -546,6 +549,9 @@ int m_rebind(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& caller,
 		ret->drained != out.drained)) {
       cl.reply_mismatch("fsio_rebind", "already_applied or drained differs");
     }
+  }
+  if (pout) {
+    *pout = out;
   }
   return r;
 }
@@ -1539,6 +1545,55 @@ void gw_actions(const World& w0, size_t gi, std::vector<Action>& acts)
 	    return std::nullopt;
 	  }});
       break;
+    case LOST_REBIND:
+      acts.push_back({fmt::format("gw{} resend fsio_rebind {} (reply lost)",
+				  glabel(g), sname(g.lost_to)),
+	  [gi](World& w) -> std::optional<std::string> {
+	    auto& g = w.gws[gi];
+	    const auto from = g.step_cs;
+	    const auto to = g.lost_to;
+	    g.step = NONE;
+	    fsio::rebind_out out;
+	    auto save = w.head;
+	    const int r = m_rebind(w.head, hd(g), g.lost_seq, from, to, 1, &out);
+	    if (r == 0 && !out.already_applied) {
+	      return fmt::format("gw{}'s resent fsio_rebind applied again",
+				 glabel(g));
+	    }
+	    if (r < 0) {
+	      w.head = save;
+	    }
+	    /* §3, Z22:  the hint after the work handed back
+	     * (presence_hints()) */
+	    g.lost_check = 1;
+	    /* §3, Z22:  the reply rebuilt from its record:  its reader moved
+	     * if its handle counts more readers on `to` than its opens there */
+	    uint32_t on_to = 0;
+	    if (auto i = w.head.opens.find(g.inc); i != w.head.opens.end()) {
+	      if (auto h = i->second.handles.find(g.handle);
+		  h != i->second.handles.end()) {
+		if (auto c = h->second.chunk_sets.find(to);
+		    c != h->second.chunk_sets.end()) {
+		  on_to = c->second.readers;
+		}
+	      }
+	    }
+	    uint32_t local = 0;
+	    for (const auto& o : g.opens) {
+	      local += !o.writer && o.cs == to;
+	    }
+	    if (on_to > local) {
+	      for (auto& o : g.opens) {
+		if (!o.writer && o.cs == from) {
+		  o.cs = to;
+		  o.storage = sname(to);
+		  break;
+		}
+	      }
+	    }
+	    return std::nullopt;
+	  }});
+      break;
     case LOST_LEAVE:
       acts.push_back({fmt::format("gw{} resend fsio_leave {} (reply lost)", glabel(g),
 				  sname(g.step_cs)),
@@ -1787,17 +1842,34 @@ void gw_actions(const World& w0, size_t gi, std::vector<Action>& acts)
 	  const auto& c = w0.head.hdr->cur_shadow;
 	  if (c && t.id == *c && t.state == state::READY) {
 	    auto to = t.id;
-	    acts.push_back({fmt::format("gw{} follow {}", glabel(g), sname(to)),
-		[gi, oi, inc, to](World& w) -> std::optional<std::string> {
+	    for (int lost = 0; lost < 2; ++lost) {
+	    if (lost && !(cfg.lost_reply && !g.did_lose_rebind)) {
+	      continue;
+	    }
+	    acts.push_back({fmt::format("gw{} follow {}{}", glabel(g), sname(to),
+					lost ? " (reply lost)" : ""),
+		[gi, oi, inc, to, lost](World& w) -> std::optional<std::string> {
 		  auto& g = w.gws[gi];
 		  g.did_follow = 1;
 		  auto& o = g.opens[oi];
 		  if (counted_rebind(w.head, g, o.cs, to, 1) == 0) {
+		    if (lost) {
+		      /* §3, Z22:  applied, its reply lost:  the gateway knows
+		       * only what it sent */
+		      g.did_lose_rebind = 1;
+		      g.resend.reset();
+		      g.step = LOST_REBIND;
+		      g.step_cs = o.cs;
+		      g.lost_to = to;
+		      g.lost_seq = g.seq;
+		      return std::nullopt;
+		    }
 		    o.cs = to;
 		    o.storage = sname(to);
 		  }
 		  return std::nullopt;
 		}});
+	    }
 	  }
 	}
       }
@@ -3808,6 +3880,9 @@ std::optional<std::string> check_state(const World& w)
   for (const auto& g : w.gws) {
     if (!g.alive || g.zombie) continue;   // a zombie's read fails:  a reopen
     for (const auto& o : g.opens) {
+      if (g.step == LOST_REBIND && !o.writer && o.cs == g.step_cs) {
+	continue;                // its rebind in flight:  reads wait for it
+      }
       if (!w.storage.count(o.storage)) {
 	return fmt::format("gw{}'s open reads {}, collected", glabel(g),
 			   o.storage);
@@ -4493,6 +4568,7 @@ TEST(FSIOModel, Explore)
       {"HINT_STALE_MERGES_NOTHING", cls_rgw_fsio_check::HINT_STALE_MERGES_NOTHING},
       {"REBASE_READS_CHUNKS", cls_rgw_fsio_check::REBASE_READS_CHUNKS},
       {"LOST_REPLY_KEEPS_HINT", cls_rgw_fsio_check::LOST_REPLY_KEEPS_HINT},
+      {"SETTLE_KEEPS_SIBLING_SEQ", cls_rgw_fsio_check::SETTLE_KEEPS_SIBLING_SEQ},
       {"W14_PUBLISHING_FREEZES_SIZE", cls_rgw_fsio_check::W14_PUBLISHING_FREEZES_SIZE},
       {"SHARED_TAIL_AFTER_LAST_READER",
        cls_rgw_fsio_check::SHARED_TAIL_AFTER_LAST_READER},
