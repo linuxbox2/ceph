@@ -4,8 +4,9 @@
 # writer;  gw1, still running, resends:  the resend reads EINVAL as done,
 # and removing its presence hint dropped the only hint leading to the
 # finalize, which an expirer crash then left unfinished.  With the
-# check, the hint stays while the head holds anything of the handle's,
-# its record or its last sequence number (design §3, Z22's paragraph).  Replayed with the check skipped, it
+# check, the hint stays while the head still counts opens of the
+# handle's that it no longer holds, or keeps its last sequence number
+# (design §3, Z22's paragraph).  Replayed with the check skipped, it
 # reproduces the violation.
 # skip: LOST_REPLY_KEEPS_HINT
 # env: FSIO_MODEL_ROLES=w+r FSIO_MODEL_S3_OPS=0 FSIO_MODEL_LOST_REPLY=1 FSIO_MODEL_RESENDS=0

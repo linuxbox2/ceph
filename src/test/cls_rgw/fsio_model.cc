@@ -218,7 +218,7 @@ enum Step : uint8_t { NONE, CONSTRUCT, PUBLISH_WRITE, PUBLISH_GC, DRAIN_SEND,
   V_REL_RELEASE,
   /* a sequenced call's reply lost (§3, Z22):  the resend, then the reply
    * rebuilt from the head */
-  LOST_LEAVE };
+  LOST_LEAVE, LOST_JOIN };
 
 /* a handle's latest sequenced call, as sent (§3, Z22):  resent with the
  * same sequence number, it models a reply lost past the PG log's dup
@@ -273,6 +273,8 @@ struct Gw {
   uint64_t lost_seq = 0;
   uint8_t lost_writer = 0, did_lose = 0;
   uint8_t lost_check = 0;        // after the work handed back:  the hint (Z22)
+  uint64_t lost_nonce = 0;       // a lost fsio_join's nonce
+  uint8_t did_lose_join = 0;
   /* versioned */
   std::string pending;           // the instance an open in progress read
   bool pending_writer = false;
@@ -300,7 +302,7 @@ struct Gw {
     encode(hwm, bl); encode(hwm_epoch, bl); encode(owe_report, bl);
     encode(did_trunc, bl);
     encode(lost_seq, bl); encode(lost_writer, bl); encode(did_lose, bl);
-    encode(lost_check, bl);
+    encode(lost_check, bl); encode(lost_nonce, bl); encode(did_lose_join, bl);
     encode((uint8_t)step, bl); encode(step_cs, bl); encode(step_r, bl);
     encode(step_born, bl); encode(step_drained, bl);
     encode(owe_head_hint, bl); encode(owe_ih_hint, bl);
@@ -1072,6 +1074,14 @@ struct World {
     return bl.to_str();
   }
 
+  /* a gateway's list of presumed-dead incarnations:  never its own, which
+   * it cannot know (a partitioned gateway does not see itself presumed
+   * dead;  one that reconnects is a new incarnation) */
+  fsio::expired_t dead_for(const Gw& g) const {
+    auto d = dead();
+    d.erase(g.inc);
+    return d;
+  }
   fsio::expired_t dead() const {
     fsio::expired_t d;
     for (auto& g : gws) {
@@ -1246,7 +1256,7 @@ void construct_abandon_actions(const Gw& g, size_t gi, uint64_t inc,
 	fsio::leave_out out;
 	cls_rgw_fsio_effects fx;
 	auto save = w.head;
-	if (counted_leave(w.head, g, g.step_cs, true, w.dead(), out, fx,
+	if (counted_leave(w.head, g, g.step_cs, true, w.dead_for(g), out, fx,
 			nullptr) < 0 || !out.abandoned) {
 	  w.head = save;                 // as first written:  no exit
 	  g.step = NONE;
@@ -1332,6 +1342,21 @@ std::optional<std::string> report_size(World& w, Gw& g, const fid_t& cs)
   }
   return std::nullopt;
 }
+
+/* §3, Z22:  a join applied and its reply lost:  the gateway keeps what it
+ * sent, to resend */
+std::optional<std::string> lose_join(Gw& g, const fsio::join_in& in)
+{
+  g.did_lose_join = 1;
+  g.resend.reset();
+  g.step = LOST_JOIN;
+  g.lost_seq = g.seq;
+  g.lost_writer = in.writer;
+  g.lost_nonce = in.nonce;
+  return std::nullopt;
+}
+
+std::string entry_tail(const World& w, const cls_rgw_fsio_chunk_set& e);
 
 void gw_actions(const World& w0, size_t gi, std::vector<Action>& acts)
 {
@@ -1442,6 +1467,78 @@ void gw_actions(const World& w0, size_t gi, std::vector<Action>& acts)
 	    return std::nullopt;
 	  }});
       break;
+    case LOST_JOIN:
+      acts.push_back({fmt::format("gw{} resend fsio_join (reply lost)", glabel(g)),
+	  [gi, inc](World& w) -> std::optional<std::string> {
+	    auto& g = w.gws[gi];
+	    g.step = NONE;
+	    fsio::join_in in{hd(g), g.lost_seq, (bool)g.lost_writer,
+			     g.lost_nonce, 10, w.dead_for(g)};
+	    fsio::join_out out;
+	    cls_rgw_fsio_effects fx;
+	    auto save = w.head;
+	    const int r = m_join(w.head, in, out, fx);
+	    if (r == 0 && !out.already_applied) {
+	      return fmt::format("gw{}'s resent fsio_join applied again",
+				 glabel(g));
+	    }
+	    if (r < 0) {
+	      w.head = save;
+	    }
+	    /* §3, Z22:  after the work it hands back, the hint stays while
+	     * the head counts opens of the handle's it no longer holds, or
+	     * keeps its last sequence number (presence_hints()) */
+	    g.lost_check = 1;
+	    /* §3, Z22:  the reply rebuilt:  the binding from its own record,
+	     * where its handle's count exceeds what its opens account for;
+	     * construct, if that chunk set is constructing and it joined as
+	     * writer */
+	    std::optional<fid_t> bound;
+	    if (auto i = w.head.opens.find(g.inc); i != w.head.opens.end()) {
+	      if (auto h = i->second.handles.find(g.handle);
+		  h != i->second.handles.end()) {
+		for (const auto& [id, c] : h->second.chunk_sets) {
+		  uint32_t local = 0;
+		  for (const auto& o : g.opens) {
+		    local += o.cs == id && o.writer == (bool)g.lost_writer;
+		  }
+		  const uint32_t n = g.lost_writer ? c.writers : c.readers;
+		  if (n > local) {
+		    bound = id;
+		  }
+		}
+	      }
+	    }
+	    if (!bound || !w.head.hdr) {
+	      return std::nullopt;     // its state went:  the open failed
+	    }
+	    const auto* e = w.head.hdr->find(*bound);
+	    if (!e) {
+	      return std::nullopt;
+	    }
+	    if (!g.lost_writer) {
+	      const auto t = entry_tail(w, *e);
+	      g.opens.push_back(LOpen{false, *bound, t});
+	      g.read_tok = t;
+	      return std::nullopt;
+	    }
+	    auto sn = sname(*bound);
+	    g.opens.push_back(LOpen{true, *bound, sn});
+	    if (cfg.sizes && e->shadow) {
+	      g.hwm = e->shadow->size_hint;
+	      g.hwm_epoch = e->shadow->trunc_epoch;
+	    }
+	    if (e->state == state::CONSTRUCTING) {
+	      /* the shadow built on what the join cloned:  its
+	       * pseudo-manifest, the head as the join saw it */
+	      w.storage.insert(sn);
+	      w.base[sn] = w.pms.count(sn) ? w.pms.at(sn) : w.head_tok();
+	      g.step = CONSTRUCT;
+	      g.step_cs = *bound;
+	    }
+	    return std::nullopt;
+	  }});
+      break;
     case LOST_LEAVE:
       acts.push_back({fmt::format("gw{} resend fsio_leave {} (reply lost)", glabel(g),
 				  sname(g.step_cs)),
@@ -1453,7 +1550,7 @@ void gw_actions(const World& w0, size_t gi, std::vector<Action>& acts)
 	    cls_rgw_fsio_effects fx;
 	    auto save = w.head;
 	    const int r = m_leave(w.head, hd(g), g.lost_seq, cs, g.lost_writer,
-				  w.dead(), out, fx, nullptr);
+				  w.dead_for(g), out, fx, nullptr);
 	    if (r == 0 && !out.already_applied) {
 	      return fmt::format("gw{}'s resent fsio_leave of {} applied again",
 				 glabel(g), sname(cs));
@@ -1522,12 +1619,16 @@ void gw_actions(const World& w0, size_t gi, std::vector<Action>& acts)
     return;
   }
 
-  if (!g.did_read && g.role != 'w') {
-    acts.push_back({fmt::format("gw{} open-read", glabel(g)),
-	[gi, inc](World& w) -> std::optional<std::string> {
+  for (int lost = 0; lost < 2 && !g.did_read && g.role != 'w'; ++lost) {
+    if (lost && !(cfg.lost_reply && !g.did_lose_join)) {
+      continue;
+    }
+    acts.push_back({fmt::format("gw{} open-read{}", glabel(g),
+				lost ? " (reply lost)" : ""),
+	[gi, inc, lost](World& w) -> std::optional<std::string> {
 	  auto& g = w.gws[gi];
 	  g.did_read = 1;
-	  fsio::join_in in{hd(g), 0, false, w.nonce_for_join(), 10, w.dead()};
+	  fsio::join_in in{hd(g), 0, false, w.nonce_for_join(), 10, w.dead_for(g)};
 	  fsio::join_out out;
 	  cls_rgw_fsio_effects fx;
 	  auto save = w.head;
@@ -1536,6 +1637,9 @@ void gw_actions(const World& w0, size_t gi, std::vector<Action>& acts)
 	    return std::nullopt;
 	  }
 	  w.took_nonce();
+	  if (lost) {
+	    return lose_join(g, in);
+	  }
 	  g.opens.push_back(LOpen{false, out.bound, w.head_tok()});
 	  g.read_tok = w.head_tok();
 	  return std::nullopt;
@@ -1550,7 +1654,7 @@ void gw_actions(const World& w0, size_t gi, std::vector<Action>& acts)
 	[gi, inc](World& w) -> std::optional<std::string> {
 	  auto& g = w.gws[gi];
 	  g.did_reopen = 1;
-	  fsio::join_in in{hd(g), 0, false, w.nonce_for_join(), 10, w.dead()};
+	  fsio::join_in in{hd(g), 0, false, w.nonce_for_join(), 10, w.dead_for(g)};
 	  fsio::join_out out;
 	  cls_rgw_fsio_effects fx;
 	  auto save = w.head;
@@ -1568,12 +1672,16 @@ void gw_actions(const World& w0, size_t gi, std::vector<Action>& acts)
 	  return std::nullopt;
 	}});
   }
-  if (!g.did_write && g.role != 'r') {
-    acts.push_back({fmt::format("gw{} open-write", glabel(g)),
-	[gi, inc](World& w) -> std::optional<std::string> {
+  for (int lost = 0; lost < 2 && !g.did_write && g.role != 'r'; ++lost) {
+    if (lost && !(cfg.lost_reply && !g.did_lose_join)) {
+      continue;
+    }
+    acts.push_back({fmt::format("gw{} open-write{}", glabel(g),
+				lost ? " (reply lost)" : ""),
+	[gi, inc, lost](World& w) -> std::optional<std::string> {
 	  auto& g = w.gws[gi];
 	  g.did_write = 1;
-	  fsio::join_in in{hd(g), 0, true, w.nonce_for_join(), 10, w.dead()};
+	  fsio::join_in in{hd(g), 0, true, w.nonce_for_join(), 10, w.dead_for(g)};
 	  fsio::join_out out;
 	  cls_rgw_fsio_effects fx;
 	  auto save = w.head;
@@ -1582,7 +1690,10 @@ void gw_actions(const World& w0, size_t gi, std::vector<Action>& acts)
 	    return std::nullopt;
 	  }
 	  w.took_nonce();
-	  apply_clones(w, fx, w.head_tok());
+	  apply_clones(w, fx, w.head_tok());   // its effects ran in the op
+	  if (lost) {
+	    return lose_join(g, in);
+	  }
 	  auto s = sname(out.bound);
 	  g.opens.push_back(LOpen{true, out.bound, s});
 	  if (cfg.sizes) {
@@ -1730,7 +1841,7 @@ void gw_actions(const World& w0, size_t gi, std::vector<Action>& acts)
 	  fsio::leave_out out;
 	  cls_rgw_fsio_effects fx;
 	  auto save = w.head;
-	  if (counted_leave(w.head, g, o.cs, o.writer, w.dead(), out, fx) < 0) {
+	  if (counted_leave(w.head, g, o.cs, o.writer, w.dead_for(g), out, fx) < 0) {
 	    w.head = save;
 	    g.release_failed = 1;         // keeps its hint (H1)
 	    return std::nullopt;
@@ -1910,7 +2021,7 @@ void gw_actions_v(const World& w0, size_t gi, std::vector<Action>& acts)
 	      return std::nullopt;           // the OLH guard:  ECANCELED
 	    }
 	    fsio::join_in in{hd(g), 0, g.pending_writer, w.nonce_for_join(), 10,
-			     w.dead(), g.pending};
+			     w.dead_for(g), g.pending};
 	    fsio::join_out out;
 	    cls_rgw_fsio_effects fx;
 	    auto save = w.head;
@@ -2133,7 +2244,7 @@ void gw_actions_v(const World& w0, size_t gi, std::vector<Action>& acts)
 	    fsio::publish_intent intent{g.pub_instance, g.pub_token,
 					w.next_epoch};
 	    auto save = w.head;
-	    if (counted_leave(w.head, g, g.step_cs, true, w.dead(), out, fx,
+	    if (counted_leave(w.head, g, g.step_cs, true, w.dead_for(g), out, fx,
 			    &intent) < 0) {
 	      w.head = save;
 	      g.release_failed = 1;         // keeps its hint (H1)
@@ -2392,7 +2503,7 @@ void gw_actions_v(const World& w0, size_t gi, std::vector<Action>& acts)
 	    fsio::leave_out out;
 	    cls_rgw_fsio_effects fx;
 	    auto save = w.head;
-	    if (counted_leave(w.head, g, o.cs, true, w.dead(), out, fx) < 0) {
+	    if (counted_leave(w.head, g, o.cs, true, w.dead_for(g), out, fx) < 0) {
 	      w.head = save;
 	      g.release_failed = 1;         // keeps its hint (H1)
 	      return std::nullopt;
@@ -2407,7 +2518,7 @@ void gw_actions_v(const World& w0, size_t gi, std::vector<Action>& acts)
 	  fsio::leave_out out;
 	  cls_rgw_fsio_effects fx;
 	  auto save = w.head;
-	  if (counted_leave(w.head, g, o.cs, false, w.dead(), out, fx) < 0) {
+	  if (counted_leave(w.head, g, o.cs, false, w.dead_for(g), out, fx) < 0) {
 	    w.head = save;
 	    g.release_failed = 1;         // keeps its hint (H1)
 	    return std::nullopt;
@@ -3549,17 +3660,35 @@ void presence_hints(const World& w0, size_t gi, std::vector<Action>& acts,
       auto v = inner(w);
       auto& g = w.gws[gi];
       /* §3, Z22:  after a lost reply and any work it handed back, the
-       * head holding anything of the handle's (its record, its last
-       * sequence number) means others are taking its state over:  the
-       * hint stays,
+       * head still counting opens of the handle's that it no longer
+       * holds, or keeping its last sequence number with none of its opens
+       * counted, means others are taking its state over:  the hint stays,
        * as a failed release's does (H1), for the expirer */
       if (g.lost_check && g.step == NONE) {
 	g.lost_check = 0;
-	if (auto i = w.head.opens.find(g.inc);
-	    i != w.head.opens.end() &&
-	    (i->second.handles.count(g.handle) ||
-	     i->second.seqs.count(g.handle)) &&
-	    !FSIO_SKIP_CHECK(LOST_REPLY_KEEPS_HINT)) {
+	bool beyond = false;
+	if (auto i = w.head.opens.find(g.inc); i != w.head.opens.end()) {
+	  if (auto h = i->second.handles.find(g.handle);
+	      h != i->second.handles.end()) {
+	    bool counted = false;
+	    for (const auto& [id, c] : h->second.chunk_sets) {
+	      uint32_t r = 0, wr = 0;
+	      for (const auto& o : g.opens) {
+		if (o.cs == id) {
+		  (o.writer ? wr : r) += 1;
+		}
+	      }
+	      beyond |= c.readers > r || c.writers > wr;
+	      counted |= c.readers > 0 || c.writers > 0;
+	    }
+	    /* an emptied record:  its last sequence number, none of its
+	     * opens counted */
+	    beyond |= !counted;
+	  } else {
+	    beyond = i->second.seqs.count(g.handle) > 0;
+	  }
+	}
+	if (beyond && !FSIO_SKIP_CHECK(LOST_REPLY_KEEPS_HINT)) {
 	  g.release_failed = 1;
 	}
       }
