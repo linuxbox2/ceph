@@ -169,18 +169,23 @@ cls_rgw_fsio_chunk_set* current_shadow(cls_rgw_fsio_hdr& hdr)
 /* removes or drains what empties (§2.2, §3.4);  the drained ids go to the
  * caller, which sends their GC entries and calls forget() */
 void settle(cls_rgw_fsio_head& h, std::vector<cls_rgw_fsio_id>& drained,
-	    cls_rgw_fsio_effects& fx, uint64_t caller = 0)
+	    cls_rgw_fsio_effects& fx, const cls_rgw_fsio_handle& caller = {})
 {
   for (auto i = h.opens.begin(); i != h.opens.end(); ) {
     auto& hs = i->second.handles;
-    /* a handle record emptied by another's call, so a presumed-dead
-     * incarnation's (expiry, a fenced finalize, an abandon, a dead
-     * publisher's completion), keeps its last_seq until grace:  its
-     * resends may still land (Z22).  Never the caller's own:  its own
-     * call emptied it, and a resend of that call finds no record (§3) */
-    const bool keep = i->first != caller &&
-      !FSIO_SKIP_CHECK(Z22_EXPIRY_KEEPS_SEQ);
     for (auto k = hs.begin(); k != hs.end(); ) {
+      /* a handle record emptied by another's call, so a presumed-dead
+       * incarnation's (expiry, a fenced finalize, an abandon, a dead
+       * publisher's completion), keeps its last_seq until grace:  its
+       * resends may still land (Z22).  Never the caller's own:  its own
+       * call emptied it, and a resend of that call finds no record (§3).
+       * Records are per handle (Z4), so a sibling handle's call is
+       * another's */
+      const bool keep =
+	!(i->first == caller.incarnation &&
+	  (k->first == caller.handle ||
+	   FSIO_SKIP_CHECK(SETTLE_KEEPS_SIBLING_SEQ))) &&
+	!FSIO_SKIP_CHECK(Z22_EXPIRY_KEEPS_SEQ);
       auto& m = k->second.chunk_sets;
       for (auto j = m.begin(); j != m.end(); ) {
 	if (j->second.readers == 0 && j->second.writers == 0) {
@@ -400,7 +405,7 @@ int join_once(cls_rgw_fsio_head& h, const join_in& in, join_out& out,
   expire_readers(h, in.expired);
   {
     std::vector<cls_rgw_fsio_id> drained;
-    settle(h, drained, fx, in.caller.incarnation);
+    settle(h, drained, fx, in.caller);
   }
   /* 3. */
   if (!h.hdr) {
@@ -748,7 +753,7 @@ int leave_once(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& caller,
 	o->chunk_sets.erase(cs);
 	out.abandoned = true;
 	std::vector<cls_rgw_fsio_id> drained;
-	settle(h, drained, fx, caller.incarnation);
+	settle(h, drained, fx, caller);
 	return 0;
       }
       /* §3.4:  the last writer freezes its shadow;  only a ready shadow
@@ -781,7 +786,7 @@ int leave_once(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& caller,
     --c.readers;
   }
   std::vector<cls_rgw_fsio_id> drained;
-  settle(h, drained, fx, caller.incarnation);
+  settle(h, drained, fx, caller);
   if (!drained.empty()) {
     out.drained = drained.front();
   }
@@ -824,7 +829,7 @@ int rebind_once(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& caller,
    * retired chunk set's drain goes to the caller */
   std::vector<cls_rgw_fsio_id> drained;
   cls_rgw_fsio_effects fx;
-  settle(h, drained, fx, caller.incarnation);
+  settle(h, drained, fx, caller);
   if (!drained.empty()) {
     out.drained = drained.front();
   }
@@ -892,7 +897,7 @@ int publish_versioned(cls_rgw_fsio_head& h, const replace_in& in,
   }
   out.keep_tail = true;
   std::vector<cls_rgw_fsio_id> drained;
-  settle(h, drained, fx, in.caller.incarnation);
+  settle(h, drained, fx, in.caller);
   if (!drained.empty()) {
     out.drained = drained.front();
   }
@@ -972,7 +977,7 @@ int replace_head(cls_rgw_fsio_head& h, const replace_in& in, replace_out& out,
     }
     out.keep_tail = true;
     std::vector<cls_rgw_fsio_id> drained;
-    settle(h, drained, fx, in.caller.incarnation);
+    settle(h, drained, fx, in.caller);
     if (!drained.empty()) {
       out.drained = drained.front();
     }
@@ -1270,7 +1275,7 @@ int expire(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& caller,
       }
     }
   }
-  settle(h, out.drained, fx, caller.incarnation);
+  settle(h, out.drained, fx, caller);
   /* §3.8, A28:  a ready shadow whose writers are all presumed dead, or a
    * publishing one whose publisher is, this call's takeover included */
   if (h.hdr) {

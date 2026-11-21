@@ -87,6 +87,7 @@ enum class cls_rgw_fsio_check : uint8_t {
   W14_PUBLISHING_FREEZES_SIZE,         // fsio_hint, fsio_truncate, §3.3
   REBASE_READS_CHUNKS,                 // the gateway's stale size report (model)
   LOST_REPLY_KEEPS_HINT,               // the gateway's lost reply (model)
+  SETTLE_KEEPS_SIBLING_SEQ,            // settle():  per handle, Z4, Z22
 };
 
 #ifdef CLS_RGW_FSIO_SKIP_CHECKS

@@ -495,6 +495,38 @@ TEST(cls_rgw_fsio, Z22_expiry_keeps_the_seq)
   z22_expiry_keeps_the_seq();
 }
 
+/* Z22, Z4:  records are per handle, so a sibling handle's call is
+ * another's:  a record it finds emptied keeps its last sequence number */
+void settle_keeps_sibling_seq()
+{
+  auto h = head("C0");
+  const cls_rgw_fsio_handle A{I1, 1}, B{I1, 2};
+  fsio::join_out out;
+  cls_rgw_fsio_effects fx;
+  const auto ja = next_seq();
+  ASSERT_EQ(0, fsio::join(h, {A, ja, false, 1, 10, {}}, out, fx));
+  const auto p = out.bound;
+  ASSERT_EQ(0, fsio::join(h, {B, next_seq(), false, 1, 10, {}}, out, fx));
+  /* emptied by another's call, not yet settled:  as a fenced finalize
+   * leaves a presumed-dead writer's record */
+  h.find(A)->chunk_sets[p].readers = 0;
+  fsio::leave_out l;
+  ASSERT_EQ(0, fsio::leave(h, B, next_seq(), p, false, {}, l, fx));
+  auto i = h.opens.find(I1);
+  ASSERT_NE(h.opens.end(), i);
+  EXPECT_FALSE(i->second.handles.count(B.handle));  // B's own:  gone
+  ASSERT_TRUE(i->second.seqs.count(A.handle));      // A's:  kept
+  EXPECT_EQ(ja, i->second.seqs.at(A.handle));
+  fsio::join_out again;
+  ASSERT_EQ(0, fsio::join(h, {A, ja, false, 1, 10, {}}, again, fx));
+  EXPECT_TRUE(again.already_applied);
+}
+
+TEST(cls_rgw_fsio, Z22_settle_keeps_a_sibling_seq)
+{
+  settle_keeps_sibling_seq();
+}
+
 using runs = std::vector<cls_rgw_fsio_run>;
 
 /* Z11:  runs that overlap or touch merge;  one far write is one more
@@ -1639,6 +1671,7 @@ TEST(cls_rgw_fsio, each_check_is_detected)
     {cls_rgw_fsio_check::Z22_COUNTED_CALL_CHECKS_SEQ,
      z22_resend_is_already_applied},
     {cls_rgw_fsio_check::Z22_EXPIRY_KEEPS_SEQ, z22_expiry_keeps_the_seq},
+    {cls_rgw_fsio_check::SETTLE_KEEPS_SIBLING_SEQ, settle_keeps_sibling_seq},
     {cls_rgw_fsio_check::Z11_EXTENT_CAPS_RUNS, z11_extent_caps_runs},
   };
   for (const auto& [check, body] : table) {
