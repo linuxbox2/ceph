@@ -1,0 +1,30 @@
+# FORGET_REPORTS_DRAIN_BY_STATE:  found 2026-11-21 by the model's
+# duplicated calls.  A copy onto itself keeps the tail, and its holder
+# waits on S1.12, which shares it;  gw1.2, the last reader, drains
+# S1.12, and its fsio_forget removes it and drains the holder, the reply
+# lost.  The resend reported only what it drained itself, which was
+# nothing:  gw1.2 never sent the holder's GC entry, and with gw1 crashed
+# no hint led the expirer to it.  With the check, fsio_forget returns
+# the drained chunk set whose `after` names the one it removes, so the
+# resend returns what the first application did (design §3.4 step 3).
+# Replayed with the check skipped, it reproduces the violation.
+# skip: FORGET_REPORTS_DRAIN_BY_STATE
+# env: FSIO_MODEL_ROLES=w+r FSIO_MODEL_S3_OPS=1 FSIO_MODEL_KEEP_TAIL=1 FSIO_MODEL_DUP=fsio_forget
+gw1 open-write
+gw1 ready S1.10
+gw1 write S1.10
+gw1 close-write S1.10
+gw1 publish-hint
+gw1 partition
+gw1 resend fsio_leave
+gw1.2 open-read
+gw1.2 resend fsio_join
+s3 copy-onto-itself
+gw1 publish S1.10
+gw1 publish-gc
+gw1.2 close-read C0
+gw1.2 drain S1.12
+gw1 crash
+expirer grace 1
+gc R1001
+# => FSIO state left at the end (1 entries, 0 incarnation records)

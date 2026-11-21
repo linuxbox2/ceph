@@ -131,6 +131,14 @@ fn quick() -> Vec<Run> {
      * off elsewhere) */
     v.push(run("quick-w+r-keep-tail", &[("FSIO_MODEL_ROLES", "w+r"), ("FSIO_MODEL_S3_OPS", "1"),
                                         ("FSIO_MODEL_KEEP_TAIL", "1"), ("FSIO_MODEL_RESENDS", "0")]));
+    /* §3:  every call that is not sequence-numbered applied twice, its
+     * first reply lost (FSIO_MODEL_DUP, off elsewhere) */
+    v.push(run("quick-v-w-dup", &[("FSIO_MODEL_VERSIONED", "1"), ("FSIO_MODEL_ROLES", "w"),
+                                  ("FSIO_MODEL_S3_OPS", "0"), ("FSIO_MODEL_RESENDS", "0"),
+                                  ("FSIO_MODEL_DUP", "all")]));
+    v.push(run("quick-w+r-keep-tail-dup", &[("FSIO_MODEL_ROLES", "w+r"), ("FSIO_MODEL_S3_OPS", "1"),
+                                            ("FSIO_MODEL_KEEP_TAIL", "1"), ("FSIO_MODEL_RESENDS", "0"),
+                                            ("FSIO_MODEL_DUP", "all")]));
     v.push(run("quick-v-w+r-reopen", &[("FSIO_MODEL_VERSIONED", "1"), ("FSIO_MODEL_ROLES", "w+r"),
                                        ("FSIO_MODEL_S3_OPS", "0"), ("FSIO_MODEL_REOPEN", "1"),
                                        ("FSIO_MODEL_RESENDS", "0"), ("FSIO_MODEL_ZOMBIES", "0"),
@@ -306,6 +314,11 @@ fn skip_table() -> Vec<Check> {
         ("FINALIZE_RESEND_RETURNS_TO", ver,
          &[("FSIO_MODEL_ROLES", "w"), ("FSIO_MODEL_S3_OPS", "0"),
            ("FSIO_MODEL_DUP", "fsio_fenced_finalize")], true),
+        /* §3.4:  fsio_forget's resend not reporting the drain its first
+         * application started (kept as a vector) */
+        ("FORGET_REPORTS_DRAIN_BY_STATE", unv,
+         &[("FSIO_MODEL_ROLES", "w+r"), ("FSIO_MODEL_KEEP_TAIL", "1"),
+           ("FSIO_MODEL_DUP", "fsio_forget")], true),
         /* §3, Z22:  a lost reply's resend dropping a hint a takeover
          * needs (kept as a vector) */
         ("LOST_REPLY_KEEPS_HINT", unv,

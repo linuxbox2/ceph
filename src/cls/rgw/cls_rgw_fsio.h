@@ -90,6 +90,7 @@ enum class cls_rgw_fsio_check : uint8_t {
   SETTLE_KEEPS_SIBLING_SEQ,            // settle():  per handle, Z4, Z22
   LOST_TRUNCATE_KEEPS_EPOCH,           // the gateway's lost truncate (model)
   FINALIZE_RESEND_RETURNS_TO,          // fsio_fenced_finalize, §3.7
+  FORGET_REPORTS_DRAIN_BY_STATE,       // fsio_forget, §3.4
 };
 
 #ifdef CLS_RGW_FSIO_SKIP_CHECKS

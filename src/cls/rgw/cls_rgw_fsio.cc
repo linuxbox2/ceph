@@ -1100,8 +1100,25 @@ int forget(cls_rgw_fsio_head& h, const cls_rgw_fsio_id& cs,
 	  v.end());
   std::vector<cls_rgw_fsio_id> drained;
   settle(h, drained, fx);
-  if (out && !drained.empty()) {
-    *out = drained.front();
+  if (!out) {
+    return 0;
+  }
+  if (FSIO_SKIP_CHECK(FORGET_REPORTS_DRAIN_BY_STATE)) {
+    if (!drained.empty()) {
+      *out = drained.front();
+    }
+    return 0;
+  }
+  /* §3.4:  the drained chunk set that waited on this one, whichever
+   * application drained it, so a resend returns what the first did */
+  if (h.hdr) {
+    for (const auto& e : h.hdr->chunk_sets) {
+      if (e.drained &&
+	  std::find(e.after.begin(), e.after.end(), cs) != e.after.end()) {
+	*out = e.id;
+	break;
+      }
+    }
   }
   return 0;
 }
