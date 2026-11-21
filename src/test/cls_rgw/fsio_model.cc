@@ -218,12 +218,12 @@ enum Step : uint8_t { NONE, CONSTRUCT, PUBLISH_WRITE, PUBLISH_GC, DRAIN_SEND,
   V_REL_RELEASE,
   /* a sequenced call's reply lost (§3, Z22):  the resend, then the reply
    * rebuilt from the head */
-  LOST_LEAVE, LOST_JOIN, LOST_REBIND };
+  LOST_LEAVE, LOST_JOIN, LOST_REBIND, LOST_TRUNC };
 
 /* a handle's latest sequenced call, as sent (§3, Z22):  resent with the
  * same sequence number, it models a reply lost past the PG log's dup
  * window and the op run again */
-enum class Counted : uint8_t { JOIN, LEAVE, REBIND };
+enum class Counted : uint8_t { JOIN, LEAVE, REBIND, TRUNCATE };
 struct Resend {
   Counted kind = Counted::JOIN;
   uint64_t seq = 0;
@@ -231,13 +231,14 @@ struct Resend {
   uint64_t nonce = 0;            // join
   std::set<uint64_t> expired;    // fsio_join, fsio_leave
   std::string instance;          // join:  versioned
-  fid_t cs, to;                  // leave:  cs;  rebind:  cs to `to`
+  fid_t cs, to;                  // leave, truncate:  cs;  rebind:  cs to `to`
+  uint64_t size = 0;             // truncate
   std::optional<fsio::publish_intent> intent;   // leave
   void encode(ceph::buffer::list& bl) const {
     using ceph::encode;
     encode((uint8_t)kind, bl); encode(writer, bl);   // seq:  the handle's
     encode(nonce, bl); encode(expired, bl); encode(instance, bl);
-    encode(cs, bl); encode(to, bl);
+    encode(cs, bl); encode(to, bl); encode(size, bl);
     encode(intent.has_value(), bl);
     if (intent) {
       encode(intent->instance, bl); encode(intent->token, bl);
@@ -276,7 +277,7 @@ struct Gw {
   uint64_t lost_nonce = 0;       // a lost fsio_join's nonce
   uint8_t did_lose_join = 0;
   fid_t lost_to;                 // a lost fsio_rebind's target
-  uint8_t did_lose_rebind = 0;
+  uint8_t did_lose_rebind = 0, did_lose_trunc = 0;
   /* versioned */
   std::string pending;           // the instance an open in progress read
   bool pending_writer = false;
@@ -305,7 +306,7 @@ struct Gw {
     encode(did_trunc, bl);
     encode(lost_seq, bl); encode(lost_writer, bl); encode(did_lose, bl);
     encode(lost_check, bl); encode(lost_nonce, bl); encode(did_lose_join, bl);
-    encode(lost_to, bl); encode(did_lose_rebind, bl);
+    encode(lost_to, bl); encode(did_lose_rebind, bl); encode(did_lose_trunc, bl);
     encode((uint8_t)step, bl); encode(step_cs, bl); encode(step_r, bl);
     encode(step_born, bl); encode(step_drained, bl);
     encode(owe_head_hint, bl); encode(owe_ih_hint, bl);
@@ -1594,6 +1595,36 @@ void gw_actions(const World& w0, size_t gi, std::vector<Action>& acts)
 	    return std::nullopt;
 	  }});
       break;
+    case LOST_TRUNC:
+      acts.push_back({fmt::format("gw{} resend fsio_truncate {} (reply lost)",
+				  glabel(g), sname(g.step_cs)),
+	  [gi](World& w) -> std::optional<std::string> {
+	    auto& g = w.gws[gi];
+	    const auto cs = g.step_cs;
+	    g.step = NONE;
+	    fsio::truncate_out out;
+	    auto save = w.head;
+	    const int r = m_truncate(w.head, hd(g), g.lost_seq, cs,
+				     g.lost_to.counter, out);
+	    if (r == 0 && !out.already_applied) {
+	      return fmt::format("gw{}'s resent fsio_truncate applied again",
+				 glabel(g));
+	    }
+	    if (r < 0) {
+	      w.head = save;
+	    }
+	    if (FSIO_SKIP_CHECK(LOST_TRUNCATE_KEEPS_EPOCH)) {
+	      /* the re-read:  the head's current epoch, maybe a later
+	       * truncate's by another gateway */
+	      const auto* e = w.head.hdr ? w.head.hdr->find(cs) : nullptr;
+	      if (e && e->shadow) {
+		g.hwm_epoch = e->shadow->trunc_epoch;
+	      }
+	    }
+	    g.lost_check = 1;         // the hint (presence_hints())
+	    return std::nullopt;
+	  }});
+      break;
     case LOST_LEAVE:
       acts.push_back({fmt::format("gw{} resend fsio_leave {} (reply lost)", glabel(g),
 				  sname(g.step_cs)),
@@ -1810,16 +1841,24 @@ void gw_actions(const World& w0, size_t gi, std::vector<Action>& acts)
 	    return report_size(w, g, g.opens[oi].cs);
 	  }});
     }
-    if (cfg.sizes && o.writer && !g.did_trunc) {
-      acts.push_back({fmt::format("gw{} truncate {}", glabel(g), o.storage),
-	  [gi, oi](World& w) -> std::optional<std::string> {
+    for (int lost = 0; lost < 2 && cfg.sizes && o.writer && !g.did_trunc;
+	 ++lost) {
+      if (lost && !(cfg.lost_reply && !g.did_lose_trunc)) {
+	continue;
+      }
+      acts.push_back({fmt::format("gw{} truncate {}{}", glabel(g), o.storage,
+				  lost ? " (reply lost)" : ""),
+	  [gi, oi, lost](World& w) -> std::optional<std::string> {
 	    auto& g = w.gws[gi];
 	    g.did_trunc = 1;
 	    auto& o = g.opens[oi];
 	    auto before = w.head;
 	    const auto seq = g.seq + 1;
+	    /* each writer truncates to its own size, so a later truncate's
+	     * epoch is not a smaller one's by accident */
+	    const uint64_t size = 5 - 2 * std::min<size_t>(gi, 2);
 	    fsio::truncate_out out;
-	    const int r = m_truncate(w.head, hd(g), seq, o.cs, 5, out);
+	    const int r = m_truncate(w.head, hd(g), seq, o.cs, size, out);
 	    if (auto v = frozen_check(before, w.head, o.cs, "fsio_truncate")) {
 	      return v;
 	    }
@@ -1827,11 +1866,31 @@ void gw_actions(const World& w0, size_t gi, std::vector<Action>& acts)
 	      return std::nullopt;           // publishing (W14):  fails
 	    }
 	    g.seq = seq;
-	    w.trunc_size[o.storage] = 5;
+	    w.trunc_size[o.storage] = size;
 	    w.ep_writes[o.storage].clear();
-	    g.hwm = 5;
+	    g.hwm = size;
+	    g.lost_to = fid_t{size, 0};        // the size, for its resend
+	    if (lost) {
+	      /* §3.3:  applied, its reply lost:  the gateway keeps the epoch
+	       * it knew and owes a report, which is stale and rebases from
+	       * the chunks */
+	      g.did_lose_trunc = 1;
+	      g.resend.reset();
+	      g.step = LOST_TRUNC;
+	      g.step_cs = o.cs;
+	      g.lost_seq = seq;
+	      g.owe_report = 1;
+	      return std::nullopt;
+	    }
 	    g.hwm_epoch = out.trunc_epoch;
 	    g.owe_report = 0;
+	    g.resend.reset();
+	    if (g.resent < cfg.resends) {
+	      Resend rs{Counted::TRUNCATE, seq};
+	      rs.cs = o.cs;
+	      rs.size = size;
+	      g.resend = rs;
+	    }
 	    return std::nullopt;
 	  }});
     }
@@ -3667,7 +3726,8 @@ void resend_actions(const World& w0, size_t gi, std::vector<Action>& acts)
       (g.zombie && w0.graced.count(g.inc))) {
     return;
   }
-  static const char* names[] = {"fsio_join", "fsio_leave", "fsio_rebind"};
+  static const char* names[] = {"fsio_join", "fsio_leave", "fsio_rebind",
+				"fsio_truncate"};
   acts.push_back({fmt::format("gw{} resend {}", glabel(g),
 			      names[(int)g.resend->kind]),
       [gi](World& w) -> std::optional<std::string> {
@@ -3702,6 +3762,11 @@ void resend_actions(const World& w0, size_t gi, std::vector<Action>& acts)
 	case Counted::REBIND:
 	  ret = m_rebind(w.head, hd(g), r.seq, r.cs, r.to, 1);
 	  break;
+	case Counted::TRUNCATE: {
+	  fsio::truncate_out out;
+	  ret = m_truncate(w.head, hd(g), r.seq, r.cs, r.size, out);
+	  break;
+	}
 	}
 	if (ret < 0) {
 	  w.head = save;
@@ -4569,6 +4634,7 @@ TEST(FSIOModel, Explore)
       {"REBASE_READS_CHUNKS", cls_rgw_fsio_check::REBASE_READS_CHUNKS},
       {"LOST_REPLY_KEEPS_HINT", cls_rgw_fsio_check::LOST_REPLY_KEEPS_HINT},
       {"SETTLE_KEEPS_SIBLING_SEQ", cls_rgw_fsio_check::SETTLE_KEEPS_SIBLING_SEQ},
+      {"LOST_TRUNCATE_KEEPS_EPOCH", cls_rgw_fsio_check::LOST_TRUNCATE_KEEPS_EPOCH},
       {"W14_PUBLISHING_FREEZES_SIZE", cls_rgw_fsio_check::W14_PUBLISHING_FREEZES_SIZE},
       {"SHARED_TAIL_AFTER_LAST_READER",
        cls_rgw_fsio_check::SHARED_TAIL_AFTER_LAST_READER},

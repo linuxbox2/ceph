@@ -119,6 +119,10 @@ fn quick() -> Vec<Run> {
     v.push(run("quick-wr-lost", &[("FSIO_MODEL_ROLES", "wr"), ("FSIO_MODEL_S3_OPS", "0"),
                                   ("FSIO_MODEL_LOST_REPLY", "1"), ("FSIO_MODEL_RESENDS", "0")]));
     /* §3.3:  size reports and a truncate (FSIO_MODEL_SIZES, off elsewhere) */
+    v.push(run("quick-w+w-sizes-lost", &[("FSIO_MODEL_ROLES", "w+w"), ("FSIO_MODEL_S3_OPS", "0"),
+                                         ("FSIO_MODEL_SIZES", "1"), ("FSIO_MODEL_LOST_REPLY", "1"),
+                                         ("FSIO_MODEL_RESENDS", "0"), ("FSIO_MODEL_ZOMBIES", "0"),
+                                         ("FSIO_MODEL_EXPIRER_CRASHES", "0")]));
     v.push(run("quick-w+w-sizes", &[("FSIO_MODEL_ROLES", "w+w"), ("FSIO_MODEL_S3_OPS", "0"),
                                     ("FSIO_MODEL_SIZES", "1"), ("FSIO_MODEL_RESENDS", "0"),
                                     ("FSIO_MODEL_ZOMBIES", "0"),
@@ -291,6 +295,12 @@ fn skip_table() -> Vec<Check> {
         /* the model's expirer clears only a dead constructor's shadow;  the
          * unit test detects it */
         ("A29_CLEAR_RECHECKS_CONSTRUCTOR", unv, NARROW, false),
+        /* §3.3:  a lost truncate reply's epoch re-read from the head
+         * (kept as a vector) */
+        ("LOST_TRUNCATE_KEEPS_EPOCH", unv,
+         &[("FSIO_MODEL_ROLES", "w+w"), ("FSIO_MODEL_S3_OPS", "0"), ("FSIO_MODEL_SIZES", "1"),
+           ("FSIO_MODEL_LOST_REPLY", "1"), ("FSIO_MODEL_RESENDS", "0"),
+           ("FSIO_MODEL_ZOMBIES", "0"), ("FSIO_MODEL_EXPIRER_CRASHES", "0")], true),
         /* §3, Z22:  a lost reply's resend dropping a hint a takeover
          * needs (kept as a vector) */
         ("LOST_REPLY_KEEPS_HINT", unv,

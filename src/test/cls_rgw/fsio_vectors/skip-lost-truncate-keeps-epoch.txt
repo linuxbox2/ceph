@@ -1,0 +1,17 @@
+# LOST_TRUNCATE_KEEPS_EPOCH:  found 2026-11-20 by the model's lost
+# replies.  gw1 truncates to 5 and loses the reply;  gw1.2 truncates to
+# 3, a later epoch;  gw1 resends, and re-reading the head's current
+# epoch takes gw1.2's, so gw1's report of 5 merges into an epoch whose
+# truncate set 3.  With the check, gw1 keeps the epoch it knew, its
+# report is stale, and the rebase reads the chunks (design §3.3).
+# Replayed with the check skipped, it reproduces the violation.
+# skip: LOST_TRUNCATE_KEEPS_EPOCH
+# env: FSIO_MODEL_ROLES=w+w FSIO_MODEL_S3_OPS=0 FSIO_MODEL_SIZES=1 FSIO_MODEL_LOST_REPLY=1 FSIO_MODEL_RESENDS=0 FSIO_MODEL_ZOMBIES=0 FSIO_MODEL_EXPIRER_CRASHES=0
+gw1 open-write
+gw1 ready S1.10
+gw1 truncate S1.10 (reply lost)
+gw1.2 open-write
+gw1.2 truncate S1.10
+gw1 resend fsio_truncate S1.10 (reply lost)
+gw1 report S1.10
+# => S1.10's hint 5 exceeds what its truncate epoch 2 holds, 3
