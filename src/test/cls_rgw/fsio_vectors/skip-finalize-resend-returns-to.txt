@@ -1,0 +1,50 @@
+# FINALIZE_RESEND_RETURNS_TO:  found 2026-11-21 by the model's duplicated
+# calls.  gw1 dies inside a versioned publish;  the expirer aborts its
+# claim, creates placeholder I4 and calls fsio_fenced_finalize, which
+# applies, recording `to` with I4's claim, and its reply is lost.  The
+# resend's `aborted` no longer names `to`'s recorded claim, so it
+# returned ERR_FSIO_CONFLICT;  the expirer deleted I4, and its next pass
+# read the absent instance as written and removed and published `to`
+# without recloning:  gw1's acknowledged write lost.  With the check, an
+# intent equal to `to`'s recorded claim is a resend and returns `to`
+# (design §3.7 step 1).  Replayed with the check skipped, it reproduces
+# the violation.
+# skip: FINALIZE_RESEND_RETURNS_TO
+# env: FSIO_MODEL_VERSIONED=1 FSIO_MODEL_ROLES=w FSIO_MODEL_S3_OPS=0 FSIO_MODEL_DUP=fsio_fenced_finalize
+gw1 read-olh-write
+gw1 count I1
+gw1 open-write I1
+gw1 ready S1.10
+gw1 write S1.10
+gw1 close-write S1.10
+gw1 publish-hint
+gw1 placeholder I2
+gw1 close-leave S1.10
+gw1 publish-read S1.10
+gw1 release-abort I2
+gw1 publish-release S1.10
+gw1 unplace-aborted I2
+gw1 publish-hint
+gw1 placeholder I3
+gw1 close-leave S1.10
+gw1 publish-read S1.10
+gw1 crash
+expirer grace 1
+expirer ocnt I1 for 1
+expirer hint I3 for 1
+expirer abort I3
+expirer decide-finalize S1.10
+expirer crash
+expirer grace 100
+expirer hint I3 for 1
+expirer decide-finalize S1.10
+expirer publish-hint for S1.10
+expirer placeholder I4
+expirer fenced-finalize S1.10
+expirer hint I3 for 1
+expirer resume-finalize S1.10
+expirer publish S1.12
+expirer expire
+expirer drop-hint 1
+gc S1.10
+# => 1 acknowledged writes to S1.10 never published

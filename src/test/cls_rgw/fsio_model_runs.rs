@@ -301,6 +301,11 @@ fn skip_table() -> Vec<Check> {
          &[("FSIO_MODEL_ROLES", "w+w"), ("FSIO_MODEL_S3_OPS", "0"), ("FSIO_MODEL_SIZES", "1"),
            ("FSIO_MODEL_LOST_REPLY", "1"), ("FSIO_MODEL_RESENDS", "0"),
            ("FSIO_MODEL_ZOMBIES", "0"), ("FSIO_MODEL_EXPIRER_CRASHES", "0")], true),
+        /* §3.7:  a versioned fenced finalize's resend returning a
+         * conflict, its placeholder then deleted (kept as a vector) */
+        ("FINALIZE_RESEND_RETURNS_TO", ver,
+         &[("FSIO_MODEL_ROLES", "w"), ("FSIO_MODEL_S3_OPS", "0"),
+           ("FSIO_MODEL_DUP", "fsio_fenced_finalize")], true),
         /* §3, Z22:  a lost reply's resend dropping a hint a takeover
          * needs (kept as a vector) */
         ("LOST_REPLY_KEEPS_HINT", unv,

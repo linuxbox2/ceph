@@ -1121,6 +1121,14 @@ int fenced_finalize(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& finalizer,
       return 0;
     }
     auto* t = hdr.find(ff->to);
+    /* §3.7:  an intent equal to `to`'s recorded claim is a resend of the
+     * call that recorded it */
+    if (intent && t->publishing->instance == intent->instance &&
+	t->publishing->token == intent->token &&
+	!FSIO_SKIP_CHECK(FINALIZE_RESEND_RETURNS_TO)) {
+      to = ff->to;
+      return 0;
+    }
     const auto prev = t->publishing->publisher;
     if (prev != finalizer && !expired.count(prev.incarnation)) {
       return -CLS_RGW_ERR_FSIO_BUSY;    // a live finalizer
