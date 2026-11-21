@@ -3957,6 +3957,64 @@ std::optional<std::string> check_state(const World& w)
   if (w.head_real() && !w.storage.count(w.head_tok())) {
     return fmt::format("published content {} collected", w.head_tok());
   }
+  /* §4.3, the presence hint over-approximates, on the head too:  every
+   * handle with FSIO state there, an open counted or its last sequence
+   * number kept, has its presence hint on the head */
+  for (const auto& [inc, rec] : w.head.opens) {
+    std::set<uint64_t> handles;
+    for (const auto& [k, ho] : rec.handles) {
+      handles.insert(k);
+    }
+    for (const auto& [k, seq] : rec.seqs) {
+      handles.insert(k);
+    }
+    for (auto k : handles) {
+      if (!w.hints.count(presence_head(cls_rgw_fsio_handle{inc, k}))) {
+	return fmt::format("the head holds {}.{}'s state with no presence "
+			   "hint", inc, k);
+      }
+    }
+  }
+  /* §2.2, §3.4:  a chunk-set entry's storage stands until the entry is
+   * drained, its GC entry sent;  a constructing shadow is collected
+   * before it is cleared (§3.8), and a fenced finalize's to before its
+   * reclone holds none yet */
+  if (w.head.hdr) {
+    const auto& hdr = *w.head.hdr;
+    for (const auto& e : hdr.chunk_sets) {
+      if (e.drained || e.state == state::CONSTRUCTING) {
+	continue;
+      }
+      std::vector<std::string> need;
+      if (e.manifest_at == at::SHADOW) {
+	bool to = false;
+	for (const auto& ff : hdr.fenced_finalizes) {
+	  to |= ff.to == e.id;
+	}
+	/* a versioned publish past its instance write:  the chunks are the
+	 * version's tail, the version's to keep or remove (§2.5, §4.2),
+	 * whatever became of the version since */
+	const auto pub = w.published.find(sname(e.id));
+	const bool written = pub != w.published.end() && pub->second > 0;
+	if (!to && !written) {
+	  need.push_back(sname(e.id));
+	}
+      } else if (e.manifest_at == at::CLONE && e.clone) {
+	const auto rn = rname(*e.clone);
+	need.push_back(rn);
+	if (auto r = w.records.find(rn); r != w.records.end() &&
+	    !r->second.empty()) {
+	  need.push_back(r->second);
+	}
+      }
+      for (const auto& n : need) {
+	if (!w.storage.count(n)) {
+	  return fmt::format("{}'s storage {} collected while its entry "
+			     "stands", sname(e.id), n);
+	}
+      }
+    }
+  }
   for (const auto& [i, v] : w.versions) {
     if (v.ih.exists && !v.ih.id_tag.empty() && !w.storage.count(v.tail)) {
       return fmt::format("live version {}'s tail {} collected", i, v.tail);
