@@ -262,6 +262,10 @@ struct Gw {
   uint8_t owe_head_hint = 0;     // PRESENCE_HINT_BEFORE_JOIN skipped:  to add
   uint8_t release_failed = 0;    // a release call failed:  keeps its hint (H1)
   std::string owe_ih_hint;       // PRESENCE_HINT_BEFORE_OCNT skipped:  to add
+  /* §3.3, FSIO_MODEL_SIZES:  a writer's local high-water mark, the
+   * truncate epoch it has seen, whether it owes a report */
+  uint64_t hwm = 0, hwm_epoch = 0;
+  uint8_t owe_report = 0, did_trunc = 0;
   /* versioned */
   std::string pending;           // the instance an open in progress read
   bool pending_writer = false;
@@ -286,6 +290,8 @@ struct Gw {
     encode(did_read, bl); encode(did_write, bl); encode(did_io, bl);
     encode(did_follow, bl); encode(did_crash, bl); encode(zombie, bl);
     encode(did_reopen, bl); encode(read_tok, bl);
+    encode(hwm, bl); encode(hwm_epoch, bl); encode(owe_report, bl);
+    encode(did_trunc, bl);
     encode((uint8_t)step, bl); encode(step_cs, bl); encode(step_r, bl);
     encode(step_born, bl); encode(step_drained, bl);
     encode(owe_head_hint, bl); encode(owe_ih_hint, bl);
@@ -323,6 +329,7 @@ struct Config {
   int resends = 1;               // FSIO_MODEL_RESENDS:  per handle (Z22)
   bool reopen = false;           // FSIO_MODEL_REOPEN:  a second read open (W12)
   bool keep_tail = false;        // FSIO_MODEL_KEEP_TAIL:  a copy onto itself (§3.6)
+  bool sizes = false;            // FSIO_MODEL_SIZES:  the size hint (§3.3)
 };
 
 /* versioned:  one instance head and what it holds */
@@ -573,6 +580,61 @@ int m_forget(cls_rgw_fsio_head& h, const fid_t& cs, cls_rgw_fsio_effects& fx,
     *drained = d;
   }
   return r;
+}
+
+/* §3.3:  a writer's size report, and ftruncate()'s call */
+int m_hint_size(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& caller,
+		const fid_t& cs, uint64_t epoch, uint64_t size,
+		fsio::hint_out& out)
+{
+  cls_rgw_fsio_hint_size_op op;
+  op.caller = caller;
+  op.cs = cs;
+  op.trunc_epoch = epoch;
+  op.size = size;
+  cls_rgw_fsio_effects fx;
+  ceph::buffer::list reply;
+  const int r = on_cluster_head("fsio_hint", cls::rgw::method::fsio_hint, h, fx, op, [&] {
+      return fsio::hint(h, caller, cs, epoch, size, {}, out);
+    }, &reply);
+  if (cl.on && r == 0 && reply.length()) {
+    if (auto ret = dec<cls_rgw_fsio_hint_size_ret>("fsio_hint", reply);
+	ret && (ret->stale != out.stale || ret->trunc_epoch != out.trunc_epoch ||
+		ret->size != out.size)) {
+      cl.reply_mismatch("fsio_hint", "stale, trunc_epoch or size differs");
+    }
+  }
+  return r;
+}
+
+int m_truncate(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& caller,
+	       uint64_t seq, const fid_t& cs, uint64_t size,
+	       fsio::truncate_out& out)
+{
+  cls_rgw_fsio_truncate_op op;
+  op.caller = caller;
+  op.seq = seq;
+  op.cs = cs;
+  op.size = size;
+  cls_rgw_fsio_effects fx;
+  return on_cluster_head("fsio_truncate", cls::rgw::method::fsio_truncate, h, fx, op, [&] {
+      return fsio::truncate(h, caller, seq, cs, size, {}, out);
+    });
+}
+
+/* §3.3, W14:  a call on a publishing shadow changes no size */
+std::optional<std::string> frozen_check(const cls_rgw_fsio_head& before,
+					const cls_rgw_fsio_head& after,
+					const fid_t& cs, const char* who)
+{
+  const auto* b = before.hdr ? before.hdr->find(cs) : nullptr;
+  const auto* a = after.hdr ? after.hdr->find(cs) : nullptr;
+  if (b && a && b->state == state::PUBLISHING && b->shadow && a->shadow &&
+      (a->shadow->size_hint != b->shadow->size_hint ||
+       a->shadow->trunc_epoch != b->shadow->trunc_epoch)) {
+    return fmt::format("{} changed publishing {}'s size", who, sname(cs));
+  }
+  return std::nullopt;
 }
 
 int m_drop_seqs(cls_rgw_fsio_head& h, uint64_t incarnation,
@@ -919,6 +981,10 @@ struct World {
    * (§2.5, Y6).  What a reader sees compares data;  what must stay alive
    * compares storage */
   std::map<std::string, std::string> same_data;
+  /* §3.3:  per shadow, the size its last truncate set, and each writer's
+   * writes in its current truncate epoch (handle index -> end offset) */
+  std::map<std::string, uint64_t> trunc_size;
+  std::map<std::string, std::map<size_t, uint64_t>> ep_writes;
   std::string data(const std::string& s) const {
     auto i = same_data.find(s);
     return i == same_data.end() ? s : i->second;
@@ -978,6 +1044,7 @@ struct World {
     encode(ex_from, bl); encode(ex_inc, bl); encode(ex_crashes, bl);
     encode(acked, bl); encode(base, bl); encode(recloned, bl);
     encode(same_data, bl);
+    encode(trunc_size, bl); encode(ep_writes, bl);
     encode(published, bl);
     encode(next_c, bl); encode(next_r, bl); encode(next_tag, bl);
     encode(next_nonce, bl);
@@ -1223,6 +1290,39 @@ void fail_actions(const Gw& g, size_t gi, std::vector<Action>& acts)
   }
 }
 
+/* the writer's report, rebasing on a stale reply (§3.3):  from the
+ * current epoch and the size returned */
+std::optional<std::string> report_size(World& w, Gw& g, const fid_t& cs)
+{
+  auto before = w.head;
+  fsio::hint_out out;
+  if (m_hint_size(w.head, hd(g), cs, g.hwm_epoch, g.hwm, out) < 0) {
+    return std::nullopt;
+  }
+  if (auto v = frozen_check(before, w.head, cs, "fsio_hint")) {
+    return v;
+  }
+  if (out.stale) {
+    /* §2.7:  the rebase reads the chunk at its high-water mark, so a
+     * write that survived the truncate stays;  the model's file is one
+     * chunk, which ends at the truncate's size or the epoch's writes */
+    const auto s = sname(cs);
+    uint64_t end = w.trunc_size.count(s) ? w.trunc_size.at(s) : 0;
+    if (auto i = w.ep_writes.find(s); i != w.ep_writes.end()) {
+      for (const auto& [k, e] : i->second) {
+	end = std::max(end, e);
+      }
+    }
+    g.hwm_epoch = out.trunc_epoch;
+    g.hwm = FSIO_SKIP_CHECK(REBASE_READS_CHUNKS) ? out.size :
+      std::max(out.size, end);
+    g.owe_report = 1;                // reports again
+  } else {
+    g.owe_report = 0;
+  }
+  return std::nullopt;
+}
+
 void gw_actions(const World& w0, size_t gi, std::vector<Action>& acts)
 {
   const auto& g = w0.gws[gi];
@@ -1427,6 +1527,10 @@ void gw_actions(const World& w0, size_t gi, std::vector<Action>& acts)
 	  apply_clones(w, fx, w.head_tok());
 	  auto s = sname(out.bound);
 	  g.opens.push_back(LOpen{true, out.bound, s});
+	  if (cfg.sizes) {
+	    g.hwm = out.size_hint;
+	    g.hwm_epoch = out.trunc_epoch;
+	  }
 	  if (out.construct) {
 	    w.storage.insert(s);
 	    w.base[s] = w.head_tok();
@@ -1463,6 +1567,47 @@ void gw_actions(const World& w0, size_t gi, std::vector<Action>& acts)
 	      return fmt::format("write into published {}", o.storage);
 	    }
 	    ++w.acked[o.storage];
+	    if (cfg.sizes) {
+	      /* §3.3:  writer k extends the file to 10k, in the shadow's
+	       * current truncate epoch, whatever epoch it has seen */
+	      const uint64_t end = 10 * (gi + 1);
+	      g.hwm = std::max(g.hwm, end);
+	      auto& ew = w.ep_writes[o.storage][gi];
+	      ew = std::max(ew, end);
+	      g.owe_report = 1;
+	    }
+	    return std::nullopt;
+	  }});
+    }
+    if (cfg.sizes && o.writer && g.owe_report) {
+      acts.push_back({fmt::format("gw{} report {}", glabel(g), o.storage),
+	  [gi, oi](World& w) -> std::optional<std::string> {
+	    auto& g = w.gws[gi];
+	    return report_size(w, g, g.opens[oi].cs);
+	  }});
+    }
+    if (cfg.sizes && o.writer && !g.did_trunc) {
+      acts.push_back({fmt::format("gw{} truncate {}", glabel(g), o.storage),
+	  [gi, oi](World& w) -> std::optional<std::string> {
+	    auto& g = w.gws[gi];
+	    g.did_trunc = 1;
+	    auto& o = g.opens[oi];
+	    auto before = w.head;
+	    const auto seq = g.seq + 1;
+	    fsio::truncate_out out;
+	    const int r = m_truncate(w.head, hd(g), seq, o.cs, 5, out);
+	    if (auto v = frozen_check(before, w.head, o.cs, "fsio_truncate")) {
+	      return v;
+	    }
+	    if (r < 0) {
+	      return std::nullopt;           // publishing (W14):  fails
+	    }
+	    g.seq = seq;
+	    w.trunc_size[o.storage] = 5;
+	    w.ep_writes[o.storage].clear();
+	    g.hwm = 5;
+	    g.hwm_epoch = out.trunc_epoch;
+	    g.owe_report = 0;
 	    return std::nullopt;
 	  }});
     }
@@ -1493,6 +1638,31 @@ void gw_actions(const World& w0, size_t gi, std::vector<Action>& acts)
 	[gi, oi, inc](World& w) -> std::optional<std::string> {
 	  auto& g = w.gws[gi];
 	  auto o = g.opens[oi];
+	  if (cfg.sizes && o.writer) {
+	    /* end_write():  the writer reports, rebasing once if stale;  then
+	     * the hint covers its writes in the current epoch (§2.7,
+	     * close-to-open) */
+	    for (int k = 0; k < 2 && g.owe_report; ++k) {
+	      if (auto v = report_size(w, g, o.cs)) {
+		return v;
+	      }
+	    }
+	    /* only while it is still a writer of the shadow:  a fenced
+	     * finalize that took a presumed-dead writer's shadow published
+	     * its writes, or fenced them */
+	    const auto* e = w.head.hdr ? w.head.hdr->find(o.cs) : nullptr;
+	    const auto* oc = w.head.find(hd(g));
+	    const bool writer = oc && oc->chunk_sets.count(o.cs) &&
+	      oc->chunk_sets.at(o.cs).writers > 0;
+	    auto ew = w.ep_writes[o.storage].find(gi);
+	    if (writer && e && e->shadow && e->state != state::PUBLISHING &&
+		ew != w.ep_writes[o.storage].end() &&
+		e->shadow->size_hint < ew->second) {
+	      return fmt::format("gw{} closes {}, its hint {} short of its "
+				 "write to {}", glabel(g), o.storage,
+				 e->shadow->size_hint, ew->second);
+	    }
+	  }
 	  g.opens.erase(g.opens.begin() + oi);
 	  fsio::leave_out out;
 	  cls_rgw_fsio_effects fx;
@@ -3395,6 +3565,27 @@ void gc_actions(const World& w0, std::vector<Action>& acts)
 
 std::optional<std::string> check_state(const World& w)
 {
+  /* §3.3:  no stale report raises a hint past what the current truncate
+   * epoch holds:  its truncate's size, or a write made in it */
+  if (cfg.sizes && w.head.hdr) {
+    for (const auto& e : w.head.hdr->chunk_sets) {
+      if (!e.is_shadow() || !e.shadow) {
+	continue;
+      }
+      const auto s = sname(e.id);
+      uint64_t bound = w.trunc_size.count(s) ? w.trunc_size.at(s) : 0;
+      if (auto i = w.ep_writes.find(s); i != w.ep_writes.end()) {
+	for (const auto& [k, end] : i->second) {
+	  bound = std::max(bound, end);
+	}
+      }
+      if (e.shadow->size_hint > bound) {
+	return fmt::format("{}'s hint {} exceeds what its truncate epoch {} "
+			   "holds, {}", s, e.shadow->size_hint,
+			   e.shadow->trunc_epoch, bound);
+      }
+    }
+  }
   for (const auto& g : w.gws) {
     if (!g.alive || g.zombie) continue;   // a zombie's read fails:  a reopen
     for (const auto& o : g.opens) {
@@ -4080,6 +4271,9 @@ TEST(FSIOModel, Explore)
       {"A29_CLEAR_RECHECKS_CONSTRUCTOR", cls_rgw_fsio_check::A29_CLEAR_RECHECKS_CONSTRUCTOR},
       {"A13_REWRITE_DEFERS", cls_rgw_fsio_check::A13_REWRITE_DEFERS},
       {"JOIN_BINDS_LINKED_PUBLISH", cls_rgw_fsio_check::JOIN_BINDS_LINKED_PUBLISH},
+      {"HINT_STALE_MERGES_NOTHING", cls_rgw_fsio_check::HINT_STALE_MERGES_NOTHING},
+      {"REBASE_READS_CHUNKS", cls_rgw_fsio_check::REBASE_READS_CHUNKS},
+      {"W14_PUBLISHING_FREEZES_SIZE", cls_rgw_fsio_check::W14_PUBLISHING_FREEZES_SIZE},
       {"SHARED_TAIL_AFTER_LAST_READER",
        cls_rgw_fsio_check::SHARED_TAIL_AFTER_LAST_READER},
       {"A26_KEEP_TAIL_RECORDS_NO_MANIFEST",
@@ -4172,6 +4366,7 @@ TEST(FSIOModel, Explore)
   cfg.resends = env_int("FSIO_MODEL_RESENDS", 1);
   cfg.reopen = env_int("FSIO_MODEL_REOPEN", 0) != 0;
   cfg.keep_tail = env_int("FSIO_MODEL_KEEP_TAIL", 0) != 0;
+  cfg.sizes = env_int("FSIO_MODEL_SIZES", 0) != 0;
   cfg.versioned = env_int("FSIO_MODEL_VERSIONED", 0);
   if (auto v = std::getenv("FSIO_MODEL_VSTART")) {
     cfg.vstart_null = std::string(v) == "null";

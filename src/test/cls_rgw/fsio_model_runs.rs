@@ -114,6 +114,11 @@ fn quick() -> Vec<Run> {
      * (FSIO_MODEL_REOPEN, off elsewhere) */
     v.push(run("quick-w+r-reopen", &[("FSIO_MODEL_ROLES", "w+r"), ("FSIO_MODEL_S3_OPS", "0"),
                                      ("FSIO_MODEL_REOPEN", "1"), ("FSIO_MODEL_RESENDS", "0")]));
+    /* §3.3:  size reports and a truncate (FSIO_MODEL_SIZES, off elsewhere) */
+    v.push(run("quick-w+w-sizes", &[("FSIO_MODEL_ROLES", "w+w"), ("FSIO_MODEL_S3_OPS", "0"),
+                                    ("FSIO_MODEL_SIZES", "1"), ("FSIO_MODEL_RESENDS", "0"),
+                                    ("FSIO_MODEL_ZOMBIES", "0"),
+                                    ("FSIO_MODEL_EXPIRER_CRASHES", "0")]));
     /* §3.6:  a tail-keeping write, a copy onto itself (FSIO_MODEL_KEEP_TAIL,
      * off elsewhere) */
     v.push(run("quick-w+r-keep-tail", &[("FSIO_MODEL_ROLES", "w+r"), ("FSIO_MODEL_S3_OPS", "1"),
@@ -282,6 +287,21 @@ fn skip_table() -> Vec<Check> {
         /* the model's expirer clears only a dead constructor's shadow;  the
          * unit test detects it */
         ("A29_CLEAR_RECHECKS_CONSTRUCTOR", unv, NARROW, false),
+        /* §3.3:  a stale report merged past a truncate;  a rebase that
+         * loses a write made after it (kept as a vector) */
+        ("HINT_STALE_MERGES_NOTHING", unv,
+         &[("FSIO_MODEL_ROLES", "w+w"), ("FSIO_MODEL_S3_OPS", "0"), ("FSIO_MODEL_SIZES", "1"),
+           ("FSIO_MODEL_RESENDS", "0"), ("FSIO_MODEL_ZOMBIES", "0"),
+           ("FSIO_MODEL_EXPIRER_CRASHES", "0")], true),
+        ("REBASE_READS_CHUNKS", unv,
+         &[("FSIO_MODEL_ROLES", "w+w"), ("FSIO_MODEL_S3_OPS", "0"), ("FSIO_MODEL_SIZES", "1"),
+           ("FSIO_MODEL_RESENDS", "0")], true),
+        /* W14:  the model's writers have all left a publishing shadow, so
+         * no call reaches it;  the unit and neorados tests cover it */
+        ("W14_PUBLISHING_FREEZES_SIZE", unv,
+         &[("FSIO_MODEL_ROLES", "w+w"), ("FSIO_MODEL_S3_OPS", "0"), ("FSIO_MODEL_SIZES", "1"),
+           ("FSIO_MODEL_RESENDS", "0"), ("FSIO_MODEL_ZOMBIES", "0"),
+           ("FSIO_MODEL_EXPIRER_CRASHES", "0")], false),
         /* a reader of a tail two writes share;  kept as a vector */
         ("SHARED_TAIL_AFTER_LAST_READER", unv, &[("FSIO_MODEL_ROLES", "f"), ("FSIO_MODEL_S3_OPS", "2"),
                                                  ("FSIO_MODEL_KEEP_TAIL", "1")], true),
@@ -391,6 +411,9 @@ fn sample() -> Vec<Run> {
         ("sample-v-w+r-1", [v, &[("FSIO_MODEL_ROLES", "w+r"), ("FSIO_MODEL_S3_OPS", "1")]].concat()),
         ("sample-v-www-1", [v, &[("FSIO_MODEL_ROLES", "www"), ("FSIO_MODEL_S3_OPS", "1")]].concat()),
         ("sample-null-wr-2", [n, &[("FSIO_MODEL_ROLES", "wr"), ("FSIO_MODEL_S3_OPS", "2")]].concat()),
+        /* §3.3:  size reports and a truncate (FSIO_MODEL_SIZES) */
+        ("sample-w+w-sizes", vec![("FSIO_MODEL_ROLES", "w+w"), ("FSIO_MODEL_S3_OPS", "1"),
+                                  ("FSIO_MODEL_SIZES", "1")]),
     ];
     configs
         .iter()

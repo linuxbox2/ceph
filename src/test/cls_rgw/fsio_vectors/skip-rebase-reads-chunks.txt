@@ -1,0 +1,16 @@
+# REBASE_READS_CHUNKS:  found 2026-11-20 by the model's size reports.
+# gw1 truncates the shadow to 5;  gw1.2, which has not learned of it,
+# writes to 20 and closes:  its report is stale, and rebasing to the
+# returned size alone loses the write from the hint (close-to-open).
+# With the check, the rebase reads the chunk at its high-water mark
+# (design §2.7).  Replayed with the check skipped, it reproduces the
+# violation.
+# skip: REBASE_READS_CHUNKS
+# env: FSIO_MODEL_ROLES=w+w FSIO_MODEL_S3_OPS=0 FSIO_MODEL_SIZES=1 FSIO_MODEL_RESENDS=0
+gw1 open-write
+gw1 ready S1.10
+gw1.2 open-write
+gw1 truncate S1.10
+gw1.2 write S1.10
+gw1.2 close-write S1.10
+# => gw1.2 closes S1.10, its hint 5 short of its write to 20
