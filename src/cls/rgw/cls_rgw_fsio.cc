@@ -661,8 +661,10 @@ int hint(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& caller,
   auto& sh = *e->shadow;
   /* W14:  a publishing shadow's size is final;  the hint changes nothing
    * and returns as usual */
-  if (e->state != state::PUBLISHING) {
-    if (trunc_epoch_seen == sh.trunc_epoch) {
+  if (e->state != state::PUBLISHING ||
+      FSIO_SKIP_CHECK(W14_PUBLISHING_FREEZES_SIZE)) {
+    if (trunc_epoch_seen == sh.trunc_epoch ||
+	FSIO_SKIP_CHECK(HINT_STALE_MERGES_NOTHING)) {
       sh.size_hint = std::max(sh.size_hint, size);
       sh.mtime_hint = std::max(sh.mtime_hint, mtime);
     } else {
@@ -688,7 +690,8 @@ int truncate(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& caller,
   if (!e) {
     return -EINVAL;
   }
-  if (e->state == state::PUBLISHING) {
+  if (e->state == state::PUBLISHING &&
+      !FSIO_SKIP_CHECK(W14_PUBLISHING_FREEZES_SIZE)) {
     return -CLS_RGW_ERR_FSIO_BUSY;    // W14, as fsio_extend
   }
   auto& sh = *e->shadow;

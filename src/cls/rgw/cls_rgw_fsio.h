@@ -83,6 +83,9 @@ enum class cls_rgw_fsio_check : uint8_t {
   JOIN_BINDS_LINKED_PUBLISH,           // fsio_join, §3.1 step 4
   A26_KEEP_TAIL_RECORDS_NO_MANIFEST,   // fsio_replace_head's supersede, §3.6
   SHARED_TAIL_AFTER_LAST_READER,       // fsio_replace_head, §3.6
+  HINT_STALE_MERGES_NOTHING,           // fsio_hint, §3.3
+  W14_PUBLISHING_FREEZES_SIZE,         // fsio_hint, fsio_truncate, §3.3
+  REBASE_READS_CHUNKS,                 // the gateway's stale size report (model)
 };
 
 #ifdef CLS_RGW_FSIO_SKIP_CHECKS
