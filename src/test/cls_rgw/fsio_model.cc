@@ -215,7 +215,10 @@ enum Step : uint8_t { NONE, CONSTRUCT, PUBLISH_WRITE, PUBLISH_GC, DRAIN_SEND,
   /* versioned (stage B):  the claim */
   V_PUB_HINT, V_PLACE, V_LEAVE, V_UNPLACE, V_PUB_UNHINT, V_PUB_CLEANUP,
   /* a publisher that cannot proceed (§4.2, W10) */
-  V_REL_RELEASE };
+  V_REL_RELEASE,
+  /* a sequenced call's reply lost (§3, Z22):  the resend, then the reply
+   * rebuilt from the head */
+  LOST_LEAVE };
 
 /* a handle's latest sequenced call, as sent (§3, Z22):  resent with the
  * same sequence number, it models a reply lost past the PG log's dup
@@ -266,6 +269,10 @@ struct Gw {
    * truncate epoch it has seen, whether it owes a report */
   uint64_t hwm = 0, hwm_epoch = 0;
   uint8_t owe_report = 0, did_trunc = 0;
+  /* FSIO_MODEL_LOST_REPLY:  the lost call's number and role */
+  uint64_t lost_seq = 0;
+  uint8_t lost_writer = 0, did_lose = 0;
+  uint8_t lost_check = 0;        // after the work handed back:  the hint (Z22)
   /* versioned */
   std::string pending;           // the instance an open in progress read
   bool pending_writer = false;
@@ -292,6 +299,8 @@ struct Gw {
     encode(did_reopen, bl); encode(read_tok, bl);
     encode(hwm, bl); encode(hwm_epoch, bl); encode(owe_report, bl);
     encode(did_trunc, bl);
+    encode(lost_seq, bl); encode(lost_writer, bl); encode(did_lose, bl);
+    encode(lost_check, bl);
     encode((uint8_t)step, bl); encode(step_cs, bl); encode(step_r, bl);
     encode(step_born, bl); encode(step_drained, bl);
     encode(owe_head_hint, bl); encode(owe_ih_hint, bl);
@@ -330,6 +339,7 @@ struct Config {
   bool reopen = false;           // FSIO_MODEL_REOPEN:  a second read open (W12)
   bool keep_tail = false;        // FSIO_MODEL_KEEP_TAIL:  a copy onto itself (§3.6)
   bool sizes = false;            // FSIO_MODEL_SIZES:  the size hint (§3.3)
+  bool lost_reply = false;       // FSIO_MODEL_LOST_REPLY:  a reply lost (Z22)
 };
 
 /* versioned:  one instance head and what it holds */
@@ -1432,6 +1442,54 @@ void gw_actions(const World& w0, size_t gi, std::vector<Action>& acts)
 	    return std::nullopt;
 	  }});
       break;
+    case LOST_LEAVE:
+      acts.push_back({fmt::format("gw{} resend fsio_leave {} (reply lost)", glabel(g),
+				  sname(g.step_cs)),
+	  [gi](World& w) -> std::optional<std::string> {
+	    auto& g = w.gws[gi];
+	    const auto cs = g.step_cs;
+	    g.step = NONE;
+	    fsio::leave_out out;
+	    cls_rgw_fsio_effects fx;
+	    auto save = w.head;
+	    const int r = m_leave(w.head, hd(g), g.lost_seq, cs, g.lost_writer,
+				  w.dead(), out, fx, nullptr);
+	    if (r == 0 && !out.already_applied) {
+	      return fmt::format("gw{}'s resent fsio_leave of {} applied again",
+				 glabel(g), sname(cs));
+	    }
+	    if (r < 0) {
+	      w.head = save;           // EINVAL:  its record went, so done (§3)
+	    } else {
+	      apply_remove_head(w, fx);
+	    }
+	    /* §3, Z22:  the handle does any work the re-read hands back;
+	     * once it is done, presence_hints() decides the hint */
+	    g.lost_check = 1;
+	    /* §3, Z22:  the reply rebuilt from the head:  its publish to run,
+	     * or a drained chunk set to send */
+	    if (w.head.hdr) {
+	      const auto* e = w.head.hdr->find(cs);
+	      if (e && e->state == state::PUBLISHING && e->publishing &&
+		  e->publishing->publisher == hd(g)) {
+		g.step = PUBLISH_HINT;
+		g.step_cs = cs;
+	      } else if (e && e->drained) {
+		g.step = DRAIN_SEND;
+		g.step_cs = cs;
+	      } else {
+		for (const auto& d : w.head.hdr->chunk_sets) {
+		  if (d.drained) {
+		    g.step = DRAIN_SEND;
+		    g.step_cs = d.id;
+		    break;
+		  }
+		}
+	      }
+	    }
+	    return std::nullopt;
+	  }});
+      break;
     case DRAIN_SEND:
       acts.push_back({fmt::format("gw{} drain {}", glabel(g), sname(g.step_cs)),
 	  [gi](World& w) -> std::optional<std::string> {
@@ -1633,9 +1691,14 @@ void gw_actions(const World& w0, size_t gi, std::vector<Action>& acts)
 	}
       }
     }
-    acts.push_back({fmt::format("gw{} close-{} {}", glabel(g),
-				o.writer ? "write" : "read", o.storage),
-	[gi, oi, inc](World& w) -> std::optional<std::string> {
+    for (int lost = 0; lost < 2; ++lost) {
+    if (lost && !(cfg.lost_reply && !g.did_lose)) {
+      continue;
+    }
+    acts.push_back({fmt::format("gw{} close-{} {}{}", glabel(g),
+				o.writer ? "write" : "read", o.storage,
+				lost ? " (reply lost)" : ""),
+	[gi, oi, inc, lost](World& w) -> std::optional<std::string> {
 	  auto& g = w.gws[gi];
 	  auto o = g.opens[oi];
 	  if (cfg.sizes && o.writer) {
@@ -1673,6 +1736,17 @@ void gw_actions(const World& w0, size_t gi, std::vector<Action>& acts)
 	    return std::nullopt;
 	  }
 	  apply_remove_head(w, fx);
+	  if (lost) {
+	    /* §3, Z22:  applied, its reply lost:  the gateway knows only
+	     * what it sent */
+	    g.did_lose = 1;
+	    g.resend.reset();
+	    g.step = LOST_LEAVE;
+	    g.step_cs = o.cs;
+	    g.lost_seq = g.seq;
+	    g.lost_writer = o.writer;
+	    return std::nullopt;
+	  }
 	  if (out.publishing) {
 	    g.step = PUBLISH_HINT;
 	    g.step_cs = o.cs;
@@ -1682,6 +1756,7 @@ void gw_actions(const World& w0, size_t gi, std::vector<Action>& acts)
 	  }
 	  return std::nullopt;
 	}});
+    }
   }
   fail_actions(g, gi, acts);
 }
@@ -3409,7 +3484,7 @@ void resend_actions(const World& w0, size_t gi, std::vector<Action>& acts)
       (g.zombie && w0.graced.count(g.inc))) {
     return;
   }
-  static const char* names[] = {"join", "leave", "rebind"};
+  static const char* names[] = {"fsio_join", "fsio_leave", "fsio_rebind"};
   acts.push_back({fmt::format("gw{} resend {}", glabel(g),
 			      names[(int)g.resend->kind]),
       [gi](World& w) -> std::optional<std::string> {
@@ -3473,6 +3548,21 @@ void presence_hints(const World& w0, size_t gi, std::vector<Action>& acts,
       }
       auto v = inner(w);
       auto& g = w.gws[gi];
+      /* §3, Z22:  after a lost reply and any work it handed back, the
+       * head holding anything of the handle's (its record, its last
+       * sequence number) means others are taking its state over:  the
+       * hint stays,
+       * as a failed release's does (H1), for the expirer */
+      if (g.lost_check && g.step == NONE) {
+	g.lost_check = 0;
+	if (auto i = w.head.opens.find(g.inc);
+	    i != w.head.opens.end() &&
+	    (i->second.handles.count(g.handle) ||
+	     i->second.seqs.count(g.handle)) &&
+	    !FSIO_SKIP_CHECK(LOST_REPLY_KEEPS_HINT)) {
+	  g.release_failed = 1;
+	}
+      }
       if (!holds_head(g) &&
 	  !(g.release_failed && !FSIO_SKIP_CHECK(H1_FAILED_RELEASE_KEEPS_HINT))) {
 	w.hints.erase(h);
@@ -3530,7 +3620,7 @@ void drop_presence_hints(const World& w0, std::vector<Action>& acts)
     }
     if (auto i = w0.head.opens.find(h.incarnation);
 	i != w0.head.opens.end() && !i->second.handles.empty()) {
-      continue;                  // its opens, not only its kept seqs
+      continue;                  // its opens, not only its last sequence numbers
     }
     if (!w0.graced.count(h.incarnation) &&
 	!FSIO_SKIP_CHECK(H2_HINT_DROPPED_AFTER_GRACE)) {
@@ -4273,6 +4363,7 @@ TEST(FSIOModel, Explore)
       {"JOIN_BINDS_LINKED_PUBLISH", cls_rgw_fsio_check::JOIN_BINDS_LINKED_PUBLISH},
       {"HINT_STALE_MERGES_NOTHING", cls_rgw_fsio_check::HINT_STALE_MERGES_NOTHING},
       {"REBASE_READS_CHUNKS", cls_rgw_fsio_check::REBASE_READS_CHUNKS},
+      {"LOST_REPLY_KEEPS_HINT", cls_rgw_fsio_check::LOST_REPLY_KEEPS_HINT},
       {"W14_PUBLISHING_FREEZES_SIZE", cls_rgw_fsio_check::W14_PUBLISHING_FREEZES_SIZE},
       {"SHARED_TAIL_AFTER_LAST_READER",
        cls_rgw_fsio_check::SHARED_TAIL_AFTER_LAST_READER},
@@ -4367,6 +4458,7 @@ TEST(FSIOModel, Explore)
   cfg.reopen = env_int("FSIO_MODEL_REOPEN", 0) != 0;
   cfg.keep_tail = env_int("FSIO_MODEL_KEEP_TAIL", 0) != 0;
   cfg.sizes = env_int("FSIO_MODEL_SIZES", 0) != 0;
+  cfg.lost_reply = env_int("FSIO_MODEL_LOST_REPLY", 0) != 0;
   cfg.versioned = env_int("FSIO_MODEL_VERSIONED", 0);
   if (auto v = std::getenv("FSIO_MODEL_VSTART")) {
     cfg.vstart_null = std::string(v) == "null";

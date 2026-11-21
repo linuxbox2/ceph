@@ -22,7 +22,7 @@ gw2 uncount I1
 expirer decide-finalize S1.10
 expirer publish-hint for S1.10
 expirer placeholder I2
-gw2 resend leave
+gw2 resend fsio_leave
 expirer fenced-finalize S1.10
 expirer reclone S1.13
 expirer instance-write I2

@@ -13,7 +13,7 @@ gw1 count I1
 gw1 open-write I1
 s3 suspend-versioning
 s3 put (suspended)
-gw1 resend join
+gw1 resend fsio_join
 gw1 ready S1.10
 gw1 uncount I1
 gw1 close-write S1.10

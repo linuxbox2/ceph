@@ -6,7 +6,7 @@
 gw1 open-write
 gw1 construct-gc S1.10
 gw1 partition
-gw1 resend join
+gw1 resend fsio_join
 gw2 open-read
 gw2 close-read C0
 gw2 crash

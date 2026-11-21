@@ -1,0 +1,22 @@
+# LOST_REPLY_KEEPS_HINT:  found 2026-11-20 by the model's lost replies.
+# gw1's last close applies and its reply is lost;  gw1 is presumed dead,
+# and the expirer's fenced finalize takes over its publish, removing its
+# writer;  gw1, still running, resends:  the resend reads EINVAL as done,
+# and removing its presence hint dropped the only hint leading to the
+# finalize, which an expirer crash then left unfinished.  With the
+# check, the hint stays while the head holds anything of the handle's,
+# its record or its last sequence number (design §3, Z22's paragraph).  Replayed with the check skipped, it
+# reproduces the violation.
+# skip: LOST_REPLY_KEEPS_HINT
+# env: FSIO_MODEL_ROLES=w+r FSIO_MODEL_S3_OPS=0 FSIO_MODEL_LOST_REPLY=1 FSIO_MODEL_RESENDS=0
+gw1 open-write
+gw1 ready S1.10
+gw1 close-write S1.10 (reply lost)
+gw1 partition
+expirer decide-finalize S1.10
+expirer fenced-finalize S1.10
+gw1 resend fsio_leave S1.10 (reply lost)
+expirer crash
+expirer grace 1
+expirer grace 100
+# => FSIO state left at the end (2 entries, 1 incarnation records)

@@ -114,6 +114,10 @@ fn quick() -> Vec<Run> {
      * (FSIO_MODEL_REOPEN, off elsewhere) */
     v.push(run("quick-w+r-reopen", &[("FSIO_MODEL_ROLES", "w+r"), ("FSIO_MODEL_S3_OPS", "0"),
                                      ("FSIO_MODEL_REOPEN", "1"), ("FSIO_MODEL_RESENDS", "0")]));
+    /* §3, Z22:  a sequenced call's reply lost (FSIO_MODEL_LOST_REPLY, off
+     * elsewhere) */
+    v.push(run("quick-wr-lost", &[("FSIO_MODEL_ROLES", "wr"), ("FSIO_MODEL_S3_OPS", "0"),
+                                  ("FSIO_MODEL_LOST_REPLY", "1"), ("FSIO_MODEL_RESENDS", "0")]));
     /* §3.3:  size reports and a truncate (FSIO_MODEL_SIZES, off elsewhere) */
     v.push(run("quick-w+w-sizes", &[("FSIO_MODEL_ROLES", "w+w"), ("FSIO_MODEL_S3_OPS", "0"),
                                     ("FSIO_MODEL_SIZES", "1"), ("FSIO_MODEL_RESENDS", "0"),
@@ -287,6 +291,11 @@ fn skip_table() -> Vec<Check> {
         /* the model's expirer clears only a dead constructor's shadow;  the
          * unit test detects it */
         ("A29_CLEAR_RECHECKS_CONSTRUCTOR", unv, NARROW, false),
+        /* §3, Z22:  a lost reply's resend dropping a hint a takeover
+         * needs (kept as a vector) */
+        ("LOST_REPLY_KEEPS_HINT", unv,
+         &[("FSIO_MODEL_ROLES", "w+r"), ("FSIO_MODEL_S3_OPS", "0"),
+           ("FSIO_MODEL_LOST_REPLY", "1"), ("FSIO_MODEL_RESENDS", "0")], true),
         /* §3.3:  a stale report merged past a truncate;  a rebase that
          * loses a write made after it (kept as a vector) */
         ("HINT_STALE_MERGES_NOTHING", unv,

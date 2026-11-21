@@ -22,8 +22,8 @@ gw1 open-write I1
 gw1 read-olh-read
 gw1 count I1
 gw2 close-write S1.10
-gw2 resend join
-gw1 resend join
+gw2 resend fsio_join
+gw1 resend fsio_join
 gw2 publish-hint
 gw2 placeholder I2
 gw1 open-read I1

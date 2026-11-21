@@ -10,14 +10,14 @@ gw2 read-olh-read
 gw2 count I2
 gw2 open-read I2
 gw1 count I2
-gw2 resend join
+gw2 resend fsio_join
 gw2 close-read C1
 gw2 uncount I2
 gw1 open-write I2
 gw1 ready S2.10
 gw1 uncount I2
 gw1 write S2.10
-gw1 resend join
+gw1 resend fsio_join
 gw1 close-write S2.10
 gw1 publish-hint
 gw1 partition

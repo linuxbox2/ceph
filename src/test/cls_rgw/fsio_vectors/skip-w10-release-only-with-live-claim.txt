@@ -14,12 +14,12 @@ gw2 open-read I2
 gw1 ready S1.10
 gw2 follow S1.10
 gw1 close-write S1.10
-gw2 resend rebind
+gw2 resend fsio_rebind
 gw1 publish-hint
 gw2 uncount I2
 gw1 placeholder I3
 gw2 close-read S1.10
-gw1 resend join
+gw1 resend fsio_join
 gw1 close-leave S1.10
 gw1 publish-read S1.10
 gw1 instance-write I3
