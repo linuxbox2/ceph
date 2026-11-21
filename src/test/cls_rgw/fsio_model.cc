@@ -3975,6 +3975,75 @@ std::optional<std::string> check_state(const World& w)
       }
     }
   }
+  /* §2.2:  no dangling binding:  every count a handle holds names a
+   * chunk-set entry (an emptied record, its last sequence number alone,
+   * names none) */
+  for (const auto& [inc, rec] : w.head.opens) {
+    for (const auto& [k, ho] : rec.handles) {
+      for (const auto& [id, c] : ho.chunk_sets) {
+	if ((c.readers || c.writers) &&
+	    !(w.head.hdr && w.head.hdr->find(id))) {
+	  return fmt::format("{}.{} is bound to {}, which has no entry", inc,
+			     k, sname(id));
+	}
+      }
+    }
+  }
+  if (w.head.hdr) {
+    const auto& hdr = *w.head.hdr;
+    const auto dead = w.dead();
+    for (const auto& e : hdr.chunk_sets) {
+      const auto b = w.head.bound(e.id);
+      /* §3.4:  a drained entry has nothing bound */
+      if (e.drained && (b.readers || b.writers)) {
+	return fmt::format("{} is drained with {} readers and {} writers "
+			   "bound", sname(e.id), b.readers, b.writers);
+      }
+      /* §3.6:  a shared tail's holder drains after its sharers are gone */
+      if (e.drained) {
+	for (const auto& a : e.after) {
+	  if (hdr.find(a)) {
+	    return fmt::format("{} drained while {}, which shares its tail, "
+			       "stands", sname(e.id), sname(a));
+	  }
+	}
+      }
+      /* §3.6:  a chunk set a tail-keeping write retired:  retired at
+       * CLONE, its record naming no manifest */
+      if (e.shares_tail) {
+	const bool clone = e.state == state::RETIRED &&
+	  e.manifest_at == at::CLONE && e.clone;
+	const auto r = clone ? w.records.find(rname(*e.clone))
+			     : w.records.end();
+	if (!clone || (r != w.records.end() && !r->second.empty())) {
+	  return fmt::format("{} shares the tail but is not a retired clone "
+			     "whose record names no manifest", sname(e.id));
+	}
+      }
+      /* §3.4, W14:  a publishing entry has its publisher, and no writer
+       * but the publisher, or a presumed-dead incarnation's, which only
+       * a fenced finalize removes */
+      if (e.state == state::PUBLISHING) {
+	if (!e.publishing) {
+	  return fmt::format("{} is publishing with no publishing record",
+			     sname(e.id));
+	}
+	for (const auto& [inc, rec] : w.head.opens) {
+	  for (const auto& [k, ho] : rec.handles) {
+	    auto c = ho.chunk_sets.find(e.id);
+	    if (c == ho.chunk_sets.end() || !c->second.writers) {
+	      continue;
+	    }
+	    const cls_rgw_fsio_handle h{inc, k};
+	    if (h != e.publishing->publisher && !dead.count(inc)) {
+	      return fmt::format("{}.{} writes publishing {}, not its "
+				 "publisher", inc, k, sname(e.id));
+	    }
+	  }
+	}
+      }
+    }
+  }
   /* §2.2, §3.4:  a chunk-set entry's storage stands until the entry is
    * drained, its GC entry sent;  a constructing shadow is collected
    * before it is cleared (§3.8), and a fenced finalize's to before its
