@@ -13,6 +13,7 @@
  *
  */
 
+#include <algorithm>
 #include <filesystem>
 #include <stdint.h>
 #include <tuple>
@@ -773,20 +774,41 @@ TEST(LibRGW, READ_DIRS1)
 
 TEST(LibRGW, READF_SETUP1)
 {
-  struct stat st;
   if (do_dirs1) {
     if (do_create) {
-      if ((! stat(readf_out_name.c_str(), &st)) &&
-	  (S_ISREG(st.st_mode)) &&
-	  (st.st_size == 6291456))
-	return;
+      /* the 6 MiB pattern, each 1 MiB block its index digit:  the local
+       * file WRITEF_DIRS1 uploads, and readf_name, which READF_DIRS1
+       * reads back */
       ofstream of;
-      of.open(readf_out_name, ios::out|ios::app|ios::binary);
+      of.open(readf_out_name, ios::out|ios::trunc|ios::binary);
       for (int ix1 = 0; ix1 < 6; ++ix1) {
 	for (int ix2 = 0; ix2 < 1024*1024; ++ix2) {
 	  of << ix1;
 	}
       }
+      of.close();
+
+      obj_rec fobj{readf_name, nullptr, dirs1_b.fh, nullptr};
+      int rc = rgw_lookup(fs, fobj.parent_fh, fobj.name.c_str(), &fobj.fh,
+			  nullptr, 0, RGW_LOOKUP_FLAG_CREATE);
+      ASSERT_EQ(rc, 0);
+      fobj.sync();
+      rc = rgw_open(fs, fobj.fh, O_RDWR,
+		    RGW_OPEN_FLAG_V3|RGW_OPEN_FLAG_CREATE);
+      ASSERT_EQ(rc, 0);
+      const size_t bufsz = 1024 * 1024;
+      std::string block;
+      for (int ix = 0; ix < 6; ++ix) {
+	block.assign(bufsz, char('0' + ix));
+	size_t nwritten = 0;
+	rc = rgw_write(fs, fobj.fh, ix * bufsz, bufsz, &nwritten,
+		       block.data(), RGW_WRITE_FLAG_NONE);
+	ASSERT_EQ(rc, 0);
+	ASSERT_EQ(nwritten, bufsz);
+      }
+      rc = rgw_close(fs, fobj.fh, RGW_CLOSE_FLAG_NONE);
+      ASSERT_EQ(rc, 0);
+      rgw_fh_rele(fs, fobj.fh, 0 /* flags */);
     }
   }
 }
@@ -802,8 +824,6 @@ TEST(LibRGW, READF_DIRS1) {
       ASSERT_NE(fobj.fh, nullptr);
       fobj.sync();
 
-      ofstream of;
-      of.open(readf_out_name, ios::out|ios::app|ios::binary);
       int bufsz = 1024 * 1024 * sizeof(char);
       auto buffer = std::make_unique<char[]>(bufsz);
 
@@ -816,10 +836,11 @@ TEST(LibRGW, READF_DIRS1) {
 		      RGW_READ_FLAG_NONE);
 	ASSERT_EQ(rc, 0);
 	ASSERT_EQ(nread, length);
-	of.write(buffer.get(), length);
+	/* READF_SETUP1's pattern:  each 1 MiB block is its index digit */
+	ASSERT_TRUE(std::all_of(buffer.get(), buffer.get() + length,
+				[ix](char c) { return c == char('0' + ix); }));
 	offset += nread;
       }
-      of.close();
       rgw_fh_rele(fs, fobj.fh, 0 /* flags */);
     }
   }
