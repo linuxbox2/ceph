@@ -13,6 +13,7 @@
  *
  */
 
+#include <filesystem>
 #include <stdint.h>
 #include <tuple>
 #include <thread>
@@ -1019,6 +1020,58 @@ TEST(LibRGW, HIER1) {
 	  ceph_abort();
 	};
       }
+    }
+  }
+}
+
+/* the process's open descriptors */
+static size_t count_fds()
+{
+  size_t n = 0;
+  for ([[maybe_unused]] const auto& e :
+	 std::filesystem::directory_iterator("/proc/self/fd")) {
+    ++n;
+  }
+  return n;
+}
+
+TEST(LibRGW, CLOSED_HANDLES_HOLD_NO_DESCRIPTORS) {
+  /* a file handle cached after its last close holds no descriptor:  on
+   * nsfs each one kept its bucket, whose directory stays open, so a
+   * mount with as many cached handles as the descriptor limit failed
+   * its next open with EMFILE */
+  if (do_hier1 && do_create) {
+    constexpr int nobjs = 64;
+    std::vector<obj_rec> objs;
+    const size_t before = count_fds();
+    for (int ix = 0; ix < nobjs; ++ix) {
+      obj_rec obj{"fdcheck_" + to_string(ix), nullptr, bucket_fh, nullptr};
+      int rc = rgw_lookup(fs, bucket_fh, obj.name.c_str(), &obj.fh,
+			  nullptr, 0, RGW_LOOKUP_FLAG_CREATE);
+      ASSERT_EQ(rc, 0);
+      rc = rgw_open(fs, obj.fh, O_RDWR,
+		    RGW_OPEN_FLAG_V3|RGW_OPEN_FLAG_CREATE);
+      ASSERT_EQ(rc, 0);
+      size_t nbytes = 0;
+      std::string data("data for " + obj.name);
+      rc = rgw_write(fs, obj.fh, 0, data.length(), &nbytes,
+		     data.data(), RGW_WRITE_FLAG_NONE);
+      ASSERT_EQ(rc, 0);
+      rc = rgw_close(fs, obj.fh, RGW_CLOSE_FLAG_NONE);
+      ASSERT_EQ(rc, 0);
+      objs.push_back(obj);         // the handle stays cached
+    }
+    const size_t after = count_fds();
+    /* slack for descriptors other threads open meanwhile;  one per
+     * handle would be nobjs */
+    EXPECT_LT(after, before + nobjs / 4)
+      << "descriptors before " << before << ", after " << after
+      << ", with " << nobjs << " closed handles cached";
+    for (auto& obj : objs) {
+      rgw_fh_rele(fs, obj.fh, 0 /* flags */);
+      int rc = rgw_unlink(fs, bucket_fh, obj.name.c_str(),
+			  RGW_UNLINK_FLAG_NONE);
+      ASSERT_EQ(rc, 0);
     }
   }
 }

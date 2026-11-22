@@ -3047,6 +3047,7 @@ namespace rgw {
           /* reset fsio handles so re-opens see correct state */
           f->fsio_hdl.reset();
           f->sal_object.reset();
+          f->sal_bucket.reset();    /* nsfs keeps the bucket directory open */
         }
 
         this->flags &= ~FLAG_OPEN;
