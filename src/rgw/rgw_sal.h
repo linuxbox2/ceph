@@ -1207,8 +1207,8 @@ class Object {
       /* commit flags */
       static constexpr uint32_t COMMIT_FLAG_NONE =    0x0000;
 
-      /* publish flags */
-      static constexpr uint32_t PUBLISH_FLAG_NONE =   0x0000;
+      /* begin_write and end_write flags */
+      static constexpr uint32_t WRITE_FLAG_NONE =     0x0000;
 
       /* close flags */
       static constexpr uint32_t CLOSE_FLAG_NONE =     0x0000;
@@ -1221,8 +1221,13 @@ class Object {
 			   uint64_t ofs, uint64_t* bytes_written,
 			   uint32_t flags) = 0;
       virtual int commit(const DoutPrefixProvider* dpp, uint32_t flags) = 0;
-      virtual int publish(const DoutPrefixProvider* dpp, uint32_t flags) = 0;
-      virtual int reclone(const DoutPrefixProvider* dpp, uint32_t flags) = 0;
+      /* this handle's first write open on the file:  the driver joins as a
+       * writer, and makes the shadow its writes go to, recloning if the
+       * one it followed was published */
+      virtual int begin_write(const DoutPrefixProvider* dpp, uint32_t flags) = 0;
+      /* this handle's last write open returned:  the driver publishes if
+       * no writer remains, else this handle stays a reader */
+      virtual int end_write(const DoutPrefixProvider* dpp, uint32_t flags) = 0;
       virtual int close(const DoutPrefixProvider* dpp, uint32_t flags) = 0;
       /* the object has been unlinked:  drop the shadow's name now,
        * refuse to publish it, and let the storage be reclaimed when
@@ -1259,8 +1264,6 @@ class Object {
       };
 
       bool resumed() const { return resumed_existing; }
-      /* true when a write requires (re-)establishing a shadow */
-      bool needs_shadow() const { return binding != Binding::SHADOW; }
       bool is_doomed() const { return doomed; }
 
       FSIOObject() {}

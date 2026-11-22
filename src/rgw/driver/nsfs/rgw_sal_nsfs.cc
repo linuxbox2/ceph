@@ -6078,6 +6078,19 @@ int NSFSObject::NSFSFSIOObject::commit(const DoutPrefixProvider* dpp, uint32_t f
   return ::fsync(shadow_fd) < 0 ? -errno : 0;
 }
 
+/* the SAL's write bracket, over nsfs's in-process follow:  a writer
+ * arriving on a shadow this handle published forks a new one and dup2()s
+ * it onto the shared fd, and the last writer out publishes */
+int NSFSObject::NSFSFSIOObject::begin_write(const DoutPrefixProvider* dpp, uint32_t flags)
+{
+  return binding == Binding::SHADOW ? 0 : reclone(dpp, OPEN_FLAG_NONE);
+}
+
+int NSFSObject::NSFSFSIOObject::end_write(const DoutPrefixProvider* dpp, uint32_t flags)
+{
+  return publish(dpp, flags);
+}
+
 int NSFSObject::NSFSFSIOObject::publish(const DoutPrefixProvider* dpp, uint32_t flags)
 {
   if (shadow_fd < 0) {

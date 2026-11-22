@@ -1269,8 +1269,10 @@ public:
 			uint64_t ofs, uint64_t* bytes_written,
 			uint32_t flags) override;
     virtual int commit(const DoutPrefixProvider* dpp, uint32_t flags) override;
-    virtual int publish(const DoutPrefixProvider* dpp, uint32_t flags) override;
-    virtual int reclone(const DoutPrefixProvider* dpp, uint32_t flags) override;
+    virtual int begin_write(const DoutPrefixProvider* dpp, uint32_t flags) override;
+    virtual int end_write(const DoutPrefixProvider* dpp, uint32_t flags) override;
+    int publish(const DoutPrefixProvider* dpp, uint32_t flags);
+    int reclone(const DoutPrefixProvider* dpp, uint32_t flags);
     virtual int close(const DoutPrefixProvider* dpp, uint32_t flags) override;
     virtual int discard(const DoutPrefixProvider* dpp, uint32_t flags) override;
     virtual int ftruncate(const DoutPrefixProvider* dpp, uint64_t size,

@@ -2319,6 +2319,7 @@ namespace rgw {
 
     if (f->fsio_path) {
       std::string obj_name = relative_object_name();
+      bool created = false;
 
       if (! f->fsio_hdl) {
         /* the file's first open:  choose_path() ran its request */
@@ -2384,6 +2385,7 @@ namespace rgw {
         }
         auto f_result = fo->sal_object->get_fsio_handle(&dp, hopen_flags,
 							specp);
+        created = true;
         if (!get<0>(f_result)) {
           f->sal_bucket = std::move(fo->sal_bucket);
           f->sal_object = std::move(fo->sal_object);
@@ -2398,12 +2400,12 @@ namespace rgw {
         }
       }
 
-      /* a writer arriving on a handle bound to the published object,
-       * or on a shadow which has since been published, forks a new
-       * shadow and dup2()s it onto the shared fd--readers on this
-       * handle follow it without reopening */
-      if (write_open && f->fsio_hdl && f->fsio_hdl->needs_shadow()) {
-        int rc = f->fsio_hdl->reclone(&dp, rgw::sal::Object::FSIOObject::OPEN_FLAG_NONE);
+      /* this handle's first write open, on a handle an earlier open made:
+       * the driver joins as a writer (one this open made with
+       * OPEN_FLAG_WRITE already is) */
+      if (write_open && f->fsio_hdl && ! created && (f->write_opens == 0)) {
+        int rc = f->fsio_hdl->begin_write(
+          &dp, rgw::sal::Object::FSIOObject::WRITE_FLAG_NONE);
         if (!!rc) {
           lsubdout(fs->get_context(), rgw, 0)
             << __func__ << " " << obj_name
@@ -2693,9 +2695,9 @@ namespace rgw {
     }
 
     if (want_write) {
-      if (f->fsio_hdl && f->fsio_hdl->needs_shadow()) {
-        int rc = f->fsio_hdl->reclone(
-          &dp, rgw::sal::Object::FSIOObject::OPEN_FLAG_NONE);
+      if (f->fsio_hdl && (f->write_opens == 0)) {
+        int rc = f->fsio_hdl->begin_write(
+          &dp, rgw::sal::Object::FSIOObject::WRITE_FLAG_NONE);
         if (!! rc) {
           lsubdout(fs->get_context(), rgw, 0)
             << __func__ << " " << object_name()
@@ -2725,8 +2727,8 @@ namespace rgw {
 
     if ((f->write_opens == 0) && f->fsio_hdl && ! deleted()) {
       stamp_unix_attrs();
-      int rc = f->fsio_hdl->publish(
-        &dp, rgw::sal::Object::FSIOObject::PUBLISH_FLAG_NONE);
+      int rc = f->fsio_hdl->end_write(
+        &dp, rgw::sal::Object::FSIOObject::WRITE_FLAG_NONE);
       if (!! rc) {
         lsubdout(fs->get_context(), rgw, 0)
           << __func__ << " " << object_name()
@@ -2882,19 +2884,9 @@ namespace rgw {
       if (unlikely(! f)) {
         return -EINVAL; // or EISDIR
       }
+      /* no shadow check:  every write lies between the handle's
+       * begin_write() and its end_write() */
       hdl = f->fsio_hdl;
-      if (hdl && hdl->needs_shadow()) {
-        /* the shadow was published--by the idle finalizer, or by an
-         * earlier last-writer close--so fork a new one rather than
-         * mutating the live object */
-        CephContext* cct = static_cast<CephContext*>(fs->get_fs()->rgw);
-        const DoutPrefix dp(cct, dout_subsys, "rgw writev: ");
-        int rc = hdl->reclone(
-          &dp, rgw::sal::Object::FSIOObject::OPEN_FLAG_NONE);
-        if (!! rc) {
-          return rc;
-        }
-      }
       if (f->global_open == open) {
         /* activity on the stateless open defers the idle finalizer */
         arm_stateless_timer();
@@ -2972,9 +2964,10 @@ namespace rgw {
         if (!! rc) {
           return rc;
         }
-      } else if (f->fsio_hdl->needs_shadow()) {
-        rc = f->fsio_hdl->reclone(
-          &dp, rgw::sal::Object::FSIOObject::OPEN_FLAG_NONE);
+      } else if (f->write_opens == 0) {
+        /* no writer holds it:  the truncate is this handle's write */
+        rc = f->fsio_hdl->begin_write(
+          &dp, rgw::sal::Object::FSIOObject::WRITE_FLAG_NONE);
         if (!! rc) {
           return rc;
         }
@@ -2990,8 +2983,8 @@ namespace rgw {
         set_size(size);
         if (! open && (f->write_opens == 0)) {
           /* readers may be attached, but no writer will publish this */
-          rc = f->fsio_hdl->publish(
-            &dp, rgw::sal::Object::FSIOObject::PUBLISH_FLAG_NONE);
+          rc = f->fsio_hdl->end_write(
+            &dp, rgw::sal::Object::FSIOObject::WRITE_FLAG_NONE);
         }
       }
     } /* !LOCKED */
@@ -3055,8 +3048,8 @@ namespace rgw {
         if (f->write_opens == 0) {
           if (f->fsio_hdl && ! deleted()) {
             stamp_unix_attrs();
-            publish_rc = f->fsio_hdl->publish(&dp,
-                      rgw::sal::Object::FSIOObject::PUBLISH_FLAG_NONE);
+            publish_rc = f->fsio_hdl->end_write(&dp,
+                      rgw::sal::Object::FSIOObject::WRITE_FLAG_NONE);
             if (!!publish_rc) {
               lsubdout(fs->get_context(), rgw, 0)
                 << __func__ << " " << object_name()
