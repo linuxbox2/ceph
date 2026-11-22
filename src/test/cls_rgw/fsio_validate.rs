@@ -7,7 +7,8 @@ edition = "2021"
 //! line, each a command you could run by hand, with one sudo password
 //! for the whole run.  `--dry-run` prints them.
 //!
-//!   fsio_validate.rs [--dry-run] [--no-build] [--build DIR] STEP|PRESET...
+//!   fsio_validate.rs [--dry-run] [--no-build] [--build DIR]
+//!                    [--filter PATTERN] STEP|PRESET...
 //!
 //! Steps:
 //!   cls            the CLS head test and the neorados CLS test, and
@@ -24,6 +25,13 @@ edition = "2021"
 //!
 //! Which steps a change needs is the caller's to say:  the driver runs
 //! what it is told and decides nothing about what changed.
+//!
+//! `--filter PATTERN` runs only the gtest tests matching `*PATTERN*`, with
+//! each suite's INIT and SHUTDOWN, in the steps whose tests are gtest
+//! binaries taking a filter:  cls, librgw-rados, harness.  A reproduction
+//! of one test:  `fsio_validate.rs --filter RewriteVersionUnderAReader
+//! librgw-rados`.  The nsfs suites cannot take one (their main() rebuilds
+//! its argument string after gtest strips its own), nor can the model.
 //!
 //! Run it as yourself, from a terminal:  it takes `sudo -v` once and
 //! keeps the ticket alive for the run.  A RADOS vstart needs root here,
@@ -58,6 +66,14 @@ struct Opts {
     build_dir: PathBuf,
     src: PathBuf,
     steps: Vec<&'static str>,
+    filter: Option<String>,
+}
+
+/// The gtest filter for `--filter`, as an argument to append, or nothing
+fn gtest_filter(o: &Opts) -> String {
+    o.filter.as_ref().map_or(String::new(), |f| {
+        format!(" --gtest_filter='*.INIT:*{f}*:*.SHUTDOWN'")
+    })
 }
 
 /// One command of the run:  what it is, how it is run, where its output goes.
@@ -142,6 +158,7 @@ fn main() {
 fn rados_phase(o: &Opts, steps: &[&'static str], run_dir: &Path, summary: &mut Vec<String>) -> bool {
     let b = &o.build_dir;
     let conf = b.join("ceph.conf").display().to_string();
+    let gf = gtest_filter(o);
     let sh = |step: &'static str, what: &str, line: String| Cmd {
         step, what: what.into(), argv: vec!["sh".into(), "-c".into(), line], cwd: b.clone(), sudo: true,
     };
@@ -169,13 +186,13 @@ fn rados_phase(o: &Opts, steps: &[&'static str], run_dir: &Path, summary: &mut V
                 "cls" => vec![
                     sh("cls", "libcls_rgw calls no RGW symbol",
                        "! nm -D --undefined-only lib/libcls_rgw.so | c++filt | grep ' rgw_'".into()),
-                    sh("cls", "the CLS head test", format!("env CEPH_CONF={conf} bin/ceph_test_cls_rgw_fsio_head")),
-                    sh("cls", "the neorados CLS test", format!("env CEPH_CONF={conf} bin/ceph_test_neorados_cls_rgw_fsio")),
+                    sh("cls", "the CLS head test", format!("env CEPH_CONF={conf} bin/ceph_test_cls_rgw_fsio_head{gf}")),
+                    sh("cls", "the neorados CLS test", format!("env CEPH_CONF={conf} bin/ceph_test_neorados_cls_rgw_fsio{gf}")),
                 ],
                 "librgw-rados" => vec![sh("librgw-rados", "the librgw test", format!(
                     "env CEPH_CONF={conf} AWS_ACCESS_KEY_ID={AWS_KEY} AWS_SECRET_ACCESS_KEY='{AWS_SECRET}' \
-                     bin/ceph_test_librgw_file_fsio_put --debug-rgw=10 --log-to-stderr=true"))],
-                "harness" => vec![sh("harness", "the driver's harness", format!("env CEPH_CONF={conf} bin/ceph_test_rgw_fsio_rados"))],
+                     bin/ceph_test_librgw_file_fsio_put --debug-rgw=10 --log-to-stderr=true{gf}"))],
+                "harness" => vec![sh("harness", "the driver's harness", format!("env CEPH_CONF={conf} bin/ceph_test_rgw_fsio_rados{gf}"))],
                 "cluster-tier" => {
                     let runner = match model_runner(o) {
                         Some(r) => r,
@@ -364,17 +381,19 @@ fn parse_args() -> Opts {
     let mut build = true;
     let mut build_dir: Option<PathBuf> = None;
     let mut steps: Vec<&'static str> = Vec::new();
+    let mut filter: Option<String> = None;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
             "--dry-run" => dry_run = true,
             "--no-build" => build = false,
             "--build" => build_dir = Some(PathBuf::from(args.next().unwrap_or_else(|| die("--build needs a directory")))),
+            "--filter" => filter = Some(args.next().unwrap_or_else(|| die("--filter needs a pattern"))),
             "driver" => steps.extend(["cls", "librgw-rados", "harness"]),
             "core" => steps.extend(["cls", "cluster-tier", "model"]),
             "full" => steps.extend(STEPS),
             "-h" | "--help" => {
-                println!("usage:  fsio_validate.rs [--dry-run] [--no-build] [--build DIR] STEP|PRESET...\n\
+                println!("usage:  fsio_validate.rs [--dry-run] [--no-build] [--build DIR] [--filter PATTERN] STEP|PRESET...\n\
                           steps:  {}\npresets:  driver core full", STEPS.join(" "));
                 std::process::exit(0);
             }
@@ -389,12 +408,17 @@ fn parse_args() -> Opts {
     }
     let mut ordered: Vec<&'static str> = STEPS.iter().copied().filter(|s| steps.contains(s)).collect();
     ordered.dedup();
+    if filter.is_some() {
+        if let Some(s) = ordered.iter().find(|s| !["cls", "librgw-rados", "harness"].contains(s)) {
+            die(&format!("--filter applies to cls, librgw-rados and harness, not {s}"));
+        }
+    }
     let src = PathBuf::from(capture(Path::new("."), &["git", "rev-parse", "--show-toplevel"]));
     let build_dir = build_dir.unwrap_or_else(|| src.join("build"));
     if !build_dir.join("build.ninja").exists() {
         die(&format!("{} is not a configured build directory", build_dir.display()));
     }
-    Opts { dry_run, build, build_dir, src, steps: ordered }
+    Opts { dry_run, build, build_dir, src, steps: ordered, filter }
 }
 
 fn capture(cwd: &Path, argv: &[&str]) -> String {
