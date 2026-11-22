@@ -602,6 +602,12 @@ if(WITH_RADOSGW_FDB)
  add_catch2_test_rgw(fdb_content)
 endif()
 
+# the RADOS FSIO driver's harness:  the SAL's FSIO ops on a RADOS vstart
+add_executable(ceph_test_rgw_fsio_rados test_rgw_fsio_rados.cc)
+target_link_libraries(ceph_test_rgw_fsio_rados
+  rgw_common ${rgw_libs} ${UNITTEST_LIBS})
+install(TARGETS ceph_test_rgw_fsio_rados DESTINATION ${CMAKE_INSTALL_BINDIR})
+
 if(WITH_RADOSGW_LANCEDB)
 add_executable(unittest_rgw_s3vector test_rgw_s3vector.cc)
 add_ceph_unittest(unittest_rgw_s3vector)
