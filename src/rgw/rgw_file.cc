@@ -2243,14 +2243,20 @@ namespace rgw {
       return -EINVAL;
     }
 
+    first_open fo;
+    bool fsio;
+    if (int rc = choose_path(posix_flags, rgw_openflags, &fo, &fsio); rc < 0) {
+      return rc;
+    }
     lock_guard guard(mtx);
-    return do_open(out, posix_flags, rgw_openflags, args);
+    return do_open(out, posix_flags, rgw_openflags, args, &fo);
   } /* RGWFileHandle::open2(...) */
 
   /* mtx must be held */
   int RGWFileHandle::do_open(file::Open** out, uint32_t posix_flags,
                              uint32_t rgw_openflags,
-                             const struct rgw_open_args* args)
+                             const struct rgw_open_args* args,
+                             first_open* fo)
   {
 
     /*
@@ -2311,40 +2317,16 @@ namespace rgw {
       }
     }
 
-    auto* driver = g_rgwlib->get_driver(); /* XXXX need to link driver to fs */
-    if (driver->have_fsio()) {
-      /* the permission check needs this object's bucket and its full
-       * key, not the immediate parent's name and the leaf--those agree
-       * only for an object at the root of a bucket, which is why this
-       * went unnoticed:  a nested object looked its bucket up by the
-       * name of its containing directory and got NoSuchBucket */
-      const std::string& bkt_name = bucket_name();
+    if (f->fsio_path) {
       std::string obj_name = relative_object_name();
 
       if (! f->fsio_hdl) {
-        uint32_t op_flags = RGWOpenRequest::FLAG_NONE;
-        if (write_open) {
-          op_flags |= RGWOpenRequest::FLAG_WRITE;
-        }
-        if (rgw_openflags & RGW_OPEN_FLAG_CREATE) {
-          op_flags |= RGWOpenRequest::FLAG_CREATE;
-        }
-
-        RGWOpenRequest req(
-                           cct, g_rgwlib->get_driver()->get_user(fs->get_user()->user_id),
-                           bkt_name, obj_name, op_flags);
-
-        int rc = g_rgwlib->get_fe()->execute_req(&req);
-        if (rc < 0) {
-          return rc;
-        }
-
-        /* the driver has FSIO, but a bucket may not serve it */
-        if (! req.sal_bucket->have_fsio()) {
-          lsubdout(fs->get_context(), rgw, 4)
+        /* the file's first open:  choose_path() ran its request */
+        if (! fo || ! fo->sal_object) {
+          lsubdout(fs->get_context(), rgw, 0)
             << __func__ << " " << obj_name
-            << ": bucket " << bkt_name << " does not serve FSIO" << dendl;
-          return -ENOTSUP;
+            << ": an FSIO open with no request behind it" << dendl;
+          return -EINVAL;
         }
 
         uint32_t hopen_flags = sal::Object::FSIOObject::OPEN_FLAG_NONE;
@@ -2400,11 +2382,11 @@ namespace rgw {
           }
           specp = &spec;
         }
-        auto f_result = req.sal_object->get_fsio_handle(&dp, hopen_flags,
+        auto f_result = fo->sal_object->get_fsio_handle(&dp, hopen_flags,
 							specp);
         if (!get<0>(f_result)) {
-          f->sal_bucket = std::move(req.sal_bucket);
-          f->sal_object = std::move(req.sal_object);
+          f->sal_bucket = std::move(fo->sal_bucket);
+          f->sal_object = std::move(fo->sal_object);
           f->fsio_hdl = std::move(get<1>(f_result));
         } else {
           lsubdout(fs->get_context(), rgw, 0)
@@ -2481,22 +2463,71 @@ namespace rgw {
     return 0;
   } /* RGWFileHandle::do_open(...) */
 
-  /* mtx must be held */
-  bool RGWFileHandle::resolve_bucket_versioned()
+  int RGWFileHandle::choose_path(uint32_t posix_flags, uint32_t rgw_openflags,
+                                 first_open* fo, bool* fsio)
   {
+    *fsio = false;
     auto* driver = g_rgwlib->get_driver();
-    if (! driver) {
-      return false;
+    if (! driver->have_fsio()) {
+      return 0;              /* no request:  this driver's path, as today */
     }
-    const DoutPrefix dp(get_fs()->get_context(), dout_subsys,
-			"rgw resolve_bucket_versioned: ");
-    std::unique_ptr<rgw::sal::Bucket> b;
-    if (driver->load_bucket(&dp, rgw_bucket("", bucket_name()),
-			    &b, null_yield) < 0) {
-      return false;
+    {
+      lock_guard guard(mtx);
+      file* f = get_if<file>(&variant_type);
+      if (! f) {
+        return -EISDIR;
+      }
+      if (is_open()) {
+        *fsio = f->fsio_path;
+        return 0;
+      }
     }
-    return b->get_info().versioned();
-  } /* RGWFileHandle::resolve_bucket_versioned */
+    auto* fs = get_fs();
+    CephContext* cct = static_cast<CephContext*>(fs->get_fs()->rgw);
+    /* the permission check needs this object's bucket and its full
+     * key, not the immediate parent's name and the leaf--those agree
+     * only for an object at the root of a bucket, which is why this
+     * went unnoticed:  a nested object looked its bucket up by the
+     * name of its containing directory and got NoSuchBucket */
+    const std::string& bkt_name = bucket_name();
+    std::string obj_name = relative_object_name();
+    uint32_t op_flags = RGWOpenRequest::FLAG_NONE;
+    if (posix_flags & (O_WRONLY | O_RDWR)) {
+      op_flags |= RGWOpenRequest::FLAG_WRITE;
+    }
+    if (rgw_openflags & RGW_OPEN_FLAG_CREATE) {
+      op_flags |= RGWOpenRequest::FLAG_CREATE;
+    }
+    RGWOpenRequest req(cct, driver->get_user(fs->get_user()->user_id),
+                       bkt_name, obj_name, op_flags);
+    int rc = g_rgwlib->get_fe()->execute_req(&req);
+    if (rc < 0) {
+      return rc;
+    }
+    const bool serves = req.sal_bucket->have_fsio();
+    if (! serves) {
+      lsubdout(fs->get_context(), rgw, 4)
+        << __func__ << " " << obj_name << ": bucket " << bkt_name
+        << " does not serve FSIO;  the legacy path" << dendl;
+    }
+    {
+      lock_guard guard(mtx);
+      file* f = get_if<file>(&variant_type);
+      if (! f) {
+        return -EISDIR;
+      }
+      if (! is_open()) {
+        f->fsio_path = serves;
+        f->versioned_bucket = req.sal_bucket->get_info().versioned();
+      }
+      *fsio = f->fsio_path;
+    }
+    if (*fsio && fo) {
+      fo->sal_bucket = std::move(req.sal_bucket);
+      fo->sal_object = std::move(req.sal_object);
+    }
+    return 0;
+  } /* RGWFileHandle::choose_path */
 
   void RGWFileHandle::arm_stateless_timer()
   {
@@ -2725,7 +2756,8 @@ namespace rgw {
   } /* RGWFileHandle::reopen2 */
 
   int RGWFileHandle::open_global(uint32_t posix_flags,
-                                 uint32_t rgw_openflags)
+                                 uint32_t rgw_openflags,
+                                 first_open* fo)
   {
     if (!is_file()) {
       return -EINVAL;
@@ -2735,11 +2767,18 @@ namespace rgw {
     CephContext* cct = static_cast<CephContext*>(fs->get_fs()->rgw);
     const DoutPrefix dp(cct, dout_subsys, "rgw open_global: ");
 
-    /* resolved before the lock is taken:  load_bucket() takes locks of
-     * its own and can do i/o, and holding a handle mutex across a driver
-     * call is a hazard we do not need.  Once per open_global(), which is
-     * what the interval selection costs. */
-    bool versioned = resolve_bucket_versioned();
+    /* chosen before the lock is taken:  the request takes locks of its
+     * own and does i/o, and holding a handle mutex across a driver call
+     * is a hazard we do not need */
+    first_open own;
+    if (! fo) {
+      bool fsio;
+      if (int rc = choose_path(posix_flags, rgw_openflags, &own, &fsio);
+          rc < 0) {
+        return rc;
+      }
+      fo = &own;
+    }
 
     lock_guard guard(mtx);
 
@@ -2757,10 +2796,9 @@ namespace rgw {
     }
 
     file::Open* open{nullptr};
-    int rc = do_open(&open, posix_flags, rgw_openflags);
+    int rc = do_open(&open, posix_flags, rgw_openflags, nullptr, fo);
     if (! rc) {
       f->global_open = open;
-      f->versioned_bucket = versioned;
       flags |= FLAG_STATELESS_OPEN;
       /* every stateless open is armed, not just a writer's:  nothing
        * else reclaims one.  v4 tells us when it is done;  v3 does not,
@@ -2900,8 +2938,12 @@ namespace rgw {
 
   int RGWFileHandle::truncate(uint64_t size)
   {
-    auto* driver = g_rgwlib->get_driver();
-    if (! driver->have_fsio()) {
+    first_open fo;
+    bool fsio;
+    if (int rc = choose_path(O_RDWR, RGW_OPEN_FLAG_NONE, &fo, &fsio); rc < 0) {
+      return rc;
+    }
+    if (! fsio) {
       /* legacy path:  size is advisory until the write cycle ends */
       return 0;
     }
@@ -2926,7 +2968,7 @@ namespace rgw {
       if (! f->fsio_hdl) {
         /* no open is held:  the truncate is the whole operation, so
          * take a write open and publish it below */
-        rc = do_open(&open, O_RDWR, RGW_OPEN_FLAG_NONE);
+        rc = do_open(&open, O_RDWR, RGW_OPEN_FLAG_NONE, nullptr, &fo);
         if (!! rc) {
           return rc;
         }
@@ -3901,13 +3943,6 @@ int rgw_open(struct rgw_fs *rgw_fs,
     return -EISDIR;
   }
 
-  /* No positional view:  the open is bookkeeping, as it was before the
-   * FSIO path existed, and rgw_close() completes the write transaction
-   * through close(). */
-  if (! g_rgwlib->get_driver()->have_fsio()) {
-    return rgw_fh->open(flags);
-  }
-
   /* v1 compatibility.  rgw_lookup(RGW_LOOKUP_FLAG_CREATE) on an object
    * which did not exist recorded the caller's intent to create it, so
    * supply what that implies rather than requiring the caller to say it
@@ -3921,17 +3956,34 @@ int rgw_open(struct rgw_fs *rgw_fs,
    * object that does not exist -- -ENOENT, after which the write has no
    * open to use and returns -EPERM, one call downstream of the cause.
    * Inferring here means a v1 consumer moving from rados to a
-   * filesystem-backed driver does not have to change. */
+   * filesystem-backed driver does not have to change.  Inferred before
+   * the path is chosen, so the open's request sees the create;  the
+   * legacy open keeps the caller's flags. */
+  uint32_t fsio_posix = posix_flags, fsio_flags = flags;
   if (rgw_fh->creating()) {
-    if (! (posix_flags & (O_WRONLY|O_RDWR))) {
-      posix_flags |= O_RDWR;
+    if (! (fsio_posix & (O_WRONLY|O_RDWR))) {
+      fsio_posix |= O_RDWR;
     }
-    flags |= RGW_OPEN_FLAG_CREATE;
+    fsio_flags |= RGW_OPEN_FLAG_CREATE;
+  }
+
+  RGWFileHandle::first_open fo;
+  bool fsio;
+  if (int rc = rgw_fh->choose_path(fsio_posix, fsio_flags, &fo, &fsio);
+      rc < 0) {
+    return rc;
+  }
+
+  /* No positional view:  the open is bookkeeping, as it was before the
+   * FSIO path existed, and rgw_close() completes the write transaction
+   * through close(). */
+  if (! fsio) {
+    return rgw_fh->open(flags);
   }
 
   /* do_open() clears FLAG_CREATING on success, for open2 as well as this
    * path -- see the note there */
-  return rgw_fh->open_global(posix_flags, flags);
+  return rgw_fh->open_global(fsio_posix, fsio_flags, &fo);
 }
 
 /*
@@ -4107,12 +4159,20 @@ int rgw_read(struct rgw_fs *rgw_fs,
   RGWLibFS *fs = static_cast<RGWLibFS*>(rgw_fs->fs_private);
   RGWFileHandle* rgw_fh = get_rgwfh(fh);
 
-  if (g_rgwlib->get_driver()->have_fsio() && rgw_fh->is_file()) {
+  RGWFileHandle::first_open fo;
+  bool fsio{false};
+  if (rgw_fh->is_file()) {
+    if (int rc = rgw_fh->choose_path(O_RDONLY, RGW_OPEN_FLAG_V3, &fo, &fsio);
+        rc < 0) {
+      return rc;
+    }
+  }
+  if (fsio) {
     /* stateless read:  attach to the shadow if one exists, else to
      * the published object;  a reader never creates a shadow */
     auto* open = rgw_fh->get_global_open();
     if (! open) {
-      int rc = rgw_fh->open_global(O_RDONLY, RGW_OPEN_FLAG_V3);
+      int rc = rgw_fh->open_global(O_RDONLY, RGW_OPEN_FLAG_V3, &fo);
       if (!! rc) {
 	return rc;
       }
@@ -4167,13 +4227,26 @@ int rgw_write(struct rgw_fs *rgw_fs,
   if (! rgw_fh->is_file())
     return -EISDIR;
 
-  if (g_rgwlib->get_driver()->have_fsio()) {
+  /* both paths return EPERM for a v4 write with no open;  checked before
+   * the choice, which would otherwise run the open's request */
+  if (! rgw_fh->is_open() && ! (flags & RGW_OPEN_FLAG_V3)) {
+    return -EPERM;
+  }
+
+  RGWFileHandle::first_open fo;
+  bool fsio;
+  rc = rgw_fh->choose_path(O_RDWR, flags, &fo, &fsio);
+  if (rc < 0) {
+    return rc;
+  }
+
+  if (fsio) {
     auto* open = rgw_fh->get_global_open();
     if (! open || ! open->is_write_open()) {
       if (! (flags & RGW_OPEN_FLAG_V3) && ! open) {
 	return -EPERM;
       }
-      rc = rgw_fh->open_global(O_RDWR, flags);
+      rc = rgw_fh->open_global(O_RDWR, flags, &fo);
       if (!! rc) {
 	return rc;
       }

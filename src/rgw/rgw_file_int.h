@@ -275,6 +275,9 @@ namespace rgw {
       std::unique_ptr<rgw::sal::Object> sal_object;
       /* shared so that in-flight i/o survives a concurrent close */
       std::shared_ptr<sal::Object::FSIOObject> fsio_hdl;
+      /* design §7:  whether this file's opens take the FSIO path, from its
+       * first open's RGWOpenRequest;  read only while it has an open */
+      bool fsio_path{false};
       RGWWriteRequest* write_req;
 
       file() : write_req(nullptr) {}
@@ -760,6 +763,20 @@ namespace rgw {
 
     int write_finish(uint32_t flags = FLAG_NONE);
 
+    /* design §7:  what a first open's RGWOpenRequest loaded, for the FSIO
+     * open that follows it */
+    struct first_open {
+      std::unique_ptr<rgw::sal::Bucket> sal_bucket;
+      std::unique_ptr<rgw::sal::Object> sal_object;
+    };
+
+    /* design §7:  the path this file's opens take.  With an open, the one
+     * recorded;  without, runs the open's RGWOpenRequest (the permission
+     * check, the bucket, the object), records the bucket's have_fsio()
+     * and versioned(), and keeps its handles in *fo.  mtx not held */
+    int choose_path(uint32_t posix_flags, uint32_t rgw_openflags,
+                    first_open* fo, bool* fsio);
+
     int open2(file::Open** /* out */, uint32_t posix_flags,
               uint32_t rgw_openflags,
               const struct rgw_open_args* args = nullptr);
@@ -767,7 +784,8 @@ namespace rgw {
     /* stateless (NFSv3) open tracking:  at most one Open per file
      * handle, created on demand and reclaimed by close or by the
      * idle reaper */
-    int open_global(uint32_t posix_flags, uint32_t rgw_openflags);
+    int open_global(uint32_t posix_flags, uint32_t rgw_openflags,
+                    first_open* fo = nullptr);
     int close_global(uint32_t flags);
 
     /* change the access mode of an existing open (NFSv4 reopen) */
@@ -784,8 +802,8 @@ namespace rgw {
     /* mtx must be held */
     int do_open(file::Open** /* out */, uint32_t posix_flags,
                 uint32_t rgw_openflags,
-                const struct rgw_open_args* args = nullptr);
-    bool resolve_bucket_versioned();
+                const struct rgw_open_args* args = nullptr,
+                first_open* fo = nullptr);
     void arm_stateless_timer();
     /* mtx must be held */
     void discard_shadow();
