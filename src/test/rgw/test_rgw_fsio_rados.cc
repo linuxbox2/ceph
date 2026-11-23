@@ -392,6 +392,29 @@ protected:
     return th;
   }
 
+  /* fstat's size;  -1 on its error */
+  static int64_t size_of(const std::unique_ptr<rgw::sal::Object::FSIOObject>& fh) {
+    struct stat st;
+    if (fh->fstat(&st, 0) < 0) {
+      return -1;
+    }
+    EXPECT_TRUE(S_ISREG(st.st_mode));
+    return st.st_size;
+  }
+  /* a shadow's truncate epoch, as its record on the head holds it */
+  std::optional<uint64_t> epoch_of(const std::string& key,
+				   const cls_rgw_fsio_id& id) {
+    auto rec = records_of(head_of(key), 0);
+    if (!rec.hdr) {
+      return std::nullopt;
+    }
+    auto* e = entry_of(*rec.hdr, id);
+    if (!e || !e->shadow) {
+      return std::nullopt;
+    }
+    return e->shadow->trunc_epoch;
+  }
+
   /* where got first differs from want, and whose bytes are there instead */
   static std::string diff(const std::string& got, const std::string& want,
 			  const std::string& other) {
@@ -988,6 +1011,144 @@ TEST_F(FSIORados, ReportsOnlyWhileWatched)
   g_conf().set_val_or_die("rgw_fsio_hint_interval", "3");
 }
 
+/* the driver's step 5:  fstat and ftruncate (FSIO design §2.7, §3.3) */
+
+/* a reader sees its content's size, whatever S3 writes since */
+TEST_F(FSIORados, ReaderStatIsTheContent)
+{
+  ASSERT_EQ(0, put("obj", pattern(9 * MiB, 1)));
+  auto r = open("obj", false);
+  ASSERT_TRUE(r);
+  EXPECT_EQ(int64_t(9 * MiB), size_of(r));
+  ASSERT_EQ(0, put("obj", pattern(5 * MiB, 2)));
+  EXPECT_EQ(int64_t(9 * MiB), size_of(r));
+}
+
+/* a writer sees its own writes' end */
+TEST_F(FSIORados, WriterStatFollowsItsWrites)
+{
+  ASSERT_EQ(0, put("obj", pattern(9 * MiB, 1)));
+  auto w = open("obj", true);
+  ASSERT_TRUE(w);
+  EXPECT_EQ(int64_t(9 * MiB), size_of(w));
+  ASSERT_EQ(0, write(w, 20 * MiB - 1, {"e"}));
+  EXPECT_EQ(int64_t(20 * MiB), size_of(w));
+}
+
+/* §3.3:  a truncate down cuts the end's chunk and removes every reserved
+ * chunk past it, then sets the size exactly at a new epoch;  the published
+ * content is unchanged */
+TEST_F(FSIORados, TruncateDownRemovesChunksPastTheEnd)
+{
+  const auto a = pattern(9 * MiB, 1);
+  ASSERT_EQ(0, put("obj", a));
+  auto w = open("obj", true);
+  ASSERT_TRUE(w);
+  auto* hdl = rados_fsio(w);
+  ASSERT_EQ(0, write(w, 20 * MiB - 1, {"e"}));	// chunk 4
+  const auto c1 = hdl->shadow_chunk(4 * MiB), c2 = hdl->shadow_chunk(8 * MiB),
+	     c4 = hdl->shadow_chunk(16 * MiB);
+  ASSERT_TRUE(bytes_of(c4));
+  ASSERT_EQ(0, w->ftruncate(env->dpp.get(), 5 * MiB, 0));
+  auto b1 = bytes_of(c1);
+  ASSERT_TRUE(b1);
+  EXPECT_EQ(MiB, b1->size());
+  EXPECT_FALSE(bytes_of(c2));
+  EXPECT_FALSE(bytes_of(c4));
+  const auto id = hdl->writing_to();
+  EXPECT_EQ(5 * MiB, size_hint_of("obj", id));
+  EXPECT_EQ(1u, epoch_of("obj", id));
+  EXPECT_EQ(int64_t(5 * MiB), size_of(w));
+  EXPECT_EQ(MiB, read(w, 4 * MiB, 2 * MiB).size());
+  std::string now;
+  ASSERT_EQ(0, get("obj", &now));
+  EXPECT_TRUE(now == a);
+}
+
+/* §2.7:  a truncate up makes the new end's chunk, the rest reading as
+ * zeros */
+TEST_F(FSIORados, TruncateUpExtendsTheEndChunk)
+{
+  ASSERT_EQ(0, put("obj", pattern(9 * MiB, 1)));
+  auto w = open("obj", true);
+  ASSERT_TRUE(w);
+  auto* hdl = rados_fsio(w);
+  ASSERT_EQ(0, w->ftruncate(env->dpp.get(), 30 * MiB, 0));
+  auto end = bytes_of(hdl->shadow_chunk(30 * MiB - 1));
+  ASSERT_TRUE(end) << "the new end's chunk was not made";
+  EXPECT_EQ(30 * MiB - 28 * MiB, end->size());
+  EXPECT_EQ(int64_t(30 * MiB), size_of(w));
+  EXPECT_EQ(30 * MiB, size_hint_of("obj", hdl->writing_to()));
+  EXPECT_EQ(std::string(4096, '\0'), read(w, 25 * MiB, 4096));
+  EXPECT_EQ(std::string(10, '\0'), read(w, 30 * MiB - 10, 100));
+}
+
+/* the head clone carries the attributes and the pseudo-manifest:  a
+ * truncate to zero empties it and never removes it */
+TEST_F(FSIORados, TruncateToZeroKeepsTheHeadClone)
+{
+  ASSERT_EQ(0, put("obj", pattern(9 * MiB, 1)));
+  auto w = open("obj", true);
+  ASSERT_TRUE(w);
+  auto* hdl = rados_fsio(w);
+  const auto c0 = hdl->shadow_chunk(0), c1 = hdl->shadow_chunk(4 * MiB);
+  ASSERT_EQ(0, w->ftruncate(env->dpp.get(), 0, 0));
+  auto b0 = bytes_of(c0);
+  ASSERT_TRUE(b0) << "the head clone was removed";
+  EXPECT_EQ(0u, b0->size());
+  ceph::buffer::list pm;
+  boost::system::error_code ec;
+  neo().execute(neorados::Object{c0.oid}, [&] {
+		  auto x = ioc_of(c0.pool); x.set_key(c0.loc); return x; }(),
+		neorados::ReadOp{}.get_xattr("user.rgw.fsio.pm", &pm), nullptr,
+		ceph::async::use_blocked[ec]);
+  EXPECT_FALSE(ec) << "the head clone lost its pseudo-manifest";
+  EXPECT_FALSE(bytes_of(c1));
+  EXPECT_EQ(0, size_of(w));
+  EXPECT_EQ("", read(w, 0, 10));
+}
+
+/* Z16:  each chunk step carries the chunk write fence's check */
+TEST_F(FSIORados, TruncateOfAFencedChunkFails)
+{
+  ASSERT_EQ(0, put("obj", pattern(9 * MiB, 1)));
+  auto w = open("obj", true);
+  ASSERT_TRUE(w);
+  const auto c2 = rados_fsio(w)->shadow_chunk(8 * MiB);
+  {
+    auto ioc = ioc_of(c2.pool);
+    ioc.set_key(c2.loc);
+    ceph::buffer::list v;
+    v.append("finalizer");
+    neorados::WriteOp op;
+    op.setxattr("user.rgw.fsio.fence", std::move(v));
+    neo().execute(neorados::Object{c2.oid}, ioc, std::move(op),
+		  ceph::async::use_blocked);
+  }
+  EXPECT_EQ(-EIO, w->ftruncate(env->dpp.get(), 5 * MiB, 0));
+  EXPECT_TRUE(bytes_of(c2)) << "a fenced chunk was removed";
+}
+
+/* §3.3:  a truncate applied but its reply lost (sent twice, the second
+ * reply kept) leaves the handle unsure of its length;  it rebases from the
+ * chunks before it answers fstat or reports, so a write after the
+ * truncate is counted and the epoch it never heard is reached */
+TEST_F(FSIORados, TruncateHeardTwiceRebases)
+{
+  ASSERT_EQ(0, put("obj", pattern(9 * MiB, 1)));
+  auto w = open("obj", true);
+  ASSERT_TRUE(w);
+  auto* hdl = rados_fsio(w);
+  const auto id = hdl->writing_to();
+  hdl->send_sequenced_twice(true);
+  ASSERT_EQ(0, w->ftruncate(env->dpp.get(), 5 * MiB, 0));
+  hdl->send_sequenced_twice(false);
+  EXPECT_EQ(1u, epoch_of("obj", id)) << "the truncate applied twice";
+  ASSERT_EQ(0, write(w, 6 * MiB, {"z"}));
+  EXPECT_EQ(int64_t(6 * MiB + 1), size_of(w));
+  EXPECT_EQ(6 * MiB + 1, size_hint_of("obj", id));
+}
+
 /* the driver's step 3, element 4:  a join that must wait (FSIO design
  * §3.1 step 5, §4.1, W13).  The test holds a shadow constructing itself:
  * a raw fsio_join as writer under a handle number of its own, its
@@ -1343,7 +1504,7 @@ TEST_F(FSIORadosVersioned, VersionedReaderReadsTheInstance)
 
 /* §3.1 step 4, first case:  a reader joining with the instance a publish
  * in flight has linked binds that publishing shadow, and reads it through
- * the instance.  Written with the publish (the driver's step 8):  a
+ * the instance.  Written with the publish (the driver's step 7):  a
  * versioned publish in flight is its precondition.  It will check that
  * the reader counted itself on the linked instance, that its binding is
  * the publishing shadow, not the OLH's previous content, and that once

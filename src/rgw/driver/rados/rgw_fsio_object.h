@@ -4,6 +4,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <optional>
 #include <string>
@@ -57,9 +58,16 @@ public:
   int end_write(const DoutPrefixProvider* dpp, uint32_t flags) override { return -ENOTSUP; }
   /* §3.4:  fsio_leave, the instance's count, then the presence hints go;
    * the lost-reply rule and the drain's GC chain are the close's step
-   * (plan, driver step 7) */
+   * (plan, driver step 6) */
   int close(const DoutPrefixProvider* dpp, uint32_t flags) override;
-  int fstat(struct stat* st, uint32_t flags) override { return -ENOTSUP; }
+  /* §2.7:  the size and mtime this handle sees:  a reader its content's,
+   * a writer its shadow's as it knows them, rebased first when a
+   * sequenced call's reply was lost (§3.3) */
+  int fstat(struct stat* st, uint32_t flags) override;
+  /* §3.3:  the chunks first, each with the chunk write fence's check,
+   * then fsio_truncate */
+  int ftruncate(const DoutPrefixProvider* dpp, uint64_t size,
+		uint32_t flags) override;
   int fgetattr(const DoutPrefixProvider* dpp, const std::string& name,
 	       buffer::list& dest, uint32_t flags) override { return -ENOTSUP; }
   int fsetattr(const DoutPrefixProvider* dpp, const std::string& name,
@@ -83,8 +91,15 @@ public:
   const std::optional<std::string>& moved_segment() const { return seg_moved; }
   /* §2.7, §3.3:  fsio_hint with this writer's epoch, high-water mark and
    * mtime;  a stale epoch rebases from the chunk at the high-water mark
-   * and reports again.  end_write() calls it (the close, plan step 7) */
+   * and reports again.  end_write() calls it (the close, plan step 6) */
   int report_hint(const DoutPrefixProvider* dpp);
+
+  /* the shadow's chunk holding ofs, as named on RADOS */
+  rgw_raw_obj shadow_chunk(uint64_t ofs) const;
+  /* test only:  each sequenced call sent twice with one sequence number,
+   * the second reply kept, as the Objecter's resend past the PG log's
+   * dup window returns it (Z22) */
+  void send_sequenced_twice(bool on) { twice = on; }
 
   /* the fsio_extend calls this handle has made */
   uint64_t extends() const { return n_extends; }
@@ -148,6 +163,13 @@ private:
   int read_piece(const DoutPrefixProvider* dpp, const FSIOChunk& c,
 		 bool shadow, uint64_t off, uint64_t len,
 		 ceph::buffer::list* bl);
+  /* the head's FSIO header */
+  int read_header(const DoutPrefixProvider* dpp, cls_rgw_fsio_hdr* hdr);
+  /* a sequenced call on the head:  the op exec, then seq advanced;
+   * twice when the test asks */
+  int sequenced(const DoutPrefixProvider* dpp,
+		const std::function<void(neorados::WriteOp&)>& build);
+
   /* §2.3, §2.5:  where the bound content's head segment went:  the
    * generation's leaf clone f(head, r), or the deferred sibling */
   int find_moved_segment(const DoutPrefixProvider* dpp);
@@ -183,7 +205,11 @@ private:
   uint64_t trunc_epoch = 0;	// the shadow's, as last heard
   bool others = false;		// another handle is open in the generation
   bool dirty = false;		// written since its last report
+  bool unsure = false;		// a sequenced call's reply was lost (§3.3)
+  bool twice = false;		// test only:  send_sequenced_twice()
   ceph::real_time wmtime;	// its last write's
+  ceph::real_time rmtime;	// the bound content's
+  ceph::real_time wmtime_hint;	// the shadow's, as the join saw it
   ceph::mono_time last_report;
   uint64_t n_extends = 0;
   std::map<rgw_pool, neorados::IOContext> iocs;
