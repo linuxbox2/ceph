@@ -21,6 +21,7 @@
 
 #include <boost/intrusive/list.hpp>
 #include "include/rados/librados_fwd.hpp"
+#include "include/neorados/RADOS.hpp"
 #include "common/async/yield_context.h"
 
 #include "rgw_common.h"
@@ -104,6 +105,8 @@ class Aio {
   static OpFunc librados_op(librados::IoCtx ctx,
                             librados::ObjectWriteOperation&& op,
                             optional_yield y, jspan_context *trace_ctx = nullptr);
+  static OpFunc neorados_op(neorados::RADOS& rados, neorados::IOContext ioc,
+                            neorados::WriteOp&& op, optional_yield y);
   static OpFunc d3n_cache_op(const DoutPrefixProvider *dpp, optional_yield y,
                              off_t read_ofs, off_t read_len, std::string& location);
 };

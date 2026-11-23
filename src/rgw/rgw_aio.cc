@@ -16,6 +16,7 @@
 #include <type_traits>
 #include "include/rados/librados.hpp"
 #include "librados/librados_asio.h"
+#include "common/error_code.h"
 
 #include "rgw_aio.h"
 #include "rgw_d3n_cacherequest.h"
@@ -137,6 +138,26 @@ Aio::OpFunc Aio::librados_op(librados::IoCtx ctx,
                              librados::ObjectWriteOperation&& op,
                              optional_yield y, jspan_context *trace_ctx) {
   return aio_abstract(std::move(ctx), std::move(op), y, trace_ctx);
+}
+
+Aio::OpFunc Aio::neorados_op(neorados::RADOS& rados, neorados::IOContext ioc,
+                             neorados::WriteOp&& op, optional_yield y) {
+  return [&rados, ioc = std::move(ioc), op = std::move(op), y]
+         (Aio* aio, AioResult& r) mutable {
+    auto done = [aio, &r] (boost::system::error_code ec) {
+      r.result = ceph::from_error_code(ec);
+      aio->put(r);
+    };
+    if (y) {
+      // complete on the yield_context's strand, as librados_op's Handler
+      auto ex = y.get_yield_context().get_executor();
+      rados.execute(neorados::Object{r.obj.oid}, ioc, std::move(op),
+                    boost::asio::bind_executor(ex, std::move(done)));
+    } else {
+      rados.execute(neorados::Object{r.obj.oid}, ioc, std::move(op),
+                    std::move(done));
+    }
+  };
 }
 
 Aio::OpFunc Aio::d3n_cache_op(const DoutPrefixProvider *dpp, optional_yield y,

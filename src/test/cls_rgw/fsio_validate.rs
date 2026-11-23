@@ -61,7 +61,8 @@ edition = "2021"
 //!
 //! `--clone-latency` runs the harness's disabled DISABLED_CloneLatency
 //! alone:  how long a writer's open takes to construct objects of 64, 256
-//! and 512 chunks (plan, the driver's step 3, element 5).  Its CLONE_LATENCY
+//! and 512 chunks, at rgw_fsio_clone_window 1 and 10 (plan, the driver's
+//! step 3, element 5).  Its CLONE_LATENCY
 //! lines go into the summary;  the harness's limit is 20 minutes for it.
 //!
 //! `--reuse` keeps a RADOS cluster between runs, for a quick loop while

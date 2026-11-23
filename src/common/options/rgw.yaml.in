@@ -2881,6 +2881,18 @@ options:
   default: 5
   services:
   - rgw
+- name: rgw_fsio_clone_window
+  type: uint
+  level: advanced
+  desc: Concurrent chunk clones per FSIO shadow construction
+  long_desc: A writer's FSIO open that constructs a shadow clones each of the
+    object's chunks;  this many clones are in flight at once (FSIO design
+    4.1).  Separate from rgw_max_copy_obj_concurrent_io, so raising it for
+    NFS does not change S3 copies.
+  default: 10
+  min: 1
+  services:
+  - rgw
 - name: rgw_fsio_check_origin
   type: bool
   level: dev

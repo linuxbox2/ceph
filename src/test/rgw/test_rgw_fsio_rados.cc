@@ -689,11 +689,13 @@ TEST_F(FSIORadosWait, JoinWaitsForReady)
  * (plan §6.13).  A measurement, not a check:  disabled in ordinary runs,
  * run by fsio_validate.rs --clone-latency.  The time is the whole open,
  * its fsio_join and fsio_ready as well as the clones;  per chunk, the
- * clones' */
+ * clones'.  Once one at a time, once at rgw_fsio_clone_window's default */
 TEST_F(FSIORados, DISABLED_CloneLatency)
 {
+  for (const char* window : {"1", "10"})
   for (const int chunks : {64, 256, 512}) {
-    const std::string key = fmt::format("clone-latency-{}", chunks);
+    g_conf().set_val_or_die("rgw_fsio_clone_window", window);
+    const std::string key = fmt::format("clone-latency-{}-{}", window, chunks);
     const uint64_t size = uint64_t(chunks) << 22;	// 4 MiB chunks
     {
       auto obj = bucket->get_object(rgw_obj_key(key));
@@ -720,10 +722,12 @@ TEST_F(FSIORados, DISABLED_CloneLatency)
     const auto ms = std::chrono::duration<double, std::milli>(
       std::chrono::steady_clock::now() - start).count();
     ASSERT_TRUE(fh);
-    std::cout << fmt::format("CLONE_LATENCY chunks={} ms={:.0f} "
-			     "per_chunk_ms={:.2f}", chunks, ms, ms / chunks)
+    std::cout << fmt::format("CLONE_LATENCY window={} chunks={} ms={:.0f} "
+			     "per_chunk_ms={:.2f}", window, chunks, ms,
+			     ms / chunks)
 	      << std::endl;
   }
+  g_conf().set_val_or_die("rgw_fsio_clone_window", "10");
 }
 
 /* the driver's step 3, element 3:  the versioned open (FSIO design §2.5,

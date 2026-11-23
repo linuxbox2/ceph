@@ -14,6 +14,7 @@
 #include "common/error_code.h"
 #include "include/random.h"
 #include "neorados/cls/rgw_fsio.h"
+#include "rgw_aio_throttle.h"
 #include "rgw_fsio_hints.h"
 #include "rgw_obj_manifest.h"
 #include "rgw_rados.h"
@@ -360,8 +361,25 @@ int RadosFSIOObject::clone_chunks(const DoutPrefixProvider* dpp,
     return -EIO;
   }
   *n = 0;
+  /* §4.1:  the clones in flight together, rgw_fsio_clone_window of them;
+   * EEXIST is a resend's, done */
+  auto aio = rgw::make_throttle(
+    dpp->get_cct()->_conf.get_val<uint64_t>("rgw_fsio_clone_window"),
+    null_yield);
+  int first = 0;
+  auto settle = [&] (rgw::AioResultList&& done) {
+    for (auto& d : done) {
+      if (d.result < 0 && d.result != -EEXIST && !first) {
+	first = d.result;
+	ldpp_dout(dpp, 0) << "ERROR: FSIO:  cloning " << d.obj.oid << " for "
+			  << id.to_str() << ":  " << cpp_strerror(-first)
+			  << dendl;
+      }
+    }
+    done.clear_and_dispose(std::default_delete<rgw::AioResultEntry>{});
+  };
   std::map<rgw_pool, neorados::IOContext> iocs;
-  for (auto p = m.obj_begin(dpp); p != m.obj_end(dpp); ++p, ++*n) {
+  for (auto p = m.obj_begin(dpp); p != m.obj_end(dpp) && !first; ++p, ++*n) {
     const rgw_raw_obj raw = p.get_location().get_raw_obj(rados);
     if (raw.oid == skip_oid) {
       continue;
@@ -373,24 +391,23 @@ int RadosFSIOObject::clone_chunks(const DoutPrefixProvider* dpp,
 			     dpp, store->get_neorados(), raw.pool,
 			     ceph::async::use_blocked)).first;
       } catch (const sys::system_error& e) {
-	return ceph::from_error_code(e.code());
+	first = ceph::from_error_code(e.code());
+	break;
       }
     }
     auto cioc = ioc->second;
     if (!raw.loc.empty()) {
       cioc.set_key(raw.loc);
     }
-    /* EEXIST is a resend's, done */
     neorados::WriteOp op;
     op.clone_to(cls_rgw_fsio_clone_name(info.bucket.marker, 'd', id, raw.oid),
 		CLONE_DROPS);
-    if (int r = exec(raw.oid, cioc, std::move(op)); r < 0 && r != -EEXIST) {
-      ldpp_dout(dpp, 0) << "ERROR: FSIO:  cloning " << raw.oid << " for "
-			<< id.to_str() << ":  " << cpp_strerror(-r) << dendl;
-      return r;
-    }
+    settle(aio->get(raw, rgw::Aio::neorados_op(store->get_neorados(), cioc,
+					       std::move(op), null_yield),
+		    1, 0));
   }
-  return 0;
+  settle(aio->drain());
+  return first;
 }
 
 int RadosFSIOObject::construct(const DoutPrefixProvider* dpp,
