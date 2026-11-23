@@ -165,6 +165,11 @@ struct RGWObjManifestRule {
    * only by an FSIO publish, which needs the fsio zone feature, set once
    * no gateway would decode the rule without it */
   std::optional<cls_rgw_fsio_id> fsio;
+  /* with fsio, on the rule covering part 0:  the head segment is the
+   * separate chunk f(head, fsio) too, the head object holding attributes
+   * only, as a publish leaves it;  else the head object holds it (a copy
+   * or dedup that put data in the head) */
+  bool fsio_head = false;
 
   RGWObjManifestRule() : start_part_num(0), start_ofs(0), part_size(0), stripe_max_size(0) {}
   RGWObjManifestRule(uint32_t _start_part_num, uint64_t _start_ofs, uint64_t _part_size, uint64_t _stripe_max_size) :
@@ -178,6 +183,7 @@ struct RGWObjManifestRule {
     encode(stripe_max_size, bl);
     encode(override_prefix, bl);
     encode(fsio, bl);
+    encode(fsio_head, bl);
     ENCODE_FINISH(bl);
   }
 
@@ -189,8 +195,10 @@ struct RGWObjManifestRule {
     decode(stripe_max_size, bl);
     if (struct_v >= 2)
       decode(override_prefix, bl);
-    if (struct_v >= 3)
+    if (struct_v >= 3) {
       decode(fsio, bl);
+      decode(fsio_head, bl);
+    }
     DECODE_FINISH(bl);
   }
   void dump(Formatter *f) const;
@@ -292,12 +300,29 @@ public:
   void clear_fsio() {
     for (auto& [ofs, rule] : rules) {
       rule.fsio.reset();
+      rule.fsio_head = false;
     }
   }
-  /* a publish's:  every rule's chunks are the shadow's, f(name, id) */
+  /* the head segment is the separate chunk f(head, id), as a publish
+   * leaves it:  the head object holds attributes only */
+  bool fsio_head_separate() const {
+    return !rules.empty() && rules.begin()->second.fsio &&
+      rules.begin()->second.fsio_head;
+  }
+  /* a copy or dedup put the head segment's data in the head object */
+  void clear_fsio_head() {
+    if (!rules.empty()) {
+      rules.begin()->second.fsio_head = false;
+    }
+  }
+  /* a publish's:  every rule's chunks are the shadow's, f(name, id), the
+   * head segment's too */
   void set_fsio(const cls_rgw_fsio_id& id) {
     for (auto& [ofs, rule] : rules) {
       rule.fsio = id;
+    }
+    if (!rules.empty()) {
+      rules.begin()->second.fsio_head = true;
     }
   }
 

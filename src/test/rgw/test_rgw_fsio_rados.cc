@@ -1155,6 +1155,12 @@ protected:
     g_conf().set_val_or_die("rgw_gc_obj_min_wait", std::to_string(min_wait));
     FSIORados::TearDown();
   }
+  /* a GC pass over every shard, expired or not;  GC's own log (each
+   * shard, what it listed and removed) needs CEPH_ARGS="--debug-rgw=20
+   * --log-to-stderr=true" at startup */
+  int gc_pass() {
+    return rados()->process_gc(false, null_yield);
+  }
   /* every GC entry carrying tag, in every shard */
   std::vector<cls_rgw_gc_obj_info> gc_entries(const std::string& tag) {
     std::vector<cls_rgw_gc_obj_info> v;
@@ -1246,7 +1252,7 @@ protected:
     for (const auto& e : es) {
       EXPECT_EQ(on, e.is_manifest());
     }
-    ASSERT_EQ(0, rados()->process_gc(false, null_yield));
+    ASSERT_EQ(0, gc_pass());
     for (const auto& o : old_tail) {
       EXPECT_FALSE(bytes_of(o)) << o.oid;
     }
@@ -1284,7 +1290,7 @@ protected:
     }
     ASSERT_FALSE(clones.empty()) << "the shadow's clones were not sent to GC";
     EXPECT_GE(made, 1u) << "no clone existed to collect";
-    ASSERT_EQ(0, rados()->process_gc(false, null_yield));
+    ASSERT_EQ(0, gc_pass());
     for (const auto& c : clones) {
       EXPECT_FALSE(bytes_of(c)) << c.oid;
     }
@@ -1325,7 +1331,7 @@ protected:
       }
       EXPECT_EQ(old_tail.size(), objs);
     }
-    ASSERT_EQ(0, rados()->process_gc(false, null_yield));
+    ASSERT_EQ(0, gc_pass());
     for (const auto& o : old_tail) {
       EXPECT_FALSE(bytes_of(o)) << o.oid;
     }
@@ -1357,7 +1363,7 @@ TEST_F(FSIORadosGC, ExpandedWhenTheFeatureIsOff)
     objs += e.chain.objs.size();
   }
   EXPECT_EQ(tail.size(), objs);
-  ASSERT_EQ(0, rados()->process_gc(false, null_yield));
+  ASSERT_EQ(0, gc_pass());
   for (const auto& t : tail) {
     EXPECT_FALSE(bytes_of(t)) << t.oid;
   }
@@ -1391,7 +1397,7 @@ TEST_F(FSIORadosGC, ManifestEntryWhenTheFeatureIsOn)
   ASSERT_EQ(1u, es.size());
   EXPECT_TRUE(es[0].is_manifest());
   EXPECT_TRUE(es[0].chain.objs.empty());
-  ASSERT_EQ(0, rados()->process_gc(false, null_yield));
+  ASSERT_EQ(0, gc_pass());
   for (const auto& c : shadow) {
     EXPECT_FALSE(bytes_of(c)) << c.oid;
   }
@@ -1457,7 +1463,7 @@ TEST_F(FSIORadosGC, NoVersion2WhileOff)
     encode(e, bl);
     EXPECT_EQ(1, bl[0]) << "encoded as version " << int(bl[0]);
   }
-  ASSERT_EQ(0, rados()->process_gc(false, null_yield));
+  ASSERT_EQ(0, gc_pass());
 }
 
 /* entries of both forms queued across the feature's enabling, all
@@ -1478,7 +1484,7 @@ TEST_F(FSIORadosGC, BothFormsAcrossEnabling)
 					    null_yield));
   ASSERT_FALSE(gc_entries(ha.tag).at(0).is_manifest());
   ASSERT_TRUE(gc_entries(hb.tag).at(0).is_manifest());
-  ASSERT_EQ(0, rados()->process_gc(false, null_yield));
+  ASSERT_EQ(0, gc_pass());
   for (const auto& t : ta) {
     EXPECT_FALSE(bytes_of(t)) << t.oid;
   }
@@ -1578,7 +1584,7 @@ protected:
     for (const auto& e : es) {
       EXPECT_EQ(on, e.is_manifest());
     }
-    ASSERT_EQ(0, rados()->process_gc(false, null_yield));
+    ASSERT_EQ(0, gc_pass());
     for (size_t i = 1; i < old_chunks.size(); ++i) {
       EXPECT_FALSE(bytes_of(old_chunks[i])) << old_chunks[i].oid;
     }
@@ -1687,7 +1693,7 @@ TEST_F(FSIORadosGC, UnexpandableEntryDoesNotBlockItsShard)
 					    hd.obj, std::nullopt, tag,
 					    null_yield));
   ASSERT_EQ(2u, gc_entries(tag).size());
-  ASSERT_EQ(0, rados()->process_gc(false, null_yield));
+  ASSERT_EQ(0, gc_pass());
   for (const auto& t : tail) {
     EXPECT_FALSE(bytes_of(t)) << "blocked behind the unexpandable entry: "
 			      << t.oid;
@@ -1700,6 +1706,240 @@ TEST_F(FSIORadosGC, UnexpandableEntryDoesNotBlockItsShard)
 TEST_F(FSIORadosGC, FeatureFollowsTheZonegroup)
 {
   EXPECT_TRUE(rados()->gc_manifest_enabled());
+}
+
+/* the driver's step 8b:  the publish flag in RGW's head write (FSIO
+ * design §3.5).  The test is the publisher:  a raw writer that constructs
+ * and freezes a shadow, then RGW's head write with the publish spec */
+class FSIORadosPublish : public FSIORadosGC {
+protected:
+  static constexpr uint64_t PUBLISHER = 999997;
+  cls_rgw_fsio_handle ph;
+  cls_rgw_fsio_id shadow;
+  RGWObjManifest source;
+
+  /* join as writer, construct (the head clone is the join's), ready;
+   * the shadow's chunk 1 changed at its first byte */
+  void construct_shadow(const std::string& key) {
+    const auto head = head_of(key);
+    ph = cls_rgw_fsio_handle{rados()->fsio_incarnation(), PUBLISHER};
+    cls_rgw_fsio_join_op in;
+    in.caller = ph;
+    in.seq = 1;
+    in.writer = true;
+    in.nonce = 1;
+    in.counter_seed = 1;
+    in.marker = bucket->get_marker();
+    cls_rgw_fsio_join_ret ret;
+    neorados::WriteOp op;
+    op.exec(neorados::cls::rgw_fsio::join(in, &ret));
+    neo().execute(neorados::Object{head.oid}, ioc_of(head.pool), std::move(op),
+		  ceph::async::use_blocked);
+    ASSERT_TRUE(ret.construct);
+    shadow = ret.bound;
+    const auto chunks = chunks_of(key);
+    for (size_t i = 1; i < chunks.size(); ++i) {
+      auto ioc = ioc_of(chunks[i].pool);
+      ioc.set_key(chunks[i].loc.empty() ? chunks[i].oid : chunks[i].loc);
+      neorados::WriteOp c;
+      /* as construction clones:  FSIO's records, the manifest and
+       * cls_refcount's tags dropped (§2.4, X16) */
+      c.clone_to(clone_of(chunks[i], shadow).oid,
+		 {"user.rgw.fsio.", RGW_ATTR_MANIFEST, "refcount"});
+      neo().execute(neorados::Object{chunks[i].oid}, ioc, std::move(c),
+		    ceph::async::use_blocked);
+    }
+    write_raw(clone_of(chunks[1], shadow), 0, "Z");
+    cls_rgw_fsio_runs_op r;
+    r.caller = ph;
+    r.cs = shadow;
+    r.runs = {cls_rgw_fsio_run{0, chunks.size() - 1}};
+    r.size = 9 * MiB;
+    neorados::WriteOp rop;
+    rop.exec(neorados::cls::rgw_fsio::ready(r));
+    neo().execute(neorados::Object{head.oid}, ioc_of(head.pool), std::move(rop),
+		  ceph::async::use_blocked);
+    ceph::buffer::list mbl;
+    neo().execute(neorados::Object{head.oid}, ioc_of(head.pool),
+		  neorados::ReadOp{}.get_xattr(RGW_ATTR_MANIFEST, &mbl),
+		  nullptr, ceph::async::use_blocked);
+    auto it = mbl.cbegin();
+    decode(source, it);
+  }
+  /* the last writer's leave:  the shadow frozen for its publisher */
+  bool freeze(const std::string& key) {
+    const auto head = head_of(key);
+    cls_rgw_fsio_leave_op in;
+    in.caller = ph;
+    in.seq = 2;
+    in.cs = shadow;
+    in.writer = true;
+    cls_rgw_fsio_leave_ret ret;
+    neorados::WriteOp op;
+    op.exec(neorados::cls::rgw_fsio::leave(in, &ret));
+    neo().execute(neorados::Object{head.oid}, ioc_of(head.pool), std::move(op),
+		  ceph::async::use_blocked);
+    return ret.publishing;
+  }
+  /* RGW's head write, as a publish:  the source manifest under the
+   * shadow's id (plan §6.4) */
+  int publish(const std::string& key, cls_rgw_fsio_replace_ret* ret) {
+    RGWObjectCtx octx(env->driver);
+    const rgw_obj obj(bucket->get_key(), rgw_obj_key(key));
+    /* atomic, as every PUT is:  without it the head write sets no ID tag
+     * and makes no ID-tag guard (prepare_atomic_modification()) */
+    octx.set_atomic(obj, true);
+    RGWRados::Object target(rados(), bucket->get_info(), octx, obj);
+    RGWRados::Object::Write w(&target);
+    RGWObjManifest m = source;
+    m.set_fsio(shadow);
+    const fsio_publish_spec spec{ph, shadow, {}};
+    ceph::real_time mtime = ceph::real_clock::now();
+    const std::string tag = gen_rand_alphanumeric(g_ceph_context, 16);
+    w.meta.manifest = &m;
+    w.meta.flags = PUT_OBJ_CREATE;
+    w.meta.mtime = &mtime;
+    w.meta.ptag = &tag;
+    w.meta.owner = owner;
+    w.meta.bucket_owner = bucket->get_owner();
+    w.meta.fsio_publish = &spec;
+    w.meta.fsio_published = ret;
+    std::map<std::string, ceph::buffer::list> attrs;
+    ceph::buffer::list etag;
+    etag.append("published");
+    attrs[RGW_ATTR_ETAG] = etag;
+    req_context rctx{env->dpp.get(), null_yield, nullptr};
+    jspan_context trace(false, false);
+    return w.write_meta(9 * MiB, 9 * MiB, attrs, rctx, trace);
+  }
+};
+
+/* the publish replaces the head with the shadow's content:  the reply
+ * keeps the tail and the replaced content is born drained, its leaf
+ * clone holding it, no GC entry sent;  the head left with no FSIO
+ * records;  and a GET reads the shadow's chunks through the manifest's
+ * id (plan §6.4) */
+TEST_F(FSIORadosPublish, HeadWritePublishes)
+{
+  const auto a = pattern(9 * MiB, 1);
+  ASSERT_EQ(0, put("obj", a));
+  const auto ha = head_info("obj");
+  construct_shadow("obj");
+  ASSERT_TRUE(freeze("obj"));
+  cls_rgw_fsio_replace_ret ret;
+  ASSERT_EQ(0, publish("obj", &ret));
+  EXPECT_TRUE(ret.keep_tail);
+  EXPECT_TRUE(ret.born_drained);
+  EXPECT_TRUE(gc_entries(ha.tag).empty()) << "GC was sent inside the publish";
+  /* §3.5:  with no other FSIO open, the published chunk set has nothing
+   * bound and is removed, the head describing it:  an idle head carries
+   * no FSIO xattrs */
+  auto rec = records_of(head_of("obj"), ph.incarnation);
+  EXPECT_FALSE(rec.any_fsio) << "the published head kept FSIO records";
+  /* every object the published manifest names, as RGW resolves it */
+  for (const auto& c : chunks_of("obj")) {
+    EXPECT_TRUE(bytes_of(c)) << "the published manifest names a missing "
+			     << c.oid << " (loc " << c.loc << ")";
+  }
+  /* RGW's read:  the head's state, then each stripe */
+  {
+    auto obj = bucket->get_object(rgw_obj_key("obj"));
+    auto rop = obj->get_read_op();
+    ASSERT_EQ(0, rop->prepare(null_yield, env->dpp.get()))
+      << "the published head's state";
+    EXPECT_EQ(int64_t(9 * MiB), int64_t(obj->get_size()));
+    for (const int64_t at : {int64_t(0), int64_t(4 * MiB), int64_t(8 * MiB)}) {
+      ceph::buffer::list part;
+      EXPECT_LT(0, rop->read(at, at + 9, part, null_yield, env->dpp.get()))
+	<< "reading at " << at;
+    }
+  }
+  std::string now;
+  ASSERT_EQ(0, get("obj", &now));
+  auto want = a;
+  want[4 * MiB] = 'Z';
+  EXPECT_EQ("same", diff(now, want, a));
+}
+
+/* plan §6.4:  an S3 copy of a published object puts the head segment's
+ * data in its own head and shares the shadow's tail by reference;  it
+ * reads the published bytes, and still does once the source is deleted
+ * and collected */
+TEST_F(FSIORadosPublish, CopyOfAPublishedObject)
+{
+  const auto a = pattern(9 * MiB, 1);
+  ASSERT_EQ(0, put("obj", a));
+  construct_shadow("obj");
+  ASSERT_TRUE(freeze("obj"));
+  cls_rgw_fsio_replace_ret ret;
+  ASSERT_EQ(0, publish("obj", &ret));
+  auto want = a;
+  want[4 * MiB] = 'Z';
+  {
+    RGWObjectCtx sctx(env->driver), dctx(env->driver);
+    auto info = bucket->get_info();
+    const rgw_obj src(bucket->get_key(), rgw_obj_key("obj"));
+    const rgw_obj dst(bucket->get_key(), rgw_obj_key("copy"));
+    std::map<std::string, ceph::buffer::list> attrs;
+    jspan_context trace(false, false);
+    ceph::real_time mtime;
+    ASSERT_EQ(0, rados()->copy_obj(sctx, dctx, owner, rgw_user(), nullptr,
+				   rgw_zone_id(), dst, src, info, info,
+				   info.placement_rule, nullptr, &mtime, nullptr,
+				   nullptr, false, nullptr, nullptr,
+				   RGWRados::ATTRSMOD_NONE, false, attrs,
+				   RGWObjCategory::Main, 0, ceph::real_time(),
+				   nullptr, nullptr, nullptr, nullptr, nullptr,
+				   nullptr, env->dpp.get(), null_yield, trace));
+  }
+  const auto cc = chunks_of("copy");
+  ASSERT_EQ(3u, cc.size());
+  EXPECT_EQ(head_of("copy").oid, cc[0].oid)
+    << "the copy's head segment is not its head object";
+  std::string got;
+  ASSERT_EQ(0, get("copy", &got));
+  EXPECT_EQ("same", diff(got, want, a));
+  /* the head's ID tag as RADOS holds it, and as RGW's state reads it:
+   * the DELETE's guard compares the two (§3.6, Z7) */
+  {
+    const auto h = head_of("obj");
+    ceph::buffer::list raw;
+    neo().execute(neorados::Object{h.oid}, ioc_of(h.pool),
+		  neorados::ReadOp{}.get_xattr(RGW_ATTR_ID_TAG, &raw), nullptr,
+		  ceph::async::use_blocked);
+    RGWObjectCtx ctx(env->driver);
+    RGWObjState* st = nullptr;
+    RGWObjManifest* m = nullptr;
+    ASSERT_EQ(0, rados()->get_obj_state(env->dpp.get(), &ctx,
+					bucket->get_info(),
+					rgw_obj(bucket->get_key(),
+						rgw_obj_key("obj")),
+					&st, &m, false, null_yield));
+    EXPECT_EQ(raw.to_str(), st->obj_tag.to_str())
+      << "raw " << raw.length() << " bytes, state " << st->obj_tag.length();
+  }
+  ASSERT_EQ(0, remove("obj"));
+  ASSERT_EQ(0, gc_pass());
+  for (size_t i = 1; i < cc.size(); ++i) {
+    EXPECT_TRUE(bytes_of(cc[i])) << "a shared stripe was collected: "
+				 << cc[i].oid;
+  }
+  ASSERT_EQ(0, get("copy", &got));
+  EXPECT_EQ("same", diff(got, want, a));
+}
+
+/* a publish needs a shadow its publisher froze:  without the freeze the
+ * head write fails and the object is unchanged */
+TEST_F(FSIORadosPublish, PublishOfANonPublishingShadowFails)
+{
+  const auto a = pattern(9 * MiB, 1);
+  ASSERT_EQ(0, put("obj", a));
+  construct_shadow("obj");
+  cls_rgw_fsio_replace_ret ret;
+  EXPECT_GT(0, publish("obj", &ret));
+  std::string now;
+  ASSERT_EQ(0, get("obj", &now));
+  EXPECT_EQ("same", diff(now, a, a));
 }
 
 /* the driver's step 3, element 4:  a join that must wait (FSIO design

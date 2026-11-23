@@ -1023,6 +1023,9 @@ namespace rgw::dedup {
     const rgw_obj &tgt_head_obj = tgt_manifest.get_obj();
 
     new_manifest.set_head(tgt_placement_rule, tgt_head_obj, src_head_size);
+    /* plan §6.4:  the target keeps its head segment in its head object;
+     * a published source's tail, f(tail, id), is what is shared */
+    new_manifest.clear_fsio_head();
     encode(new_manifest, new_manifest_bl);
   }
 

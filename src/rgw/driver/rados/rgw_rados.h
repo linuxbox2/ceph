@@ -345,6 +345,15 @@ struct BILogNopHandler {
 
 class RGWFSIOWatch;
 
+/* FSIO_RADOS_DESIGN.md §3.5:  an FSIO publish's head write:  the publisher
+ * and the shadow it froze;  tags, for a tracking-only head, the content's
+ * (Z15) */
+struct fsio_publish_spec {
+  cls_rgw_fsio_handle publisher;
+  cls_rgw_fsio_id shadow;
+  ceph::buffer::list tags;
+};
+
 class RGWRados
 {
   friend class RGWGC;
@@ -800,6 +809,8 @@ public:
     /* the head write reuses the old tail (meta.keep_tail:  an append, a
      * copy onto itself);  FSIO's supersede then records none (§3.6, Y2) */
     bool fsio_write_keeps_tail = false;
+    /* the head write publishes an FSIO shadow (meta.fsio_publish, §3.5) */
+    const fsio_publish_spec *fsio_publish = nullptr;
     /* how a head write replaces the head (FSIO_RADOS_DESIGN.md §3.6,
      * §2.5, §2.5a) */
     enum class head_op { SUPERSEDE, DELETE, REMOVE_VERSION, REMOVE_NULL };
@@ -931,6 +942,10 @@ public:
         bool keep_tail;
         bool completeMultipart;
         bool appendable;
+        /* FSIO_RADOS_DESIGN.md §3.5:  this head write is an FSIO publish
+         * of that shadow, by that handle;  its reply, if wanted */
+        const fsio_publish_spec *fsio_publish = nullptr;
+        cls_rgw_fsio_replace_ret *fsio_published = nullptr;
 
         MetaParams() : mtime(NULL), rmattrs(NULL), data(NULL), manifest(NULL), ptag(NULL),
                  remove_objs(NULL), category(RGWObjCategory::Main), flags(0),

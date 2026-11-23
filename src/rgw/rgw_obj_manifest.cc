@@ -203,14 +203,18 @@ void RGWObjManifest::obj_iterator::update_location()
     /* plan §6.4:  a published FSIO object's head segment is its chunk
      * 0, f(head, id), the head holding attributes only;  readers find it
      * by name (get_obj_iterate()'s head test compares names) */
-    if (!manifest->rules.empty()) {
+    if (manifest->fsio_head_separate()) {
       location.set_fsio(manifest->rules.begin()->second.fsio);
     }
     return;
   }
 
   manifest->get_implicit_location(cur_part_id, cur_stripe, ofs, &cur_override_prefix, &location);
-  if (rule_iter != manifest->rules.end()) {
+  /* the head segment (part 0, below max_head_size) is f(head, id) only
+   * when the rule says so;  every other stripe of the rule is */
+  if (rule_iter != manifest->rules.end() &&
+      (cur_part_id != 0 || ofs >= manifest->get_max_head_size() ||
+       rule_iter->second.fsio_head)) {
     location.set_fsio(rule_iter->second.fsio);
   }
 }

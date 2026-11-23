@@ -374,6 +374,7 @@ void RGWObjManifestRule::dump(Formatter *f) const
   encode_json("override_prefix", override_prefix, f);
   if (fsio) {
     encode_json("fsio", fsio->to_str(), f);
+    encode_json("fsio_head", fsio_head, f);
   }
 }
 

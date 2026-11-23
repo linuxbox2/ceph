@@ -893,11 +893,11 @@ int rgw_fsio_replace_head(cls_method_context_t hctx, ceph::buffer::list* in,
   if (int r = decode_op(in, op, __func__); r < 0) {
     return r;
   }
-  if (op.mode == static_cast<uint8_t>(fsio::replace_mode::PUBLISH)) {
-    if (int r = check_origin(hctx, op.caller.incarnation); r < 0) {
-      return r;
-    }
-  }
+  /* §3, §4.3:  not origin-checked, the one call that is not:  a publish
+   * rides RGW's librados head write, so its origin is the gateway's
+   * librados client, not its incarnation;  it proceeds only for the
+   * publisher recorded on a publishing shadow, which that publisher's
+   * own origin-checked fsio_leave set */
   cls_rgw_fsio_head h;
   loaded l;
   int r = load_head(hctx, h, l);

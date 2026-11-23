@@ -59,6 +59,7 @@ private:
   RGWObjManifest m;		// the copy, unbounded, its anchors plain
   /* each rule's content id, by its first part */
   std::vector<std::pair<uint32_t, std::optional<cls_rgw_fsio_id>>> ids;
+  bool head_separate = false;	// the head segment is f(head, id) too
   uint64_t obj_size = 0;
   const RGWZoneGroup* zg = nullptr;
   const RGWZoneParams* zp = nullptr;

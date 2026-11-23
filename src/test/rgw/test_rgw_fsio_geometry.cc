@@ -227,6 +227,14 @@ TEST(FSIOGeometry, RuleCarriesItsId)
   decode(d, it);
   ASSERT_TRUE(d.fsio);
   EXPECT_EQ(*r.fsio, *d.fsio);
+  EXPECT_FALSE(d.fsio_head);
+  r.fsio_head = true;
+  ceph::buffer::list hb;
+  encode(r, hb);
+  RGWObjManifestRule dh;
+  auto hi = hb.cbegin();
+  decode(dh, hi);
+  EXPECT_TRUE(dh.fsio_head);
   /* a version 2 rule, as written before:  no id */
   ceph::buffer::list v2;
   ENCODE_START(2, 1, v2);
@@ -273,6 +281,49 @@ TEST(FSIOGeometry, IteratorNamesPublishedChunks)
     EXPECT_EQ(plain.pool, pubraw.pool);
   }
   EXPECT_EQ(3u, n);
+  /* a seek resolves the same names as a walk:  RGW's read() seeks */
+  n = 0;
+  for (auto w = pub.obj_begin(dpp()); w != pub.obj_end(dpp()); ++w, ++n) {
+    auto f = pub.obj_find(dpp(), w.get_stripe_ofs() + 1);
+    EXPECT_EQ(env.get_raw(w.get_location()), env.get_raw(f.get_location()))
+      << "chunk " << n;
+  }
+}
+
+/* the head segment is f(head, id) only as a publish leaves it;  once a
+ * copy or dedup puts its data in the head object, the head segment is
+ * the head object and only the tail stays the shadow's */
+TEST(FSIOGeometry, HeadSegmentFollowsFsioHead)
+{
+  test_rgw_env env;
+  const auto src = atomic(env, 9 * MiB, 4 * MiB, 4 * MiB);
+  const cls_rgw_fsio_id id{7, 0xabc};
+  auto copy = published(src, id);
+  EXPECT_TRUE(copy.fsio_head_separate());
+  copy.clear_fsio_head();
+  EXPECT_FALSE(copy.fsio_head_separate());
+  const auto marker = src.get_obj().bucket.marker;
+  auto a = src.obj_begin(dpp());
+  auto b = copy.obj_begin(dpp());
+  size_t n = 0;
+  for (; a != src.obj_end(dpp()) && b != copy.obj_end(dpp()); ++a, ++b, ++n) {
+    const auto plain = env.get_raw(a.get_location());
+    const auto got = env.get_raw(b.get_location());
+    if (n == 0) {
+      EXPECT_EQ(plain, got) << "the head segment is the head object's";
+    } else {
+      EXPECT_EQ(cls_rgw_fsio_clone_name(marker, 'd', id, plain.oid), got.oid);
+    }
+    /* a seek agrees with the walk */
+    EXPECT_EQ(got, env.get_raw(copy.obj_find(dpp(), a.get_stripe_ofs() + 1)
+				 .get_location()));
+  }
+  EXPECT_EQ(3u, n);
+  const auto g = geometry(env, copy);
+  const FSIOChunk c0 = g.locate(dpp(), 0), c1 = g.locate(dpp(), 5 * MiB);
+  EXPECT_EQ(c0.anchor, FSIOGeometry::named(c0, marker, std::nullopt));
+  EXPECT_EQ(cls_rgw_fsio_clone_name(marker, 'd', id, c1.anchor.oid),
+	    FSIOGeometry::named(c1, marker, std::nullopt).oid);
 }
 
 /* the geometry's anchors are plain, so a later shadow's names do not

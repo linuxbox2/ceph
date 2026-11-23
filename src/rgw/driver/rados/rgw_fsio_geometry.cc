@@ -38,6 +38,7 @@ int FSIOGeometry::make(const DoutPrefixProvider* dpp,
   /* §6.4:  anchors are the names without a published id, so a later
    * shadow's names never grow;  the ids name the content */
   g->ids.clear();
+  g->head_separate = g->m.fsio_head_separate();
   for (const auto& [ofs, rule] : g->m.get_rules()) {
     g->ids.emplace_back(rule.start_part_num, rule.fsio);
   }
@@ -83,6 +84,11 @@ FSIOChunk FSIOGeometry::locate(const DoutPrefixProvider* dpp,
     if (first <= part) {
       c.content = id;
     }
+  }
+  /* the head segment is the head object's unless the publish left it
+   * separate (a copy's or a dedup's) */
+  if (part == 0 && c.ofs < m.get_max_head_size() && !head_separate) {
+    c.content.reset();
   }
   return c;
 }

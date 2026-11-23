@@ -3617,6 +3617,7 @@ int RGWRados::Object::Write::_do_write_meta(uint64_t size, uint64_t accounted_si
   bool guard = ((target->manifest) || (target->state->obj_tag.length() != 0)) && (!target->state->fake_tag);
   bool set_attr_id_tag = guard && target->obj.key.instance.empty() && (meta.if_nomatch == nullptr || meta.if_nomatch != "*"sv);
   target->fsio_write_keeps_tail = meta.keep_tail;
+  target->fsio_publish = meta.fsio_publish;
   r = target->prepare_atomic_modification(rctx.dpp, op, reset_obj, ptag, meta.modify_tail, set_attr_id_tag, rctx.y);
   if (r < 0)
     return r;
@@ -3791,6 +3792,16 @@ int RGWRados::Object::Write::_do_write_meta(uint64_t size, uint64_t accounted_si
   }
 
   poolid = ioctx.get_id();
+
+  if (meta.fsio_published && target->fsio_replaced) {
+    try {
+      auto it = target->fsio_replaced->out.cbegin();
+      decode(*meta.fsio_published, it);
+    } catch (const ceph::buffer::error&) {
+      ldpp_dout(rctx.dpp, 0) << "ERROR: an FSIO publish's reply was undecodable"
+                             << dendl;
+    }
+  }
 
   r = target->complete_atomic_modification(
     rctx.dpp, meta.keep_tail || target->fsio_keep_tail(), rctx.y);
@@ -5689,6 +5700,9 @@ int RGWRados::copy_obj(RGWObjectCtx& src_obj_ctx,
     }
 
     pmanifest->set_head(dest_bucket_info.placement_rule, dest_obj, first_chunk.length());
+    /* plan §6.4:  the head segment's data is now in the head object;
+     * a published source's tail stays shared, f(tail, id) */
+    pmanifest->clear_fsio_head();
   } else {
     pmanifest->set_head(dest_bucket_info.placement_rule, dest_obj, 0);
   }
@@ -7310,9 +7324,7 @@ int RGWRados::expand_gc_entry(const DoutPrefixProvider *dpp,
   }
   /* the head held no data:  none inline, or published, its head segment
    * then chunk 0, f(head, id) (plan §6.4) */
-  const auto& rules = m.get_rules();
-  if (m.get_head_size() == 0 ||
-      (!rules.empty() && rules.begin()->second.fsio)) {
+  if (m.get_head_size() == 0 || m.fsio_head_separate()) {
     rgw_raw_obj a = raw_head;
     a.oid = cls_rgw_fsio_clone_name(marker, 'a', sh.id, raw_head.oid);
     a.loc = raw_head.loc.empty() ? raw_head.oid : raw_head.loc;
@@ -7603,8 +7615,16 @@ void RGWRados::Object::replace_head(const DoutPrefixProvider *dpp,
                                     const std::string* delete_id_tag)
 {
   if (!store->fsio_enabled(dpp, bucket_info, y)) {
-    store->remove_rgw_head_obj(op);
-    return;
+    if (fsio_publish) {
+      /* §3.5:  a publish is FSIO's alone;  failed by the class, which
+       * finds no shadow to publish, rather than written as a PUT */
+      ldpp_dout(dpp, 0) << "ERROR: an FSIO publish in bucket "
+                        << bucket_info.bucket << ", which FSIO does not serve"
+                        << dendl;
+    } else {
+      store->remove_rgw_head_obj(op);
+      return;
+    }
   }
   const cls_rgw_fsio_id r{ceph::util::generate_random_number<uint64_t>(),
                           ceph::util::generate_random_number<uint64_t>()};
@@ -7633,6 +7653,15 @@ void RGWRados::Object::replace_head(const DoutPrefixProvider *dpp,
     call.mode = static_cast<uint8_t>(cls_rgw_fsio::replace_mode::REMOVE_NULL);
     break;
   default:
+    if (fsio_publish) {
+      /* §3.5:  the publish, in place of the supersede, which it performs
+       * itself when the shadow's generation is deferred */
+      call.mode = static_cast<uint8_t>(cls_rgw_fsio::replace_mode::PUBLISH);
+      call.caller = fsio_publish->publisher;
+      call.shadow = fsio_publish->shadow;
+      call.tags = fsio_publish->tags;
+      break;
+    }
     call.mode = static_cast<uint8_t>(cls_rgw_fsio::replace_mode::SUPERSEDE);
     call.keep_tail = fsio_write_keeps_tail;
     break;
@@ -8263,7 +8292,12 @@ int RGWRados::get_obj_state_impl(const DoutPrefixProvider *dpp, RGWObjectCtx *oc
     try {
       sm->manifest.emplace();
       decode(*sm->manifest, miter);
-      sm->manifest->set_head(bucket_info.placement_rule, obj, s->size); /* patch manifest to reflect the head we just read, some manifests might be
+      /* a published FSIO object's head holds attributes only:  its head
+       * segment is chunk 0, f(head, id), and its head size stays as the
+       * manifest records it (plan §6.4) */
+      sm->manifest->set_head(bucket_info.placement_rule, obj,
+                             sm->manifest->fsio_head_separate() ?
+                               sm->manifest->get_head_size() : s->size); /* patch manifest to reflect the head we just read, some manifests might be
                                              broken due to old bugs */
       s->size = sm->manifest->get_obj_size();
       if (!compressed)
