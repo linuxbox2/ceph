@@ -24,36 +24,11 @@
 #include "include/buffer.h"
 #include "include/encoding.h"
 #include "rgw/rgw_basic_types.h"
+#include "cls_rgw_fsio_id.h"
 
 #define CLS_RGW_ERR_FSIO_BUSY     2310 // also in rgw_common.h, don't change!
 #define CLS_RGW_ERR_FSIO_CONFLICT 2311 // also in rgw_common.h, don't change!
 
-struct cls_rgw_fsio_id {
-  uint64_t counter = 0;
-  uint64_t nonce = 0;
-
-  auto operator<=>(const cls_rgw_fsio_id&) const = default;
-  bool empty() const { return counter == 0 && nonce == 0; }
-  std::string to_str() const {
-    return fmt::format("{:016x}{:016x}", counter, nonce);
-  }
-
-  void encode(ceph::buffer::list& bl) const {
-    ENCODE_START(1, 1, bl);
-    encode(counter, bl);
-    encode(nonce, bl);
-    ENCODE_FINISH(bl);
-  }
-  void decode(ceph::buffer::list::const_iterator& bl) {
-    DECODE_START(1, bl);
-    decode(counter, bl);
-    decode(nonce, bl);
-    DECODE_FINISH(bl);
-  }
-  void dump(ceph::Formatter *f) const;
-  static std::list<cls_rgw_fsio_id> generate_test_instances();
-};
-WRITE_CLASS_ENCODER(cls_rgw_fsio_id)
 
 /* chunk indexes, inclusive (§2.7, Z11) */
 struct cls_rgw_fsio_run {
@@ -529,13 +504,3 @@ struct cls_rgw_fsio_gc_shadow {
 };
 WRITE_CLASS_ENCODER(cls_rgw_fsio_gc_shadow)
 
-/* §2.7, E2:  a clone of a head (or instance head) lives after the
- * bucket's heads, <marker>~fsio_<role><id>_<key part>, the key part being
- * the head's oid after <marker>_;  the class and RGW name clones by it */
-inline std::string cls_rgw_fsio_clone_name(std::string_view marker, char role,
-					   const cls_rgw_fsio_id& id,
-					   std::string_view head_oid)
-{
-  return fmt::format("{}~fsio_{}{}_{}", marker, role, id.to_str(),
-		     head_oid.substr(marker.size() + 1));
-}

@@ -25,6 +25,7 @@
 #include "rgw_bucket_types.h"
 #include "rgw_obj_types.h"
 #include "rgw_placement_types.h"
+#include "cls/rgw/cls_rgw_fsio_id.h"
 
 #include "common/dout.h"
 #include "common/Formatter.h"
@@ -43,6 +44,9 @@ class rgw_obj_select {
   rgw_obj obj;
   rgw_raw_obj raw_obj;
   bool is_raw;
+  /* FSIO_RADOS_WORK_PLAN.md §6.4:  a published FSIO chunk's id;  the
+   * object resolves to f(name, id), its locator the name */
+  std::optional<cls_rgw_fsio_id> fsio;
 
 public:
   rgw_obj_select() : is_raw(false) {}
@@ -51,6 +55,7 @@ public:
   rgw_obj_select(const rgw_obj_select& rhs) {
     placement_rule = rhs.placement_rule;
     is_raw = rhs.is_raw;
+    fsio = rhs.fsio;
     if (is_raw) {
       raw_obj = rhs.raw_obj;
     } else {
@@ -72,13 +77,31 @@ public:
   rgw_obj_select& operator=(const rgw_obj& rhs) {
     obj = rhs;
     is_raw = false;
+    fsio.reset();
     return *this;
   }
 
   rgw_obj_select& operator=(const rgw_raw_obj& rhs) {
     raw_obj = rhs;
     is_raw = true;
+    fsio.reset();
     return *this;
+  }
+
+  void set_fsio(const std::optional<cls_rgw_fsio_id>& id) {
+    fsio = id;
+  }
+  /* the name a published FSIO chunk has:  f(name, id), its locator the
+   * name the object would have without it (§6.4) */
+  static void apply_fsio(const std::optional<cls_rgw_fsio_id>& id,
+                         std::string_view marker, rgw_raw_obj& r) {
+    if (id) {
+      const std::string name = r.oid;
+      r.oid = cls_rgw_fsio_clone_name(marker, 'd', *id, name);
+      if (r.loc.empty()) {
+        r.loc = name;
+      }
+    }
   }
 
   void set_placement_rule(const rgw_placement_rule& rule) {
@@ -137,29 +160,37 @@ struct RGWObjManifestRule {
   uint64_t part_size; /* each part size, 0 if there's no part size, meaning it's unlimited */
   uint64_t stripe_max_size; /* underlying obj max size */
   std::string override_prefix;
+  /* FSIO_RADOS_WORK_PLAN.md §6.4:  a published FSIO shadow's id:  each
+   * chunk of this rule is f(name, fsio), its locator its name.  Written
+   * only by an FSIO publish, which needs the fsio zone feature, set once
+   * no gateway would decode the rule without it */
+  std::optional<cls_rgw_fsio_id> fsio;
 
   RGWObjManifestRule() : start_part_num(0), start_ofs(0), part_size(0), stripe_max_size(0) {}
   RGWObjManifestRule(uint32_t _start_part_num, uint64_t _start_ofs, uint64_t _part_size, uint64_t _stripe_max_size) :
                        start_part_num(_start_part_num), start_ofs(_start_ofs), part_size(_part_size), stripe_max_size(_stripe_max_size) {}
 
   void encode(bufferlist& bl) const {
-    ENCODE_START(2, 1, bl);
+    ENCODE_START(3, 1, bl);
     encode(start_part_num, bl);
     encode(start_ofs, bl);
     encode(part_size, bl);
     encode(stripe_max_size, bl);
     encode(override_prefix, bl);
+    encode(fsio, bl);
     ENCODE_FINISH(bl);
   }
 
   void decode(bufferlist::const_iterator& bl) {
-    DECODE_START(2, bl);
+    DECODE_START(3, bl);
     decode(start_part_num, bl);
     decode(start_ofs, bl);
     decode(part_size, bl);
     decode(stripe_max_size, bl);
     if (struct_v >= 2)
       decode(override_prefix, bl);
+    if (struct_v >= 3)
+      decode(fsio, bl);
     DECODE_FINISH(bl);
   }
   void dump(Formatter *f) const;
@@ -255,6 +286,20 @@ public:
 
   void get_implicit_location(uint64_t cur_part_id, uint64_t cur_stripe, uint64_t ofs,
                              const std::string *override_prefix, rgw_obj_select *location) const;
+
+  /* FSIO_RADOS_WORK_PLAN.md §6.4:  the names without a published FSIO
+   * id, from which a later shadow names its chunks */
+  void clear_fsio() {
+    for (auto& [ofs, rule] : rules) {
+      rule.fsio.reset();
+    }
+  }
+  /* a publish's:  every rule's chunks are the shadow's, f(name, id) */
+  void set_fsio(const cls_rgw_fsio_id& id) {
+    for (auto& [ofs, rule] : rules) {
+      rule.fsio = id;
+    }
+  }
 
   const std::map<uint64_t, RGWObjManifestRule>& get_rules() const {
     return rules;

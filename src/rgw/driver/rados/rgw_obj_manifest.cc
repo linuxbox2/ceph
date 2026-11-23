@@ -372,6 +372,9 @@ void RGWObjManifestRule::dump(Formatter *f) const
   encode_json("part_size", part_size, f);
   encode_json("stripe_max_size", stripe_max_size, f);
   encode_json("override_prefix", override_prefix, f);
+  if (fsio) {
+    encode_json("fsio", fsio->to_str(), f);
+  }
 }
 
 std::list<RGWObjManifestRule> RGWObjManifestRule::generate_test_instances()
@@ -452,6 +455,7 @@ rgw_raw_obj rgw_obj_select::get_raw_obj(const RGWZoneGroup& zonegroup, const RGW
   if (!is_raw) {
     rgw_raw_obj r;
     rgw_obj_to_raw(zonegroup, zone_params, placement_rule, obj, &r);
+    apply_fsio(fsio, obj.bucket.marker, r);
     return r;
   }
   return raw_obj;

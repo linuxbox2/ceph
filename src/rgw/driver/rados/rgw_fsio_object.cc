@@ -294,8 +294,8 @@ int RadosFSIOObject::join(const DoutPrefixProvider* dpp, bool writer,
     in.seq = seq + 1;		// taken only if the call applies
     in.writer = writer;
     in.nonce = ceph::util::generate_random_number<uint64_t>();
-    in.counter_seed = 1;	// no manifest carries a shadow id until a
-				// publish writes one (plan, the driver's step 3)
+    /* §6.8:  a new shadow's id sorts after the published one's */
+    in.counter_seed = g->max_counter() + 1;
     in.instance = instance;
     in.marker = info.bucket.marker;
     op.exec(neorados::cls::rgw_fsio::join(in, ret));
@@ -399,7 +399,9 @@ int RadosFSIOObject::clone_chunks(const DoutPrefixProvider* dpp,
     const FSIOChunk c = g.locate(dpp, ofs);
     *n = c.index + 1;
     ofs = c.ofs + c.capacity;
-    const rgw_raw_obj& raw = c.anchor;
+    /* the content's chunk, f(anchor, its id) when published (§6.4) */
+    const rgw_raw_obj raw = FSIOGeometry::named(c, info.bucket.marker,
+						std::nullopt);
     if (raw.oid == skip_oid) {
       continue;
     }

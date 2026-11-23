@@ -35,6 +35,13 @@ int FSIOGeometry::make(const DoutPrefixProvider* dpp,
   }
   g->obj_size = g->m.get_obj_size();
   g->m.set_obj_size(UNBOUNDED);
+  /* §6.4:  anchors are the names without a published id, so a later
+   * shadow's names never grow;  the ids name the content */
+  g->ids.clear();
+  for (const auto& [ofs, rule] : g->m.get_rules()) {
+    g->ids.emplace_back(rule.start_part_num, rule.fsio);
+  }
+  g->m.clear_fsio();
   if (g->m.get_head_size() < g->m.get_max_head_size()) {
     g->m.set_head_size(g->m.get_max_head_size());
   }
@@ -72,14 +79,32 @@ FSIOChunk FSIOGeometry::locate(const DoutPrefixProvider* dpp,
     index += parts * per_part;
   }
   c.index = index + it.get_cur_stripe();
+  for (const auto& [first, id] : ids) {
+    if (first <= part) {
+      c.content = id;
+    }
+  }
   return c;
+}
+
+uint64_t FSIOGeometry::max_counter() const
+{
+  uint64_t n = 0;
+  for (const auto& [first, id] : ids) {
+    if (id) {
+      n = std::max(n, id->counter);
+    }
+  }
+  return n;
 }
 
 rgw_raw_obj FSIOGeometry::named(const FSIOChunk& c, std::string_view marker,
 				const std::optional<cls_rgw_fsio_id>& id)
 {
   if (!id) {
-    return c.anchor;
+    rgw_raw_obj r = c.anchor;
+    rgw_obj_select::apply_fsio(c.content, marker, r);
+    return r;
   }
   rgw_raw_obj r = c.anchor;
   r.oid = cls_rgw_fsio_clone_name(marker, 'd', *id, c.anchor.oid);

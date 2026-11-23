@@ -213,6 +213,99 @@ TEST(FSIOGeometry, ShadowNames)
   }
 }
 
+/* plan §6.4, the driver's step 8a:  a published FSIO object's manifest
+ * carries the shadow id on its rules */
+
+TEST(FSIOGeometry, RuleCarriesItsId)
+{
+  RGWObjManifestRule r(0, 4 * MiB, 0, 4 * MiB);
+  r.fsio = cls_rgw_fsio_id{7, 0xabc};
+  ceph::buffer::list bl;
+  encode(r, bl);
+  RGWObjManifestRule d;
+  auto it = bl.cbegin();
+  decode(d, it);
+  ASSERT_TRUE(d.fsio);
+  EXPECT_EQ(*r.fsio, *d.fsio);
+  /* a version 2 rule, as written before:  no id */
+  ceph::buffer::list v2;
+  ENCODE_START(2, 1, v2);
+  encode(uint32_t(0), v2);
+  encode(uint64_t(4 * MiB), v2);
+  encode(uint64_t(0), v2);
+  encode(uint64_t(4 * MiB), v2);
+  encode(std::string("p"), v2);
+  ENCODE_FINISH(v2);
+  RGWObjManifestRule o;
+  auto oi = v2.cbegin();
+  decode(o, oi);
+  EXPECT_FALSE(o.fsio);
+  EXPECT_EQ("p", o.override_prefix);
+}
+
+/* the published manifest:  the source's, its rules carrying the id;  its
+ * head size is kept, the head segment being chunk 0, f(head, id) (zeroing
+ * it would renumber the stripes) */
+RGWObjManifest published(const RGWObjManifest& source, const cls_rgw_fsio_id& id)
+{
+  RGWObjManifest m = source;
+  m.set_fsio(id);
+  return m;
+}
+
+/* every location resolves to f(name, id), its locator the name, so every
+ * manifest reader follows a published object's chunks unchanged */
+TEST(FSIOGeometry, IteratorNamesPublishedChunks)
+{
+  test_rgw_env env;
+  const auto src = atomic(env, 9 * MiB, 4 * MiB, 4 * MiB);
+  const cls_rgw_fsio_id id{7, 0xabc};
+  const auto pub = published(src, id);
+  const auto marker = src.get_obj().bucket.marker;
+  auto a = src.obj_begin(dpp());
+  auto b = pub.obj_begin(dpp());
+  size_t n = 0;
+  for (; a != src.obj_end(dpp()) && b != pub.obj_end(dpp()); ++a, ++b, ++n) {
+    const auto plain = env.get_raw(a.get_location());
+    const auto pubraw = env.get_raw(b.get_location());
+    EXPECT_EQ(cls_rgw_fsio_clone_name(marker, 'd', id, plain.oid), pubraw.oid);
+    EXPECT_EQ(plain.loc.empty() ? plain.oid : plain.loc, pubraw.loc);
+    EXPECT_EQ(plain.pool, pubraw.pool);
+  }
+  EXPECT_EQ(3u, n);
+}
+
+/* the geometry's anchors are plain, so a later shadow's names do not
+ * grow;  the content is named with the published id */
+TEST(FSIOGeometry, GeometryAnchorsArePlain)
+{
+  test_rgw_env env;
+  const auto src = atomic(env, 9 * MiB, 4 * MiB, 4 * MiB);
+  const cls_rgw_fsio_id id{7, 0xabc}, next{8, 0xdef};
+  const auto g = geometry(env, published(src, id));
+  const auto plain = geometry(env, src);
+  const auto marker = src.get_obj().bucket.marker;
+  for (const uint64_t at : {uint64_t(0), 5 * MiB, 8 * MiB}) {
+    const FSIOChunk c = g.locate(dpp(), at), p = plain.locate(dpp(), at);
+    EXPECT_EQ(p.anchor, c.anchor) << at;
+    ASSERT_TRUE(c.content) << at;
+    EXPECT_EQ(cls_rgw_fsio_clone_name(marker, 'd', id, c.anchor.oid),
+	      FSIOGeometry::named(c, marker, std::nullopt).oid);
+    EXPECT_EQ(cls_rgw_fsio_clone_name(marker, 'd', next, c.anchor.oid),
+	      FSIOGeometry::named(c, marker, next).oid);
+    EXPECT_EQ(p.anchor, FSIOGeometry::named(p, marker, std::nullopt));
+  }
+}
+
+/* §6.8:  a new shadow's counter starts past the published one's */
+TEST(FSIOGeometry, CounterSeedFollowsTheManifest)
+{
+  test_rgw_env env;
+  const auto src = atomic(env, 9 * MiB, 4 * MiB, 4 * MiB);
+  EXPECT_EQ(0u, geometry(env, src).max_counter());
+  EXPECT_EQ(7u, geometry(env, published(src, {7, 0xabc})).max_counter());
+}
+
 int main(int argc, char** argv)
 {
   auto args = argv_to_vec(argc, argv);

@@ -217,6 +217,7 @@ rgw_raw_obj rgw_obj_select::get_raw_obj(RGWRados* store) const
   if (!is_raw) {
     rgw_raw_obj r;
     store->obj_to_raw(placement_rule, obj, &r);
+    apply_fsio(fsio, obj.bucket.marker, r);
     return r;
   }
   return raw_obj;
@@ -7307,7 +7308,11 @@ int RGWRados::expand_gc_entry(const DoutPrefixProvider *dpp,
       break;
     }
   }
-  if (m.get_max_head_size() == 0) {
+  /* the head held no data:  none inline, or published, its head segment
+   * then chunk 0, f(head, id) (plan §6.4) */
+  const auto& rules = m.get_rules();
+  if (m.get_head_size() == 0 ||
+      (!rules.empty() && rules.begin()->second.fsio)) {
     rgw_raw_obj a = raw_head;
     a.oid = cls_rgw_fsio_clone_name(marker, 'a', sh.id, raw_head.oid);
     a.loc = raw_head.loc.empty() ? raw_head.oid : raw_head.loc;
