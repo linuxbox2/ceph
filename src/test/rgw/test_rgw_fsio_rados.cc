@@ -13,11 +13,20 @@
 
 #include <fmt/format.h>
 
+#include "cls/rgw/cls_rgw_fsio_ops.h"
+#include "common/async/blocked_completion.h"
 #include "common/async/context_pool.h"
 #include "common/common_init.h"
+#include "common/error_code.h"
 #include "common/random_string.h"
 #include "global/global_context.h"
 #include "gtest/gtest.h"
+#include "include/neorados/RADOS.hpp"
+#include "neorados/cls/rgw_fsio.h"
+#include "rgw/driver/rados/rgw_fsio_watch.h"
+#include "rgw/driver/rados/rgw_rados.h"
+#include "rgw/driver/rados/rgw_sal_rados.h"
+#include "rgw/driver/rados/rgw_tools.h"
 #include "rgw/rgw_common.h"
 #include "rgw/rgw_req_context.h"
 #include "rgw/rgw_sal.h"
@@ -169,6 +178,75 @@ TEST_F(FSIORados, BringUp)
   std::string back;
   ASSERT_EQ(0, get("obj", &back));
   ASSERT_EQ(data, back);
+}
+
+/* FSIO design §2.2, §4.3, Z28:  the incarnation is the global id of the
+ * store's neorados client, the origin its fsio_* calls carry and the
+ * watcher its liveness objects name.  Needs the OSDs' origin check on
+ * (rgw_fsio_check_origin), which the driver's cluster-tier step turns
+ * off after this step */
+TEST_F(FSIORados, IncarnationIsTheOriginAndAWatcher)
+{
+  auto* store = static_cast<rgw::sal::RadosStore*>(env->driver);
+  auto* rados = store->getRados();
+  auto& neo = store->get_neorados();
+  const uint64_t inc = rados->fsio_incarnation();
+  ASSERT_EQ(neo.instance_id(), inc);
+
+  /* each liveness object is watched by this incarnation */
+  ASSERT_TRUE(rados->fsio_watch);
+  auto cioc = rgw::init_iocontext(
+    env->dpp.get(), neo, env->site.get_zone_params().control_pool,
+    ceph::async::use_blocked);
+  for (int i = 0; i < g_conf()->rgw_num_control_oids; ++i) {
+    std::vector<neorados::ObjWatcher> watchers;
+    neorados::ReadOp op;
+    op.list_watchers(&watchers, nullptr);
+    neo.execute(neorados::Object{RGWFSIOWatch::oid(i)}, cioc, std::move(op),
+		nullptr, ceph::async::use_blocked);
+    ASSERT_TRUE(std::any_of(watchers.begin(), watchers.end(),
+			    [inc](const auto& w) {
+			      return w.watcher_id == static_cast<int64_t>(inc);
+			    }))
+      << RGWFSIOWatch::oid(i) << " has no watcher client." << inc;
+  }
+  ASSERT_TRUE(rados->fsio_watch->since_confirmed());
+
+  /* an fsio_* call carrying the incarnation passes the origin check;  one
+   * carrying any other id returns EPERM */
+  ASSERT_EQ(0, put("obj", "data"));
+  auto obj = bucket->get_object(rgw_obj_key("obj"));
+  rgw_raw_obj head;
+  static_cast<rgw::sal::RadosObject*>(obj.get())->get_raw_obj(&head);
+  auto hioc = rgw::init_iocontext(env->dpp.get(), neo, head.pool,
+				  ceph::async::use_blocked);
+  auto join = [&](uint64_t incarnation, cls_rgw_fsio_join_ret* ret) {
+    cls_rgw_fsio_join_op in;
+    in.caller = cls_rgw_fsio_handle{incarnation, 1};
+    in.seq = 1;
+    in.nonce = 1;
+    in.counter_seed = 10;
+    in.marker = bucket->get_marker();
+    neorados::WriteOp op;
+    op.exec(neorados::cls::rgw_fsio::join(in, ret));
+    boost::system::error_code ec;
+    neo.execute(neorados::Object{head.oid}, hioc, std::move(op),
+		ceph::async::use_blocked[ec]);
+    return ceph::from_error_code(ec);
+  };
+  ASSERT_EQ(-EPERM, join(inc + 1, nullptr));
+  cls_rgw_fsio_join_ret ret;
+  ASSERT_EQ(0, join(inc, &ret));
+  cls_rgw_fsio_leave_op in;
+  in.caller = cls_rgw_fsio_handle{inc, 1};
+  in.seq = 2;
+  in.cs = ret.bound;
+  neorados::WriteOp op;
+  op.exec(neorados::cls::rgw_fsio::leave(in));
+  boost::system::error_code ec;
+  neo.execute(neorados::Object{head.oid}, hioc, std::move(op),
+	      ceph::async::use_blocked[ec]);
+  ASSERT_EQ(0, ceph::from_error_code(ec));
 }
 
 int main(int argc, char** argv)

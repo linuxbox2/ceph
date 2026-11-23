@@ -342,6 +342,8 @@ struct BILogNopHandler {
   int flush() { return 0; }
 };
 
+class RGWFSIOWatch;
+
 class RGWRados
 {
   friend class RGWGC;
@@ -1873,6 +1875,13 @@ public:
   int add_bucket_to_reshard(const DoutPrefixProvider *dpp, const RGWBucketInfo& bucket_info, uint32_t new_num_shards, optional_yield y);
 
   uint64_t instance_id();
+  /* FSIO design §2.2, §4.3:  this gateway's incarnation, the global id of
+   * its neorados client:  the origin of its fsio_* calls (Z28), and the
+   * name its watches on the liveness objects carry */
+  uint64_t fsio_incarnation();
+  /* its watches on the zone's FSIO liveness objects, when the zonegroup
+   * has the fsio feature */
+  std::shared_ptr<RGWFSIOWatch> fsio_watch;
 
   librados::Rados* get_rados_handle();
 

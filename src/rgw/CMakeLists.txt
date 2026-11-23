@@ -229,6 +229,7 @@ list(APPEND librgw_rados_srcs
   driver/rados/rgw_gc_log.cc
   driver/rados/rgw_lc_tier.cc
   driver/rados/rgw_log_backing.cc
+  driver/rados/rgw_fsio_watch.cc
   driver/rados/rgw_metadata.cc
   driver/rados/rgw_notify.cc
   driver/rados/rgw_obj_manifest.cc

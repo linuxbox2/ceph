@@ -61,6 +61,7 @@
 #include "rgw_rest_realm.h"
 #include "rgw_rest_user.h"
 #include "rgw_sal.h"
+#include "rgw_fsio_watch.h"
 #include "rgw_sal_rados.h"
 #ifdef WITH_RADOSGW_LANCEDB
 #include "rgw_s3vector.h"
@@ -2863,6 +2864,11 @@ int RadosStore::meta_remove(const DoutPrefixProvider* dpp, std::string& metadata
 
 void RadosStore::shutdown(void) {
   svc()->datalog_rados->blocking_shutdown();
+  /* FSIO's watches, while the io_context their unwatch completes on still
+   * runs:  finalize() comes after it stops */
+  if (rados && rados->fsio_watch) {
+    rados->fsio_watch->stop();
+  }
   return;
 }
 

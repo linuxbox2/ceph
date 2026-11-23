@@ -56,6 +56,7 @@
 
 #include "neorados/cls/version.h"
 #include "neorados/cls/rgw_fsio.h"
+#include "rgw_fsio_watch.h"
 #include "rgw_fsio_hints.h"
 
 #include "rgw_tools.h"
@@ -1550,6 +1551,18 @@ int RGWRados::init_complete(const DoutPrefixProvider *dpp, optional_yield y, rgw
       // v1_topic_migration.stop(), but we could run it on the global thread
       // pool and cancel spawn() with a cancellation_signal instead
       v1_topic_migration.start(1);
+    }
+  }
+  /* FSIO design §4.3:  the incarnation watches the liveness objects before
+   * the gateway serves anything */
+  if (svc.zone->get_zonegroup().supports(rgw::zone_features::fsio)) {
+    fsio_watch = std::make_shared<RGWFSIOWatch>(driver->get_neorados());
+    ret = fsio_watch->start(dpp, svc.zone->get_zone_params().control_pool,
+			    cct->_conf->rgw_num_control_oids);
+    if (ret < 0) {
+      ldpp_dout(dpp, 0) << "ERROR: FSIO:  cannot watch the liveness objects: "
+			<< cpp_strerror(-ret) << dendl;
+      return ret;
     }
   }
   return ret;
@@ -13269,6 +13282,11 @@ int RGWRados::get_target_shard_id(const rgw::bucket_index_normal_layout& layout,
       r = -ENOTSUP;
   }
   return r;
+}
+
+uint64_t RGWRados::fsio_incarnation()
+{
+  return driver->get_neorados().instance_id();
 }
 
 uint64_t RGWRados::instance_id()
