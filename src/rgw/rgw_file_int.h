@@ -808,7 +808,7 @@ namespace rgw {
     /* mtx must be held */
     void discard_shadow();
     /* mtx must be held */
-    void stamp_unix_attrs();
+    void write_unix_attrs();
     int readv(file::Open* open_hdl, const struct iovec* iov, int iov_cnt,
               uint64_t offset, uint64_t* bytes_read, uint32_t flags);
 

@@ -684,7 +684,7 @@ TEST(OPEN2, CREATE_FLAG)
  * zero-length object -- so create-then-setattr publishes an empty object
  * before the real content exists.
  *
- * The attributes are stamped at create rather than left to publish, because
+ * The attributes are written at create rather than left to publish, because
  * an exclusive-create replay has to be able to read them back mid-write:
  * ganesha leaves the verifier in atime/mtime, and compares what getattr
  * returns.  publish() is last-writer close, which is far too late.
@@ -805,7 +805,7 @@ TEST(OPEN2, CREATEMODE_ATTRS_ARE_DURABLE_BEFORE_PUBLISH)
 
   /* The load-bearing assertion:  the attribute blob is on the shadow now,
    * while the object is still unpublished and the open still live.  Left to
-   * stamp_unix_attrs() it would not appear until close, and an exclusive
+   * write_unix_attrs() it would not appear until close, and an exclusive
    * create replay arriving here would read "exists, no verifier". */
   const auto sp = shadow_path(name);
   ASSERT_TRUE(sf::exists(sp))
@@ -1994,7 +1994,7 @@ TEST(OPEN2, ETAG_AFTER_PUBLISH)
   auto gr0 = o2h->getxattr("user.rgw.etag" /* RGW_ATTR_ETAG */);
 
   o2h->close(open1);
-  /* published — etag should now be stamped */
+  /* published — etag should now be written */
 
   /* reopen to read the etag */
   auto ofr2 = o2h->open(O_RDONLY, RGW_OPEN_FLAG_NONE);
@@ -2050,7 +2050,7 @@ TEST(OPEN2, RENDEZVOUS1)
 
   /* returning one of two write opens does not publish */
   ASSERT_EQ(o2h->close(w0), 0);
-  /* the etag is stamped at publish, so it must not have moved yet */
+  /* the etag is written at publish, so it must not have moved yet */
   auto etag_mid = get<1>(o2h->getxattr("user.rgw.etag" /* RGW_ATTR_ETAG */));
 
   /* last writer close publishes */
@@ -2536,7 +2536,7 @@ TEST(OPEN2, COMMIT1)
   ASSERT_EQ(get<0>(rdr), 0);
   ASSERT_EQ(get<1>(rdr), a4);
 
-  /* the etag is stamped at publish, so it must not have moved yet */
+  /* the etag is written at publish, so it must not have moved yet */
   auto etag_mid = get<1>(o2h->getxattr("user.rgw.etag" /* RGW_ATTR_ETAG */));
 
   /* repeated COMMITs succeed */
@@ -3022,7 +3022,7 @@ TEST(OPEN2, TRUNCATE_API)
   ASSERT_EQ(o2h->close(get<1>(ofw)), 0);
   ASSERT_EQ(sf::file_size(published_path("trunc2")), a8.length());
 
-  /* Look the object up again now that it exists.  stat_leaf stamps its
+  /* Look the object up again now that it exists.  stat_leaf sets its
    * etag onto the handle, and that cached value is precisely what a
    * later setattr would write back over the truncated object's etag.
    * Without this step the handle holds no etag--reset_object unlinked
@@ -3489,7 +3489,7 @@ TEST(OPEN2, REOPEN2_MULTI_WRITER)
 TEST(OPEN2, UNIX_ATTRS_PERSIST)
 {
   /* A file created through open2/write/close must carry its owner,
-   * group and mode.  The legacy write path stamped these in
+   * group and mode.  The legacy write path wrote these in
    * RGWWriteRequest::exec_finish(); the FSIO path had no equivalent, so
    * such a file had uid 0, gid 0 and no mode.
    *
@@ -3705,7 +3705,7 @@ TEST(OPEN2, DOTFILE_IS_LISTED)
 
 TEST(OPEN2, PUBLISHED_ETAG_IS_BARE)
 {
-  /* publish() stamps RGW_ATTR_ETAG from the shadow's content.  It must
+  /* publish() writes RGW_ATTR_ETAG from the shadow's content.  It must
    * store bare hex, with no trailing NUL:  dump_etag() emits the
    * attribute verbatim, so a stored NUL travels inside the quoted ETag
    * header, and If-Match then compares unequal for every object we
@@ -3749,7 +3749,7 @@ TEST(OPEN2, PUBLISHED_ETAG_IS_BARE)
   ASSERT_EQ(rc, 0);
 
   auto it = attrs.find(RGW_ATTR_ETAG);
-  ASSERT_NE(it, attrs.end()) << "publish did not stamp an etag";
+  ASSERT_NE(it, attrs.end()) << "publish did not write an etag";
 
   std::string stored = it->second.to_str();
   expect_published_etag_shape(stored);
@@ -3757,7 +3757,7 @@ TEST(OPEN2, PUBLISHED_ETAG_IS_BARE)
 
 TEST(OPEN2, PUBLISHED_ETAG_MATCHES_LISTING)
 {
-  /* publish() computes a real MD5 from the shadow's content and stamps it
+  /* publish() computes a real MD5 from the shadow's content and writes it
    * as RGW_ATTR_ETAG, which is what HEAD returns.  The listing entry it
    * adds must carry the same value -- a listing that reports the
    * synthesized change token while HEAD reports a digest is a LIST/HEAD
@@ -4895,8 +4895,8 @@ TEST(OPEN2, VER_PUBLISHED_ETAG_TRACKS_VERSION_ID)
     }
     ++found;
     ASSERT_FALSE(o.key.instance.empty())
-        << "NFS write did not stamp a version id";
-    ASSERT_FALSE(o.meta.etag.empty()) << "NFS write did not stamp an etag";
+        << "NFS write did not write a version id";
+    ASSERT_FALSE(o.meta.etag.empty()) << "NFS write did not write an etag";
     expect_published_etag_shape(o.meta.etag);
 
     if (g_ceph_context->_conf->rgw_non_md5_etag) {
@@ -5368,7 +5368,7 @@ TEST(OPEN2, VER_SUSPEND_ON_DISK)
   ssize_t len = ::getxattr(cur.c_str(), vid_x.c_str(), buf, sizeof(buf));
   ASSERT_GT(len, 0) << "current object carries no version id";
   ASSERT_EQ(std::string(buf, len), std::string("null"))
-    << "a write to a suspended bucket must stamp the null version id";
+    << "a write to a suspended bucket must write the null version id";
 }
 
 TEST(OPEN2, VER_SUSPEND_RESTORE)

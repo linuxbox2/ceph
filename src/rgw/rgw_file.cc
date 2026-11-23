@@ -1203,9 +1203,9 @@ namespace rgw {
     /* save attrs */
     req.emplace_attr(RGW_ATTR_UNIX_KEY1, std::move(ux_key));
     req.emplace_attr(RGW_ATTR_UNIX1, std::move(ux_attrs));
-    /* only stamp etag and acl when we have them--writing an empty
+    /* only write etag and acl when we have them--writing an empty
      * buffer::list over a good policy leaves it undecodable.  after a
-     * truncate, publish() has already stamped an etag for the new
+     * truncate, publish() has already written an etag for the new
      * content, so the handle's cached one is stale as well */
     if ((! truncated) && etag.length()) {
       req.emplace_attr(RGW_ATTR_ETAG, std::move(etag));
@@ -2283,7 +2283,7 @@ namespace rgw {
 
     if (write_open) {
       /* content may change from here, so the etag cached at lookup can
-       * no longer be stamped onto the object--publish() computes the
+       * no longer be written to the object--publish() computes the
        * authoritative one, and stat_leaf repopulates this at the next
        * lookup.  ganesha issues a truncate and a setattr as two calls,
        * so without this the second would put the pre-truncate etag back
@@ -2307,7 +2307,7 @@ namespace rgw {
       createmode = args->createmode;
 
       /* Initial attributes go onto the handle *before* the create, because
-       * encode_attrs() serialises handle state and the stamp below is what
+       * encode_attrs() serialises handle state and the write below is what
        * makes them durable.  This is also how an exclusive-create verifier
        * arrives:  ganesha's set_common_verifier() puts it in atime/mtime, so
        * it needs no special handling here -- but it does mean those two must
@@ -2356,7 +2356,7 @@ namespace rgw {
           hopen_flags |= sal::Object::FSIOObject::OPEN_FLAG_WRITE;
         }
         /* What a create should apply, handed to the driver rather than
-	 * stamped by us afterwards.  The driver builds the shadow away from
+	 * written by us afterwards.  The driver builds the shadow away from
 	 * its name and links it into place only once complete, so there is no
 	 * window in which another opener adopts a half-built view and no
 	 * half-built shadow left behind if it fails.  encode_attrs() reads
@@ -2457,7 +2457,7 @@ namespace rgw {
     flags |= FLAG_OPEN;
 
     /* ganesha's open2 fills attrs_out;  everything it wants was just
-     * stamped, so returning it here saves the caller a getattr */
+     * written, so returning it here saves the caller a getattr */
     if (args && args->attrs_out) {
       (void) stat(args->attrs_out, FLAG_LOCKED);
     }
@@ -2600,10 +2600,10 @@ namespace rgw {
    * Doing it at publish rather than at create also captures a setattr
    * issued while the open was held.  Size and mtime are refreshed from
    * the shadow first:  encode_attrs() serializes the whole state, so
-   * stamping the handle's cached values would persist a size which
+   * writing the handle's cached values would persist a size which
    * disagrees with the data, and decode_attrs() would hand that back at
    * the next lookup. */
-  void RGWFileHandle::stamp_unix_attrs()
+  void RGWFileHandle::write_unix_attrs()
   {
     file* f = get_if<file>(&variant_type);
     if (! f || ! f->fsio_hdl) {
@@ -2611,7 +2611,7 @@ namespace rgw {
     }
 
     CephContext* cct = static_cast<CephContext*>(fs->get_fs()->rgw);
-    const DoutPrefix dp(cct, dout_subsys, "rgw stamp_unix_attrs: ");
+    const DoutPrefix dp(cct, dout_subsys, "rgw write_unix_attrs: ");
 
     struct stat shadow_st;
     if (f->fsio_hdl->fstat(&shadow_st, 0) == 0) {
@@ -2634,9 +2634,9 @@ namespace rgw {
     if (!! rc) {
       lsubdout(fs->get_context(), rgw, 0)
         << __func__ << " " << object_name()
-        << " failed to stamp unix attrs rc=" << rc << dendl;
+        << " failed to write unix attrs rc=" << rc << dendl;
     }
-  } /* RGWFileHandle::stamp_unix_attrs */
+  } /* RGWFileHandle::write_unix_attrs */
 
   /* mtx must be held */
   void RGWFileHandle::discard_shadow()
@@ -2726,7 +2726,7 @@ namespace rgw {
     (f->read_opens)++;
 
     if ((f->write_opens == 0) && f->fsio_hdl && ! deleted()) {
-      stamp_unix_attrs();
+      write_unix_attrs();
       int rc = f->fsio_hdl->end_write(
         &dp, rgw::sal::Object::FSIOObject::WRITE_FLAG_NONE);
       if (!! rc) {
@@ -3047,7 +3047,7 @@ namespace rgw {
       if (write_open) {
         if (f->write_opens == 0) {
           if (f->fsio_hdl && ! deleted()) {
-            stamp_unix_attrs();
+            write_unix_attrs();
             publish_rc = f->fsio_hdl->end_write(&dp,
                       rgw::sal::Object::FSIOObject::WRITE_FLAG_NONE);
             if (!!publish_rc) {
