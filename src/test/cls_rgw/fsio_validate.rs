@@ -8,7 +8,8 @@ edition = "2021"
 //! for the whole run.  `--dry-run` prints them.
 //!
 //!   fsio_validate.rs [--dry-run] [--no-build] [--build DIR]
-//!                    [--filter PATTERN] [--timeout SECS] STEP|PRESET...
+//!                    [--filter PATTERN] [--timeout SECS] [--reuse]
+//!                    [--tests] [--clone-latency] STEP|PRESET...
 //!
 //! Steps:
 //!   cls            the CLS head test and the neorados CLS test, and
@@ -54,6 +55,24 @@ edition = "2021"
 //! handing its files back, 3 for every other command;  `--timeout SECS`
 //! sets them all.
 //!
+//! A gtest step that fails lists each failed test under its summary line,
+//! with its assertions' text;  `--tests` lists every test, the passing
+//! ones with their time, on the console and in the summary.
+//!
+//! `--clone-latency` runs the harness's disabled DISABLED_CloneLatency
+//! alone:  how long a writer's open takes to construct objects of 64, 256
+//! and 512 chunks (plan, the driver's step 3, element 5).  Its CLONE_LATENCY
+//! lines go into the summary;  the harness's limit is 20 minutes for it.
+//!
+//! `--reuse` keeps a RADOS cluster between runs, for a quick loop while
+//! prototyping:  if the build directory's cluster answers, the run skips
+//! the stop and the fresh vstart (it still enables fsio, which is
+//! idempotent), and either way it leaves the cluster running at the end,
+//! its files root's until a run without `--reuse` hands them back.  It is
+//! for changes on the client side (the RGW driver, librgw, the harness),
+//! which each test process loads fresh;  a running OSD keeps the cls_rgw
+//! it loaded, so a cls_rgw or OSD change needs a run without it.
+//!
 //! Before a run it builds what the chosen steps run, unless told
 //! `--no-build`;  either way it then requires the build's version to be
 //! HEAD's.  Each step's output goes to `<build>/fsio-validate/<time>/
@@ -78,11 +97,17 @@ struct Opts {
     steps: Vec<&'static str>,
     filter: Option<String>,
     timeout: Option<u64>,
+    reuse: bool,
+    tests: bool,
+    clone_latency: bool,
 }
 
 /// A step's command's limit, in seconds
 fn step_timeout(o: &Opts, step: &str) -> u64 {
     /* about two to three times what each has taken (2026-11-23) */
+    if o.clone_latency && step == "harness" && o.timeout.is_none() {
+        return 1200;
+    }
     o.timeout.unwrap_or(match step {
         "build" => 1200,
         "model" => 1800,
@@ -186,6 +211,14 @@ fn rados_phase(o: &Opts, steps: &[&'static str], run_dir: &Path, summary: &mut V
     let sh = |step: &'static str, what: &str, line: String| Cmd {
         step, what: what.into(), argv: vec!["sh".into(), "-c".into(), line], cwd: b.clone(), sudo: true,
     };
+    /* --reuse:  a cluster that answers is kept */
+    let running = o.reuse && !o.dry_run && Command::new("sudo")
+        .args(["-n", "timeout", "20", "bin/ceph", "-c", "ceph.conf", "health"])
+        .current_dir(b).stdout(Stdio::null()).stderr(Stdio::null())
+        .status().map(|s| s.success()).unwrap_or(false);
+    if running {
+        println!("== [rados] the running cluster kept (--reuse)");
+    }
     let setup = [
         sh("rados-stop", "stop whatever is running", "../src/stop.sh".into()),
         sh("rados-vstart", "a fresh RADOS vstart",
@@ -195,6 +228,9 @@ fn rados_phase(o: &Opts, steps: &[&'static str], run_dir: &Path, summary: &mut V
     ];
     let mut failed = false;
     for c in &setup {
+        if running && c.step != "rados-fsio" {
+            continue;
+        }
         let vstart = c.step == "rados-vstart";
         let ok = exec(o, c, run_dir, summary, |log| {
             (vstart && log.contains("expected plugin")).then(|| "a plugin version mismatch".to_string())
@@ -216,6 +252,9 @@ fn rados_phase(o: &Opts, steps: &[&'static str], run_dir: &Path, summary: &mut V
                 "librgw-rados" => vec![sh("librgw-rados", "the librgw test", format!(
                     "env CEPH_CONF={conf} AWS_ACCESS_KEY_ID={AWS_KEY} AWS_SECRET_ACCESS_KEY='{AWS_SECRET}' \
                      bin/ceph_test_librgw_file_fsio_put --debug-rgw=10 --log-to-stderr=true{gf}"))],
+                "harness" if o.clone_latency => vec![sh("harness", "the clone latency", format!(
+                    "env CEPH_CONF={conf} bin/ceph_test_rgw_fsio_rados \
+                     --gtest_also_run_disabled_tests --gtest_filter='*CloneLatency*'"))],
                 "harness" => vec![sh("harness", "the driver's harness", format!("env CEPH_CONF={conf} bin/ceph_test_rgw_fsio_rados{gf}"))],
                 "cluster-tier" => {
                     let runner = match model_runner(o) {
@@ -243,6 +282,10 @@ fn rados_phase(o: &Opts, steps: &[&'static str], run_dir: &Path, summary: &mut V
                 failed |= !exec(o, c, run_dir, summary, expected_count);
             }
         }
+    }
+    if o.reuse {
+        println!("== [rados] the cluster left running (--reuse)");
+        return failed;
     }
     let (user, group) = (id("-un"), id("-gn"));
     let teardown = [
@@ -329,6 +372,12 @@ fn exec(o: &Opts, c: &Cmd, run_dir: &Path, summary: &mut Vec<String>,
     let l = line(c.step, &c.what, !failed_note, &note);
     println!("{l}");
     summary.push(l);
+    if failed_note || o.tests {
+        for d in gtest_tests(&text, o.tests) {
+            println!("{d}");
+            summary.push(d);
+        }
+    }
     !failed_note
 }
 
@@ -345,9 +394,49 @@ fn expected_count(text: &str) -> Option<String> {
                 + if t.starts_with("[  PASSED") { " passed" } else { " failed" });
         } else if t.contains(" as expected") && t.contains(" of ") {
             parts.push(t.to_string());
+        } else if t.starts_with("CLONE_LATENCY ") {
+            parts.push(t.trim_start_matches("CLONE_LATENCY ").to_string());
+        } else if let Some(n) = t.strip_prefix("YOU HAVE ") {
+            /* gtest's "YOU HAVE 1 DISABLED TEST":  a parked test stays seen */
+            if let Some(n) = n.split_whitespace().next() {
+                parts.push(format!("{n} disabled"));
+            }
         }
     }
     (!parts.is_empty()).then(|| parts.join(", "))
+}
+
+/// A gtest run's tests:  each failed one's name, and under it its
+/// assertions' text ("file:line: Failure" to the test's end), so a failing
+/// step says which tests failed and why without opening its log;  with
+/// `all`, each passing one's name and time too
+fn gtest_tests(text: &str, all: bool) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut block: Vec<String> = Vec::new();
+    let mut in_failure = false;
+    for l in text.lines() {
+        let t = l.trim_end();
+        if t.starts_with("[ RUN      ]") {
+            block.clear();
+            in_failure = false;
+        } else if all && t.starts_with("[       OK ]") {
+            out.push(format!("    ok     {}", t.trim_start_matches("[       OK ]").trim()));
+        } else if t.ends_with(": Failure") {
+            in_failure = true;
+            block.push(format!("      {}", t.rsplit('/').next().unwrap_or(t)));
+        } else if t.starts_with("[  FAILED  ]") && t.ends_with(")") {
+            /* "[  FAILED  ] Suite.Test (12 ms)":  the test's end */
+            let name = t.trim_start_matches("[  FAILED  ]").trim();
+            out.push(format!("    FAILED {}", name.split(" (").next().unwrap_or(name)));
+            out.extend(block.drain(..));
+            in_failure = false;
+        } else if in_failure && !t.is_empty() && !t.starts_with('[') && block.len() < 40 {
+            /* the assertion's lines, values cut short */
+            let v: String = t.chars().take(160).collect();
+            block.push(format!("      {v}"));
+        }
+    }
+    out
 }
 
 fn line(step: &str, what: &str, ok: bool, note: &str) -> String {
@@ -416,10 +505,16 @@ fn parse_args() -> Opts {
     let mut steps: Vec<&'static str> = Vec::new();
     let mut filter: Option<String> = None;
     let mut timeout: Option<u64> = None;
+    let mut reuse = false;
+    let mut tests = false;
+    let mut clone_latency = false;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
             "--dry-run" => dry_run = true,
+            "--reuse" => reuse = true,
+            "--tests" => tests = true,
+            "--clone-latency" => clone_latency = true,
             "--no-build" => build = false,
             "--build" => build_dir = Some(PathBuf::from(args.next().unwrap_or_else(|| die("--build needs a directory")))),
             "--filter" => filter = Some(args.next().unwrap_or_else(|| die("--filter needs a pattern"))),
@@ -429,7 +524,7 @@ fn parse_args() -> Opts {
             "core" => steps.extend(["cls", "cluster-tier", "model"]),
             "full" => steps.extend(STEPS),
             "-h" | "--help" => {
-                println!("usage:  fsio_validate.rs [--dry-run] [--no-build] [--build DIR] [--filter PATTERN] [--timeout SECS] STEP|PRESET...\n\
+                println!("usage:  fsio_validate.rs [--dry-run] [--no-build] [--build DIR] [--filter PATTERN] [--timeout SECS] [--reuse] [--tests] [--clone-latency] STEP|PRESET...\n\
                           steps:  {}\npresets:  driver core full", STEPS.join(" "));
                 std::process::exit(0);
             }
@@ -454,7 +549,10 @@ fn parse_args() -> Opts {
     if !build_dir.join("build.ninja").exists() {
         die(&format!("{} is not a configured build directory", build_dir.display()));
     }
-    Opts { dry_run, build, build_dir, src, steps: ordered, filter, timeout }
+    if clone_latency && !steps.contains(&"harness") {
+        die("--clone-latency runs the harness:  name the harness step");
+    }
+    Opts { dry_run, build, build_dir, src, steps: ordered, filter, timeout, reuse, tests, clone_latency }
 }
 
 fn capture(cwd: &Path, argv: &[&str]) -> String {

@@ -137,9 +137,13 @@ namespace m = ::cls::rgw::method;
   return detail::call(m::fsio_drop_seqs, in);
 }
 
-[[nodiscard]] inline auto ocnt_add(const cls_rgw_fsio_ocnt_op& in)
+/* §2.5:  gone, and held when gone, are what a gateway needs to settle
+ * its presence hint (§4.3) */
+[[nodiscard]] inline auto ocnt_add(const cls_rgw_fsio_ocnt_op& in,
+                                   cls_rgw_fsio_ocnt_add_ret* ret = nullptr,
+                                   boost::system::error_code* ec = nullptr)
 {
-  return detail::call(m::fsio_ocnt_add, in);
+  return detail::call(m::fsio_ocnt_add, in, ret, ec);
 }
 
 [[nodiscard]] inline auto ocnt_remove(const cls_rgw_fsio_ocnt_op& in,

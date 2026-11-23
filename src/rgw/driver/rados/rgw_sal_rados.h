@@ -630,6 +630,10 @@ class RadosObject : public StoreObject {
     virtual int delete_obj_attrs(const DoutPrefixProvider* dpp, const char* attr_name, optional_yield y) override;
     virtual bool is_expired() override;
     virtual void gen_rand_obj_instance_name() override;
+    /* FSIO_RADOS_DESIGN.md §3.1, §4.1:  the FSIO open (rgw_fsio_object.cc) */
+    FSIOResult get_fsio_handle(const DoutPrefixProvider* dpp,
+			       uint32_t flags = FSIOObject::OPEN_FLAG_NONE,
+			       const FSIOCreateSpec* spec = nullptr) override;
     void get_raw_obj(rgw_raw_obj* raw_obj);
     virtual std::unique_ptr<Object> clone() override {
       return std::unique_ptr<Object>(new RadosObject(*this));

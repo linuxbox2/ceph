@@ -7,7 +7,9 @@
  * through the SAL directly, with no librgw.  Each op's tests land with
  * the op. */
 
+#include <chrono>
 #include <memory>
+#include <thread>
 #include <string>
 #include <vector>
 
@@ -23,7 +25,10 @@
 #include "gtest/gtest.h"
 #include "include/neorados/RADOS.hpp"
 #include "neorados/cls/rgw_fsio.h"
+#include "rgw/driver/rados/rgw_fsio_hints.h"
+#include "rgw/driver/rados/rgw_fsio_object.h"
 #include "rgw/driver/rados/rgw_fsio_watch.h"
+#include "rgw/driver/rados/rgw_obj_manifest.h"
 #include "rgw/driver/rados/rgw_rados.h"
 #include "rgw/driver/rados/rgw_sal_rados.h"
 #include "rgw/driver/rados/rgw_tools.h"
@@ -110,13 +115,25 @@ protected:
 
   void TearDown() override {
     if (bucket) {
+      /* a writer a test leaves open holds FSIO state the bucket's removal
+       * refuses;  the purge strips it (shadow chunks leak until step 10) */
+      static_cast<rgw::sal::RadosStore*>(env->driver)->getRados()->fsio_purge(
+	env->dpp.get(), bucket->get_info(), null_yield);
       bucket->remove(env->dpp.get(), true /* purge */, null_yield);
     }
   }
 
-  /* an object as an S3 PUT writes it:  the content an open clones */
-  int put(const std::string& key, const std::string& data) {
+  /* an object as an S3 PUT writes it:  the content an open clones;  in a
+   * bucket with versioning enabled, a new version, its instance returned */
+  int put(const std::string& key, const std::string& data,
+	  std::string* instance = nullptr) {
     auto obj = bucket->get_object(rgw_obj_key(key));
+    if (bucket->versioning_enabled()) {
+      obj->gen_rand_obj_instance_name();
+    }
+    if (instance) {
+      *instance = obj->get_key().instance;
+    }
     auto writer = env->driver->get_atomic_writer(
       env->dpp.get(), null_yield, obj.get(), owner, nullptr, 0,
       gen_rand_alphanumeric(g_ceph_context, 16));
@@ -137,6 +154,177 @@ protected:
     return writer->complete(data.size(), "", &mtime, ceph::real_time(),
 			    attrs, std::nullopt, ceph::real_time(), nullptr,
 			    nullptr, nullptr, nullptr, nullptr, rctx, 0);
+  }
+
+  /* the store's neorados client, and the context of the pool an
+   * object's head is in */
+  neorados::RADOS& neo() {
+    return static_cast<rgw::sal::RadosStore*>(env->driver)->get_neorados();
+  }
+  rgw_raw_obj head_of(const std::string& key) {
+    auto obj = bucket->get_object(rgw_obj_key(key));
+    rgw_raw_obj head;
+    static_cast<rgw::sal::RadosObject*>(obj.get())->get_raw_obj(&head);
+    return head;
+  }
+  rgw_raw_obj instance_of(const std::string& key, const std::string& inst) {
+    auto obj = bucket->get_object(rgw_obj_key(key, inst));
+    rgw_raw_obj raw;
+    static_cast<rgw::sal::RadosObject*>(obj.get())->get_raw_obj(&raw);
+    return raw;
+  }
+  /* an instance head's open count (§2.5), if it has one */
+  std::optional<cls_rgw_fsio_ocnt> ocnt_of(const rgw_raw_obj& ih) {
+    ceph::buffer::list bl;
+    boost::system::error_code ec;
+    neorados::ReadOp op;
+    op.get_xattr("user.rgw.fsio.ocnt", &bl, &ec);
+    neo().execute(neorados::Object{ih.oid}, ioc_of(ih.pool), std::move(op),
+		  nullptr, ceph::async::use_blocked[ec]);
+    if (ec || !bl.length()) {
+      return std::nullopt;
+    }
+    cls_rgw_fsio_ocnt o;
+    auto it = bl.cbegin();
+    decode(o, it);
+    return o;
+  }
+  void set_versioning(uint32_t flags) {
+    bucket->get_info().flags &= ~(BUCKET_VERSIONED | BUCKET_VERSIONS_SUSPENDED);
+    bucket->get_info().flags |= flags;
+    ASSERT_EQ(0, bucket->put_info(env->dpp.get(), false, ceph::real_time(),
+				  null_yield));
+  }
+  neorados::IOContext ioc_of(const rgw_pool& pool) {
+    return rgw::init_iocontext(env->dpp.get(), neo(), pool,
+			       ceph::async::use_blocked);
+  }
+
+  /* a head's FSIO records, as the class reads them:  its header, if any,
+   * and an incarnation's record, if any (§2.2) */
+  struct Records {
+    std::optional<cls_rgw_fsio_hdr> hdr;
+    std::optional<cls_rgw_fsio_opens> opens;
+    bool any_fsio = false;
+  };
+  Records records_of(const rgw_raw_obj& head, uint64_t incarnation) {
+    boost::container::flat_map<std::string, ceph::buffer::list> attrs;
+    neorados::ReadOp op;
+    op.get_xattrs(&attrs, nullptr);
+    neo().execute(neorados::Object{head.oid}, ioc_of(head.pool),
+		  std::move(op), nullptr, ceph::async::use_blocked);
+    Records r;
+    const auto mine = fmt::format("user.rgw.fsio.m.{:016x}", incarnation);
+    for (auto& [k, v] : attrs) {
+      if (!k.starts_with("user.rgw.fsio.")) {
+	continue;
+      }
+      r.any_fsio = true;
+      auto it = v.cbegin();
+      if (k == "user.rgw.fsio.hdr") {
+	decode(r.hdr.emplace(), it);
+      } else if (k == mine) {
+	decode(r.opens.emplace(), it);
+      }
+    }
+    return r;
+  }
+
+  /* an object's bytes, read whole;  nullopt if it does not exist */
+  std::optional<std::string> bytes_of(const rgw_raw_obj& raw) {
+    auto ioc = ioc_of(raw.pool);
+    if (!raw.loc.empty()) {
+      ioc.set_key(raw.loc);
+    }
+    uint64_t size = 0;
+    ceph::buffer::list bl;
+    neorados::ReadOp op;
+    op.stat(&size, nullptr);
+    op.read(0, 0, &bl);
+    boost::system::error_code ec;
+    neo().execute(neorados::Object{raw.oid}, ioc, std::move(op), nullptr,
+		  ceph::async::use_blocked[ec]);
+    if (ec) {
+      return std::nullopt;
+    }
+    return bl.to_str();
+  }
+
+  /* the chunks of an object's current manifest, head first */
+  std::vector<rgw_raw_obj> chunks_of(const std::string& key,
+				     const std::string& inst = {}) {
+    auto head = inst.empty() ? head_of(key) : instance_of(key, inst);
+    ceph::buffer::list bl;
+    neorados::ReadOp op;
+    op.get_xattr(RGW_ATTR_MANIFEST, &bl, nullptr);
+    neo().execute(neorados::Object{head.oid}, ioc_of(head.pool),
+		  std::move(op), nullptr, ceph::async::use_blocked);
+    RGWObjManifest m;
+    auto it = bl.cbegin();
+    decode(m, it);
+    auto* rados = static_cast<rgw::sal::RadosStore*>(env->driver)->getRados();
+    std::vector<rgw_raw_obj> v;
+    for (auto p = m.obj_begin(env->dpp.get()); p != m.obj_end(env->dpp.get());
+	 ++p) {
+      v.push_back(p.get_location().get_raw_obj(rados));
+    }
+    return v;
+  }
+
+  /* §2.4:  a chunk's clone in a shadow, f(anchor, id) */
+  rgw_raw_obj clone_of(const rgw_raw_obj& chunk, const cls_rgw_fsio_id& id) {
+    rgw_raw_obj c = chunk;
+    c.oid = cls_rgw_fsio_clone_name(bucket->get_marker(), 'd', id, chunk.oid);
+    c.loc = chunk.loc.empty() ? chunk.oid : chunk.loc;
+    return c;
+  }
+
+  std::unique_ptr<rgw::sal::Object::FSIOObject> open(const std::string& key,
+						      bool writer) {
+    auto obj = bucket->get_object(rgw_obj_key(key));
+    auto [r, fh] = obj->get_fsio_handle(
+      env->dpp.get(), writer ? rgw::sal::Object::FSIOObject::OPEN_FLAG_WRITE
+			     : rgw::sal::Object::FSIOObject::OPEN_FLAG_NONE);
+    EXPECT_EQ(0, r);
+    return std::move(fh);
+  }
+  static rgw::sal::RadosFSIOObject* rados_fsio(
+    const std::unique_ptr<rgw::sal::Object::FSIOObject>& fh) {
+    return static_cast<rgw::sal::RadosFSIOObject*>(fh.get());
+  }
+  static const cls_rgw_fsio_chunk_set* entry_of(const cls_rgw_fsio_hdr& hdr,
+						const cls_rgw_fsio_id& id) {
+    for (const auto& e : hdr.chunk_sets) {
+      if (e.id == id) {
+	return &e;
+      }
+    }
+    return nullptr;
+  }
+
+  /* the presence hints a handle holds on a head or an instance head,
+   * found on the shard of that head's oid (§2.7) */
+  int presence_hints(const rgw_raw_obj& head, const cls_rgw_fsio_handle& h,
+		     cls_rgw_fsio_hint_target target =
+		       cls_rgw_fsio_hint_target::HEAD) {
+    auto* rados = static_cast<rgw::sal::RadosStore*>(env->driver)->getRados();
+    const auto shards = static_cast<uint32_t>(
+      g_conf().get_val<uint64_t>("rgw_fsio_open_hints_num_shards"));
+    const auto shard = rgw::fsio::open_hint_shard_oid(
+      rgw::fsio::open_hint_shard(head.oid, shards));
+    cls_rgw_fsio_hint_list_op in;
+    in.bucket = bucket->get_key();
+    in.incarnation = h.incarnation;
+    cls_rgw_fsio_hint_list_ret ret;
+    neorados::ReadOp op;
+    op.exec(neorados::cls::rgw_fsio::open_hint_list(in, &ret));
+    neo().execute(neorados::Object{shard}, rados->fsio_hint_ioc(),
+		  std::move(op), nullptr, ceph::async::use_blocked);
+    return std::count_if(ret.hints.begin(), ret.hints.end(),
+			 [&](const cls_rgw_fsio_hint& x) {
+			   return x.kind == cls_rgw_fsio_hint_kind::PRESENCE &&
+			     x.handle == h.handle && x.target == target;
+			 });
   }
 
   /* an object's content as an S3 GET reads it */
@@ -247,6 +435,484 @@ TEST_F(FSIORados, IncarnationIsTheOriginAndAWatcher)
   neo.execute(neorados::Object{head.oid}, hioc, std::move(op),
 	      ceph::async::use_blocked[ec]);
   ASSERT_EQ(0, ceph::from_error_code(ec));
+}
+
+/* the driver's step 3, the open:  a reader's open adds its presence hint
+ * and binds its handle to the published chunk set;  its close takes both
+ * away, leaving no FSIO state (FSIO design §3.1, §3.4, §4.3) */
+TEST_F(FSIORados, ReaderBindsPublished)
+{
+  ASSERT_EQ(0, put("obj", std::string(9 << 20, 'r')));
+  const auto head = head_of("obj");
+  auto obj = bucket->get_object(rgw_obj_key("obj"));
+  auto [r, fh] = obj->get_fsio_handle(env->dpp.get(),
+				      rgw::sal::Object::FSIOObject::OPEN_FLAG_NONE);
+  ASSERT_EQ(0, r);
+  ASSERT_TRUE(fh);
+  auto* hdl = static_cast<rgw::sal::RadosFSIOObject*>(fh.get());
+  const auto h = hdl->handle();
+
+  auto rec = records_of(head, h.incarnation);
+  ASSERT_TRUE(rec.hdr);
+  ASSERT_TRUE(rec.opens);
+  auto ho = rec.opens->handles.find(h.handle);
+  ASSERT_NE(rec.opens->handles.end(), ho);
+  auto c = ho->second.chunk_sets.find(hdl->bound());
+  ASSERT_NE(ho->second.chunk_sets.end(), c);
+  EXPECT_EQ(1u, c->second.readers);
+  EXPECT_EQ(0u, c->second.writers);
+  auto e = std::find_if(rec.hdr->chunk_sets.begin(), rec.hdr->chunk_sets.end(),
+			[&](const auto& x) { return x.id == hdl->bound(); });
+  ASSERT_NE(rec.hdr->chunk_sets.end(), e);
+  EXPECT_EQ(cls_rgw_fsio_cs_state::PUBLISHED, e->state);
+  EXPECT_FALSE(rec.hdr->cur_shadow);
+  EXPECT_EQ(1, presence_hints(head, h));
+
+  ASSERT_EQ(0, fh->close(env->dpp.get(),
+			 rgw::sal::Object::FSIOObject::CLOSE_FLAG_NONE));
+  EXPECT_FALSE(records_of(head, h.incarnation).any_fsio);
+  EXPECT_EQ(0, presence_hints(head, h));
+  std::string back;
+  ASSERT_EQ(0, get("obj", &back));
+  EXPECT_EQ(std::string(9 << 20, 'r'), back);
+}
+
+/* the driver's step 3, element 2:  a writer's open constructs a shadow
+ * (FSIO design §3.1 step 7, §4.1):  the join clones the head, the gateway
+ * every tail chunk, and fsio_ready makes it ready */
+TEST_F(FSIORados, WriterConstructsShadow)
+{
+  const std::string data(9 << 20, 'w');
+  ASSERT_EQ(0, put("obj", data));
+  const auto head = head_of("obj");
+  const auto chunks = chunks_of("obj");
+  ASSERT_EQ(3u, chunks.size());
+  auto fh = open("obj", true);
+  ASSERT_TRUE(fh);
+  auto* hdl = rados_fsio(fh);
+  const auto id = hdl->writing_to();
+  const auto h = hdl->handle();
+
+  auto rec = records_of(head, h.incarnation);
+  ASSERT_TRUE(rec.hdr);
+  ASSERT_TRUE(rec.hdr->cur_shadow);
+  EXPECT_EQ(id, *rec.hdr->cur_shadow);
+  const auto* e = entry_of(*rec.hdr, id);
+  ASSERT_NE(nullptr, e);
+  EXPECT_EQ(cls_rgw_fsio_cs_state::READY, e->state);
+  ASSERT_TRUE(e->shadow);
+  EXPECT_EQ(uint64_t(9 << 20), e->shadow->size_hint);
+  ASSERT_EQ(1u, e->shadow->extent.size());
+  EXPECT_EQ(0u, e->shadow->extent[0].first);
+  EXPECT_EQ(2u, e->shadow->extent[0].last);
+  ASSERT_TRUE(rec.opens);
+  EXPECT_EQ(1u, rec.opens->handles.at(h.handle).chunk_sets.at(id).writers);
+
+  for (const auto& c : chunks) {
+    auto src = bytes_of(c);
+    auto cl = bytes_of(clone_of(c, id));
+    ASSERT_TRUE(src) << c.oid;
+    ASSERT_TRUE(cl) << clone_of(c, id).oid;
+    EXPECT_EQ(*src, *cl) << clone_of(c, id).oid;
+  }
+  std::string back;
+  ASSERT_EQ(0, get("obj", &back));
+  EXPECT_EQ(data, back);
+}
+
+/* a second writer binds the ready shadow and constructs nothing */
+TEST_F(FSIORados, SecondWriterJoinsTheShadow)
+{
+  ASSERT_EQ(0, put("obj", std::string(9 << 20, 's')));
+  const auto head = head_of("obj");
+  auto fh1 = open("obj", true);
+  auto fh2 = open("obj", true);
+  ASSERT_TRUE(fh1);
+  ASSERT_TRUE(fh2);
+  const auto id = rados_fsio(fh1)->writing_to();
+  EXPECT_EQ(id, rados_fsio(fh2)->writing_to());
+  auto rec = records_of(head, rados_fsio(fh1)->handle().incarnation);
+  ASSERT_TRUE(rec.hdr);
+  EXPECT_EQ(id, *rec.hdr->cur_shadow);
+  int shadows = 0;
+  for (const auto& x : rec.hdr->chunk_sets) {
+    shadows += x.shadow ? 1 : 0;
+  }
+  EXPECT_EQ(1, shadows);
+  for (auto* f : {rados_fsio(fh1), rados_fsio(fh2)}) {
+    EXPECT_EQ(1u, rec.opens->handles.at(f->handle().handle).chunk_sets.at(id).writers);
+  }
+}
+
+/* begin_write() on a reader's handle makes it a writer as well */
+TEST_F(FSIORados, BeginWriteOnAReader)
+{
+  ASSERT_EQ(0, put("obj", std::string(9 << 20, 'b')));
+  const auto head = head_of("obj");
+  auto fh = open("obj", false);
+  ASSERT_TRUE(fh);
+  ASSERT_EQ(0, fh->begin_write(env->dpp.get(),
+			       rgw::sal::Object::FSIOObject::WRITE_FLAG_NONE));
+  auto* hdl = rados_fsio(fh);
+  auto rec = records_of(head, hdl->handle().incarnation);
+  ASSERT_TRUE(rec.opens);
+  const auto& cs = rec.opens->handles.at(hdl->handle().handle).chunk_sets;
+  EXPECT_EQ(1u, cs.at(hdl->bound()).readers);
+  EXPECT_EQ(1u, cs.at(hdl->writing_to()).writers);
+  EXPECT_NE(hdl->bound(), hdl->writing_to());
+}
+
+/* a writer's join after an S3 PUT builds its shadow from the new content
+ * (§3.1, the compound op's ID-tag guard) */
+TEST_F(FSIORados, GuardRetriesAfterAPut)
+{
+  ASSERT_EQ(0, put("obj", std::string(9 << 20, '1')));
+  auto fh1 = open("obj", true);
+  ASSERT_TRUE(fh1);
+  ASSERT_EQ(0, put("obj", std::string(9 << 20, '2')));
+  auto fh2 = open("obj", true);
+  ASSERT_TRUE(fh2);
+  const auto id = rados_fsio(fh2)->writing_to();
+  EXPECT_NE(rados_fsio(fh1)->writing_to(), id);
+  for (const auto& c : chunks_of("obj")) {
+    auto cl = bytes_of(clone_of(c, id));
+    ASSERT_TRUE(cl) << clone_of(c, id).oid;
+    EXPECT_EQ(*bytes_of(c), *cl) << clone_of(c, id).oid;
+    EXPECT_EQ('2', (*cl)[0]);
+  }
+}
+
+/* the driver's step 3, element 4:  a join that must wait (FSIO design
+ * §3.1 step 5, §4.1, W13).  The test holds a shadow constructing itself:
+ * a raw fsio_join as writer under a handle number of its own, its
+ * fsio_ready sent or not */
+class FSIORadosWait : public FSIORados {
+protected:
+  static constexpr uint64_t CONSTRUCTOR = 999999;
+  cls_rgw_fsio_id constructing;
+
+  void SetUp() override {
+    FSIORados::SetUp();
+    g_conf().set_val_or_die("rgw_fsio_join_wait", "2");
+  }
+  void TearDown() override {
+    g_conf().set_val_or_die("rgw_fsio_join_wait", "5");
+    FSIORados::TearDown();
+  }
+  cls_rgw_fsio_handle constructor() {
+    return {static_cast<rgw::sal::RadosStore*>(env->driver)->getRados()
+	      ->fsio_incarnation(), CONSTRUCTOR};
+  }
+  void hold_constructing(const rgw_raw_obj& head) {
+    cls_rgw_fsio_join_op in;
+    in.caller = constructor();
+    in.seq = 1;
+    in.writer = true;
+    in.nonce = 1;
+    in.counter_seed = 1;
+    in.marker = bucket->get_marker();
+    cls_rgw_fsio_join_ret ret;
+    neorados::WriteOp op;
+    op.exec(neorados::cls::rgw_fsio::join(in, &ret));
+    neo().execute(neorados::Object{head.oid}, ioc_of(head.pool), std::move(op),
+		  ceph::async::use_blocked);
+    ASSERT_TRUE(ret.construct);
+    constructing = ret.bound;
+  }
+  void ready(const rgw_raw_obj& head) {
+    cls_rgw_fsio_runs_op in;
+    in.caller = constructor();
+    in.cs = constructing;
+    in.runs = {cls_rgw_fsio_run{0, 2}};
+    in.size = 9 << 20;
+    neorados::WriteOp op;
+    op.exec(neorados::cls::rgw_fsio::ready(in));
+    neo().execute(neorados::Object{head.oid}, ioc_of(head.pool), std::move(op),
+		  ceph::async::use_blocked);
+  }
+  rgw::sal::Object::FSIOResult open_writer() {
+    return bucket->get_object(rgw_obj_key("obj"))->get_fsio_handle(
+      env->dpp.get(), rgw::sal::Object::FSIOObject::OPEN_FLAG_WRITE);
+  }
+};
+
+/* a writer's open waits rgw_fsio_join_wait for the constructing shadow,
+ * then returns EAGAIN, leaving nothing of its own on the head */
+TEST_F(FSIORadosWait, JoinWaitsThenEAGAIN)
+{
+  ASSERT_EQ(0, put("obj", std::string(9 << 20, 'a')));
+  const auto head = head_of("obj");
+  hold_constructing(head);
+  const auto start = std::chrono::steady_clock::now();
+  auto [r, fh] = open_writer();
+  const auto waited = std::chrono::steady_clock::now() - start;
+  EXPECT_EQ(-EAGAIN, r);
+  EXPECT_FALSE(fh);
+  EXPECT_GE(waited, std::chrono::seconds(2));
+  EXPECT_LT(waited, std::chrono::seconds(4));
+  /* only the constructor's handle has state on the head, and no hint */
+  auto rec = records_of(head, constructor().incarnation);
+  ASSERT_TRUE(rec.opens);
+  EXPECT_EQ(1u, rec.opens->handles.size());
+  EXPECT_EQ(1u, rec.opens->handles.count(CONSTRUCTOR));
+}
+
+/* a writer's open waiting on a constructing shadow binds it once it is
+ * ready, within the wait, and constructs nothing itself */
+TEST_F(FSIORadosWait, JoinWaitsForReady)
+{
+  ASSERT_EQ(0, put("obj", std::string(9 << 20, 'r')));
+  const auto head = head_of("obj");
+  hold_constructing(head);
+  std::thread readier([&] {
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    ready(head);
+  });
+  const auto start = std::chrono::steady_clock::now();
+  auto [r, fh] = open_writer();
+  const auto waited = std::chrono::steady_clock::now() - start;
+  readier.join();
+  ASSERT_EQ(0, r);
+  ASSERT_TRUE(fh);
+  EXPECT_LT(waited, std::chrono::seconds(2));
+  EXPECT_EQ(constructing, rados_fsio(fh)->writing_to());
+  /* the constructor cloned no tail chunk, and neither did this open */
+  for (const auto& c : chunks_of("obj")) {
+    if (c.oid != head.oid) {
+      EXPECT_FALSE(bytes_of(clone_of(c, constructing))) << c.oid;
+    }
+  }
+}
+
+/* the driver's step 3, element 5:  how long a writer's open takes to
+ * construct objects of growing chunk counts, against rgw_fsio_join_wait
+ * (plan §6.13).  A measurement, not a check:  disabled in ordinary runs,
+ * run by fsio_validate.rs --clone-latency.  The time is the whole open,
+ * its fsio_join and fsio_ready as well as the clones;  per chunk, the
+ * clones' */
+TEST_F(FSIORados, DISABLED_CloneLatency)
+{
+  for (const int chunks : {64, 256, 512}) {
+    const std::string key = fmt::format("clone-latency-{}", chunks);
+    const uint64_t size = uint64_t(chunks) << 22;	// 4 MiB chunks
+    {
+      auto obj = bucket->get_object(rgw_obj_key(key));
+      auto writer = env->driver->get_atomic_writer(
+	env->dpp.get(), null_yield, obj.get(), owner, nullptr, 0,
+	gen_rand_alphanumeric(g_ceph_context, 16));
+      ASSERT_EQ(0, writer->prepare(null_yield));
+      const std::string piece(4 << 20, 'c');
+      for (uint64_t ofs = 0; ofs < size; ofs += piece.size()) {
+	ceph::buffer::list bl;
+	bl.append(piece);
+	ASSERT_EQ(0, writer->process(std::move(bl), ofs));
+      }
+      ASSERT_EQ(0, writer->process({}, size));
+      ceph::real_time mtime;
+      rgw::sal::Attrs attrs;
+      req_context rctx{env->dpp.get(), null_yield, nullptr};
+      ASSERT_EQ(0, writer->complete(size, "", &mtime, ceph::real_time(), attrs,
+				    std::nullopt, ceph::real_time(), nullptr,
+				    nullptr, nullptr, nullptr, nullptr, rctx, 0));
+    }
+    const auto start = std::chrono::steady_clock::now();
+    auto fh = open(key, true);
+    const auto ms = std::chrono::duration<double, std::milli>(
+      std::chrono::steady_clock::now() - start).count();
+    ASSERT_TRUE(fh);
+    std::cout << fmt::format("CLONE_LATENCY chunks={} ms={:.0f} "
+			     "per_chunk_ms={:.2f}", chunks, ms, ms / chunks)
+	      << std::endl;
+  }
+}
+
+/* the driver's step 3, element 3:  the versioned open (FSIO design §2.5,
+ * §3.1, §4.1, §4.3) */
+class FSIORadosVersioned : public FSIORados {
+protected:
+  void SetUp() override {
+    FSIORados::SetUp();
+    set_versioning(BUCKET_VERSIONED);
+  }
+};
+
+/* a reader counts itself on the instance the OLH names, hinted there and
+ * on the OLH, and joins the OLH naming the instance;  its close takes all
+ * of it away */
+TEST_F(FSIORadosVersioned, VersionedReaderCountsOnTheInstance)
+{
+  std::string inst;
+  ASSERT_EQ(0, put("obj", std::string(9 << 20, 'v'), &inst));
+  ASSERT_FALSE(inst.empty());
+  const auto olh = head_of("obj");
+  const auto ih = instance_of("obj", inst);
+  auto fh = open("obj", false);
+  ASSERT_TRUE(fh);
+  auto* hdl = rados_fsio(fh);
+  const auto h = hdl->handle();
+  EXPECT_EQ(inst, hdl->instance());
+
+  auto oc = ocnt_of(ih);
+  ASSERT_TRUE(oc);
+  EXPECT_EQ(1u, oc->holders.count(h));
+  EXPECT_EQ(1, presence_hints(ih, h, cls_rgw_fsio_hint_target::INSTANCE_HEAD));
+  EXPECT_EQ(1, presence_hints(olh, h));
+  auto rec = records_of(olh, h.incarnation);
+  ASSERT_TRUE(rec.hdr);
+  EXPECT_EQ(inst, rec.hdr->cur_instance);
+  ASSERT_TRUE(rec.opens);
+  EXPECT_EQ(1u, rec.opens->handles.at(h.handle).chunk_sets.at(hdl->bound()).readers);
+
+  ASSERT_EQ(0, fh->close(env->dpp.get(),
+			 rgw::sal::Object::FSIOObject::CLOSE_FLAG_NONE));
+  oc = ocnt_of(ih);
+  EXPECT_TRUE(!oc || !oc->holders.count(h));
+  EXPECT_EQ(0, presence_hints(ih, h, cls_rgw_fsio_hint_target::INSTANCE_HEAD));
+  EXPECT_EQ(0, presence_hints(olh, h));
+  EXPECT_FALSE(records_of(olh, h.incarnation).any_fsio);
+}
+
+/* a writer's construction clones the instance head itself (§4.1 step 1),
+ * with the instance's manifest as the pseudo-manifest, then its tail */
+TEST_F(FSIORadosVersioned, VersionedWriterClonesTheInstance)
+{
+  const std::string data(9 << 20, 'W');
+  std::string inst;
+  ASSERT_EQ(0, put("obj", data, &inst));
+  const auto olh = head_of("obj");
+  const auto ih = instance_of("obj", inst);
+  auto fh = open("obj", true);
+  ASSERT_TRUE(fh);
+  auto* hdl = rados_fsio(fh);
+  const auto id = hdl->writing_to();
+  auto rec = records_of(olh, hdl->handle().incarnation);
+  ASSERT_TRUE(rec.hdr);
+  const auto* e = entry_of(*rec.hdr, id);
+  ASSERT_NE(nullptr, e);
+  EXPECT_EQ(cls_rgw_fsio_cs_state::READY, e->state);
+
+  /* the instance head holds the first chunk's data:  its clone is 'd' */
+  auto ic = clone_of(ih, id);
+  auto ic_bytes = bytes_of(ic);
+  ASSERT_TRUE(ic_bytes) << ic.oid;
+  EXPECT_EQ(*bytes_of(ih), *ic_bytes);
+  ceph::buffer::list pm, man;
+  neo().execute(neorados::Object{ic.oid}, [&] {
+		  auto x = ioc_of(ic.pool); x.set_key(ic.loc); return x; }(),
+		neorados::ReadOp{}.get_xattr("user.rgw.fsio.pm", &pm), nullptr,
+		ceph::async::use_blocked);
+  neo().execute(neorados::Object{ih.oid}, ioc_of(ih.pool),
+		neorados::ReadOp{}.get_xattr(RGW_ATTR_MANIFEST, &man), nullptr,
+		ceph::async::use_blocked);
+  EXPECT_TRUE(pm.contents_equal(man));
+  for (const auto& c : chunks_of("obj", inst)) {
+    auto cl = bytes_of(clone_of(c, id));
+    ASSERT_TRUE(cl) << clone_of(c, id).oid;
+    EXPECT_EQ(*bytes_of(c), *cl) << clone_of(c, id).oid;
+  }
+  std::string back;
+  ASSERT_EQ(0, get("obj", &back));
+  EXPECT_EQ(data, back);
+}
+
+/* an open after a new version counts itself on the new instance */
+TEST_F(FSIORadosVersioned, VersionedOpenAfterAPutBindsTheNewVersion)
+{
+  std::string i1, i2;
+  ASSERT_EQ(0, put("obj", std::string(1 << 20, '1'), &i1));
+  ASSERT_EQ(0, put("obj", std::string(1 << 20, '2'), &i2));
+  ASSERT_NE(i1, i2);
+  auto fh = open("obj", false);
+  ASSERT_TRUE(fh);
+  auto* hdl = rados_fsio(fh);
+  EXPECT_EQ(i2, hdl->instance());
+  EXPECT_FALSE(ocnt_of(instance_of("obj", i1)).has_value() &&
+	       ocnt_of(instance_of("obj", i1))->holders.count(hdl->handle()));
+  auto oc = ocnt_of(instance_of("obj", i2));
+  ASSERT_TRUE(oc);
+  EXPECT_EQ(1u, oc->holders.count(hdl->handle()));
+}
+
+/* §2.5a:  the OLH naming the null version, the open joins the head as an
+ * unversioned one does:  no instance count */
+TEST_F(FSIORadosVersioned, NullVersionOpensAsUnversioned)
+{
+  std::string i1;
+  ASSERT_EQ(0, put("obj", std::string(1 << 20, '1'), &i1));
+  set_versioning(BUCKET_VERSIONED | BUCKET_VERSIONS_SUSPENDED);
+  ASSERT_EQ(0, put("obj", std::string(1 << 20, 'n')));
+  auto fh = open("obj", false);
+  ASSERT_TRUE(fh);
+  auto* hdl = rados_fsio(fh);
+  EXPECT_TRUE(hdl->instance().empty());
+  auto oc = ocnt_of(instance_of("obj", i1));
+  EXPECT_TRUE(!oc || !oc->holders.count(hdl->handle()));
+  auto rec = records_of(head_of("obj"), hdl->handle().incarnation);
+  ASSERT_TRUE(rec.opens);
+  EXPECT_EQ(1u, rec.opens->handles.at(hdl->handle().handle)
+		  .chunk_sets.at(hdl->bound()).readers);
+}
+
+/* §4.1 step 1:  a handle counted on a version that was rewritten in place
+ * since (A13) constructs from the content it counted for:  the deferred
+ * record's sibling and manifest, not the rewritten instance head's */
+TEST_F(FSIORadosVersioned, WriterConstructsFromTheDeferredSibling)
+{
+  std::string inst;
+  ASSERT_EQ(0, put("obj", std::string(9 << 20, 'o'), &inst));
+  const auto ih = instance_of("obj", inst);
+  const auto old_chunks = chunks_of("obj", inst);
+  ceph::buffer::list old_manifest;
+  neo().execute(neorados::Object{ih.oid}, ioc_of(ih.pool),
+		neorados::ReadOp{}.get_xattr(RGW_ATTR_MANIFEST, &old_manifest),
+		nullptr, ceph::async::use_blocked);
+
+  auto fh = open("obj", false);		// counted on the old content
+  ASSERT_TRUE(fh);
+  auto* rados = static_cast<rgw::sal::RadosStore*>(env->driver)->getRados();
+  ASSERT_EQ(0, rados->rewrite_obj(bucket->get_info(),
+				  rgw_obj(bucket->get_key(), rgw_obj_key("obj", inst)),
+				  env->dpp.get(), null_yield));
+  auto oc = ocnt_of(ih);
+  ASSERT_TRUE(oc);
+  ASSERT_EQ(1u, oc->deferred.size()) << "the rewrite deferred nothing";
+  const auto new_chunks = chunks_of("obj", inst);
+
+  ASSERT_EQ(0, fh->begin_write(env->dpp.get(),
+			       rgw::sal::Object::FSIOObject::WRITE_FLAG_NONE));
+  const auto id = rados_fsio(fh)->writing_to();
+  /* the instance head's clone carries the old manifest */
+  auto ic = clone_of(ih, id);
+  ceph::buffer::list pm;
+  boost::system::error_code ec;
+  neo().execute(neorados::Object{ic.oid}, [&] {
+		  auto x = ioc_of(ic.pool); x.set_key(ic.loc); return x; }(),
+		neorados::ReadOp{}.get_xattr("user.rgw.fsio.pm", &pm), nullptr,
+		ceph::async::use_blocked[ec]);
+  ASSERT_FALSE(ec) << ic.oid << ":  " << ec.message();
+  EXPECT_TRUE(pm.contents_equal(old_manifest));
+  /* its tail is the old manifest's chunks, not the rewrite's */
+  for (const auto& c : old_chunks) {
+    if (c.oid != ih.oid) {
+      EXPECT_TRUE(bytes_of(clone_of(c, id))) << "no clone of old " << c.oid;
+    }
+  }
+  for (const auto& c : new_chunks) {
+    if (c.oid != ih.oid) {
+      EXPECT_FALSE(bytes_of(clone_of(c, id))) << "a clone of new " << c.oid;
+    }
+  }
+}
+
+/* §3.1 step 4, first case:  a reader joining with the instance a publish
+ * in flight has linked binds that publishing shadow, and reads it through
+ * the instance.  Written with the publish (the driver's step 7):  a
+ * versioned publish in flight is its precondition.  It will check that
+ * the reader counted itself on the linked instance, that its binding is
+ * the publishing shadow, not the OLH's previous content, and that once
+ * the publish completes the binding is the published instance's. */
+TEST_F(FSIORadosVersioned, DISABLED_LinkedPublishReadsThroughTheInstance)
+{
 }
 
 int main(int argc, char** argv)

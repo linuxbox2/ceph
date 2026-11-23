@@ -2868,6 +2868,19 @@ options:
   default: 127
   services:
   - rgw
+- name: rgw_fsio_join_wait
+  type: secs
+  level: advanced
+  desc: How long an FSIO open waits for a shadow being constructed or
+    published
+  long_desc: An FSIO open that finds the current shadow being constructed or
+    published, as another gateway's writer builds or publishes it, retries
+    with backoff for at most this long, and then returns EAGAIN to its
+    caller (FSIO design 4.1, finding W13).  A librgw call never blocks for
+    the length of a publish.
+  default: 5
+  services:
+  - rgw
 - name: rgw_fsio_check_origin
   type: bool
   level: dev

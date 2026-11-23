@@ -1882,6 +1882,10 @@ public:
   /* its watches on the zone's FSIO liveness objects, when the zonegroup
    * has the fsio feature */
   std::shared_ptr<RGWFSIOWatch> fsio_watch;
+  /* §2.2, Z4:  each FSIO view of an object a handle of its own */
+  std::atomic<uint64_t> fsio_next_handle{1};
+  /* §2.7:  the FSIO open hints' shards, in the log pool */
+  neorados::IOContext& fsio_hint_ioc() { return log_pool_neo_ctx; }
 
   librados::Rados* get_rados_handle();
 
