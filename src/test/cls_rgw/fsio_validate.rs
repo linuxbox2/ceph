@@ -15,7 +15,8 @@ edition = "2021"
 //!   cls            the CLS head test and the neorados CLS test, and
 //!                  libcls_rgw calling no RGW symbol          (RADOS)
 //!   librgw-rados   ceph_test_librgw_file_fsio_put            (RADOS)
-//!   harness        ceph_test_rgw_fsio_rados, the driver's harness (RADOS)
+//!   harness        unittest_rgw_fsio_geometry (no cluster), then
+//!                  ceph_test_rgw_fsio_rados, the driver's harness (RADOS)
 //!   cluster-tier   the model's cluster tier, the origin check off (RADOS)
 //!   model          the model's in-memory tiers:  quick vectors skips
 //!   nsfs-librgw    write2, and nfsns with every group flag    (nsfs)
@@ -160,7 +161,7 @@ fn main() {
             targets.extend(match *s {
                 "cls" => &["cls_rgw", "ceph_test_cls_rgw_fsio_head", "ceph_test_neorados_cls_rgw_fsio"][..],
                 "librgw-rados" => &["rgw", "ceph_test_librgw_file_fsio_put"][..],
-                "harness" => &["ceph_test_rgw_fsio_rados"][..],
+                "harness" => &["unittest_rgw_fsio_geometry", "ceph_test_rgw_fsio_rados"][..],
                 "cluster-tier" | "model" => &["ceph_test_cls_rgw_fsio_model"][..],
                 "nsfs-librgw" => &["rgw", "ceph_test_librgw_file_write2", "ceph_test_librgw_file_nfsns"][..],
                 _ => &[][..],
@@ -256,7 +257,10 @@ fn rados_phase(o: &Opts, steps: &[&'static str], run_dir: &Path, summary: &mut V
                 "harness" if o.clone_latency => vec![sh("harness", "the clone latency", format!(
                     "env CEPH_CONF={conf} bin/ceph_test_rgw_fsio_rados \
                      --gtest_also_run_disabled_tests --gtest_filter='*CloneLatency*'"))],
-                "harness" => vec![sh("harness", "the driver's harness", format!("env CEPH_CONF={conf} bin/ceph_test_rgw_fsio_rados{gf}"))],
+                "harness" => vec![
+                    sh("harness", "the chunk geometry", "bin/unittest_rgw_fsio_geometry".to_string()),
+                    sh("harness", "the driver's harness", format!("env CEPH_CONF={conf} bin/ceph_test_rgw_fsio_rados{gf}")),
+                ],
                 "cluster-tier" => {
                     let runner = match model_runner(o) {
                         Some(r) => r,

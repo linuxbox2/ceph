@@ -292,6 +292,151 @@ protected:
     const std::unique_ptr<rgw::sal::Object::FSIOObject>& fh) {
     return static_cast<rgw::sal::RadosFSIOObject*>(fh.get());
   }
+  /* bytes whose value depends on their offset and the seed, so a read from
+   * the wrong place or the wrong content shows */
+  static std::string pattern(uint64_t size, int seed) {
+    std::string s(size, '\0');
+    for (uint64_t i = 0; i < size; ++i) {
+      s[i] = static_cast<char>((i * 31 + (i >> 12) * 7 + seed * 101) & 0xff);
+    }
+    return s;
+  }
+  /* preadv into buffers of the given lengths, concatenated;  its return */
+  static int read(const std::unique_ptr<rgw::sal::Object::FSIOObject>& fh,
+		  uint64_t ofs, const std::vector<size_t>& lens,
+		  std::string* out) {
+    std::vector<std::string> bufs;
+    std::vector<struct iovec> iov;
+    for (auto l : lens) {
+      bufs.emplace_back(l, '\xee');
+    }
+    for (auto& b : bufs) {
+      iov.push_back({b.data(), b.size()});
+    }
+    uint64_t n = 0;
+    int r = fh->preadv(iov.data(), iov.size(), ofs, &n, 0);
+    out->clear();
+    for (auto& b : bufs) {
+      out->append(b);
+    }
+    out->resize(n);
+    return r;
+  }
+  std::string read(const std::unique_ptr<rgw::sal::Object::FSIOObject>& fh,
+		   uint64_t ofs, size_t len) {
+    std::string out;
+    EXPECT_EQ(0, read(fh, ofs, {len}, &out));
+    return out;
+  }
+  /* pwritev from buffers holding the pieces;  its return */
+  static int write(const std::unique_ptr<rgw::sal::Object::FSIOObject>& fh,
+		   uint64_t ofs, const std::vector<std::string>& pieces,
+		   uint64_t* n = nullptr) {
+    std::vector<std::string> bufs(pieces);
+    std::vector<struct iovec> iov;
+    for (auto& b : bufs) {
+      iov.push_back({b.data(), b.size()});
+    }
+    uint64_t done = 0;
+    int r = fh->pwritev(iov.data(), iov.size(), ofs, &done, 0);
+    if (n) {
+      *n = done;
+    }
+    return r;
+  }
+  /* the reserved runs of a shadow, as its record on the head holds them */
+  std::vector<cls_rgw_fsio_run> extent_of(const std::string& key,
+					  const cls_rgw_fsio_id& id) {
+    auto rec = records_of(head_of(key), 0);
+    if (!rec.hdr) {
+      return {};
+    }
+    auto* e = entry_of(*rec.hdr, id);
+    if (!e || !e->shadow) {
+      return {};
+    }
+    return e->shadow->extent;
+  }
+
+  /* a shadow's size hint, as its record on the head holds it */
+  std::optional<uint64_t> size_hint_of(const std::string& key,
+				       const cls_rgw_fsio_id& id) {
+    auto rec = records_of(head_of(key), 0);
+    if (!rec.hdr) {
+      return std::nullopt;
+    }
+    auto* e = entry_of(*rec.hdr, id);
+    if (!e || !e->shadow) {
+      return std::nullopt;
+    }
+    return e->shadow->size_hint;
+  }
+  /* a writer handle of the test's own on a head, as another gateway's:  a
+   * raw fsio_join as writer, its first sequenced call;  its handle */
+  cls_rgw_fsio_handle raw_writer(const rgw_raw_obj& head, uint64_t number) {
+    const cls_rgw_fsio_handle th{static_cast<rgw::sal::RadosStore*>(
+				   env->driver)->getRados()->fsio_incarnation(),
+				 number};
+    cls_rgw_fsio_join_op in;
+    in.caller = th;
+    in.seq = 1;
+    in.writer = true;
+    in.nonce = 1;
+    in.counter_seed = 1;
+    in.marker = bucket->get_marker();
+    cls_rgw_fsio_join_ret ret;
+    neorados::WriteOp op;
+    op.exec(neorados::cls::rgw_fsio::join(in, &ret));
+    neo().execute(neorados::Object{head.oid}, ioc_of(head.pool), std::move(op),
+		  ceph::async::use_blocked);
+    return th;
+  }
+
+  /* where got first differs from want, and whose bytes are there instead */
+  static std::string diff(const std::string& got, const std::string& want,
+			  const std::string& other) {
+    if (got == want) {
+      return "same";
+    }
+    if (got.size() != want.size()) {
+      return fmt::format("{} bytes, not {}", got.size(), want.size());
+    }
+    uint64_t i = 0;
+    while (got[i] == want[i]) {
+      ++i;
+    }
+    uint64_t j = i;
+    while (j < got.size() && got[j] != want[j]) {
+      ++j;
+    }
+    const bool theirs = got.compare(i, j - i, other, i, j - i) == 0;
+    return fmt::format("differs at {} for {} bytes, {}", i, j - i,
+		       theirs ? "the other content's" : "neither content's");
+  }
+
+  /* a RADOS object's bytes changed or removed directly:  a state the driver
+   * must handle, made by the test */
+  void write_raw(const rgw_raw_obj& raw, uint64_t off, const std::string& d) {
+    auto ioc = ioc_of(raw.pool);
+    ioc.set_key(raw.loc.empty() ? raw.oid : raw.loc);
+    ceph::buffer::list bl;
+    bl.append(d);
+    neorados::WriteOp op;
+    op.write(off, std::move(bl));
+    neo().execute(neorados::Object{raw.oid}, ioc, std::move(op),
+		  ceph::async::use_blocked);
+  }
+  void remove_raw(const rgw_raw_obj& raw) {
+    auto ioc = ioc_of(raw.pool);
+    if (!raw.loc.empty()) {
+      ioc.set_key(raw.loc);
+    }
+    neorados::WriteOp op;
+    op.remove();
+    neo().execute(neorados::Object{raw.oid}, ioc, std::move(op),
+		  ceph::async::use_blocked);
+  }
+
   static const cls_rgw_fsio_chunk_set* entry_of(const cls_rgw_fsio_hdr& hdr,
 						const cls_rgw_fsio_id& id) {
     for (const auto& e : hdr.chunk_sets) {
@@ -580,6 +725,267 @@ TEST_F(FSIORados, GuardRetriesAfterAPut)
     EXPECT_EQ(*bytes_of(c), *cl) << clone_of(c, id).oid;
     EXPECT_EQ('2', (*cl)[0]);
   }
+}
+
+/* the driver's step 4, element 2:  reads (FSIO design §2.7).  Each
+ * object's bytes depend on their offset, so a misplaced read shows */
+static constexpr uint64_t MiB = 1 << 20;
+
+/* a reader reads the published content:  across the head segment's end,
+ * across stripes, into several buffers, and short at its end */
+TEST_F(FSIORados, ReaderReadsThePublished)
+{
+  const auto a = pattern(9 * MiB, 1);
+  ASSERT_EQ(0, put("obj", a));
+  auto fh = open("obj", false);
+  ASSERT_TRUE(fh);
+  EXPECT_EQ(a.substr(0, 100), read(fh, 0, 100));
+  EXPECT_EQ(a.substr(4 * MiB - 10, 20), read(fh, 4 * MiB - 10, 20));
+  EXPECT_EQ(a.substr(5 * MiB, 4 * MiB), read(fh, 5 * MiB, 4 * MiB));
+  std::string out;
+  ASSERT_EQ(0, read(fh, 3 * MiB + MiB / 2, {MiB, 10, MiB}, &out));
+  EXPECT_EQ(a.substr(3 * MiB + MiB / 2, 2 * MiB + 10), out);
+  EXPECT_EQ(a.substr(9 * MiB - 10), read(fh, 9 * MiB - 10, 100));
+  EXPECT_EQ("", read(fh, 9 * MiB, 10));
+}
+
+/* §2.3:  a reader keeps reading the content it opened after an S3 PUT
+ * replaces it, the inline head segment from the generation's clone */
+TEST_F(FSIORados, ReaderKeepsItsContentAcrossAnOverwrite)
+{
+  const auto a = pattern(9 * MiB, 1), b = pattern(9 * MiB, 2);
+  ASSERT_EQ(0, put("obj", a));
+  auto fh = open("obj", false);
+  ASSERT_TRUE(fh);
+  EXPECT_EQ(a.substr(0, 10), read(fh, 0, 10));
+  ASSERT_EQ(0, put("obj", b));
+  std::string now;
+  ASSERT_EQ(0, get("obj", &now));
+  EXPECT_TRUE(now == b) << "the head does not hold the new content";
+  EXPECT_FALSE(rados_fsio(fh)->moved_segment());
+  EXPECT_EQ("same", diff(read(fh, 0, 9 * MiB), a, b));
+  const auto& moved = rados_fsio(fh)->moved_segment();
+  ASSERT_TRUE(moved) << "the head segment was read from the new head";
+  EXPECT_NE(std::string::npos, moved->find("~fsio_G")) << *moved;
+}
+
+/* a writer reads its shadow:  a change made in a shadow chunk is seen by
+ * the writer and not by a reader of the published content */
+TEST_F(FSIORados, WriterReadsTheShadow)
+{
+  const auto a = pattern(9 * MiB, 1);
+  ASSERT_EQ(0, put("obj", a));
+  auto w = open("obj", true);
+  ASSERT_TRUE(w);
+  EXPECT_EQ("same", diff(read(w, 0, 9 * MiB), a, a));
+  const auto id = rados_fsio(w)->writing_to();
+  const auto chunks = chunks_of("obj");
+  ASSERT_GE(chunks.size(), 2u);
+  write_raw(clone_of(chunks[1], id), 0, "XYZ");
+  EXPECT_EQ("XYZ", read(w, 4 * MiB, 3));
+  auto r = open("obj", false);
+  ASSERT_TRUE(r);
+  EXPECT_EQ(a.substr(4 * MiB, 3), read(r, 4 * MiB, 3));
+}
+
+/* Z11:  a shadow chunk missing inside the size reads as zeros */
+TEST_F(FSIORados, MissingShadowChunkReadsAsZeros)
+{
+  const auto a = pattern(9 * MiB, 1);
+  ASSERT_EQ(0, put("obj", a));
+  auto w = open("obj", true);
+  ASSERT_TRUE(w);
+  const auto chunks = chunks_of("obj");
+  ASSERT_GE(chunks.size(), 2u);
+  remove_raw(clone_of(chunks[1], rados_fsio(w)->writing_to()));
+  EXPECT_EQ(a.substr(4 * MiB - 5, 5), read(w, 4 * MiB - 5, 5));
+  EXPECT_EQ(std::string(MiB, '\0'), read(w, 4 * MiB, MiB));
+  EXPECT_EQ(a.substr(8 * MiB, 5), read(w, 8 * MiB, 5));
+}
+
+/* a published stripe missing is a fault, not a hole:  no published object
+ * is sparse until the publish sets RGW_ATTR_SPARSE (design §2.7) */
+TEST_F(FSIORados, MissingPublishedStripeFails)
+{
+  ASSERT_EQ(0, put("obj", pattern(9 * MiB, 1)));
+  auto fh = open("obj", false);
+  ASSERT_TRUE(fh);
+  const auto chunks = chunks_of("obj");
+  ASSERT_GE(chunks.size(), 2u);
+  remove_raw(chunks[1]);
+  std::string out;
+  EXPECT_EQ(-EIO, read(fh, 4 * MiB, {10}, &out));
+}
+
+/* the driver's step 4, element 3:  writes (FSIO design §2.7, §3.7) */
+
+/* a write lands in the shadow's chunks, across a chunk boundary and from
+ * several buffers, and the writer reads it back;  the published content
+ * is unchanged */
+TEST_F(FSIORados, WriteWithinTheShadow)
+{
+  const auto a = pattern(9 * MiB, 1);
+  ASSERT_EQ(0, put("obj", a));
+  auto w = open("obj", true);
+  ASSERT_TRUE(w);
+  uint64_t n = 0;
+  ASSERT_EQ(0, write(w, 4 * MiB - 2, {"hello"}, &n));
+  EXPECT_EQ(5u, n);
+  ASSERT_EQ(0, write(w, 6 * MiB, {"ab", "", "cde"}, &n));
+  EXPECT_EQ(5u, n);
+  auto want = a;
+  want.replace(4 * MiB - 2, 5, "hello");
+  want.replace(6 * MiB, 5, "abcde");
+  EXPECT_EQ("same", diff(read(w, 0, 9 * MiB), want, a));
+  const auto id = rados_fsio(w)->writing_to();
+  const auto chunks = chunks_of("obj");
+  ASSERT_GE(chunks.size(), 2u);
+  auto c1 = bytes_of(clone_of(chunks[1], id));
+  ASSERT_TRUE(c1);
+  EXPECT_EQ("llo", c1->substr(0, 3));
+  std::string now;
+  ASSERT_EQ(0, get("obj", &now));
+  EXPECT_TRUE(now == a) << "a shadow write reached the published content";
+}
+
+/* §3.7:  an append reserves ahead, the run doubling, so it costs a few
+ * fsio_extend calls, not one a chunk;  the shadow keeps one run */
+TEST_F(FSIORados, AppendReservesAhead)
+{
+  ASSERT_EQ(0, put("obj", pattern(9 * MiB, 1)));
+  auto w = open("obj", true);
+  ASSERT_TRUE(w);
+  for (uint64_t i = 3; i <= 40; ++i) {
+    ASSERT_EQ(0, write(w, i * 4 * MiB, {"x"})) << "chunk " << i;
+  }
+  EXPECT_LE(rados_fsio(w)->extends(), 3u);
+  const auto ext = extent_of("obj", rados_fsio(w)->writing_to());
+  ASSERT_EQ(1u, ext.size());
+  EXPECT_EQ(0u, ext[0].first);
+  EXPECT_GE(ext[0].last, 40u);
+}
+
+/* Z11:  a far write adds a run of its own, never the span before it, and
+ * the chunks between read as zeros */
+TEST_F(FSIORados, FarWriteAddsARun)
+{
+  ASSERT_EQ(0, put("obj", pattern(9 * MiB, 1)));
+  auto w = open("obj", true);
+  ASSERT_TRUE(w);
+  const uint64_t far = 1000 * 4 * MiB;
+  ASSERT_EQ(0, write(w, far, {"z"}));
+  const auto ext = extent_of("obj", rados_fsio(w)->writing_to());
+  ASSERT_EQ(2u, ext.size());
+  EXPECT_EQ((cls_rgw_fsio_run{0, 2}), ext[0]);
+  EXPECT_EQ(1000u, ext[1].first);
+  EXPECT_EQ(1015u, ext[1].last);
+  EXPECT_EQ("z", read(w, far, 1));
+  EXPECT_EQ(std::string(4096, '\0'), read(w, far - 4096, 4096));
+}
+
+/* §3.7:  a write to a chunk carrying the chunk write fence returns -EIO;
+ * another chunk still takes writes */
+TEST_F(FSIORados, WriteToAFencedChunkFails)
+{
+  ASSERT_EQ(0, put("obj", pattern(9 * MiB, 1)));
+  auto w = open("obj", true);
+  ASSERT_TRUE(w);
+  const auto chunks = chunks_of("obj");
+  ASSERT_GE(chunks.size(), 3u);
+  const auto c1 = clone_of(chunks[1], rados_fsio(w)->writing_to());
+  {
+    auto ioc = ioc_of(c1.pool);
+    ioc.set_key(c1.loc);
+    ceph::buffer::list v;
+    v.append("finalizer");
+    neorados::WriteOp op;
+    op.setxattr("user.rgw.fsio.fence", std::move(v));
+    neo().execute(neorados::Object{c1.oid}, ioc, std::move(op),
+		  ceph::async::use_blocked);
+  }
+  EXPECT_EQ(-EIO, write(w, 4 * MiB + 10, {"no"}));
+  EXPECT_EQ(0, write(w, 8 * MiB + 10, {"yes"}));
+}
+
+/* the driver's step 4, element 4:  the size hint (FSIO design §2.7, §3.3,
+ * §7) */
+
+/* two writers' reports merge by max, whatever their order */
+TEST_F(FSIORados, HintMergesByMax)
+{
+  ASSERT_EQ(0, put("obj", pattern(9 * MiB, 1)));
+  auto w1 = open("obj", true), w2 = open("obj", true);
+  ASSERT_TRUE(w1 && w2);
+  const auto id = rados_fsio(w1)->writing_to();
+  ASSERT_EQ(id, rados_fsio(w2)->writing_to());
+  ASSERT_EQ(0, write(w1, 20 * MiB - 1, {"a"}));
+  ASSERT_EQ(0, write(w2, 12 * MiB - 1, {"b"}));
+  ASSERT_EQ(0, rados_fsio(w1)->report_hint(env->dpp.get()));
+  EXPECT_EQ(20 * MiB, size_hint_of("obj", id));
+  ASSERT_EQ(0, rados_fsio(w2)->report_hint(env->dpp.get()));
+  EXPECT_EQ(20 * MiB, size_hint_of("obj", id));
+}
+
+/* §2.7:  a report after another handle's truncate is stale;  the writer
+ * rebases from the chunk at its high-water mark, so a write the truncate
+ * cut is not reported and one after it is */
+TEST_F(FSIORados, StaleHintRebasesFromTheChunk)
+{
+  ASSERT_EQ(0, put("obj", pattern(9 * MiB, 1)));
+  auto w = open("obj", true);
+  ASSERT_TRUE(w);
+  const auto id = rados_fsio(w)->writing_to();
+  ASSERT_EQ(0, write(w, 10 * MiB, {"x"}));	// chunk 2, [8, 12) MiB
+  /* another handle's ftruncate() to 9.5 MiB:  the chunk first, then
+   * fsio_truncate (§3.3) */
+  const auto head = head_of("obj");
+  const auto t = raw_writer(head, 999998);
+  const auto chunks = chunks_of("obj");
+  ASSERT_GE(chunks.size(), 3u);
+  {
+    const auto c2 = clone_of(chunks[2], id);
+    auto ioc = ioc_of(c2.pool);
+    ioc.set_key(c2.loc);
+    neorados::WriteOp op;
+    op.truncate(MiB + MiB / 2);
+    neo().execute(neorados::Object{c2.oid}, ioc, std::move(op),
+		  ceph::async::use_blocked);
+    cls_rgw_fsio_truncate_op in;
+    in.caller = t;
+    in.seq = 2;
+    in.cs = id;
+    in.size = 9 * MiB + MiB / 2;
+    neorados::WriteOp top;
+    top.exec(neorados::cls::rgw_fsio::truncate(in));
+    neo().execute(neorados::Object{head.oid}, ioc_of(head.pool),
+		  std::move(top), ceph::async::use_blocked);
+  }
+  ASSERT_EQ(9 * MiB + MiB / 2, size_hint_of("obj", id));
+  ASSERT_EQ(0, write(w, 9 * MiB + 3 * MiB / 4, {"y"}));
+  ASSERT_EQ(0, rados_fsio(w)->report_hint(env->dpp.get()));
+  EXPECT_EQ(9 * MiB + 3 * MiB / 4 + 1, size_hint_of("obj", id));
+  EXPECT_EQ("", read(w, 10 * MiB, 1));
+}
+
+/* §7:  a writer reports as it writes only while another handle is open in
+ * the generation */
+TEST_F(FSIORados, ReportsOnlyWhileWatched)
+{
+  g_conf().set_val_or_die("rgw_fsio_hint_interval", "0");
+  ASSERT_EQ(0, put("alone", pattern(9 * MiB, 1)));
+  auto w = open("alone", true);
+  ASSERT_TRUE(w);
+  ASSERT_EQ(0, write(w, 9 * MiB, {"q"}));
+  EXPECT_EQ(9 * MiB, size_hint_of("alone", rados_fsio(w)->writing_to()));
+
+  ASSERT_EQ(0, put("watched", pattern(9 * MiB, 1)));
+  auto r = open("watched", false);
+  auto w2 = open("watched", true);
+  ASSERT_TRUE(r && w2);
+  ASSERT_EQ(0, write(w2, 9 * MiB, {"q"}));
+  EXPECT_EQ(9 * MiB + 1,
+	    size_hint_of("watched", rados_fsio(w2)->writing_to()));
+  g_conf().set_val_or_die("rgw_fsio_hint_interval", "3");
 }
 
 /* the driver's step 3, element 4:  a join that must wait (FSIO design
@@ -908,9 +1314,36 @@ TEST_F(FSIORadosVersioned, WriterConstructsFromTheDeferredSibling)
   }
 }
 
+/* §2.5:  a reader on a version keeps reading it after a put makes a newer
+ * one, and after the version is rewritten in place, its head segment then
+ * from the deferred sibling */
+TEST_F(FSIORadosVersioned, VersionedReaderReadsTheInstance)
+{
+  const auto a = pattern(9 * MiB, 1), b = pattern(9 * MiB, 2);
+  std::string inst;
+  ASSERT_EQ(0, put("obj", a, &inst));
+  auto fh = open("obj", false);
+  ASSERT_TRUE(fh);
+  ASSERT_EQ(0, put("obj", b));
+  EXPECT_EQ("same", diff(read(fh, 0, 9 * MiB), a, b));
+  auto* rados = static_cast<rgw::sal::RadosStore*>(env->driver)->getRados();
+  ASSERT_EQ(0, rados->rewrite_obj(bucket->get_info(),
+				  rgw_obj(bucket->get_key(), rgw_obj_key("obj", inst)),
+				  env->dpp.get(), null_yield));
+  auto oc = ocnt_of(instance_of("obj", inst));
+  ASSERT_TRUE(oc);
+  ASSERT_EQ(1u, oc->deferred.size()) << "the rewrite deferred nothing";
+  EXPECT_FALSE(rados_fsio(fh)->moved_segment());
+  /* the rewrite copied the bytes, so only where they were read shows it */
+  EXPECT_EQ("same", diff(read(fh, 0, 9 * MiB), a, b));
+  const auto& moved = rados_fsio(fh)->moved_segment();
+  ASSERT_TRUE(moved) << "the head segment was read from the rewritten head";
+  EXPECT_NE(std::string::npos, moved->find("~fsio_G")) << *moved;
+}
+
 /* §3.1 step 4, first case:  a reader joining with the instance a publish
  * in flight has linked binds that publishing shadow, and reads it through
- * the instance.  Written with the publish (the driver's step 7):  a
+ * the instance.  Written with the publish (the driver's step 8):  a
  * versioned publish in flight is its precondition.  It will check that
  * the reader counted itself on the linked instance, that its binding is
  * the publishing shadow, not the OLH's previous content, and that once

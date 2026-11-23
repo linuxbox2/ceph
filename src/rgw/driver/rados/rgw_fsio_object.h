@@ -4,11 +4,15 @@
 #pragma once
 
 #include <cstdint>
+#include <map>
+#include <optional>
 #include <string>
+#include <vector>
 
 #include "include/neorados/RADOS.hpp"
 #include "cls/rgw/cls_rgw_fsio_ops.h"
 #include "cls/rgw/cls_rgw_fsio_types.h"
+#include "rgw_fsio_geometry.h"
 #include "rgw_sal.h"
 
 namespace rgw::sal {
@@ -37,17 +41,23 @@ public:
    * shadow */
   int open(const DoutPrefixProvider* dpp, bool writer);
 
+  /* §2.7:  a writer open reads its shadow, otherwise the bound content;
+   * short at the size;  a missing shadow chunk inside it reads as zeros
+   * (Z11), a missing published one fails */
   int preadv(const struct iovec* iov, int iovcnt, uint64_t ofs,
-	     uint64_t* bytes_read, uint32_t flags) override { return -ENOTSUP; }
+	     uint64_t* bytes_read, uint32_t flags) override;
+  /* §2.7, §3.7:  into the shadow's chunks, each reserved first and each
+   * write carrying the chunk write fence's check;  one that meets the
+   * fence returns -EIO */
   int pwritev(const struct iovec* iov, int iovcnt, uint64_t ofs,
-	      uint64_t* bytes_written, uint32_t flags) override { return -ENOTSUP; }
+	      uint64_t* bytes_written, uint32_t flags) override;
   int commit(const DoutPrefixProvider* dpp, uint32_t flags) override { return 0; }
   /* §3.1:  a reader's handle joins as a writer too */
   int begin_write(const DoutPrefixProvider* dpp, uint32_t flags) override;
   int end_write(const DoutPrefixProvider* dpp, uint32_t flags) override { return -ENOTSUP; }
   /* §3.4:  fsio_leave, the instance's count, then the presence hints go;
    * the lost-reply rule and the drain's GC chain are the close's step
-   * (plan, driver step 6) */
+   * (plan, driver step 7) */
   int close(const DoutPrefixProvider* dpp, uint32_t flags) override;
   int fstat(struct stat* st, uint32_t flags) override { return -ENOTSUP; }
   int fgetattr(const DoutPrefixProvider* dpp, const std::string& name,
@@ -68,11 +78,22 @@ public:
    * version */
   const std::string& instance() const { return inst; }
   const std::string& instance_oid() const { return inst_oid; }
+  /* where the bound content's inline head segment is read from, once an
+   * overwrite or a rewrite moved it */
+  const std::optional<std::string>& moved_segment() const { return seg_moved; }
+  /* §2.7, §3.3:  fsio_hint with this writer's epoch, high-water mark and
+   * mtime;  a stale epoch rebases from the chunk at the high-water mark
+   * and reports again.  end_write() calls it (the close, plan step 7) */
+  int report_hint(const DoutPrefixProvider* dpp);
+
+  /* the fsio_extend calls this handle has made */
+  uint64_t extends() const { return n_extends; }
 
 private:
   /* an object's head as a guard reads it:  its ID tag, its manifest, the
    * head object's own size (inline data), the object's size, its mtime */
   struct Source {
+    std::string oid;		// the head it was read from, or the instance's
     ceph::buffer::list id_tag;
     ceph::buffer::list manifest;
     uint64_t head_size = 0;
@@ -99,15 +120,37 @@ private:
   /* §3.1:  the guard, then fsio_join, in one op, retried while an S3
    * write or a relink lands in between */
   int join(const DoutPrefixProvider* dpp, bool writer, Source* src,
-	   cls_rgw_fsio_join_ret* ret);
+	   FSIOGeometry* g, cls_rgw_fsio_join_ret* ret);
   /* §4.1:  versioned, the instance head's clone first;  then every chunk
    * but the head's cloned to f(anchor, id), then fsio_ready */
   int construct(const DoutPrefixProvider* dpp, const Source& src,
 		const cls_rgw_fsio_id& id);
-  int clone_chunks(const DoutPrefixProvider* dpp,
-		   const ceph::buffer::list& manifest,
+  /* every chunk of g's source but skip_oid, its head's, cloned to
+   * f(anchor, id);  n, the source's chunk count */
+  int clone_chunks(const DoutPrefixProvider* dpp, const FSIOGeometry& g,
 		   const std::string& skip_oid, const cls_rgw_fsio_id& id,
 		   uint64_t* n);
+  /* the geometry of a manifest (§2.7);  -ENXIO when it has none (§6.2) */
+  int make_geometry(const DoutPrefixProvider* dpp,
+		    const ceph::buffer::list& manifest, FSIOGeometry* g);
+
+  /* §3.7:  the chunk at index is in a run this writer knows is reserved,
+   * or fsio_extend reserves ahead to cover it */
+  int reserve(const DoutPrefixProvider* dpp, uint64_t index);
+  void know(const cls_rgw_fsio_run& run);
+
+  /* a pool's IOContext, cached, keyed with the object's locator */
+  int ioc_for(const DoutPrefixProvider* dpp, const rgw_raw_obj& raw,
+	      neorados::IOContext* ioc);
+  /* len bytes at off in chunk c of the content (no id) or the shadow;  the
+   * inline head segment of the bound content guarded by its ID tag, and
+   * read from where an overwrite or a rewrite moved it once it fails */
+  int read_piece(const DoutPrefixProvider* dpp, const FSIOChunk& c,
+		 bool shadow, uint64_t off, uint64_t len,
+		 ceph::buffer::list* bl);
+  /* §2.3, §2.5:  where the bound content's head segment went:  the
+   * generation's leaf clone f(head, r), or the deferred sibling */
+  int find_moved_segment(const DoutPrefixProvider* dpp);
 
   /* §2.7:  this handle's presence hint on the head or the instance head */
   int presence_hint(const DoutPrefixProvider* dpp, bool add, bool on_instance);
@@ -129,6 +172,22 @@ private:
   std::string counted_gc_tag;	// its ID tag, and its tail tag else its ID tag
   std::string inst_oid;
   neorados::IOContext inst_ioc;
+  FSIOGeometry rgeo;		// the bound content's, read under the join's guard
+  FSIOGeometry wgeo;		// the shadow's:  its source's
+  std::string seg_oid;		// the bound content's inline head segment,
+  ceph::buffer::list seg_tag;	//   guarded by its ID tag
+  std::optional<std::string> seg_moved;	// where it went, once it moved
+  uint64_t wsize = 0;		// the shadow's size hint, as the join saw it
+  uint64_t hwm = 0;		// the end of this handle's writes
+  std::vector<cls_rgw_fsio_run> known;	// runs it knows are reserved, merged
+  uint64_t trunc_epoch = 0;	// the shadow's, as last heard
+  bool others = false;		// another handle is open in the generation
+  bool dirty = false;		// written since its last report
+  ceph::real_time wmtime;	// its last write's
+  ceph::mono_time last_report;
+  uint64_t n_extends = 0;
+  std::map<rgw_pool, neorados::IOContext> iocs;
+  std::optional<NoDoutPrefix> ndp;	// preadv and pwritev take no dpp
   bool hinted = false;		// on the head
   bool inst_hinted = false;
   bool counted = false;

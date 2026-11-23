@@ -233,6 +233,16 @@ target_link_libraries(ceph_test_rgw_manifest
   ${CRYPTO_LIBS})
 endif()
 
+if(WITH_RADOSGW_RADOS)
+# unittest_rgw_fsio_geometry:  FSIO's chunk geometry, with no cluster
+add_executable(unittest_rgw_fsio_geometry test_rgw_fsio_geometry.cc)
+target_include_directories(unittest_rgw_fsio_geometry
+  PRIVATE ${CMAKE_SOURCE_DIR}/src/rgw/driver/rados)
+add_ceph_unittest(unittest_rgw_fsio_geometry)
+target_link_libraries(unittest_rgw_fsio_geometry test_rgw_a ${rgw_libs}
+  ${UNITTEST_LIBS})
+endif()
+
 set(test_rgw_obj_srcs test_rgw_obj.cc)
 if(WITH_RADOSGW_RADOS)
 add_executable(ceph_test_rgw_obj

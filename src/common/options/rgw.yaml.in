@@ -2881,6 +2881,29 @@ options:
   default: 5
   services:
   - rgw
+- name: rgw_fsio_hint_interval
+  type: secs
+  level: advanced
+  desc: How often an FSIO writer reports its size while others watch
+  long_desc: While another handle has an FSIO open in its generation, a writer
+    reports its size and mtime hint at most this often as it writes;
+    otherwise only when it ends writing (FSIO design 7).  The default is
+    the Linux NFS client's acregmin.
+  default: 3
+  services:
+  - rgw
+- name: rgw_fsio_extent_reserve
+  type: uint
+  level: advanced
+  desc: The least number of chunks an FSIO writer reserves ahead
+  long_desc: Before it creates a chunk outside its shadow's reserved runs, an
+    FSIO writer reserves at least this many with fsio_extend;  an append
+    reserves as many as its run already holds, up to 256 chunks, so it pays
+    one call on the head per many chunks written (FSIO design 3.7).
+  default: 16
+  min: 1
+  services:
+  - rgw
 - name: rgw_fsio_clone_window
   type: uint
   level: advanced
