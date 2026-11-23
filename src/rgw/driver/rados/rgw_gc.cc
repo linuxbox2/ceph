@@ -653,8 +653,17 @@ int RGWGC::process(int index, int max_secs, bool expired_only,
 	if (!stop && r == 0) {
 	  flush();
 	}
-	if (stop || r < 0) {
+	if (stop) {
 	  goto done;
+	}
+	if (r < 0) {
+	  /* an entry this gateway cannot expand (undecodable, or a manifest
+	   * the geometry declines) fails the same way on every pass:  it is
+	   * removed with its batch, its objects left, rather than holding
+	   * every entry behind it in the shard */
+	  ldpp_dout(this, 0) << "ERROR: RGWGC::process manifest-form entry "
+			     << info.tag << " not expanded: " << cpp_strerror(-r)
+			     << ";  removed, its objects left" << dendl;
 	}
 	continue;
       }

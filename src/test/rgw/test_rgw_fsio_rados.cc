@@ -1667,6 +1667,34 @@ TEST_F(FSIORados, SecondWriterLeavesTheFirstWriting)
   EXPECT_EQ(1u, rec.opens->handles.at(h1.handle).chunk_sets.at(id).writers);
 }
 
+/* an entry GC cannot expand is dropped, not retried:  it would fail the
+ * same way on every pass, and must not hold the entries behind it in its
+ * shard.  Two entries with one tag share a shard:  an unexpandable one
+ * first, then an ordinary one, whose tail one pass collects */
+TEST_F(FSIORadosGC, UnexpandableEntryDoesNotBlockItsShard)
+{
+  ASSERT_EQ(0, put("obj", pattern(9 * MiB, 1)));
+  const auto hd = head_info("obj");
+  const auto tail = tail_of("obj");
+  const std::string tag = "fsio-gc-unexpandable";
+  ceph::buffer::list garbage;
+  garbage.append("not a manifest");
+  rados()->gc_manifest_override(true);
+  ASSERT_EQ(0, rados()->send_manifest_to_gc(env->dpp.get(), garbage, hd.obj,
+					    std::nullopt, tag, null_yield));
+  rados()->gc_manifest_override(false);
+  ASSERT_EQ(0, rados()->send_manifest_to_gc(env->dpp.get(), hd.manifest,
+					    hd.obj, std::nullopt, tag,
+					    null_yield));
+  ASSERT_EQ(2u, gc_entries(tag).size());
+  ASSERT_EQ(0, rados()->process_gc(false, null_yield));
+  for (const auto& t : tail) {
+    EXPECT_FALSE(bytes_of(t)) << "blocked behind the unexpandable entry: "
+			      << t.oid;
+  }
+  EXPECT_TRUE(gc_entries(tag).empty());
+}
+
 /* with no override, the store reads the feature from the zonegroup, which
  * fsio_validate.rs's rados-fsio step enables */
 TEST_F(FSIORadosGC, FeatureFollowsTheZonegroup)
