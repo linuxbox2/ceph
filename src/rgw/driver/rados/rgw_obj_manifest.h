@@ -478,6 +478,11 @@ public:
       }
       return (objs.size() >= 2);
     }
+    /* plan §6.4:  a published FSIO object's head segment is the separate
+     * chunk f(head, id), so the head object holds no data at any size */
+    if (fsio_head_separate()) {
+      return obj_size > 0;
+    }
     return (obj_size > head_size);
   }
 

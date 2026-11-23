@@ -352,6 +352,9 @@ struct fsio_publish_spec {
   cls_rgw_fsio_handle publisher;
   cls_rgw_fsio_id shadow;
   ceph::buffer::list tags;
+  /* the leaf clone's r, which the publisher's hint named first (§4.2
+   * step 1);  drawn here when absent */
+  std::optional<cls_rgw_fsio_id> r;
 };
 
 class RGWRados

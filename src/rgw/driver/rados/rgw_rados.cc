@@ -7660,7 +7660,13 @@ void RGWRados::Object::replace_head(const DoutPrefixProvider *dpp,
       call.caller = fsio_publish->publisher;
       call.shadow = fsio_publish->shadow;
       call.tags = fsio_publish->tags;
-      break;
+      call.r = fsio_publish->r.value_or(r);
+      call.keep_attr_prefixes = {RGW_ATTR_OLH_PREFIX};
+      call.marker = bucket_info.bucket.marker;
+      fsio_replaced.emplace();
+      cls_rgw_fsio_replace_head(op, call, &fsio_replaced->out,
+                                &fsio_replaced->rval);
+      return;
     }
     call.mode = static_cast<uint8_t>(cls_rgw_fsio::replace_mode::SUPERSEDE);
     call.keep_tail = fsio_write_keeps_tail;

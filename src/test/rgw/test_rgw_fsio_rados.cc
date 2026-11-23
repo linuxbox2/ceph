@@ -478,7 +478,9 @@ protected:
    * found on the shard of that head's oid (§2.7) */
   int presence_hints(const rgw_raw_obj& head, const cls_rgw_fsio_handle& h,
 		     cls_rgw_fsio_hint_target target =
-		       cls_rgw_fsio_hint_target::HEAD) {
+		       cls_rgw_fsio_hint_target::HEAD,
+		     cls_rgw_fsio_hint_kind kind =
+		       cls_rgw_fsio_hint_kind::PRESENCE) {
     auto* rados = static_cast<rgw::sal::RadosStore*>(env->driver)->getRados();
     const auto shards = static_cast<uint32_t>(
       g_conf().get_val<uint64_t>("rgw_fsio_open_hints_num_shards"));
@@ -494,8 +496,8 @@ protected:
 		  std::move(op), nullptr, ceph::async::use_blocked);
     return std::count_if(ret.hints.begin(), ret.hints.end(),
 			 [&](const cls_rgw_fsio_hint& x) {
-			   return x.kind == cls_rgw_fsio_hint_kind::PRESENCE &&
-			     x.handle == h.handle && x.target == target;
+			   return x.kind == kind && x.handle == h.handle &&
+			     x.target == target;
 			 });
   }
 
@@ -1646,8 +1648,8 @@ TEST_F(FSIORados, BeginWriteMovesTheReaderToTheShadow)
 }
 
 /* §3.4:  a writer that is not the last gives up its writer open;  the
- * last one's leave freezes the shadow, and until the publish lands it is
- * released, the shadow ready again and the writer's open kept */
+ * last one's leave freezes the shadow and publishes it (§4.2;  until
+ * step 8c this released the freeze and returned -ENOTSUP) */
 TEST_F(FSIORados, SecondWriterLeavesTheFirstWriting)
 {
   ASSERT_EQ(0, put("obj", pattern(9 * MiB, 1)));
@@ -1663,14 +1665,12 @@ TEST_F(FSIORados, SecondWriterLeavesTheFirstWriting)
   EXPECT_FALSE(rec.opens->handles.count(h2.handle) &&
 	       rec.opens->handles.at(h2.handle).chunk_sets.count(id) &&
 	       rec.opens->handles.at(h2.handle).chunk_sets.at(id).writers);
-  EXPECT_EQ(-ENOTSUP, w1->end_write(env->dpp.get(), 0));
+  EXPECT_EQ(0, w1->end_write(env->dpp.get(), 0));
   rec = records_of(head_of("obj"), h1.incarnation);
-  ASSERT_TRUE(rec.hdr);
-  const auto* e = entry_of(*rec.hdr, id);
-  ASSERT_TRUE(e);
-  EXPECT_EQ(cls_rgw_fsio_cs_state::READY, e->state);
-  EXPECT_FALSE(e->publishing);
-  EXPECT_EQ(1u, rec.opens->handles.at(h1.handle).chunk_sets.at(id).writers);
+  EXPECT_FALSE(rec.any_fsio) << "the published head kept FSIO records";
+  std::string now;
+  ASSERT_EQ(0, get("obj", &now));
+  EXPECT_EQ("two", now.substr(4 * MiB, 3));
 }
 
 /* an entry GC cannot expand is dropped, not retried:  it would fail the
@@ -1699,6 +1699,135 @@ TEST_F(FSIORadosGC, UnexpandableEntryDoesNotBlockItsShard)
 			      << t.oid;
   }
   EXPECT_TRUE(gc_entries(tag).empty());
+}
+
+/* the driver's step 8c:  the unversioned publish (FSIO design §4.2) */
+
+/* the last writer's end_write() publishes:  a GET reads the new bytes,
+ * the head keeps no FSIO records, the publish hint is gone, and the
+ * replaced content, born drained, goes to GC with its leaf clone */
+TEST_F(FSIORadosGC, LastWriterPublishes)
+{
+  const auto a = pattern(9 * MiB, 1);
+  ASSERT_EQ(0, put("obj", a));
+  const auto ha = head_info("obj");
+  const auto old_tail = tail_of("obj");
+  auto w = open("obj", true);
+  ASSERT_TRUE(w);
+  const auto h = rados_fsio(w)->handle();
+  ASSERT_EQ(0, write(w, 4 * MiB, {"Z"}));
+  ASSERT_EQ(0, w->end_write(env->dpp.get(), 0));
+  std::string now;
+  ASSERT_EQ(0, get("obj", &now));
+  auto want = a;
+  want[4 * MiB] = 'Z';
+  EXPECT_EQ("same", diff(now, want, a));
+  const auto head = head_of("obj");
+  EXPECT_FALSE(records_of(head, h.incarnation).any_fsio);
+  EXPECT_EQ(0, presence_hints(head, h, cls_rgw_fsio_hint_target::HEAD,
+			      cls_rgw_fsio_hint_kind::PUBLISH));
+  EXPECT_FALSE(gc_entries(ha.tag).empty()) << "the replaced tail was not sent";
+  ASSERT_EQ(0, gc_pass());
+  for (const auto& o : old_tail) {
+    EXPECT_FALSE(bytes_of(o)) << o.oid;
+  }
+  ASSERT_EQ(0, get("obj", &now));
+  EXPECT_EQ("same", diff(now, want, a));
+}
+
+/* a reader on the old content keeps reading it after the publish:  its
+ * chunk set retired, its tail kept from GC until the reader's close
+ * drains it (§3.4) */
+TEST_F(FSIORadosGC, PublishUnderAReaderKeepsTheOldContent)
+{
+  const auto a = pattern(9 * MiB, 1);
+  ASSERT_EQ(0, put("obj", a));
+  const auto ha = head_info("obj");
+  auto r = open("obj", false);
+  auto w = open("obj", true);
+  ASSERT_TRUE(r && w);
+  ASSERT_EQ(0, write(w, 4 * MiB, {"Z"}));
+  ASSERT_EQ(0, w->end_write(env->dpp.get(), 0));
+  EXPECT_TRUE(gc_entries(ha.tag).empty()) << "a read content was collected";
+  EXPECT_EQ("same", diff(read(r, 0, 9 * MiB), a, a));
+  ASSERT_EQ(0, r->close(env->dpp.get(), 0));
+  EXPECT_FALSE(gc_entries(ha.tag).empty()) << "the close did not drain it";
+}
+
+/* a published file no larger than its head segment reads:  its head
+ * holds attributes only, so it has a tail at any size */
+TEST_F(FSIORadosGC, SmallPublishedFileReads)
+{
+  ASSERT_EQ(0, put("obj", "0123456789"));
+  auto w = open("obj", true);
+  ASSERT_TRUE(w);
+  ASSERT_EQ(0, write(w, 3, {"abc"}));
+  ASSERT_EQ(0, w->end_write(env->dpp.get(), 0));
+  std::string now;
+  ASSERT_EQ(0, get("obj", &now));
+  EXPECT_EQ("012abc6789", now);
+}
+
+/* §2.7:  the publish takes its size from the chunks */
+TEST_F(FSIORadosGC, TruncatedThenPublished)
+{
+  const auto a = pattern(9 * MiB, 1);
+  ASSERT_EQ(0, put("obj", a));
+  auto w = open("obj", true);
+  ASSERT_TRUE(w);
+  ASSERT_EQ(0, w->ftruncate(env->dpp.get(), 5 * MiB, 0));
+  ASSERT_EQ(0, w->end_write(env->dpp.get(), 0));
+  std::string now;
+  ASSERT_EQ(0, get("obj", &now));
+  EXPECT_EQ("same", diff(now, a.substr(0, 5 * MiB), a));
+}
+
+/* §3.5:  an S3 PUT that lands while the shadow is open is replaced by
+ * the publish, last writer wins;  the PUT's tail goes to GC */
+TEST_F(FSIORadosGC, PublishAfterAnS3PutWins)
+{
+  const auto a = pattern(9 * MiB, 1), b = pattern(9 * MiB, 2);
+  ASSERT_EQ(0, put("obj", a));
+  auto w = open("obj", true);
+  ASSERT_TRUE(w);
+  ASSERT_EQ(0, write(w, 4 * MiB, {"Z"}));
+  ASSERT_EQ(0, put("obj", b));
+  const auto hb = head_info("obj");
+  const auto b_tail = tail_of("obj");
+  ASSERT_EQ(0, w->end_write(env->dpp.get(), 0));
+  std::string now;
+  ASSERT_EQ(0, get("obj", &now));
+  auto want = a;
+  want[4 * MiB] = 'Z';
+  EXPECT_EQ("same", diff(now, want, b));
+  ASSERT_EQ(0, gc_pass());
+  for (const auto& o : b_tail) {
+    EXPECT_FALSE(bytes_of(o)) << "the PUT's tail was kept:  " << o.oid;
+  }
+  (void)hb;
+}
+
+/* W21:  a publish whose reply is lost after it applied decides as the
+ * expirer would:  published, the replaced content sent to GC once, the
+ * hint gone */
+TEST_F(FSIORadosGC, AmbiguousPublishDecidesAsTheExpirer)
+{
+  const auto a = pattern(9 * MiB, 1);
+  ASSERT_EQ(0, put("obj", a));
+  const auto ha = head_info("obj");
+  auto w = open("obj", true);
+  ASSERT_TRUE(w);
+  const auto h = rados_fsio(w)->handle();
+  ASSERT_EQ(0, write(w, 4 * MiB, {"Z"}));
+  rados_fsio(w)->lose_publish_reply(true);
+  ASSERT_EQ(0, w->end_write(env->dpp.get(), 0));
+  std::string now;
+  ASSERT_EQ(0, get("obj", &now));
+  EXPECT_EQ('Z', now[4 * MiB]);
+  EXPECT_EQ(0, presence_hints(head_of("obj"), h,
+			      cls_rgw_fsio_hint_target::HEAD,
+			      cls_rgw_fsio_hint_kind::PUBLISH));
+  EXPECT_EQ(1u, gc_entries(ha.tag).size()) << "the replaced content's GC";
 }
 
 /* with no override, the store reads the feature from the zonegroup, which

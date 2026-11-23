@@ -99,6 +99,9 @@ public:
 
   /* the shadow's chunk holding ofs, as named on RADOS */
   rgw_raw_obj shadow_chunk(uint64_t ofs) const;
+  /* test only:  the publish's head write applied, its reply treated as
+   * lost, so the publish decides as the expirer would (§4.2, W21) */
+  void lose_publish_reply(bool on) { lose_reply = on; }
   /* test only:  each sequenced call sent twice with one sequence number,
    * the second reply kept, as the Objecter's resend past the PG log's
    * dup window returns it (Z22) */
@@ -172,6 +175,19 @@ private:
   /* §2.5:  a drained instance count's deferred contents, then
    * fsio_ocnt_forget, any failure of which counts as done */
   int drain_count(const DoutPrefixProvider* dpp);
+  /* §4.2 steps 1-5:  the last writer's publish of the shadow its leave
+   * froze */
+  int publish(const DoutPrefixProvider* dpp);
+  /* §3.5:  the publish hint naming the leaf clone f(head, r) */
+  int publish_hint(const DoutPrefixProvider* dpp, bool add,
+		   const cls_rgw_fsio_id& r);
+  /* §2.3:  the content replaced under the leaf clone f(head, r):  its
+   * tail to GC from the clone's record, then the clone */
+  int collect_leaf(const DoutPrefixProvider* dpp, const cls_rgw_fsio_id& r);
+  /* §2.7:  the size from the chunks:  the highest existing chunk in the
+   * shadow's extent that is not a fenced hole, scanned down */
+  int scan_size(const DoutPrefixProvider* dpp, uint64_t* size);
+
   /* §4.1, W15:  a shadow's chunks and attribute clone to GC */
   int collect_shadow(const DoutPrefixProvider* dpp, const cls_rgw_fsio_id& id,
 		     const std::vector<cls_rgw_fsio_run>& extent,
@@ -230,6 +246,7 @@ private:
   bool dirty = false;		// written since its last report
   bool unsure = false;		// a sequenced call's reply was lost (§3.3)
   bool twice = false;		// test only:  send_sequenced_twice()
+  bool lose_reply = false;	// test only:  lose_publish_reply()
   ceph::real_time wmtime;	// its last write's
   ceph::real_time rmtime;	// the bound content's
   ceph::real_time wmtime_hint;	// the shadow's, as the join saw it
