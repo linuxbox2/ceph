@@ -8,7 +8,7 @@ edition = "2021"
 //! for the whole run.  `--dry-run` prints them.
 //!
 //!   fsio_validate.rs [--dry-run] [--no-build] [--build DIR]
-//!                    [--filter PATTERN] STEP|PRESET...
+//!                    [--filter PATTERN] [--timeout SECS] STEP|PRESET...
 //!
 //! Steps:
 //!   cls            the CLS head test and the neorados CLS test, and
@@ -44,6 +44,16 @@ edition = "2021"
 //! you and its binary run under `sudo -n`, since root has neither your
 //! toolchain nor your cargo cache.
 //!
+//! Every command runs under coreutils `timeout`, inside the sudo for a
+//! RADOS step, so a command that never returns (a hung test) fails its
+//! step instead of stalling the run, and the run goes on to its
+//! teardown.  `timeout` signals the command's whole process group, TERM
+//! and KILL ten seconds after.  The limits, about two to three times what
+//! each has taken:  20 minutes for the build and the cluster tier, 30 for
+//! the model, 5 for each nsfs command, 2 for stopping the cluster and
+//! handing its files back, 3 for every other command;  `--timeout SECS`
+//! sets them all.
+//!
 //! Before a run it builds what the chosen steps run, unless told
 //! `--no-build`;  either way it then requires the build's version to be
 //! HEAD's.  Each step's output goes to `<build>/fsio-validate/<time>/
@@ -67,6 +77,20 @@ struct Opts {
     src: PathBuf,
     steps: Vec<&'static str>,
     filter: Option<String>,
+    timeout: Option<u64>,
+}
+
+/// A step's command's limit, in seconds
+fn step_timeout(o: &Opts, step: &str) -> u64 {
+    /* about two to three times what each has taken (2026-11-23) */
+    o.timeout.unwrap_or(match step {
+        "build" => 1200,
+        "model" => 1800,
+        "cluster-tier" => 1200,
+        "nsfs-librgw" => 300,
+        "rados-stop" | "rados-chown" => 120,
+        _ => 180,
+    })
 }
 
 /// The gtest filter for `--filter`, as an argument to append, or nothing
@@ -270,6 +294,8 @@ fn exec(o: &Opts, c: &Cmd, run_dir: &Path, summary: &mut Vec<String>,
     if c.sudo {
         argv.extend(["sudo".into(), "-n".into()]);
     }
+    let limit = step_timeout(o, c.step);
+    argv.extend(["timeout".into(), "-k".into(), "10".into(), limit.to_string()]);
     argv.extend(c.argv.iter().cloned());
     if o.dry_run {
         println!("[{}] {}\n  (cd {} && {})", c.step, c.what, c.cwd.display(), shell_words(&argv));
@@ -283,16 +309,23 @@ fn exec(o: &Opts, c: &Cmd, run_dir: &Path, summary: &mut Vec<String>,
     let _ = writeln!(f, "== {}\n$ (cd {} && {})", c.what, c.cwd.display(), shell_words(&argv));
     let out = Command::new(&argv[0]).args(&argv[1..]).current_dir(&c.cwd)
         .stdin(Stdio::null()).output();
+    let mut timed_out = false;
     let (ok, text) = match out {
         Ok(out) => {
             let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+            /* timeout's own:  124 when it sent TERM, 137 when KILL */
+            timed_out = matches!(out.status.code(), Some(124) | Some(137));
             (out.status.success(), text)
         }
         Err(e) => (false, format!("could not run:  {e}\n")),
     };
     let _ = f.write_all(text.as_bytes());
-    let note = count(&text).unwrap_or_default();
-    let failed_note = !ok || note.starts_with("a plugin");
+    let note = if timed_out {
+        format!("timed out after {limit} s")
+    } else {
+        count(&text).unwrap_or_default()
+    };
+    let failed_note = !ok || timed_out || note.starts_with("a plugin");
     let l = line(c.step, &c.what, !failed_note, &note);
     println!("{l}");
     summary.push(l);
@@ -382,6 +415,7 @@ fn parse_args() -> Opts {
     let mut build_dir: Option<PathBuf> = None;
     let mut steps: Vec<&'static str> = Vec::new();
     let mut filter: Option<String> = None;
+    let mut timeout: Option<u64> = None;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
@@ -389,11 +423,13 @@ fn parse_args() -> Opts {
             "--no-build" => build = false,
             "--build" => build_dir = Some(PathBuf::from(args.next().unwrap_or_else(|| die("--build needs a directory")))),
             "--filter" => filter = Some(args.next().unwrap_or_else(|| die("--filter needs a pattern"))),
+            "--timeout" => timeout = Some(args.next().and_then(|v| v.parse().ok())
+                                          .unwrap_or_else(|| die("--timeout needs a number of seconds"))),
             "driver" => steps.extend(["cls", "librgw-rados", "harness"]),
             "core" => steps.extend(["cls", "cluster-tier", "model"]),
             "full" => steps.extend(STEPS),
             "-h" | "--help" => {
-                println!("usage:  fsio_validate.rs [--dry-run] [--no-build] [--build DIR] [--filter PATTERN] STEP|PRESET...\n\
+                println!("usage:  fsio_validate.rs [--dry-run] [--no-build] [--build DIR] [--filter PATTERN] [--timeout SECS] STEP|PRESET...\n\
                           steps:  {}\npresets:  driver core full", STEPS.join(" "));
                 std::process::exit(0);
             }
@@ -418,7 +454,7 @@ fn parse_args() -> Opts {
     if !build_dir.join("build.ninja").exists() {
         die(&format!("{} is not a configured build directory", build_dir.display()));
     }
-    Opts { dry_run, build, build_dir, src, steps: ordered, filter }
+    Opts { dry_run, build, build_dir, src, steps: ordered, filter, timeout }
 }
 
 fn capture(cwd: &Path, argv: &[&str]) -> String {
