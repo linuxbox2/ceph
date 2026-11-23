@@ -42,11 +42,14 @@ std::string head_of(std::string_view oid)
   return fmt::format("{}_{}", MARKER, oid);
 }
 
-WriteOp make_head()
+WriteOp make_head(bool data = true)
 {
-  return std::move(WriteOp{}
-                   .create(true)
-                   .write_full(to_buffer_list("data"))
+  WriteOp op;
+  op.create(true);
+  if (data) {
+    op.write_full(to_buffer_list("data"));
+  }
+  return std::move(op
                    .setxattr("user.rgw.idtag", to_buffer_list("t0"))
                    .setxattr("user.rgw.manifest", to_buffer_list("C0")));
 }
@@ -136,8 +139,10 @@ CORO_TEST_F(NeoRadosClsRgwFsio, WriterJoinClonesTheHead, FsioTest) {
   if (!jret.construct) {
     co_return;
   }
-  /* §2.7, E2:  <marker>~fsio_a<id>_<key part>, after every head */
-  const auto clone = fmt::format("{}~fsio_a{}_{}", MARKER, jret.bound.to_str(),
+  /* §2.7, E2:  <marker>~fsio_d<id>_<key part>, after every head:  the
+   * head holds data, an inline head segment, so its clone is that
+   * segment's data chunk */
+  const auto clone = fmt::format("{}~fsio_d{}_{}", MARKER, jret.bound.to_str(),
                                  oid);
   auto ioc = pool();
   ioc.set_key(head);
@@ -151,6 +156,31 @@ CORO_TEST_F(NeoRadosClsRgwFsio, WriterJoinClonesTheHead, FsioTest) {
   co_await expect_error_code(                // FSIO's records not carried
     execute(clone, ReadOp{}.get_xattr(HDR, &v), ioc),
     sys::errc::no_message_available);
+  co_return;
+}
+
+/* §2.7:  a head holding no data (a multipart object's, or one an FSIO
+ * publish wrote) is cloned as the shadow's attribute clone, role 'a',
+ * with the pseudo-manifest and no data */
+CORO_TEST_F(NeoRadosClsRgwFsio, WriterJoinClonesAnAttributesOnlyHead, FsioTest) {
+  const auto head = head_of(oid);
+  co_await execute(head, make_head(false));
+  cls_rgw_fsio_join_ret jret;
+  co_await execute(head, WriteOp{}.exec(f::join(join_op(1, true), &jret)));
+  EXPECT_TRUE(jret.construct);
+  if (!jret.construct) {
+    co_return;
+  }
+  const auto clone = fmt::format("{}~fsio_a{}_{}", MARKER, jret.bound.to_str(),
+                                 oid);
+  auto ioc = pool();
+  ioc.set_key(head);
+  ceph::buffer::list v;
+  co_await execute(clone, ReadOp{}.get_xattr("user.rgw.fsio.pm", &v), ioc);
+  EXPECT_EQ("C0", v.to_str());
+  v.clear();
+  co_await execute(clone, ReadOp{}.read(0, 0, &v), ioc);
+  EXPECT_EQ(0u, v.length());
   co_return;
 }
 

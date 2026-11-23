@@ -342,7 +342,7 @@ public:
       }
       if (c.role == 'G') {
 	encode(c.record, want_clone.attrs[std::string(GEN)]);
-      } else if (c.role == 'a' && c.pm.length()) {
+      } else if (c.pm.length()) {
 	want_clone.attrs[std::string(PM)] = c.pm;
       }
       Obj got_clone;

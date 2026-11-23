@@ -213,6 +213,9 @@ struct join_in {
   expired_t expired;
   std::string instance;             // versioned:  the instance the OLH named
   std::string identity;             // a writer:  its NFS open's (§3.5, Y16)
+  /* §2.7:  the head object holds data, an inline head segment, so its
+   * clone is that segment's data chunk, role 'd';  else 'a' */
+  bool head_data = false;
 };
 struct join_out {
   cls_rgw_fsio_id bound;

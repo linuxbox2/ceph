@@ -293,8 +293,8 @@ int apply(cls_method_context_t hctx, const std::string& marker,
     std::map<std::string, ceph::buffer::list> set;
     if (c.role == 'G') {
       encode(c.record, set[std::string(GEN)]);
-    } else if (c.role == 'a' && c.pm.length()) {
-      set[std::string(PM)] = c.pm;
+    } else if (c.pm.length()) {
+      set[std::string(PM)] = c.pm;	// the shadow's head clone, 'a' or 'd'
     }
     /* §2.3, §2.4, plan §6.7:  a clone drops FSIO's records, the head's
      * manifest (its record carries it) and cls_refcount's tags (X16) */
@@ -396,6 +396,10 @@ int rgw_fsio_join(cls_method_context_t hctx, ceph::buffer::list* in,
   int r = on_head(hctx, op.marker, [&](auto& h, auto& fx) {
     fsio::join_in jin{op.caller, op.seq, op.writer, op.nonce, op.counter_seed,
 		      op.expired, op.instance, op.identity};
+    uint64_t size = 0;
+    if (h.exists && cls_cxx_stat(hctx, &size, nullptr) == 0) {
+      jin.head_data = size > 0;
+    }
     fsio::join_out jout;
     int r = fsio::join(h, jin, jout, fx);
     ret.bound = jout.bound;

@@ -1237,7 +1237,7 @@ void apply_clones(World& w, const cls_rgw_fsio_effects& fx,
       /* the record as the core wrote it:  the head's manifest, or none
        * for a tail-keeping write (§3.6, Y2) */
       w.records[rn] = c.record.manifest.length() ? head_tok : "";
-    } else if (c.role == 'a') {
+    } else if (c.role == 'a' || c.role == 'd') {
       w.pms[sname(c.r)] = tok(c.pm);
     }
   }

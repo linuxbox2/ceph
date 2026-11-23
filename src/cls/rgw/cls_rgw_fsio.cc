@@ -490,7 +490,7 @@ int join_once(cls_rgw_fsio_head& h, const join_in& in, join_out& out,
        * instance head itself (§4.1) */
       if (!versioned) {
 	fx.clones.push_back(cls_rgw_fsio_clone{
-	    cs.id, 'a', {},
+	    cs.id, in.head_data ? 'd' : 'a', {},
 	    FSIO_SKIP_CHECK(W1_SHADOW_STORES_PSEUDO_MANIFEST) ? ceph::buffer::list{} : h.manifest});
       }
     }
