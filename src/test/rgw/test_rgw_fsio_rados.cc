@@ -8,8 +8,10 @@
  * the op. */
 
 #include <chrono>
+#include <map>
 #include <memory>
 #include <thread>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -714,24 +716,6 @@ TEST_F(FSIORados, SecondWriterJoinsTheShadow)
   }
 }
 
-/* begin_write() on a reader's handle makes it a writer as well */
-TEST_F(FSIORados, BeginWriteOnAReader)
-{
-  ASSERT_EQ(0, put("obj", std::string(9 << 20, 'b')));
-  const auto head = head_of("obj");
-  auto fh = open("obj", false);
-  ASSERT_TRUE(fh);
-  ASSERT_EQ(0, fh->begin_write(env->dpp.get(),
-			       rgw::sal::Object::FSIOObject::WRITE_FLAG_NONE));
-  auto* hdl = rados_fsio(fh);
-  auto rec = records_of(head, hdl->handle().incarnation);
-  ASSERT_TRUE(rec.opens);
-  const auto& cs = rec.opens->handles.at(hdl->handle().handle).chunk_sets;
-  EXPECT_EQ(1u, cs.at(hdl->bound()).readers);
-  EXPECT_EQ(1u, cs.at(hdl->writing_to()).writers);
-  EXPECT_NE(hdl->bound(), hdl->writing_to());
-}
-
 /* a writer's join after an S3 PUT builds its shadow from the new content
  * (§3.1, the compound op's ID-tag guard) */
 TEST_F(FSIORados, GuardRetriesAfterAPut)
@@ -1213,6 +1197,98 @@ protected:
     auto c = chunks_of(key);
     return {c.begin() + 1, c.end()};
   }
+  /* every object named by any GC entry, expanded as the worker expands,
+   * with its pool and locator */
+  std::map<std::string, rgw_raw_obj> gc_objects() {
+    std::map<std::string, rgw_raw_obj> v;
+    int index = 0;
+    std::string marker;
+    bool truncated = false, processing_queue = false;
+    do {
+      std::list<cls_rgw_gc_obj_info> result;
+      EXPECT_EQ(0, rados()->list_gc_objs(index, marker, 1000, false, result,
+					 truncated, processing_queue));
+      for (const auto& e : result) {
+	for (const auto& o : e.chain.objs) {
+	  v[o.key.name] = rgw_raw_obj{rgw_pool(o.pool), o.key.name, o.loc};
+	}
+	if (e.is_manifest()) {
+	  rados()->expand_gc_entry(env->dpp.get(), e,
+				   [&v] (const rgw_raw_obj& o) {
+				     v[o.oid] = o; return 0; });
+	}
+      }
+    } while (truncated);
+    return v;
+  }
+  /* §3.4:  a reader on A, an S3 PUT of B, the reader's close */
+  void reader_drains_deferred(bool on) {
+    rados()->gc_manifest_override(on);
+    ASSERT_EQ(0, put("obj", pattern(9 * MiB, 1)));
+    const auto ha = head_info("obj");
+    const auto old_tail = tail_of("obj");
+    auto r = open("obj", false);
+    ASSERT_TRUE(r);
+    ASSERT_EQ(0, put("obj", pattern(9 * MiB, 2)));
+    const auto new_tail = tail_of("obj");
+    EXPECT_EQ(10u, read(r, 0, 10).size());	// reads through the leaf clone
+    const auto leaf = rados_fsio(r)->moved_segment();
+    ASSERT_TRUE(leaf);
+    ASSERT_EQ(0, r->close(env->dpp.get(), 0));
+    rgw_raw_obj l = head_of("obj");
+    l.loc = l.oid;
+    l.oid = *leaf;
+    EXPECT_FALSE(bytes_of(l)) << "the leaf clone was not removed";
+    auto rec = records_of(head_of("obj"), 0);
+    EXPECT_FALSE(rec.hdr) << "the header was not forgotten";
+    auto es = gc_entries(ha.tag);
+    ASSERT_FALSE(es.empty()) << "the replaced tail was not sent to GC";
+    for (const auto& e : es) {
+      EXPECT_EQ(on, e.is_manifest());
+    }
+    ASSERT_EQ(0, rados()->process_gc(false, null_yield));
+    for (const auto& o : old_tail) {
+      EXPECT_FALSE(bytes_of(o)) << o.oid;
+    }
+    for (const auto& o : new_tail) {
+      EXPECT_TRUE(bytes_of(o)) << o.oid;
+    }
+  }
+  /* §3.4, W15:  a published stripe removed, so construction's clone of
+   * it fails */
+  void construction_abandons(bool on) {
+    rados()->gc_manifest_override(on);
+    ASSERT_EQ(0, put("obj", pattern(9 * MiB, 1)));
+    const auto chunks = chunks_of("obj");
+    ASSERT_EQ(3u, chunks.size());
+    remove_raw(chunks[2]);
+    auto obj = bucket->get_object(rgw_obj_key("obj"));
+    auto [r, fh] = obj->get_fsio_handle(
+      env->dpp.get(), rgw::sal::Object::FSIOObject::OPEN_FLAG_WRITE);
+    EXPECT_EQ(-EAGAIN, r);
+    EXPECT_FALSE(fh);
+    auto rec = records_of(head_of("obj"), 0);
+    if (rec.hdr) {
+      EXPECT_FALSE(rec.hdr->cur_shadow) << "the shadow was not abandoned";
+      for (const auto& e : rec.hdr->chunk_sets) {
+	EXPECT_FALSE(e.is_shadow()) << e.id.to_str();
+      }
+    }
+    std::vector<rgw_raw_obj> clones;
+    size_t made = 0;
+    for (const auto& [name, raw] : gc_objects()) {
+      if (name.find(bucket->get_marker() + "~fsio_") == 0) {
+	clones.push_back(raw);
+	made += bytes_of(raw).has_value();
+      }
+    }
+    ASSERT_FALSE(clones.empty()) << "the shadow's clones were not sent to GC";
+    EXPECT_GE(made, 1u) << "no clone existed to collect";
+    ASSERT_EQ(0, rados()->process_gc(false, null_yield));
+    for (const auto& c : clones) {
+      EXPECT_FALSE(bytes_of(c)) << c.oid;
+    }
+  }
   int remove(const std::string& key) {
     auto obj = bucket->get_object(rgw_obj_key(key));
     auto del = obj->get_delete_op();
@@ -1434,6 +1510,161 @@ TEST_F(FSIORadosGC, DeleteSendsOneManifestEntry)
 TEST_F(FSIORadosGC, DeleteExpandsWhileOff)
 {
   old_tail_collected(false, false);
+}
+
+/* the driver's step 7:  the close (FSIO design §3.4) */
+
+/* §3.4:  the last reader of a generation an S3 PUT replaced drains it:
+ * its tail to GC in the feature's form, its leaf clone removed, its
+ * chunk-set entry forgotten */
+TEST_F(FSIORadosGC, ReaderCloseDrainsADeferredGeneration)
+{
+  reader_drains_deferred(true);
+}
+
+TEST_F(FSIORadosGC, ReaderCloseDrainsADeferredGenerationWhileOff)
+{
+  reader_drains_deferred(false);
+}
+
+/* §3.4, W15:  a construction that fails abandons its shadow:  its clones
+ * to GC, the shadow gone from the head, the open EAGAIN */
+TEST_F(FSIORadosGC, ConstructionThatFailsAbandons)
+{
+  construction_abandons(true);
+}
+
+TEST_F(FSIORadosGC, ConstructionThatFailsAbandonsWhileOff)
+{
+  construction_abandons(false);
+}
+
+/* §2.5:  the last reader of a version rewritten in place drains its
+ * instance count:  the deferred content to GC, its sibling removed, the
+ * count forgotten */
+class FSIORadosGCVersioned : public FSIORadosGC {
+protected:
+  void SetUp() override {
+    FSIORadosGC::SetUp();
+    set_versioning(BUCKET_VERSIONED);
+  }
+  void count_drains(bool on) {
+    rados()->gc_manifest_override(on);
+    std::string inst;
+    ASSERT_EQ(0, put("obj", pattern(9 * MiB, 1), &inst));
+    const auto ih = instance_of("obj", inst);
+    const auto old_chunks = chunks_of("obj", inst);
+    auto r = open("obj", false);
+    ASSERT_TRUE(r);
+    ASSERT_EQ(0, rados()->rewrite_obj(bucket->get_info(),
+				      rgw_obj(bucket->get_key(),
+					      rgw_obj_key("obj", inst)),
+				      env->dpp.get(), null_yield));
+    auto oc = ocnt_of(ih);
+    ASSERT_TRUE(oc);
+    ASSERT_EQ(1u, oc->deferred.size());
+    const auto rec = oc->deferred[0];
+    rgw_raw_obj sib = ih;
+    sib.oid = cls_rgw_fsio_clone_name(bucket->get_marker(), 'G', rec.clone,
+				      ih.oid);
+    sib.loc = ih.oid;
+    ASSERT_TRUE(bytes_of(sib));
+    const auto new_chunks = chunks_of("obj", inst);
+    ASSERT_EQ(0, r->close(env->dpp.get(), 0));
+    EXPECT_FALSE(ocnt_of(ih)) << "the instance count was not forgotten";
+    EXPECT_FALSE(bytes_of(sib)) << "the sibling was not removed";
+    auto es = gc_entries(rec.gc_tag);
+    ASSERT_FALSE(es.empty()) << "the deferred content was not sent to GC";
+    for (const auto& e : es) {
+      EXPECT_EQ(on, e.is_manifest());
+    }
+    ASSERT_EQ(0, rados()->process_gc(false, null_yield));
+    for (size_t i = 1; i < old_chunks.size(); ++i) {
+      EXPECT_FALSE(bytes_of(old_chunks[i])) << old_chunks[i].oid;
+    }
+    for (size_t i = 1; i < new_chunks.size(); ++i) {
+      EXPECT_TRUE(bytes_of(new_chunks[i])) << new_chunks[i].oid;
+    }
+  }
+};
+
+TEST_F(FSIORadosGCVersioned, VersionedReaderCloseDrainsTheRewrittenContent)
+{
+  count_drains(true);
+}
+
+TEST_F(FSIORadosGCVersioned, VersionedReaderCloseDrainsWhileOff)
+{
+  count_drains(false);
+}
+
+/* §3, Z22:  a leave applied but its reply lost leaves nothing of the
+ * handle's on the head, so its presence hint goes */
+TEST_F(FSIORados, ReaderCloseHeardTwiceDropsItsHint)
+{
+  ASSERT_EQ(0, put("obj", pattern(9 * MiB, 1)));
+  auto r = open("obj", false);
+  ASSERT_TRUE(r);
+  const auto head = head_of("obj");
+  const auto h = rados_fsio(r)->handle();
+  ASSERT_EQ(1, presence_hints(head, h));
+  rados_fsio(r)->send_sequenced_twice(true);
+  ASSERT_EQ(0, r->close(env->dpp.get(), 0));
+  EXPECT_EQ(0, presence_hints(head, h));
+  auto rec = records_of(head, h.incarnation);
+  EXPECT_FALSE(rec.opens && rec.opens->handles.count(h.handle));
+}
+
+/* begin_write() on a reader's handle makes it a writer as well, and
+ * (§3.4, fsio_rebind) its reader follows its own shadow at once, so the
+ * head knows which chunk set it reads;  BeginWriteOnAReader before the
+ * rebind (step 7) expected the reader left on the published content */
+TEST_F(FSIORados, BeginWriteMovesTheReaderToTheShadow)
+{
+  ASSERT_EQ(0, put("obj", pattern(9 * MiB, 1)));
+  auto fh = open("obj", false);
+  ASSERT_TRUE(fh);
+  auto* hdl = rados_fsio(fh);
+  const auto published = hdl->bound();
+  ASSERT_EQ(0, fh->begin_write(env->dpp.get(),
+			       rgw::sal::Object::FSIOObject::WRITE_FLAG_NONE));
+  const auto shadow = hdl->writing_to();
+  EXPECT_EQ(shadow, hdl->bound());
+  auto rec = records_of(head_of("obj"), hdl->handle().incarnation);
+  ASSERT_TRUE(rec.opens);
+  const auto& mine = rec.opens->handles.at(hdl->handle().handle).chunk_sets;
+  ASSERT_TRUE(mine.count(shadow));
+  EXPECT_EQ(1u, mine.at(shadow).readers);
+  EXPECT_EQ(1u, mine.at(shadow).writers);
+  EXPECT_FALSE(mine.count(published) && mine.at(published).readers);
+}
+
+/* §3.4:  a writer that is not the last gives up its writer open;  the
+ * last one's leave freezes the shadow, and until the publish lands it is
+ * released, the shadow ready again and the writer's open kept */
+TEST_F(FSIORados, SecondWriterLeavesTheFirstWriting)
+{
+  ASSERT_EQ(0, put("obj", pattern(9 * MiB, 1)));
+  auto w1 = open("obj", true), w2 = open("obj", true);
+  ASSERT_TRUE(w1 && w2);
+  const auto id = rados_fsio(w1)->writing_to();
+  const auto h1 = rados_fsio(w1)->handle(), h2 = rados_fsio(w2)->handle();
+  ASSERT_EQ(0, write(w2, 4 * MiB, {"two"}));
+  ASSERT_EQ(0, w2->end_write(env->dpp.get(), 0));
+  auto rec = records_of(head_of("obj"), h1.incarnation);
+  ASSERT_TRUE(rec.opens);
+  EXPECT_EQ(1u, rec.opens->handles.at(h1.handle).chunk_sets.at(id).writers);
+  EXPECT_FALSE(rec.opens->handles.count(h2.handle) &&
+	       rec.opens->handles.at(h2.handle).chunk_sets.count(id) &&
+	       rec.opens->handles.at(h2.handle).chunk_sets.at(id).writers);
+  EXPECT_EQ(-ENOTSUP, w1->end_write(env->dpp.get(), 0));
+  rec = records_of(head_of("obj"), h1.incarnation);
+  ASSERT_TRUE(rec.hdr);
+  const auto* e = entry_of(*rec.hdr, id);
+  ASSERT_TRUE(e);
+  EXPECT_EQ(cls_rgw_fsio_cs_state::READY, e->state);
+  EXPECT_FALSE(e->publishing);
+  EXPECT_EQ(1u, rec.opens->handles.at(h1.handle).chunk_sets.at(id).writers);
 }
 
 /* with no override, the store reads the feature from the zonegroup, which

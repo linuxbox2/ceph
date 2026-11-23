@@ -102,7 +102,7 @@ namespace m = ::cls::rgw::method;
 }
 
 [[nodiscard]] inline auto rebind(const cls_rgw_fsio_rebind_op& in,
-                                 cls_rgw_fsio_flags_ret* ret = nullptr,
+                                 cls_rgw_fsio_rebind_ret* ret = nullptr,
                                  boost::system::error_code* ec = nullptr)
 {
   return detail::call(m::fsio_rebind, in, ret, ec);
@@ -127,9 +127,12 @@ namespace m = ::cls::rgw::method;
   return detail::call(m::fsio_expire, in, ret, ec);
 }
 
-[[nodiscard]] inline auto forget(const cls_rgw_fsio_cs_op& in)
+/* §3.4 step 3:  the reply's drained is a holder the forget let drain */
+[[nodiscard]] inline auto forget(const cls_rgw_fsio_cs_op& in,
+                                 cls_rgw_fsio_forget_ret* ret = nullptr,
+                                 boost::system::error_code* ec = nullptr)
 {
-  return detail::call(m::fsio_forget, in);
+  return detail::call(m::fsio_forget, in, ret, ec);
 }
 
 [[nodiscard]] inline auto drop_seqs(const cls_rgw_fsio_drop_seqs_op& in)

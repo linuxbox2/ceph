@@ -215,8 +215,12 @@ int RadosFSIOObject::uncount(const DoutPrefixProvider* dpp)
 			<< ":  " << cpp_strerror(-r) << dendl;
       return r;
     }
-    /* a drain's GC entries are the close's step (plan, driver step 7) */
     counted = false;
+    if (ret.drained) {
+      if (int d = drain_count(dpp); d < 0) {
+	return d;
+      }
+    }
   }
   if (inst_hinted) {
     presence_hint(dpp, false, true);
@@ -798,7 +802,7 @@ int RadosFSIOObject::preadv(const struct iovec* iov, int iovcnt, uint64_t ofs,
     return -EBADF;
   }
   const DoutPrefixProvider* dpp = &*ndp;
-  const bool shadow = writing;
+  const bool shadow = writing || reader_on_shadow;
   const FSIOGeometry& g = shadow ? wgeo : rgeo;
   const uint64_t end = shadow ? std::max(wsize, hwm) : g.size();
   uint64_t total = 0;
@@ -1091,45 +1095,378 @@ int RadosFSIOObject::open(const DoutPrefixProvider* dpp, bool writer)
   writing = true;
   binding = Binding::SHADOW;
   if (ret.construct) {
-    return construct(dpp, src, wcs);
+    if (int r = construct(dpp, src, wcs); r < 0) {
+      return abandon(dpp, src);
+    }
   }
   return 0;
 }
 
+int RadosFSIOObject::abandon(const DoutPrefixProvider* dpp, const Source& src)
+{
+  /* §3.4, W15:  what the expirer does for a dead constructor:  every
+   * chunk construction would have cloned, the clones made so far among
+   * them (ENOENT for the rest), and the attribute clone;  construction's
+   * pseudo-manifest is the source's */
+  const uint64_t last = wgeo.locate(dpp, std::max<uint64_t>(wgeo.size(), 1) - 1).index;
+  collect_shadow(dpp, wcs, {cls_rgw_fsio_run{0, last}}, &src.manifest);
+  cls_rgw_fsio_leave_ret ret;
+  int r = leave(dpp, wcs, true, &ret);
+  writing = false;
+  if (r == 0 && !ret.abandoned) {
+    ldpp_dout(dpp, 0) << "ERROR: FSIO:  fsio_leave of the constructing "
+		      << wcs.to_str() << " did not abandon it" << dendl;
+  }
+  ldpp_dout(dpp, 1) << "FSIO:  construction of " << wcs.to_str() << " on "
+		    << head_oid << " failed;  abandoned" << dendl;
+  if (!reading) {
+    uncount(dpp);
+    presence_hint(dpp, false, false);
+    hinted = false;
+  }
+  return -EAGAIN;
+}
+
 int RadosFSIOObject::begin_write(const DoutPrefixProvider* dpp, uint32_t flags)
 {
-  return writing ? 0 : open(dpp, true);
+  if (writing) {
+    return 0;
+  }
+  if (int r = open(dpp, true); r < 0) {
+    return r;
+  }
+  if (!reading || cs == wcs) {
+    return 0;
+  }
+  /* §3.4, fsio_rebind:  its reader follows its own shadow, so the head
+   * knows which chunk set each open reads */
+  cls_rgw_fsio_rebind_ret ret;
+  int r = sequenced(dpp, [&] (neorados::WriteOp& op) {
+    cls_rgw_fsio_rebind_op in;
+    in.caller = h;
+    in.seq = seq + 1;
+    in.from = cs;
+    in.to = wcs;
+    in.readers = 1;
+    op.exec(neorados::cls::rgw_fsio::rebind(in, &ret));
+  });
+  if (r < 0) {
+    ldpp_dout(dpp, 0) << "ERROR: FSIO:  fsio_rebind of " << cs.to_str()
+		      << " to " << wcs.to_str() << ":  " << cpp_strerror(-r)
+		      << dendl;
+    return 0;			// the reader stays where it was
+  }
+  cs = wcs;
+  reader_on_shadow = true;
+  if (ret.drained) {
+    return drain(dpp, *ret.drained);
+  }
+  return 0;
+}
+
+int RadosFSIOObject::leave(const DoutPrefixProvider* dpp,
+			   const cls_rgw_fsio_id& id, bool writer,
+			   cls_rgw_fsio_leave_ret* ret)
+{
+  int r = sequenced(dpp, [&] (neorados::WriteOp& op) {
+    cls_rgw_fsio_leave_op in;
+    in.caller = h;
+    in.seq = seq + 1;
+    in.cs = id;
+    in.writer = writer;
+    op.exec(neorados::cls::rgw_fsio::leave(in, ret));
+  });
+  if (r < 0 && r != -EINVAL) {
+    ldpp_dout(dpp, 0) << "ERROR: FSIO:  fsio_leave as "
+		      << (writer ? "writer" : "reader") << " of " << head_oid
+		      << " by " << h.incarnation << "." << h.handle << ":  "
+		      << cpp_strerror(-r) << dendl;
+  }
+  return r;
+}
+
+int RadosFSIOObject::keeps_hint(const DoutPrefixProvider* dpp, bool* keep)
+{
+  *keep = false;
+  ceph::buffer::list bl;
+  neorados::ReadOp op;
+  op.get_xattr(fmt::format("user.rgw.fsio.m.{:016x}", h.incarnation), &bl,
+	       nullptr);
+  sys::error_code ec;
+  store->get_neorados().execute(neorados::Object{head_oid}, head_ioc,
+				std::move(op), nullptr,
+				ceph::async::use_blocked[ec]);
+  if (ec) {
+    /* no record:  nothing of the incarnation's is left on the head */
+    return (ec == sys::errc::no_such_file_or_directory ||
+	    ec == sys::errc::no_message_available) ? 0
+						   : ceph::from_error_code(ec);
+  }
+  cls_rgw_fsio_opens rec;
+  try {
+    auto it = bl.cbegin();
+    decode(rec, it);
+  } catch (const ceph::buffer::error&) {
+    return -EIO;
+  }
+  /* opens it no longer holds still counted, or its last sequence number
+   * kept by expiry with none counted:  others are taking its state over
+   * while its incarnation is presumed dead */
+  if (auto o = rec.handles.find(h.handle); o != rec.handles.end()) {
+    for (const auto& [id, c] : o->second.chunk_sets) {
+      if ((c.readers && !reading) || (c.writers && !writing)) {
+	*keep = true;
+      }
+    }
+  }
+  if (rec.seqs.count(h.handle)) {
+    *keep = true;
+  }
+  return 0;
+}
+
+int RadosFSIOObject::collect_shadow(const DoutPrefixProvider* dpp,
+				    const cls_rgw_fsio_id& id,
+				    const std::vector<cls_rgw_fsio_run>& extent,
+				    const ceph::buffer::list* given)
+{
+  if (given && given->length()) {
+    return store->getRados()->send_manifest_to_gc(
+      dpp, *given, rgw_obj(info.bucket, key),
+      cls_rgw_fsio_gc_shadow{id, extent}, id.to_str(), null_yield);
+  }
+  /* its pseudo-manifest, on its attribute clone:  the head's data chunk
+   * when the head holds data, else the attributes-only clone (§2.4) */
+  const auto& marker = info.bucket.marker;
+  auto aioc = head_ioc;
+  aioc.set_key(head_oid);
+  ceph::buffer::list pm;
+  sys::error_code ec;
+  for (const char role : {'d', 'a'}) {
+    neorados::ReadOp op;
+    op.get_xattr("user.rgw.fsio.pm", &pm, nullptr);
+    ec.clear();
+    store->get_neorados().execute(
+      neorados::Object{cls_rgw_fsio_clone_name(marker, role, id, head_oid)},
+      aioc, std::move(op), nullptr, ceph::async::use_blocked[ec]);
+    if (!ec) {
+      break;
+    }
+  }
+  if (ec || !pm.length()) {
+    ldpp_dout(dpp, 0) << "ERROR: FSIO:  no pseudo-manifest for "
+		      << id.to_str() << " on " << head_oid << dendl;
+    return -EIO;
+  }
+  return store->getRados()->send_manifest_to_gc(
+    dpp, pm, rgw_obj(info.bucket, key), cls_rgw_fsio_gc_shadow{id, extent},
+    id.to_str(), null_yield);
+}
+
+int RadosFSIOObject::drain(const DoutPrefixProvider* dpp, cls_rgw_fsio_id id)
+{
+  const auto& marker = info.bucket.marker;
+  for (;;) {
+    cls_rgw_fsio_hdr hdr;
+    if (int r = read_header(dpp, &hdr); r < 0) {
+      return r;
+    }
+    const cls_rgw_fsio_chunk_set* e = nullptr;
+    for (const auto& c : hdr.chunk_sets) {
+      if (c.id == id) {
+	e = &c;
+      }
+    }
+    if (e && e->manifest_at == cls_rgw_fsio_manifest_at::CLONE && e->clone) {
+      /* §2.3:  the generation's record, then its leaf clone */
+      const auto leaf = cls_rgw_fsio_clone_name(marker, 'G', *e->clone,
+						 head_oid);
+      auto lioc = head_ioc;
+      lioc.set_key(head_oid);
+      ceph::buffer::list bl;
+      neorados::ReadOp op;
+      op.get_xattr("user.rgw.fsio.gen", &bl, nullptr);
+      sys::error_code ec;
+      store->get_neorados().execute(neorados::Object{leaf}, lioc,
+				    std::move(op), nullptr,
+				    ceph::async::use_blocked[ec]);
+      cls_rgw_fsio_gen gen;
+      if (!ec) {
+	try {
+	  auto it = bl.cbegin();
+	  decode(gen, it);
+	} catch (const ceph::buffer::error&) {
+	  return -EIO;
+	}
+      }
+      rgw_raw_obj raw;
+      store->getRados()->obj_to_raw(info.placement_rule,
+				    rgw_obj(info.bucket, key), &raw);
+      librados::IoCtx ioctx;
+      if (int r = rgw_init_ioctx(dpp, store->getRados()->get_rados_handle(),
+				 raw.pool, ioctx); r < 0) {
+	return r;
+      }
+      ioctx.locator_set_key(head_oid);
+      store->getRados()->fsio_collect_replaced(
+	dpp, ioctx, leaf, rgw_obj(info.bucket, key), gen.manifest,
+	gen.gc_tag, null_yield);
+    } else if (e && e->manifest_at == cls_rgw_fsio_manifest_at::SHADOW &&
+	       e->shadow) {
+      if (int r = collect_shadow(dpp, id, e->shadow->extent); r < 0) {
+	return r;
+      }
+    }
+    /* INSTANCE:  its tail is a live version's (§2.5);  none, nothing */
+    cls_rgw_fsio_forget_ret ret;
+    neorados::WriteOp op;
+    op.exec(neorados::cls::rgw_fsio::forget(cls_rgw_fsio_cs_op{h, id}, &ret));
+    if (int r = exec(head_oid, head_ioc, std::move(op)); r < 0) {
+      ldpp_dout(dpp, 0) << "ERROR: FSIO:  fsio_forget of " << id.to_str()
+			<< " on " << head_oid << ":  " << cpp_strerror(-r)
+			<< dendl;
+      return r;
+    }
+    if (!ret.drained) {
+      return 0;
+    }
+    id = *ret.drained;		// §3.6:  a shared tail's holder, drained now
+  }
+}
+
+int RadosFSIOObject::drain_count(const DoutPrefixProvider* dpp)
+{
+  ceph::buffer::list bl;
+  neorados::ReadOp op;
+  op.get_xattr("user.rgw.fsio.ocnt", &bl, nullptr);
+  sys::error_code ec;
+  store->get_neorados().execute(neorados::Object{inst_oid}, inst_ioc,
+				std::move(op), nullptr,
+				ceph::async::use_blocked[ec]);
+  if (ec) {
+    return 0;			// gone with the version:  nothing to send
+  }
+  cls_rgw_fsio_ocnt oc;
+  try {
+    auto it = bl.cbegin();
+    decode(oc, it);
+  } catch (const ceph::buffer::error&) {
+    return -EIO;
+  }
+  const rgw_obj inst_obj(info.bucket, rgw_obj_key(key.name, inst));
+  rgw_raw_obj raw;
+  store->getRados()->obj_to_raw(info.placement_rule, inst_obj, &raw);
+  for (const auto& d : oc.deferred) {
+    librados::IoCtx ioctx;
+    if (int r = rgw_init_ioctx(dpp, store->getRados()->get_rados_handle(),
+			       raw.pool, ioctx); r < 0) {
+      return r;
+    }
+    ioctx.locator_set_key(inst_oid);
+    store->getRados()->fsio_collect_replaced(
+      dpp, ioctx,
+      cls_rgw_fsio_clone_name(info.bucket.marker, 'G', d.clone, inst_oid),
+      inst_obj, d.manifest, d.gc_tag, null_yield);
+  }
+  /* §3.4:  any failure counts as done */
+  neorados::WriteOp fop;
+  cls_rgw_fsio_ocnt_op in;
+  in.holder = h;
+  fop.exec(neorados::cls::rgw_fsio::ocnt_forget(in));
+  (void)exec(inst_oid, inst_ioc, std::move(fop));
+  return 0;
 }
 
 int RadosFSIOObject::close(const DoutPrefixProvider* dpp, uint32_t flags)
 {
   if (writing) {
-    return -ENOTSUP;		// a writer's last close publishes:  step 8
+    if (int r = end_write(dpp, flags); r < 0) {
+      return r;
+    }
   }
   if (!reading) {
     return 0;
   }
-  cls_rgw_fsio_leave_op in;
-  in.caller = h;
-  in.seq = seq + 1;
-  in.cs = cs;
-  in.writer = false;
-  neorados::WriteOp op;
-  op.exec(neorados::cls::rgw_fsio::leave(in));
-  if (int r = exec(head_oid, head_ioc, std::move(op)); r < 0) {
-    ldpp_dout(dpp, 0) << "ERROR: FSIO:  fsio_leave as reader of " << head_oid
-		      << " by " << h.incarnation << "." << h.handle << ":  "
-		      << cpp_strerror(-r) << dendl;
+  cls_rgw_fsio_leave_ret ret;
+  int r = leave(dpp, cs, false, &ret);
+  if (r < 0 && r != -EINVAL) {
     return r;
   }
-  seq = in.seq;
   reading = false;
+  const bool lost = r == -EINVAL || ret.already_applied;
+  if (r == 0 && ret.drained) {
+    if (int d = drain(dpp, *ret.drained); d < 0) {
+      return d;
+    }
+  }
   /* §2.5:  off the instance's count once it holds no open bound to it */
-  if (int r = uncount(dpp); r < 0) {
-    return r;
+  if (!writing) {
+    if (int u = uncount(dpp); u < 0) {
+      return u;
+    }
+  }
+  bool keep = false;
+  if (lost) {
+    /* §3, Z22:  any work the head hands back first, then the hint goes
+     * only if the head holds nothing of this handle's */
+    cls_rgw_fsio_hdr hdr;
+    if (read_header(dpp, &hdr) == 0) {
+      for (const auto& c : hdr.chunk_sets) {
+	if (c.drained) {
+	  drain(dpp, c.id);
+	}
+      }
+    }
+    if (int k = keeps_hint(dpp, &keep); k < 0) {
+      return k;
+    }
+  }
+  if (keep || writing) {
+    return 0;
   }
   hinted = false;
   return presence_hint(dpp, false, false);
+}
+
+int RadosFSIOObject::end_write(const DoutPrefixProvider* dpp, uint32_t flags)
+{
+  if (!writing) {
+    return 0;
+  }
+  if (dirty || unsure) {
+    if (int r = report_hint(dpp); r < 0) {
+      return r;
+    }
+  }
+  cls_rgw_fsio_leave_ret ret;
+  if (int r = leave(dpp, wcs, true, &ret); r < 0) {
+    return r;
+  }
+  if (ret.publishing) {
+    /* §3.4:  the last writer froze the shadow;  the publish is the
+     * driver's step 8.  Until it lands, released as a publisher that
+     * cannot proceed releases:  the shadow ready again, its open kept */
+    neorados::WriteOp op;
+    op.exec(neorados::cls::rgw_fsio::publish_release(
+	      cls_rgw_fsio_cs_op{h, wcs}));
+    if (int r = exec(head_oid, head_ioc, std::move(op)); r < 0) {
+      ldpp_dout(dpp, 0) << "ERROR: FSIO:  fsio_publish_release of "
+			<< wcs.to_str() << ":  " << cpp_strerror(-r) << dendl;
+    }
+    return -ENOTSUP;
+  }
+  writing = false;
+  if (ret.drained) {
+    if (int d = drain(dpp, *ret.drained); d < 0) {
+      return d;
+    }
+  }
+  if (!reading) {
+    uncount(dpp);
+    hinted = false;
+    return presence_hint(dpp, false, false);
+  }
+  return 0;
 }
 
 Object::FSIOResult RadosObject::get_fsio_handle(const DoutPrefixProvider* dpp,

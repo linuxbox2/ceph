@@ -55,7 +55,10 @@ public:
   int commit(const DoutPrefixProvider* dpp, uint32_t flags) override { return 0; }
   /* §3.1:  a reader's handle joins as a writer too */
   int begin_write(const DoutPrefixProvider* dpp, uint32_t flags) override;
-  int end_write(const DoutPrefixProvider* dpp, uint32_t flags) override { return -ENOTSUP; }
+  /* §3.4:  the hint reported, then fsio_leave as writer;  the last
+   * writer's freezes the shadow, which the publish (plan, driver step 8)
+   * completes;  until it lands the freeze is released and -ENOTSUP */
+  int end_write(const DoutPrefixProvider* dpp, uint32_t flags) override;
   /* §3.4:  fsio_leave, the instance's count, then the presence hints go;
    * the lost-reply rule and the drain's GC chain are the close's step
    * (plan, driver step 7) */
@@ -163,6 +166,26 @@ private:
   int read_piece(const DoutPrefixProvider* dpp, const FSIOChunk& c,
 		 bool shadow, uint64_t off, uint64_t len,
 		 ceph::buffer::list* bl);
+  /* §3.4 steps 2-3:  a drained chunk set's GC entry, then fsio_forget,
+   * and the same for any holder that hands back */
+  int drain(const DoutPrefixProvider* dpp, cls_rgw_fsio_id id);
+  /* §2.5:  a drained instance count's deferred contents, then
+   * fsio_ocnt_forget, any failure of which counts as done */
+  int drain_count(const DoutPrefixProvider* dpp);
+  /* §4.1, W15:  a shadow's chunks and attribute clone to GC */
+  int collect_shadow(const DoutPrefixProvider* dpp, const cls_rgw_fsio_id& id,
+		     const std::vector<cls_rgw_fsio_run>& extent,
+		     const ceph::buffer::list* pm = nullptr);
+  /* §3.4, W15:  a construction that failed:  its clones to GC, then
+   * fsio_leave as writer, which abandons the shadow */
+  int abandon(const DoutPrefixProvider* dpp, const Source& src);
+  /* §3, Z22:  after a lost reply, whether the head still holds this
+   * handle's opens it gave up, or its last sequence number alone */
+  int keeps_hint(const DoutPrefixProvider* dpp, bool* keep);
+  /* fsio_leave of cs in a role, through sequenced() */
+  int leave(const DoutPrefixProvider* dpp, const cls_rgw_fsio_id& cs,
+	    bool writer, cls_rgw_fsio_leave_ret* ret);
+
   /* the head's FSIO header */
   int read_header(const DoutPrefixProvider* dpp, cls_rgw_fsio_hdr* hdr);
   /* a sequenced call on the head:  the op exec, then seq advanced;
@@ -219,6 +242,7 @@ private:
   bool counted = false;
   bool reading = false;
   bool writing = false;
+  bool reader_on_shadow = false;	// its reader followed its shadow (rebind)
 };
 
 } // namespace rgw::sal
