@@ -19,6 +19,9 @@ inline constexpr std::string_view notification_v2 = "notification_v2";
 // FSIO, POSIX-style positional I/O on RADOS heads;  enabled only once
 // every gateway is upgraded (FSIO_RADOS_DESIGN.md §7, X9)
 inline constexpr std::string_view fsio = "fsio";
+// GC entries holding a manifest, not its expanded chain;  set once every
+// OSD can list them (FSIO_RADOS_DESIGN.md §8)
+inline constexpr std::string_view gc_manifest = "gc-manifest";
 
 // static list of features supported by this release
 inline constexpr std::initializer_list<std::string_view> supported = {
@@ -26,6 +29,7 @@ inline constexpr std::initializer_list<std::string_view> supported = {
     compress_encrypted,
     notification_v2,
     fsio,
+    gc_manifest,
 };
 
 inline constexpr bool supports(std::string_view feature) {

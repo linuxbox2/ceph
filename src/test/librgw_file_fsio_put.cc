@@ -233,6 +233,17 @@ std::set<std::string> in_gc()
 	for (const auto& o : e.chain.objs) {
 	  s.insert(o.key.name);
 	}
+	/* FSIO_RADOS_DESIGN.md §8:  a manifest-form entry (the gc-manifest
+	 * zone feature) names its objects through its manifest, expanded as
+	 * the GC worker expands it */
+	if (e.is_manifest()) {
+	  const NoDoutPrefix ndp(g_ceph_context, ceph_subsys_rgw);
+	  static_cast<rgw::sal::RadosStore*>(rgw::g_rgwlib->get_driver())->
+	    getRados()->expand_gc_entry(&ndp, e, [&s] (const rgw_raw_obj& o) {
+	      s.insert(o.oid);
+	      return 0;
+	    });
+	}
       }
       marker = next;
     }

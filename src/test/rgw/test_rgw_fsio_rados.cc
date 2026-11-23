@@ -16,6 +16,7 @@
 #include <fmt/format.h>
 
 #include "cls/rgw/cls_rgw_fsio_ops.h"
+#include "cls/rgw/cls_rgw_types.h"
 #include "common/async/blocked_completion.h"
 #include "common/async/context_pool.h"
 #include "common/common_init.h"
@@ -75,7 +76,8 @@ public:
 					false, false, false, false, false,
 					false, null_yield, cfgstore.get(),
 					true /* use_cache */,
-					false /* use_gc */);
+					true /* use_gc:  no thread, the tests
+						run GC passes */);
     ASSERT_NE(nullptr, driver);
   }
 
@@ -1149,6 +1151,298 @@ TEST_F(FSIORados, TruncateHeardTwiceRebases)
   EXPECT_EQ(6 * MiB + 1, size_hint_of("obj", id));
 }
 
+/* the driver's step 6:  manifest-form GC entries (FSIO design §8).  The
+ * in-process store reads the zonegroup once, so the tests stand in for
+ * the gc-manifest feature's answer (gc_manifest_override());  both forms
+ * and the switch between them run in one bring-up */
+class FSIORadosGC : public FSIORados {
+protected:
+  RGWRados* rados() {
+    return static_cast<rgw::sal::RadosStore*>(env->driver)->getRados();
+  }
+  int64_t min_wait = 0;		// rgw_gc_obj_min_wait is an int option
+  void SetUp() override {
+    FSIORados::SetUp();
+    min_wait = g_conf().get_val<int64_t>("rgw_gc_obj_min_wait");
+    g_conf().set_val_or_die("rgw_gc_obj_min_wait", "0");
+  }
+  void TearDown() override {
+    rados()->gc_manifest_override(std::nullopt);
+    g_conf().set_val_or_die("rgw_gc_obj_min_wait", std::to_string(min_wait));
+    FSIORados::TearDown();
+  }
+  /* every GC entry carrying tag, in every shard */
+  std::vector<cls_rgw_gc_obj_info> gc_entries(const std::string& tag) {
+    std::vector<cls_rgw_gc_obj_info> v;
+    int index = 0;
+    std::string marker;
+    bool truncated = false, processing_queue = false;
+    do {
+      std::list<cls_rgw_gc_obj_info> result;
+      EXPECT_EQ(0, rados()->list_gc_objs(index, marker, 1000, false, result,
+					 truncated, processing_queue));
+      for (auto& i : result) {
+	if (i.tag == tag) {
+	  v.push_back(std::move(i));
+	}
+      }
+    } while (truncated);
+    return v;
+  }
+  /* the head's manifest, its rgw_obj, and the tag its tail is collected by */
+  struct Head {
+    ceph::buffer::list manifest;
+    rgw_obj obj;
+    std::string tag;
+  };
+  Head head_info(const std::string& key) {
+    Head hd;
+    const auto raw = head_of(key);
+    ceph::buffer::list idt, tailt;
+    neorados::ReadOp op;
+    op.get_xattr(RGW_ATTR_MANIFEST, &hd.manifest, nullptr);
+    op.get_xattr(RGW_ATTR_ID_TAG, &idt, nullptr);
+    op.get_xattr(RGW_ATTR_TAIL_TAG, &tailt, nullptr);
+    neo().execute(neorados::Object{raw.oid}, ioc_of(raw.pool), std::move(op),
+		  nullptr, ceph::async::use_blocked);
+    hd.obj = rgw_obj(bucket->get_key(), rgw_obj_key(key));
+    hd.tag = (tailt.length() ? tailt : idt).to_str();
+    return hd;
+  }
+  std::vector<rgw_raw_obj> tail_of(const std::string& key) {
+    auto c = chunks_of(key);
+    return {c.begin() + 1, c.end()};
+  }
+  int remove(const std::string& key) {
+    auto obj = bucket->get_object(rgw_obj_key(key));
+    auto del = obj->get_delete_op();
+    del->params.bucket_owner = bucket->get_owner();
+    return del->delete_obj(env->dpp.get(), null_yield, 0);
+  }
+
+  /* the overwrite or DELETE of a two-stripe object, and its old tail's
+   * GC entries in the form the feature picks */
+  void old_tail_collected(bool on, bool overwrite) {
+    rados()->gc_manifest_override(on);
+    ASSERT_EQ(0, put("obj", pattern(9 * MiB, 1)));
+    const auto hd = head_info("obj");
+    const auto old_tail = tail_of("obj");
+    ASSERT_EQ(2u, old_tail.size());
+    std::vector<rgw_raw_obj> new_tail;
+    if (overwrite) {
+      ASSERT_EQ(0, put("obj", pattern(9 * MiB, 2)));
+      new_tail = tail_of("obj");
+    } else {
+      ASSERT_EQ(0, remove("obj"));
+    }
+    auto es = gc_entries(hd.tag);
+    ASSERT_FALSE(es.empty()) << "the old tail was not sent to GC";
+    if (on) {
+      ASSERT_EQ(1u, es.size());
+      EXPECT_TRUE(es[0].is_manifest());
+      EXPECT_TRUE(es[0].chain.objs.empty());
+    } else {
+      size_t objs = 0;
+      for (const auto& e : es) {
+        EXPECT_FALSE(e.is_manifest());
+        objs += e.chain.objs.size();
+      }
+      EXPECT_EQ(old_tail.size(), objs);
+    }
+    ASSERT_EQ(0, rados()->process_gc(false, null_yield));
+    for (const auto& o : old_tail) {
+      EXPECT_FALSE(bytes_of(o)) << o.oid;
+    }
+    for (const auto& o : new_tail) {
+      EXPECT_TRUE(bytes_of(o)) << "the new tail was collected:  " << o.oid;
+    }
+    EXPECT_TRUE(gc_entries(hd.tag).empty());
+  }
+};
+
+
+/* with the feature off, the objects a manifest names go to GC as today's
+ * expanded chains, and GC deletes them */
+TEST_F(FSIORadosGC, ExpandedWhenTheFeatureIsOff)
+{
+  ASSERT_EQ(0, put("obj", pattern(9 * MiB, 1)));
+  const auto hd = head_info("obj");
+  const auto tail = tail_of("obj");
+  ASSERT_EQ(2u, tail.size());
+  rados()->gc_manifest_override(false);
+  ASSERT_EQ(0, rados()->send_manifest_to_gc(env->dpp.get(), hd.manifest,
+					    hd.obj, std::nullopt, hd.tag,
+					    null_yield));
+  auto es = gc_entries(hd.tag);
+  ASSERT_FALSE(es.empty());
+  size_t objs = 0;
+  for (const auto& e : es) {
+    EXPECT_FALSE(e.is_manifest());
+    objs += e.chain.objs.size();
+  }
+  EXPECT_EQ(tail.size(), objs);
+  ASSERT_EQ(0, rados()->process_gc(false, null_yield));
+  for (const auto& t : tail) {
+    EXPECT_FALSE(bytes_of(t)) << t.oid;
+  }
+  EXPECT_TRUE(gc_entries(hd.tag).empty());
+}
+
+/* with the feature on, one manifest-form entry;  GC expands it while it
+ * deletes:  an FSIO shadow's chunks over its extent, past the manifest's
+ * end too, and its attribute clone, the published content untouched */
+TEST_F(FSIORadosGC, ManifestEntryWhenTheFeatureIsOn)
+{
+  ASSERT_EQ(0, put("obj", pattern(9 * MiB, 1)));
+  auto w = open("obj", true);
+  ASSERT_TRUE(w);
+  auto* hdl = rados_fsio(w);
+  ASSERT_EQ(0, write(w, 1000 * 4 * MiB, {"f"}));
+  const auto id = hdl->writing_to();
+  const std::vector<rgw_raw_obj> shadow{
+    hdl->shadow_chunk(0), hdl->shadow_chunk(4 * MiB),
+    hdl->shadow_chunk(8 * MiB), hdl->shadow_chunk(1000 * 4 * MiB)};
+  for (const auto& c : shadow) {
+    ASSERT_TRUE(bytes_of(c)) << c.oid;
+  }
+  const auto hd = head_info("obj");
+  cls_rgw_fsio_gc_shadow sh{id, extent_of("obj", id)};
+  rados()->gc_manifest_override(true);
+  const std::string tag = "fsio-gc-test";
+  ASSERT_EQ(0, rados()->send_manifest_to_gc(env->dpp.get(), hd.manifest,
+					    hd.obj, sh, tag, null_yield));
+  auto es = gc_entries(tag);
+  ASSERT_EQ(1u, es.size());
+  EXPECT_TRUE(es[0].is_manifest());
+  EXPECT_TRUE(es[0].chain.objs.empty());
+  ASSERT_EQ(0, rados()->process_gc(false, null_yield));
+  for (const auto& c : shadow) {
+    EXPECT_FALSE(bytes_of(c)) << c.oid;
+  }
+  for (const auto& t : tail_of("obj")) {
+    EXPECT_TRUE(bytes_of(t)) << "a published stripe was collected:  " << t.oid;
+  }
+  EXPECT_TRUE(gc_entries(tag).empty());
+}
+
+/* §8:  what a manifest-form entry gains:  a 1 TiB object's tail is one
+ * small entry, where today's form lists every stripe.  Measured on the
+ * encoding and the expansion, not sent:  collecting 262,143 absent
+ * stripes would hold the GC queue for every later test */
+TEST_F(FSIORadosGC, LargeManifestEntryStaysSmall)
+{
+  ASSERT_EQ(0, put("obj", pattern(1 * MiB, 1)));
+  const auto hd = head_info("obj");
+  RGWObjManifest m;
+  RGWObjManifest::generator gen;
+  const uint64_t size = uint64_t(1) << 40;
+  m.set_trivial_rule(4 * MiB, 4 * MiB);
+  ASSERT_EQ(0, gen.create_begin(g_ceph_context, &m,
+				bucket->get_info().placement_rule, nullptr,
+				bucket->get_key(), hd.obj));
+  for (uint64_t ofs = 0; ofs < size; ) {
+    ofs = std::min(ofs + gen.cur_stripe_max_size(), size);
+    gen.create_next(ofs);
+  }
+  cls_rgw_gc_obj_info info;
+  info.tag = "large";
+  encode(m, info.manifest);
+  encode(hd.obj, info.head);
+  ceph::buffer::list bl;
+  encode(info, bl);
+  EXPECT_LT(bl.length(), 4096u);
+  uint64_t n = 0;
+  ASSERT_EQ(0, rados()->expand_gc_entry(env->dpp.get(), info,
+					[&n] (const rgw_raw_obj&) {
+					  ++n; return 0; }));
+  EXPECT_EQ(size / (4 * MiB) - 1, n);
+}
+
+/* §8:  with the feature off, no version 2 entry is ever written:  an
+ * older OSD would fail to list it */
+TEST_F(FSIORadosGC, NoVersion2WhileOff)
+{
+  ASSERT_EQ(0, put("obj", pattern(9 * MiB, 1)));
+  auto w = open("obj", true);
+  ASSERT_TRUE(w);
+  const auto id = rados_fsio(w)->writing_to();
+  const auto hd = head_info("obj");
+  rados()->gc_manifest_override(false);
+  const std::string tag = "fsio-gc-off";
+  ASSERT_EQ(0, rados()->send_manifest_to_gc(
+	      env->dpp.get(), hd.manifest, hd.obj,
+	      cls_rgw_fsio_gc_shadow{id, extent_of("obj", id)}, tag,
+	      null_yield));
+  auto es = gc_entries(tag);
+  ASSERT_FALSE(es.empty());
+  for (const auto& e : es) {
+    EXPECT_FALSE(e.is_manifest());
+    ceph::buffer::list bl;
+    encode(e, bl);
+    EXPECT_EQ(1, bl[0]) << "encoded as version " << int(bl[0]);
+  }
+  ASSERT_EQ(0, rados()->process_gc(false, null_yield));
+}
+
+/* entries of both forms queued across the feature's enabling, all
+ * collected by one pass */
+TEST_F(FSIORadosGC, BothFormsAcrossEnabling)
+{
+  ASSERT_EQ(0, put("a", pattern(9 * MiB, 1)));
+  ASSERT_EQ(0, put("b", pattern(9 * MiB, 2)));
+  const auto ha = head_info("a"), hb = head_info("b");
+  const auto ta = tail_of("a"), tb = tail_of("b");
+  rados()->gc_manifest_override(false);
+  ASSERT_EQ(0, rados()->send_manifest_to_gc(env->dpp.get(), ha.manifest,
+					    ha.obj, std::nullopt, ha.tag,
+					    null_yield));
+  rados()->gc_manifest_override(true);
+  ASSERT_EQ(0, rados()->send_manifest_to_gc(env->dpp.get(), hb.manifest,
+					    hb.obj, std::nullopt, hb.tag,
+					    null_yield));
+  ASSERT_FALSE(gc_entries(ha.tag).at(0).is_manifest());
+  ASSERT_TRUE(gc_entries(hb.tag).at(0).is_manifest());
+  ASSERT_EQ(0, rados()->process_gc(false, null_yield));
+  for (const auto& t : ta) {
+    EXPECT_FALSE(bytes_of(t)) << t.oid;
+  }
+  for (const auto& t : tb) {
+    EXPECT_FALSE(bytes_of(t)) << t.oid;
+  }
+  EXPECT_TRUE(gc_entries(ha.tag).empty());
+  EXPECT_TRUE(gc_entries(hb.tag).empty());
+}
+
+/* RGW's own overwrite and DELETE send the replaced tail through the same
+ * path:  one manifest-form entry with the feature on, today's expanded
+ * chains with it off;  a GC pass collects the old tail and leaves the new */
+TEST_F(FSIORadosGC, OverwriteSendsOneManifestEntry)
+{
+  old_tail_collected(true, true);
+}
+
+TEST_F(FSIORadosGC, OverwriteExpandsWhileOff)
+{
+  old_tail_collected(false, true);
+}
+
+TEST_F(FSIORadosGC, DeleteSendsOneManifestEntry)
+{
+  old_tail_collected(true, false);
+}
+
+TEST_F(FSIORadosGC, DeleteExpandsWhileOff)
+{
+  old_tail_collected(false, false);
+}
+
+/* with no override, the store reads the feature from the zonegroup, which
+ * fsio_validate.rs's rados-fsio step enables */
+TEST_F(FSIORadosGC, FeatureFollowsTheZonegroup)
+{
+  EXPECT_TRUE(rados()->gc_manifest_enabled());
+}
+
 /* the driver's step 3, element 4:  a join that must wait (FSIO design
  * §3.1 step 5, §4.1, W13).  The test holds a shadow constructing itself:
  * a raw fsio_join as writer under a handle number of its own, its
@@ -1504,7 +1798,7 @@ TEST_F(FSIORadosVersioned, VersionedReaderReadsTheInstance)
 
 /* §3.1 step 4, first case:  a reader joining with the instance a publish
  * in flight has linked binds that publishing shadow, and reads it through
- * the instance.  Written with the publish (the driver's step 7):  a
+ * the instance.  Written with the publish (the driver's step 8):  a
  * versioned publish in flight is its precondition.  It will check that
  * the reader counted itself on the linked instance, that its binding is
  * the publishing shadow, not the OLH's previous content, and that once

@@ -215,7 +215,7 @@ int RadosFSIOObject::uncount(const DoutPrefixProvider* dpp)
 			<< ":  " << cpp_strerror(-r) << dendl;
       return r;
     }
-    /* a drain's GC entries are the close's step (plan, driver step 6) */
+    /* a drain's GC entries are the close's step (plan, driver step 7) */
     counted = false;
   }
   if (inst_hinted) {
@@ -1104,7 +1104,7 @@ int RadosFSIOObject::begin_write(const DoutPrefixProvider* dpp, uint32_t flags)
 int RadosFSIOObject::close(const DoutPrefixProvider* dpp, uint32_t flags)
 {
   if (writing) {
-    return -ENOTSUP;		// a writer's last close publishes:  step 7
+    return -ENOTSUP;		// a writer's last close publishes:  step 8
   }
   if (!reading) {
     return 0;

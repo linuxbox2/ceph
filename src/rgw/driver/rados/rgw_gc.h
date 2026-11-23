@@ -52,6 +52,10 @@ public:
   std::vector<bool> transitioned_objects_cache;
   int get_max_objs() const { return max_objs; }
   std::tuple<int, std::optional<cls_rgw_obj_chain>> send_split_chain(const cls_rgw_obj_chain& chain, const std::string& tag, optional_yield y);
+  /* FSIO_RADOS_DESIGN.md §8:  one manifest-form entry on the GC queue;
+   * -ECANCELED or -EPERM where the shard is still the legacy omap, which
+   * takes only an expanded chain */
+  int send_manifest(const cls_rgw_gc_obj_info& info, optional_yield y);
 
   int remove(int index, const std::vector<std::string>& tags, librados::AioCompletion **pc, optional_yield y);
   int remove(int index, int num_entries, optional_yield y);

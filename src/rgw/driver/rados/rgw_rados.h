@@ -18,6 +18,7 @@
 #include "common/async/context_pool.h"
 #include "rgw_common.h"
 #include "cls/rgw/cls_rgw_types.h"
+#include "cls/rgw/cls_rgw_fsio_types.h"
 #include "cls/version/cls_version_types.h"
 #include "cls/log/cls_log_types.h"
 #include "cls/timeindex/cls_timeindex_types.h"
@@ -1817,6 +1818,24 @@ public:
 
   void update_gc_chain(const DoutPrefixProvider *dpp, rgw_obj head_obj, RGWObjManifest& manifest, cls_rgw_obj_chain *chain);
   std::tuple<int, std::optional<cls_rgw_obj_chain>> send_chain_to_gc(cls_rgw_obj_chain& chain, const std::string& tag, optional_yield y);
+  /* FSIO_RADOS_DESIGN.md §8:  what a manifest names, sent to GC:  one
+   * manifest-form entry where the gc-manifest zone feature is set and the
+   * shard is the queue;  otherwise the same objects, expanded, as
+   * send_chain_to_gc().  fsio, an FSIO shadow's id and extent, collects
+   * its chunks and attribute clone */
+  int send_manifest_to_gc(const DoutPrefixProvider *dpp,
+                          const ceph::buffer::list& manifest,
+                          const rgw_obj& head,
+                          const std::optional<cls_rgw_fsio_gc_shadow>& fsio,
+                          const std::string& tag, optional_yield y);
+  /* the gc-manifest zone feature;  a test may stand in for the
+   * zonegroup's answer, which the store reads once at bring-up */
+  bool gc_manifest_enabled() const;
+  /* the objects a manifest-form GC entry names (RGWGC::expand()) */
+  int expand_gc_entry(const DoutPrefixProvider *dpp,
+                      const cls_rgw_gc_obj_info& info,
+                      const std::function<int(const rgw_raw_obj&)>& f);
+  void gc_manifest_override(std::optional<bool> on) { gc_manifest_for_test = on; }
   void delete_objs_inline(const DoutPrefixProvider *dpp, cls_rgw_obj_chain& chain,
                           const std::string& tag, optional_yield y);
   int gc_operate(const DoutPrefixProvider *dpp, std::string& oid, librados::ObjectWriteOperation&& op, optional_yield y);
@@ -1884,6 +1903,7 @@ public:
   std::shared_ptr<RGWFSIOWatch> fsio_watch;
   /* §2.2, Z4:  each FSIO view of an object a handle of its own */
   std::atomic<uint64_t> fsio_next_handle{1};
+  std::optional<bool> gc_manifest_for_test;
   /* §2.7:  the FSIO open hints' shards, in the log pool */
   neorados::IOContext& fsio_hint_ioc() { return log_pool_neo_ctx; }
 

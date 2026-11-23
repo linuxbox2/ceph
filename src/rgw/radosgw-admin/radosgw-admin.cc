@@ -9671,6 +9671,23 @@ next:
 	for (const auto& obj : info.chain.objs) {
           encode_json("obj", obj, formatter.get());
 	}
+	if (info.is_manifest()) {
+	  /* FSIO_RADOS_DESIGN.md §8:  a manifest-form entry's objects, as
+	   * the GC worker expands them, so rgw-orphan-list sees them too */
+	  int r = static_cast<rgw::sal::RadosStore*>(driver)->getRados()->
+	    expand_gc_entry(dpp(), info, [&] (const rgw_raw_obj& o) {
+	      cls_rgw_obj obj;
+	      obj.pool = o.pool.to_str();
+	      obj.key = cls_rgw_obj_key(o.oid);
+	      obj.loc = o.loc;
+	      encode_json("obj", obj, formatter.get());
+	      return 0;
+	    });
+	  if (r < 0) {
+	    cerr << "ERROR: failed to expand GC entry " << info.tag << ": "
+		 << cpp_strerror(-r) << std::endl;
+	  }
+	}
 	formatter->close_section(); // objs
 	formatter->close_section(); // obj_chain
 	formatter->flush(cout);

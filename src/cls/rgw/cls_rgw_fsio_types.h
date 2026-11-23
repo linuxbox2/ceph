@@ -507,6 +507,28 @@ struct cls_rgw_fsio_hint {
 };
 WRITE_CLASS_ENCODER(cls_rgw_fsio_hint)
 
+/* FSIO_RADOS_DESIGN.md §8:  the FSIO part of a manifest-form GC entry,
+ * opaque to cls_rgw_gc:  the shadow whose chunks f(anchor, id) and
+ * attribute clone it collects, over its reserved runs */
+struct cls_rgw_fsio_gc_shadow {
+  cls_rgw_fsio_id id;
+  std::vector<cls_rgw_fsio_run> extent;
+
+  void encode(ceph::buffer::list& bl) const {
+    ENCODE_START(1, 1, bl);
+    encode(id, bl);
+    encode(extent, bl);
+    ENCODE_FINISH(bl);
+  }
+  void decode(ceph::buffer::list::const_iterator& bl) {
+    DECODE_START(1, bl);
+    decode(id, bl);
+    decode(extent, bl);
+    DECODE_FINISH(bl);
+  }
+};
+WRITE_CLASS_ENCODER(cls_rgw_fsio_gc_shadow)
+
 /* §2.7, E2:  a clone of a head (or instance head) lives after the
  * bucket's heads, <marker>~fsio_<role><id>_<key part>, the key part being
  * the head's oid after <marker>_;  the class and RGW name clones by it */

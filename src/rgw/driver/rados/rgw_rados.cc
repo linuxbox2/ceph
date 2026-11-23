@@ -56,6 +56,7 @@
 
 #include "neorados/cls/version.h"
 #include "neorados/cls/rgw_fsio.h"
+#include "rgw_fsio_geometry.h"
 #include "rgw_fsio_watch.h"
 #include "rgw_fsio_hints.h"
 
@@ -6536,17 +6537,8 @@ int RGWRados::fsio_collect_replaced(const DoutPrefixProvider *dpp,
                         << ":  undecodable manifest: " << e.what() << dendl;
       return -EIO;
     }
-    cls_rgw_obj_chain chain;
-    update_gc_chain(dpp, head_obj, manifest, &chain);
-    if (!chain.empty()) {
-      if (gc == nullptr) {
-        delete_objs_inline(dpp, chain, tag, y);
-      } else {
-        auto [r, left] = gc->send_split_chain(chain, tag, y);
-        if (r < 0 && left) {
-          delete_objs_inline(dpp, *left, tag, y);
-        }
-      }
+    if (manifest.has_tail()) {
+      send_manifest_to_gc(dpp, manifest_bl, head_obj, std::nullopt, tag, y);
     }
   }
   librados::ObjectWriteOperation op;
@@ -7210,25 +7202,17 @@ int RGWRados::Object::complete_atomic_modification(const DoutPrefixProvider *dpp
   if ((!manifest) || keep_tail)
     return 0;
 
-  cls_rgw_obj_chain chain;
-  store->update_gc_chain(dpp, obj, *manifest, &chain);
-
-  if (chain.empty()) {
+  if (!manifest->has_tail()) {
     return 0;
   }
 
+  /* FSIO_RADOS_DESIGN.md §8:  one manifest-form GC entry where the
+   * gc-manifest zone feature is set, else the expanded chain as before;
+   * inline deletion when GC isn't initialised or a send fails */
   string tag = (state->tail_tag.length() > 0 ? state->tail_tag.to_str() : state->obj_tag.to_str());
-  if (store->gc == nullptr) {
-    ldpp_dout(dpp, 0) << "deleting objects inline since gc isn't initialized" << dendl;
-    //Delete objects inline just in case gc hasn't been initialised, prevents crashes
-    store->delete_objs_inline(dpp, chain, tag, y);
-  } else {
-    auto [ret, leftover_chain] = store->gc->send_split_chain(chain, tag, y); // do it synchronously
-    if (ret < 0 && leftover_chain) {
-      //Delete objects inline if send chain to gc fails
-      store->delete_objs_inline(dpp, *leftover_chain, tag, y);
-    }
-  }
+  bufferlist manifest_bl;
+  encode(*manifest, manifest_bl);
+  store->send_manifest_to_gc(dpp, manifest_bl, obj, std::nullopt, tag, y);
   return 0;
 }
 
@@ -7253,6 +7237,138 @@ std::tuple<int, std::optional<cls_rgw_obj_chain>> RGWRados::send_chain_to_gc(cls
   }
 
   return gc->send_split_chain(chain, tag, y);
+}
+
+int RGWRados::expand_gc_entry(const DoutPrefixProvider *dpp,
+                              const cls_rgw_gc_obj_info& info,
+                              const std::function<int(const rgw_raw_obj&)>& f)
+{
+  RGWObjManifest m;
+  rgw_obj head;
+  try {
+    auto mi = info.manifest.cbegin();
+    decode(m, mi);
+    auto hi = info.head.cbegin();
+    decode(head, hi);
+  } catch (const buffer::error&) {
+    ldpp_dout(dpp, 0) << "ERROR: expand_gc_entry - undecodable entry, tag="
+		      << info.tag << dendl;
+    return -EIO;
+  }
+  rgw_raw_obj raw_head;
+  obj_to_raw(m.get_head_placement_rule(), head, &raw_head);
+  if (!info.fsio.length()) {
+    /* as update_gc_chain() */
+    for (auto it = m.obj_begin(dpp); it != m.obj_end(dpp); ++it) {
+      const rgw_raw_obj obj = it.get_location().get_raw_obj(this);
+      if (obj == raw_head) {
+	continue;
+      }
+      if (int r = f(obj); r < 0) {
+	return r;
+      }
+    }
+    return 0;
+  }
+  /* §8:  an FSIO shadow:  every index in its extent, past the manifest's
+   * end by the last rule's stripes, named f(anchor, id);  and its
+   * attribute clone, which is chunk 0 when the head holds data */
+  cls_rgw_fsio_gc_shadow sh;
+  try {
+    auto si = info.fsio.cbegin();
+    decode(sh, si);
+  } catch (const buffer::error&) {
+    return -EIO;
+  }
+  rgw::sal::FSIOGeometry g;
+  const auto& zone = *svc.zone;
+  if (int r = rgw::sal::FSIOGeometry::make(dpp, info.manifest,
+					   zone.get_zonegroup(),
+					   zone.get_zone_params(), &g); r < 0) {
+    return r;
+  }
+  const auto& marker = head.bucket.marker;
+  uint64_t last = 0;
+  for (const auto& run : sh.extent) {
+    last = std::max(last, run.last);
+  }
+  for (rgw::sal::FSIOChunk c = g.locate(dpp, 0); ;
+       c = g.locate(dpp, c.ofs + c.capacity)) {
+    bool in = false;
+    for (const auto& run : sh.extent) {
+      in = in || (run.first <= c.index && c.index <= run.last);
+    }
+    if (in) {
+      if (int r = f(rgw::sal::FSIOGeometry::named(c, marker, sh.id)); r < 0) {
+	return r;
+      }
+    }
+    if (c.index >= last) {
+      break;
+    }
+  }
+  if (m.get_max_head_size() == 0) {
+    rgw_raw_obj a = raw_head;
+    a.oid = cls_rgw_fsio_clone_name(marker, 'a', sh.id, raw_head.oid);
+    a.loc = raw_head.loc.empty() ? raw_head.oid : raw_head.loc;
+    return f(a);
+  }
+  return 0;
+}
+
+bool RGWRados::gc_manifest_enabled() const
+{
+  if (gc_manifest_for_test) {
+    return *gc_manifest_for_test;
+  }
+  return svc.zone->get_zonegroup().supports(rgw::zone_features::gc_manifest);
+}
+
+int RGWRados::send_manifest_to_gc(const DoutPrefixProvider *dpp,
+                                  const bufferlist& manifest,
+                                  const rgw_obj& head,
+                                  const std::optional<cls_rgw_fsio_gc_shadow>& fsio,
+                                  const string& tag, optional_yield y)
+{
+  cls_rgw_gc_obj_info info;
+  info.tag = tag;
+  info.manifest = manifest;
+  encode(head, info.head);
+  if (fsio) {
+    encode(*fsio, info.fsio);
+  }
+  if (gc && gc_manifest_enabled()) {
+    /* a legacy omap shard (-ECANCELED, -EPERM) takes only the expanded
+     * form;  any other failure falls back to it too, and from it to
+     * deleting inline, as every chain's send does */
+    int r = gc->send_manifest(info, y);
+    if (r == 0) {
+      return 0;
+    }
+    if (r != -ECANCELED && r != -EPERM) {
+      ldpp_dout(dpp, 0) << "WARNING: manifest-form GC entry " << tag
+                        << " not sent: " << cpp_strerror(-r)
+                        << ";  sending it expanded" << dendl;
+    }
+  }
+  /* the expanded form:  a zone without the feature, or a legacy shard */
+  cls_rgw_obj_chain chain;
+  if (int r = expand_gc_entry(dpp, info, [&chain] (const rgw_raw_obj& o) {
+        chain.push_obj(o.pool.to_str(), cls_rgw_obj_key(o.oid), o.loc);
+        return 0;
+      }); r < 0) {
+    return r;
+  }
+  if (!gc) {
+    ldpp_dout(dpp, 0) << "deleting objects inline since gc isn't initialized" << dendl;
+    delete_objs_inline(dpp, chain, tag, y);
+    return 0;
+  }
+  auto [r, leftover] = send_chain_to_gc(chain, tag, y);
+  if (r < 0 && leftover) {
+    delete_objs_inline(dpp, *leftover, tag, y);
+  }
+  return r;
 }
 
 void RGWRados::delete_objs_inline(const DoutPrefixProvider *dpp, cls_rgw_obj_chain& chain,

@@ -1288,22 +1288,48 @@ struct cls_rgw_gc_obj_info
   std::string tag;
   cls_rgw_obj_chain chain;
   ceph::real_time time;
+  /* FSIO_RADOS_DESIGN.md §8:  the manifest form, what the chain is built
+   * from, which RGW expands as it deletes;  opaque here.  Encoded as
+   * version 2, compat 2, only when present, so an expanded entry is
+   * version 1 exactly as before, and only the gc-manifest zone feature
+   * writes the new form, once no OSD would fail to list it */
+  ceph::buffer::list manifest;	// the encoded RGWObjManifest
+  ceph::buffer::list head;	// the encoded head rgw_obj
+  ceph::buffer::list fsio;	// an FSIO shadow's id and extent, if one
 
   cls_rgw_gc_obj_info() {}
 
+  bool is_manifest() const { return manifest.length() > 0; }
+
   void encode(ceph::buffer::list& bl) const {
-    ENCODE_START(1, 1, bl);
+    if (!is_manifest()) {
+      ENCODE_START(1, 1, bl);
+      encode(tag, bl);
+      encode(chain, bl);
+      encode(time, bl);
+      ENCODE_FINISH(bl);
+      return;
+    }
+    ENCODE_START(2, 2, bl);
     encode(tag, bl);
     encode(chain, bl);
     encode(time, bl);
+    encode(manifest, bl);
+    encode(head, bl);
+    encode(fsio, bl);
     ENCODE_FINISH(bl);
   }
 
   void decode(ceph::buffer::list::const_iterator& bl) {
-    DECODE_START(1, bl);
+    DECODE_START(2, bl);
     decode(tag, bl);
     decode(chain, bl);
     decode(time, bl);
+    if (struct_v >= 2) {
+      decode(manifest, bl);
+      decode(head, bl);
+      decode(fsio, bl);
+    }
     DECODE_FINISH(bl);
   }
 
@@ -1313,6 +1339,10 @@ struct cls_rgw_gc_obj_info
     chain.dump(f);
     f->close_section();
     f->dump_stream("time") << time;
+    if (is_manifest()) {
+      f->dump_unsigned("manifest_len", manifest.length());
+      f->dump_bool("fsio", fsio.length() > 0);
+    }
   }
   static std::list<cls_rgw_gc_obj_info> generate_test_instances() {
     std::list<cls_rgw_gc_obj_info> ls;
@@ -1321,6 +1351,10 @@ struct cls_rgw_gc_obj_info
     ls.back().tag = "footag";
     ceph_timespec ts{ceph_le32(21), ceph_le32(32)};
     ls.back().time = ceph::real_clock::from_ceph_timespec(ts);
+    ls.emplace_back();
+    ls.back().tag = "manifest";
+    ls.back().manifest.append("m");
+    ls.back().head.append("h");
     return ls;
   }
 

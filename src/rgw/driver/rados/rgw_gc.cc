@@ -118,6 +118,16 @@ std::tuple<int, std::optional<cls_rgw_obj_chain>> RGWGC::send_split_chain(const 
   return {0, {}};
 }
 
+int RGWGC::send_manifest(const cls_rgw_gc_obj_info& info, optional_yield y)
+{
+  ObjectWriteOperation op;
+  gc_log_enqueue2(op, cct->_conf->rgw_gc_obj_min_wait, info);
+  int i = tag_index(info.tag);
+  ldpp_dout(this, 20) << "RGWGC::send_manifest - on object name: "
+		      << obj_names[i] << " tag is: " << info.tag << dendl;
+  return store->gc_operate(this, obj_names[i], std::move(op), y);
+}
+
 int RGWGC::send_chain(const cls_rgw_obj_chain& chain, const string& tag, optional_yield y)
 {
   ObjectWriteOperation op;
@@ -588,6 +598,65 @@ int RGWGC::process(int index, int max_secs, bool expired_only,
         } else {
           io_manager.add_tag_io_size(index, info.tag, chain.objs.size());
         }
+      }
+      if (info.is_manifest()) {
+	/* FSIO_RADOS_DESIGN.md §8:  expanded a batch at a time while it
+	 * deletes;  an entry cut short is not removed, and is expanded
+	 * again from its start, puts and ENOENT being idempotent.  Only
+	 * the queue holds this form */
+	if (! transitioned_objects_cache[index]) {
+	  ldpp_dout(this, 0) << "ERROR: RGWGC::process manifest-form entry "
+			     << info.tag << " in a legacy shard" << dendl;
+	  continue;
+	}
+	static constexpr size_t batch = 1000;
+	cls_rgw_obj_chain part;
+	bool stop = false;
+	auto flush = [&] () {
+	  for (const auto& obj : part.objs) {
+	    if (obj.pool != last_pool) {
+	      delete ctx;
+	      ctx = new IoCtx;
+	      if (int r = rgw_init_ioctx(this, store->get_rados_handle(),
+					 obj.pool, *ctx); r < 0) {
+		if (r != -ENOENT) {
+		  stop = true;
+		  return;
+		}
+		last_pool = "";
+		continue;
+	      }
+	      last_pool = obj.pool;
+	    }
+	    ctx->locator_set_key(obj.loc);
+	    ctx->set_pool_full_try();
+	    ldpp_dout(this, 5) << "RGWGC::process removing " << obj.pool <<
+	      ":" << obj.key.name << dendl;
+	    ObjectWriteOperation op;
+	    cls_refcount_put(op, info.tag, true);
+	    if (io_manager.schedule_io(ctx, obj.key.name, &op, index,
+				       info.tag) < 0 ||
+		going_down() || ceph_clock_now() >= end) {
+	      stop = true;
+	      return;
+	    }
+	  }
+	  part.objs.clear();
+	};
+	int r = store->expand_gc_entry(this, info, [&] (const rgw_raw_obj& o) {
+	  part.push_obj(o.pool.to_str(), cls_rgw_obj_key(o.oid), o.loc);
+	  if (part.objs.size() >= batch) {
+	    flush();
+	  }
+	  return stop ? -ECANCELED : 0;
+	});
+	if (!stop && r == 0) {
+	  flush();
+	}
+	if (stop || r < 0) {
+	  goto done;
+	}
+	continue;
       }
       if (! chain.objs.empty()) {
 	for (const auto& obj : chain.objs) {

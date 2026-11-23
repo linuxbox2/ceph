@@ -226,7 +226,8 @@ fn rados_phase(o: &Opts, steps: &[&'static str], run_dir: &Path, summary: &mut V
         sh("rados-vstart", "a fresh RADOS vstart",
            "env MON=1 OSD=1 RGW=1 MGR=0 MDS=0 ../src/vstart.sh -n -d -o 'bluestore_block_size = 2T'".into()),
         sh("rados-fsio", "enable the fsio zonegroup feature",
-           "bin/radosgw-admin -c ceph.conf zonegroup modify --rgw-zonegroup=default --enable-feature=fsio".into()),
+           "bin/radosgw-admin -c ceph.conf zonegroup modify --rgw-zonegroup=default --enable-feature=fsio \
+            && bin/radosgw-admin -c ceph.conf zonegroup modify --rgw-zonegroup=default --enable-feature=gc-manifest".into()),
     ];
     let mut failed = false;
     for c in &setup {

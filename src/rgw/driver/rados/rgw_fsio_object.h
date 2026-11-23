@@ -58,7 +58,7 @@ public:
   int end_write(const DoutPrefixProvider* dpp, uint32_t flags) override { return -ENOTSUP; }
   /* §3.4:  fsio_leave, the instance's count, then the presence hints go;
    * the lost-reply rule and the drain's GC chain are the close's step
-   * (plan, driver step 6) */
+   * (plan, driver step 7) */
   int close(const DoutPrefixProvider* dpp, uint32_t flags) override;
   /* §2.7:  the size and mtime this handle sees:  a reader its content's,
    * a writer its shadow's as it knows them, rebased first when a
@@ -91,7 +91,7 @@ public:
   const std::optional<std::string>& moved_segment() const { return seg_moved; }
   /* §2.7, §3.3:  fsio_hint with this writer's epoch, high-water mark and
    * mtime;  a stale epoch rebases from the chunk at the high-water mark
-   * and reports again.  end_write() calls it (the close, plan step 6) */
+   * and reports again.  end_write() calls it (the close, plan step 7) */
   int report_hint(const DoutPrefixProvider* dpp);
 
   /* the shadow's chunk holding ofs, as named on RADOS */
