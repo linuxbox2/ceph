@@ -2895,6 +2895,17 @@ options:
   default: 30
   services:
   - rgw
+- name: rgw_fsio_shutdown_grace
+  type: secs
+  level: advanced
+  desc: How long an orderly librgw shutdown waits for clients to close
+  long_desc: An export's unmount, or the process's stop, first fails new
+    opens through it, then waits at most this long for the files open
+    through it to be closed, then closes those still open as their last
+    close would, publishing or handing off a write (FSIO design 4.3).
+  default: 30
+  services:
+  - rgw
 - name: rgw_fsio_hint_interval
   type: secs
   level: advanced

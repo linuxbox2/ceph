@@ -2819,6 +2819,111 @@ TEST(OPEN2, WRITER_CLOSE_WITH_A_READER_PUBLISHES)
   EXPECT_FALSE(sf::exists(shadow_path(name)));
 }
 
+/* FSIO_RADOS_DESIGN.md §4.3, the orderly shutdown's drain, through
+ * rgw_umount().  On a second mount of the bucket, so the suite's own is
+ * untouched */
+struct ShutdownGrace {
+  explicit ShutdownGrace(const char* secs) { set(secs); }
+  ~ShutdownGrace() { set("30"); }
+  static void set(const char* secs) {
+    g_conf().set_val("rgw_fsio_shutdown_grace", secs);
+    g_conf().apply_changes(nullptr);
+  }
+};
+
+static int mount_bucket(rgw_fs** m, rgw_file_handle** bfh)
+{
+  int rc = rgw_mount2(rgw_h, userid.c_str(), access_key.c_str(),
+		      secret_key.c_str(), "/", m, RGW_MOUNT_FLAG_NONE);
+  if (rc < 0) {
+    return rc;
+  }
+  return rgw_lookup(*m, (*m)->root_fh, bucket_name.c_str(), bfh, nullptr, 0,
+		    RGW_LOOKUP_FLAG_NONE);
+}
+
+/* a file still open at the unmount is closed by it, and published */
+TEST(OPEN2, UMOUNT_PUBLISHES_AN_UNCLOSED_WRITE)
+{
+  if (! have_fs_layout()) {
+    GTEST_SKIP() << "not a filesystem-backed driver";
+  }
+  const std::string name{"drain-pub"};
+  reset_object(name);
+  publish_p4(name);
+  ShutdownGrace grace("0");
+
+  rgw_fs* fs2{nullptr};
+  rgw_file_handle* bfh2{nullptr};
+  ASSERT_EQ(mount_bucket(&fs2, &bfh2), 0);
+  {
+    Open2Helper o2h(fs2, bfh2);
+    ASSERT_EQ(get<0>(o2h.lookup(name)), 0);
+    auto ofw = o2h.open(O_RDWR, RGW_OPEN_FLAG_NONE);
+    ASSERT_EQ(get<0>(ofw), 0);
+    ASSERT_EQ(get<0>(o2h.write(get<1>(ofw), std::string{"QQ"}, 0, 2)), 0);
+    /* the helper returns its lookup's reference;  the open, never
+     * closed, keeps the handle */
+  }
+  ASSERT_EQ(rgw_fh_rele(fs2, bfh2, RGW_FH_RELE_FLAG_NONE), 0);
+  EXPECT_EQ(contents_of(published_path(name)), "PPPP");
+  ASSERT_EQ(rgw_umount(fs2, RGW_UMOUNT_FLAG_NONE), 0);
+  EXPECT_EQ(contents_of(published_path(name)), "QQPP");
+  EXPECT_FALSE(sf::exists(shadow_path(name)));
+}
+
+/* while the unmount waits for clients, a new open fails with EAGAIN, and
+ * the last close ends the wait before the grace is out */
+TEST(OPEN2, UMOUNT_WAITS_FOR_A_CLOSE_AND_FAILS_NEW_OPENS)
+{
+  if (! have_fs_layout()) {
+    GTEST_SKIP() << "not a filesystem-backed driver";
+  }
+  const std::string name{"drain-wait"};
+  const std::string other{"drain-new"};
+  reset_object(name);
+  reset_object(other);
+  publish_p4(name);
+  ShutdownGrace grace("5");
+
+  rgw_fs* fs2{nullptr};
+  rgw_file_handle* bfh2{nullptr};
+  ASSERT_EQ(mount_bucket(&fs2, &bfh2), 0);
+  /* each helper returns its lookup's reference when it goes */
+  auto a = std::make_unique<Open2Helper>(fs2, bfh2);
+  auto b = std::make_unique<Open2Helper>(fs2, bfh2);
+  ASSERT_EQ(get<0>(a->lookup(name)), 0);
+  auto ofa = a->open(O_RDWR, RGW_OPEN_FLAG_NONE);
+  ASSERT_EQ(get<0>(ofa), 0);
+  ASSERT_EQ(get<0>(a->write(get<1>(ofa), std::string{"QQ"}, 0, 2)), 0);
+  ASSERT_EQ(get<0>(b->lookup(other)), 0);
+
+  auto* lfs = static_cast<rgw::RGWLibFS*>(fs2->fs_private);
+  const auto start = std::chrono::steady_clock::now();
+  int umount_rc{-1};
+  std::jthread umount([&] { umount_rc = rgw_umount(fs2, RGW_UMOUNT_FLAG_NONE); });
+  for (int i = 0; i < 200 && ! lfs->is_draining(); ++i) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  EXPECT_TRUE(lfs->is_draining());
+  auto ofb = b->open(O_RDWR, RGW_OPEN_FLAG_CREATE);
+  EXPECT_EQ(get<0>(ofb), -EAGAIN);
+
+  /* the open keeps a's handle;  every reference goes back before the
+   * close lets the unmount go on to the cache */
+  b.reset();
+  a.reset();
+  EXPECT_EQ(rgw_fh_rele(fs2, bfh2, RGW_FH_RELE_FLAG_NONE), 0);
+  EXPECT_EQ(rgw_close2(get<1>(ofa), RGW_CLOSE_FLAG_NONE), 0);
+  umount.join();
+  const auto took = std::chrono::steady_clock::now() - start;
+
+  EXPECT_EQ(umount_rc, 0);
+  EXPECT_LT(took, std::chrono::seconds(4))
+    << "the unmount waited out its grace after the last close";
+  EXPECT_EQ(contents_of(published_path(name)), "QQPP");
+}
+
 TEST(OPEN2, UNLINK_LEAVES_NO_SHADOW)
 {
   /* direct evidence for UNLINK1:  the doomed shadow loses its name at

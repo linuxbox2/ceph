@@ -242,6 +242,9 @@ namespace rgw {
         RGWFileHandle& fh;
         list_hook file_open_hook;
         uint32_t posix_flags;
+        /* taken by a closer, under the handle's mtx, which close2()
+         * releases before it takes it again:  the drain skips it */
+        bool closing{false};
 
         Open(RGWFileHandle& _fh, uint32_t _posix_flags);
         ~Open();
@@ -828,6 +831,9 @@ namespace rgw {
 
     int close();
     int close2(file::Open* open_hdl, uint32_t flags);
+    /* the drain's step 3 (FSIO_RADOS_DESIGN.md §4.3):  every open closed
+     * as its CLOSE would be */
+    void close_all();
 
     /* NFS SETATTR with a size:  a complete write operation, not a
      * cached attribute */
@@ -1052,6 +1058,16 @@ namespace rgw {
 
     mutable std::atomic<uint64_t> refcnt;
 
+    /* the orderly shutdown's drain (FSIO_RADOS_DESIGN.md §4.3):  the file
+     * handles holding an open, each with a reference while it does */
+    std::mutex open_mtx;
+    std::condition_variable open_cv;
+    std::unordered_set<RGWFileHandle*> open_fhs;
+    std::atomic<bool> draining{false};
+
+    /* open_fhs, each with a reference the caller returns */
+    std::vector<RGWFileHandle*> held_open_fhs();
+
     RGWFileHandle::FHCache fh_cache;
     RGWFileHandle::FhLRU fh_lru;
 
@@ -1203,6 +1219,27 @@ namespace rgw {
     }
 
     void stop() { shutdown = true; }
+
+    /* the drain's record:  a file handle's first open recorded, its last
+     * returned */
+    void opened(RGWFileHandle* fh);
+    void closed(RGWFileHandle* fh);
+    bool is_draining() const { return draining.load(); }
+
+    /* the orderly shutdown's drain (FSIO_RADOS_DESIGN.md §4.3), from
+     * close() for one export, from RGWLibProcess::stop() for all;  run
+     * once the caller has stopped issuing calls on the export.  Step 1
+     * and step 2's v3 opens:  new opens fail, and each stateless open's
+     * idle close is brought forward to now */
+    void begin_drain();
+    /* steps 2 and 3:  clients have until deadline to close, then each
+     * file still open is closed */
+    void finish_drain(std::chrono::steady_clock::time_point deadline);
+    void drain();
+    static std::chrono::seconds shutdown_grace(CephContext* cct) {
+      return cct->_conf.get_val<std::chrono::seconds>(
+	"rgw_fsio_shutdown_grace");
+    }
 
     void release_evict(RGWFileHandle* fh) {
       /* remove from cache, releases sentinel ref */

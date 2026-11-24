@@ -34,6 +34,16 @@ namespace rgw {
 
     void stop() {
       shutdown = true;
+      /* the orderly shutdown's drain (FSIO_RADOS_DESIGN.md §4.3), every
+       * export at once, before the driver drops its watches */
+      for (const auto& fs: mounted_fs) {
+	fs.second->begin_drain();
+      }
+      const auto deadline = std::chrono::steady_clock::now() +
+	RGWLibFS::shutdown_grace(cct);
+      for (const auto& fs: mounted_fs) {
+	fs.second->finish_drain(deadline);
+      }
       for (const auto& fs: mounted_fs) {
 	fs.second->stop();
       }

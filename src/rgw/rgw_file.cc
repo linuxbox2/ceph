@@ -27,6 +27,7 @@
 #include "rgw_lib_frontend.h"
 #include "rgw_perf_counters.h"
 #include "common/errno.h"
+#include "include/scope_guard.h"
 
 #include "services/svc_zone.h"
 
@@ -1603,8 +1604,75 @@ namespace rgw {
     }
   } /* RGWLibFS::update_fh */
 
+  std::vector<RGWFileHandle*> RGWLibFS::held_open_fhs()
+  {
+    lock_guard guard(open_mtx);
+    std::vector<RGWFileHandle*> fhs;
+    fhs.reserve(open_fhs.size());
+    for (auto* fh : open_fhs) {
+      fhs.push_back(ref(fh));
+    }
+    return fhs;
+  }
+
+  void RGWLibFS::opened(RGWFileHandle* fh)
+  {
+    ref(fh);
+    lock_guard guard(open_mtx);
+    open_fhs.insert(fh);
+  }
+
+  void RGWLibFS::closed(RGWFileHandle* fh)
+  {
+    {
+      lock_guard guard(open_mtx);
+      open_fhs.erase(fh);
+      if (open_fhs.empty()) {
+	open_cv.notify_all();
+      }
+    }
+    unref(fh);
+  }
+
+  void RGWLibFS::begin_drain()
+  {
+    draining = true;
+    for (auto* fh : held_open_fhs()) {
+      {
+	RGWFileHandle::lock_guard guard(fh->mtx);
+	auto* f = std::get_if<RGWFileHandle::file>(&fh->variant_type);
+	if (f && f->stateless_timer_id) {
+	  write_timer.adjust_event(f->stateless_timer_id,
+				   std::chrono::seconds(0));
+	}
+      }
+      unref(fh);
+    }
+  }
+
+  void RGWLibFS::finish_drain(std::chrono::steady_clock::time_point deadline)
+  {
+    {
+      unique_lock guard(open_mtx);
+      open_cv.wait_until(guard, deadline, [this] { return open_fhs.empty(); });
+    }
+    for (auto* fh : held_open_fhs()) {
+      ldpp_dout_fmt(this, 1, "{} {} still open, closing", __func__,
+		    fh->object_name());
+      fh->close_all();
+      unref(fh);
+    }
+  }
+
+  void RGWLibFS::drain()
+  {
+    begin_drain();
+    finish_drain(std::chrono::steady_clock::now() + shutdown_grace(cct));
+  }
+
   void RGWLibFS::close()
   {
+    drain();
     state.flags |= FLAG_CLOSED;
 
     class ObjUnref
@@ -2141,6 +2209,11 @@ namespace rgw {
       return -EISDIR;
     }
 
+    /* the drain's step 1 (FSIO_RADOS_DESIGN.md §4.3) */
+    if (fs->is_draining()) {
+      return -EAGAIN;
+    }
+
     bool write_open = ((posix_flags & O_WRONLY) || (posix_flags & O_RDWR));
 
     if (write_open) {
@@ -2291,6 +2364,9 @@ namespace rgw {
     /* save on open list */
     auto open = new file::Open(*this, posix_flags);
     f->opens.push_back(*open);
+    if (f->opens.size() == 1) {
+      fs->opened(this);
+    }
     *out = open;
 
     if (rgw_openflags & RGW_OPEN_FLAG_V3) {
@@ -2674,6 +2750,7 @@ namespace rgw {
         return 0;
       }
       open = f->global_open;
+      open->closing = true;
       f->global_open = nullptr;
       /* the idle event holds a reference on this handle and releases
        * it when it runs, so it is left to fire rather than cancelled;
@@ -2879,6 +2956,16 @@ namespace rgw {
       close_flags |= rgw::sal::Object::FSIOObject::CLOSE_FLAG_DETACH;
     }
 
+    /* the file's last open returned:  out of the drain's record once mtx
+     * is released, since the record's reference may be the handle's last */
+    bool last_open{false};
+    auto* lfs = fs;
+    auto unrecord = make_scope_guard([&] {
+      if (last_open) {
+	lfs->closed(this);
+      }
+    });
+
     lock_guard guard(mtx); // XXX needed? probably
 
     auto f = std::get_if<file>(&variant_type);
@@ -2951,10 +3038,43 @@ namespace rgw {
       auto it = file::open_list::s_iterator_to(*open);
       f->opens.erase(it);
       delete(open);
+      last_open = f->opens.empty();
     }
 
     return rc;
   } /* RGWFileHandle::close2 */
+
+  void RGWFileHandle::close_all()
+  {
+    if (int rc = close_global(RGW_CLOSE_FLAG_NONE); rc < 0) {
+      ldpp_dout_fmt(fs, 0, "{} {} stateless close returned {}", __func__,
+		    object_name(), rc);
+    }
+    for (;;) {
+      file::Open* open{nullptr};
+      {
+	lock_guard guard(mtx);
+	file* f = get_if<file>(&variant_type);
+	if (! f) {
+	  return;
+	}
+	for (auto& o : f->opens) {
+	  if (! o.closing) {
+	    open = &o;
+	    break;
+	  }
+	}
+	if (! open) {
+	  return;
+	}
+	open->closing = true;
+      }
+      if (int rc = close2(open, RGW_CLOSE_FLAG_NONE); rc < 0) {
+	ldpp_dout_fmt(fs, 0, "{} {} close returned {}", __func__,
+		      object_name(), rc);
+      }
+    }
+  } /* RGWFileHandle::close_all */
 
   RGWFileHandle::file::Open::Open(RGWFileHandle& _fh, uint32_t _posix_flags)
     : fh(_fh), posix_flags(_posix_flags)
