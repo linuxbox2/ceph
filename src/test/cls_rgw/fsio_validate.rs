@@ -9,7 +9,7 @@ edition = "2021"
 //!
 //!   fsio_validate.rs [--dry-run] [--no-build] [--build DIR]
 //!                    [--filter PATTERN] [--timeout SECS] [--reuse]
-//!                    [--tests] [--clone-latency] STEP|PRESET...
+//!                    [--tests] [--progress] [--clone-latency] STEP|PRESET...
 //!
 //! Steps:
 //!   cls            the CLS head test and the neorados CLS test, and
@@ -60,6 +60,10 @@ edition = "2021"
 //! with its assertions' text;  `--tests` lists every test, the passing
 //! ones with their time, on the console and in the summary.
 //!
+//! `--progress` prints each gtest test's result as it ends, in the steps
+//! whose tests are gtest binaries;  the model's runner prints each run's
+//! as it ends, with or without it.
+//!
 //! `--clone-latency` runs the harness's disabled DISABLED_CloneLatency
 //! alone:  how long a writer's open takes to construct objects of 64, 256
 //! and 512 chunks, at rgw_fsio_clone_window 1 and 10 (plan, the driver's
@@ -101,6 +105,7 @@ struct Opts {
     timeout: Option<u64>,
     reuse: bool,
     tests: bool,
+    progress: bool,
     clone_latency: bool,
 }
 
@@ -356,8 +361,27 @@ fn exec(o: &Opts, c: &Cmd, run_dir: &Path, summary: &mut Vec<String>,
         .unwrap_or_else(|e| die(&format!("{}:  {e}", log.display())));
     use std::io::Write;
     let _ = writeln!(f, "== {}\n$ (cd {} && {})", c.what, c.cwd.display(), shell_words(&argv));
-    let out = Command::new(&argv[0]).args(&argv[1..]).current_dir(&c.cwd)
-        .stdin(Stdio::null()).output();
+    /* the model's runner prints a line as each run ends:  shown as it
+     * comes, the step's line still after them all;  with --progress, a
+     * gtest test's result line as it ends */
+    let runner = c.argv.iter().any(|a| a.contains("fsio_model_runs"));
+    let out = if runner {
+        output_streamed(&argv, &c.cwd, |l| Some(format!("    {l}")))
+    } else if o.progress {
+        output_streamed(&argv, &c.cwd, |l| {
+            let t = l.trim_end();
+            if let Some(n) = t.strip_prefix("[       OK ]") {
+                Some(format!("    ok     {}", n.trim()))
+            } else if t.starts_with("[  FAILED  ]") && t.ends_with(")") {
+                Some(format!("    FAILED {}", t.trim_start_matches("[  FAILED  ]").trim()))
+            } else {
+                None
+            }
+        })
+    } else {
+        Command::new(&argv[0]).args(&argv[1..]).current_dir(&c.cwd)
+            .stdin(Stdio::null()).output()
+    };
     let mut timed_out = false;
     let (ok, text) = match out {
         Ok(out) => {
@@ -385,6 +409,32 @@ fn exec(o: &Opts, c: &Cmd, run_dir: &Path, summary: &mut Vec<String>,
         }
     }
     !failed_note
+}
+
+/// A command's output as `Command::output()` returns it, each stdout line
+/// `show` returns a line for also printed as it comes
+fn output_streamed(argv: &[String], cwd: &Path, show: impl Fn(&str) -> Option<String>)
+                   -> std::io::Result<std::process::Output> {
+    use std::io::{BufRead, Read};
+    let mut child = Command::new(&argv[0]).args(&argv[1..]).current_dir(cwd)
+        .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
+    let mut err = child.stderr.take().unwrap();
+    let errs = std::thread::spawn(move || {
+        let mut v = Vec::new();
+        let _ = err.read_to_end(&mut v);
+        v
+    });
+    let mut stdout = Vec::new();
+    for l in std::io::BufReader::new(child.stdout.take().unwrap()).split(b'\n') {
+        let Ok(l) = l else { break };
+        if let Some(p) = show(&String::from_utf8_lossy(&l)) {
+            println!("{p}");
+        }
+        stdout.extend_from_slice(&l);
+        stdout.push(b'\n');
+    }
+    let status = child.wait()?;
+    Ok(std::process::Output { status, stdout, stderr: errs.join().unwrap_or_default() })
 }
 
 /// "[  PASSED  ] 18 tests." and "[  FAILED  ] 2 tests", or a tier's
@@ -415,18 +465,30 @@ fn expected_count(text: &str) -> Option<String> {
 /// A gtest run's tests:  each failed one's name, and under it its
 /// assertions' text ("file:line: Failure" to the test's end), so a failing
 /// step says which tests failed and why without opening its log;  with
-/// `all`, each passing one's name and time too
+/// `all`, each passing one's name and time too.  A test that started and
+/// never ended, in a log with a failed ceph_assert or a signal, crashed
+/// the run:  it is named with that line, since the tests after it did not
+/// run
 fn gtest_tests(text: &str, all: bool) -> Vec<String> {
     let mut out = Vec::new();
     let mut block: Vec<String> = Vec::new();
     let mut in_failure = false;
+    let mut running: Option<String> = None;
+    let mut crash: Option<String> = None;
     for l in text.lines() {
         let t = l.trim_end();
+        if crash.is_none() && (t.contains("FAILED ceph_assert") || t.contains("*** Caught signal")) {
+            crash = Some(t.rsplit('/').next().unwrap_or(t).trim().to_string());
+        }
         if t.starts_with("[ RUN      ]") {
             block.clear();
             in_failure = false;
-        } else if all && t.starts_with("[       OK ]") {
-            out.push(format!("    ok     {}", t.trim_start_matches("[       OK ]").trim()));
+            running = Some(t.trim_start_matches("[ RUN      ]").trim().to_string());
+        } else if t.starts_with("[       OK ]") {
+            running = None;
+            if all {
+                out.push(format!("    ok     {}", t.trim_start_matches("[       OK ]").trim()));
+            }
         } else if t.ends_with(": Failure") {
             in_failure = true;
             block.push(format!("      {}", t.rsplit('/').next().unwrap_or(t)));
@@ -436,11 +498,17 @@ fn gtest_tests(text: &str, all: bool) -> Vec<String> {
             out.push(format!("    FAILED {}", name.split(" (").next().unwrap_or(name)));
             out.extend(block.drain(..));
             in_failure = false;
+            running = None;
         } else if in_failure && !t.is_empty() && !t.starts_with('[') && block.len() < 40 {
             /* the assertion's lines, values cut short */
             let v: String = t.chars().take(160).collect();
             block.push(format!("      {v}"));
         }
+    }
+    if let (Some(name), Some(why)) = (running, crash) {
+        let why: String = why.chars().take(160).collect();
+        out.push(format!("    CRASHED {name}:  the tests after it did not run"));
+        out.push(format!("      {why}"));
     }
     out
 }
@@ -513,6 +581,7 @@ fn parse_args() -> Opts {
     let mut timeout: Option<u64> = None;
     let mut reuse = false;
     let mut tests = false;
+    let mut progress = false;
     let mut clone_latency = false;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
@@ -520,6 +589,7 @@ fn parse_args() -> Opts {
             "--dry-run" => dry_run = true,
             "--reuse" => reuse = true,
             "--tests" => tests = true,
+            "--progress" => progress = true,
             "--clone-latency" => clone_latency = true,
             "--no-build" => build = false,
             "--build" => build_dir = Some(PathBuf::from(args.next().unwrap_or_else(|| die("--build needs a directory")))),
@@ -530,7 +600,7 @@ fn parse_args() -> Opts {
             "core" => steps.extend(["cls", "cluster-tier", "model"]),
             "full" => steps.extend(STEPS),
             "-h" | "--help" => {
-                println!("usage:  fsio_validate.rs [--dry-run] [--no-build] [--build DIR] [--filter PATTERN] [--timeout SECS] [--reuse] [--tests] [--clone-latency] STEP|PRESET...\n\
+                println!("usage:  fsio_validate.rs [--dry-run] [--no-build] [--build DIR] [--filter PATTERN] [--timeout SECS] [--reuse] [--tests] [--progress] [--clone-latency] STEP|PRESET...\n\
                           steps:  {}\npresets:  driver core full", STEPS.join(" "));
                 std::process::exit(0);
             }
@@ -558,7 +628,8 @@ fn parse_args() -> Opts {
     if clone_latency && !steps.contains(&"harness") {
         die("--clone-latency runs the harness:  name the harness step");
     }
-    Opts { dry_run, build, build_dir, src, steps: ordered, filter, timeout, reuse, tests, clone_latency }
+    Opts { dry_run, build, build_dir, src, steps: ordered, filter, timeout, reuse, tests, progress,
+           clone_latency }
 }
 
 fn capture(cwd: &Path, argv: &[&str]) -> String {

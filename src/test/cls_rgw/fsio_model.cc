@@ -4297,11 +4297,11 @@ struct Explorer {
   std::chrono::steady_clock::time_point start =
     std::chrono::steady_clock::now();
 
-  void status() const {
+  void status(const std::string& lead = {}) const {
     using namespace std::chrono;
     double secs = duration<double>(steady_clock::now() - start).count();
-    std::cerr << fmt::format("[fsio-model] {:.0f}s  {} states ({:.0f}/s)  "
-			     "{} ends  depth {}  {} violation kinds\n",
+    std::cerr << fmt::format("[fsio-model] {}{:.0f}s  {} states ({:.0f}/s)  "
+			     "{} ends  depth {}  {} violation kinds\n", lead,
 			     secs, states, secs > 0 ? states / secs : 0.0,
 			     ends, path.size(), found.size())
 	      << std::flush;
@@ -4959,9 +4959,10 @@ TEST(FSIOModel, Explore)
 	 i < (only >= 0 ? (uint64_t)only + 1 : (uint64_t)nw); ++i) {
       if (x.stop_at_first && !x.found.empty()) break;
       x.walk(w0, seed, i);
-      if (x.progress && x.walks % 100000 == 0) {
-	std::cerr << fmt::format("[fsio-model] {} walks", x.walks);
-	x.status();
+      /* the cluster tier's walks run at tens of states a second:  its
+       * progress is by walks */
+      if (x.progress && x.walks % (cl.on ? 100 : 100000) == 0) {
+	x.status(fmt::format("{} of {} walks  ", x.walks, nw));
       }
     }
     x.status();
