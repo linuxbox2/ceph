@@ -170,6 +170,11 @@ struct RGWObjManifestRule {
    * only, as a publish leaves it;  else the head object holds it (a copy
    * or dedup that put data in the head) */
   bool fsio_head = false;
+  /* with fsio_head:  the object the head segment's chunk is named from,
+   * f(anchor, fsio), as the publish recorded it:  the source instance in
+   * a versioned bucket (FSIO_RADOS_DESIGN.md §4.2 step 3), so RGW setting
+   * the head to the object it read leaves the name as it was */
+  std::optional<rgw_obj> fsio_head_anchor;
 
   RGWObjManifestRule() : start_part_num(0), start_ofs(0), part_size(0), stripe_max_size(0) {}
   RGWObjManifestRule(uint32_t _start_part_num, uint64_t _start_ofs, uint64_t _part_size, uint64_t _stripe_max_size) :
@@ -184,6 +189,7 @@ struct RGWObjManifestRule {
     encode(override_prefix, bl);
     encode(fsio, bl);
     encode(fsio_head, bl);
+    encode(fsio_head_anchor, bl);
     ENCODE_FINISH(bl);
   }
 
@@ -198,6 +204,7 @@ struct RGWObjManifestRule {
     if (struct_v >= 3) {
       decode(fsio, bl);
       decode(fsio_head, bl);
+      decode(fsio_head_anchor, bl);
     }
     DECODE_FINISH(bl);
   }
@@ -301,6 +308,7 @@ public:
     for (auto& [ofs, rule] : rules) {
       rule.fsio.reset();
       rule.fsio_head = false;
+      rule.fsio_head_anchor.reset();
     }
   }
   /* the head segment is the separate chunk f(head, id), as a publish
@@ -313,17 +321,30 @@ public:
   void clear_fsio_head() {
     if (!rules.empty()) {
       rules.begin()->second.fsio_head = false;
+      rules.begin()->second.fsio_head_anchor.reset();
     }
   }
   /* a publish's:  every rule's chunks are the shadow's, f(name, id), the
-   * head segment's too */
+   * head segment's too, named from the head as it is now */
   void set_fsio(const cls_rgw_fsio_id& id) {
     for (auto& [ofs, rule] : rules) {
       rule.fsio = id;
     }
     if (!rules.empty()) {
       rules.begin()->second.fsio_head = true;
+      rules.begin()->second.fsio_head_anchor = obj;
     }
+  }
+  /* the head segment's object:  its recorded anchor when it is a separate
+   * FSIO chunk, else the head */
+  const rgw_obj& fsio_head_obj() const {
+    if (fsio_head_separate()) {
+      const auto& r = rules.begin()->second;
+      if (r.fsio_head_anchor) {
+        return *r.fsio_head_anchor;
+      }
+    }
+    return obj;
   }
 
   const std::map<uint64_t, RGWObjManifestRule>& get_rules() const {

@@ -198,7 +198,7 @@ void RGWObjManifest::obj_iterator::update_location()
   }
 
   if (ofs < manifest->get_head_size()) {
-    location = manifest->get_obj();
+    location = manifest->fsio_head_obj();
     location.set_placement_rule(manifest->get_head_placement_rule());
     /* plan §6.4:  a published FSIO object's head segment is its chunk
      * 0, f(head, id), the head holding attributes only;  readers find it
@@ -236,7 +236,7 @@ void RGWObjManifest::get_implicit_location(uint64_t cur_part_id, uint64_t cur_st
   if (!cur_part_id) {
     if (ofs < max_head_size) {
       location->set_placement_rule(head_placement_rule);
-      *location = obj;
+      *location = fsio_head_obj();
       return;
     } else {
       char buf[16];

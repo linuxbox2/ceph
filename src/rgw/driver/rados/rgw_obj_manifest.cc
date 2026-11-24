@@ -375,6 +375,9 @@ void RGWObjManifestRule::dump(Formatter *f) const
   if (fsio) {
     encode_json("fsio", fsio->to_str(), f);
     encode_json("fsio_head", fsio_head, f);
+    if (fsio_head_anchor) {
+      encode_json("fsio_head_anchor", *fsio_head_anchor, f);
+    }
   }
 }
 
