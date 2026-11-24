@@ -62,10 +62,11 @@ edition = "2021"
 //! with its assertions' text;  `--tests` lists every test, the passing
 //! ones with their time, on the console and in the summary.
 //!
-//! `--debug-rgw LEVEL` starts the harness with RGW's debug output at
-//! LEVEL on stderr, into its log (`CEPH_ARGS`:  the harness takes it only
-//! at startup, and sudo drops the caller's environment);  with
-//! `--filter`, for a failing test's trace.
+//! `--debug-rgw LEVEL` starts the harness and the librgw tests, over
+//! RADOS and over nsfs, with RGW's debug output at LEVEL on stderr, into
+//! their logs (`CEPH_ARGS`:  they take it only at startup, and sudo drops
+//! the caller's environment);  with `--filter`, for a failing test's
+//! trace.
 //!
 //! `--progress` prints each gtest test's result as it ends, in the steps
 //! whose tests are gtest binaries;  the model's runner prints each run's
@@ -224,10 +225,7 @@ fn rados_phase(o: &Opts, steps: &[&'static str], run_dir: &Path, summary: &mut V
     let b = &o.build_dir;
     let conf = b.join("ceph.conf").display().to_string();
     let gf = gtest_filter(o);
-    /* --debug-rgw:  the harness's RGW output, set at its startup */
-    let dbg = o.debug_rgw.map_or(String::new(), |l| {
-        format!(" CEPH_ARGS='--debug-rgw={l} --log-to-stderr=true --err-to-stderr=true'")
-    });
+    let dbg = debug_env(o);
     let sh = |step: &'static str, what: &str, line: String| Cmd {
         step, what: what.into(), argv: vec!["sh".into(), "-c".into(), line], cwd: b.clone(), sudo: true,
     };
@@ -273,7 +271,8 @@ fn rados_phase(o: &Opts, steps: &[&'static str], run_dir: &Path, summary: &mut V
                 ],
                 "librgw-rados" => vec![sh("librgw-rados", "the librgw test", format!(
                     "env CEPH_CONF={conf} AWS_ACCESS_KEY_ID={AWS_KEY} AWS_SECRET_ACCESS_KEY='{AWS_SECRET}' \
-                     bin/ceph_test_librgw_file_fsio_put --debug-rgw=10 --log-to-stderr=true{gf}"))],
+                     bin/ceph_test_librgw_file_fsio_put --debug-rgw={} --log-to-stderr=true{gf}",
+                    o.debug_rgw.unwrap_or(10)))],
                 "harness" if o.clone_latency => vec![sh("harness", "the clone latency", format!(
                     "env CEPH_CONF={conf} bin/ceph_test_rgw_fsio_rados \
                      --gtest_also_run_disabled_tests --gtest_filter='*CloneLatency*'"))],
@@ -325,6 +324,14 @@ fn rados_phase(o: &Opts, steps: &[&'static str], run_dir: &Path, summary: &mut V
     failed
 }
 
+/// --debug-rgw:  RGW's output, for a program that takes it at its startup;
+/// an `env` assignment, empty without the option
+fn debug_env(o: &Opts) -> String {
+    o.debug_rgw.map_or(String::new(), |l| {
+        format!(" CEPH_ARGS='--debug-rgw={l} --log-to-stderr=true --err-to-stderr=true'")
+    })
+}
+
 /// An nsfs gateway from this tree's rgw-vstart.sh, the librgw suites, the
 /// gateway stopped.  True if any step failed.
 fn nsfs_phase(o: &Opts, run_dir: &Path, summary: &mut Vec<String>) -> bool {
@@ -333,7 +340,8 @@ fn nsfs_phase(o: &Opts, run_dir: &Path, summary: &mut Vec<String>) -> bool {
     let sh = |what: &str, line: String| Cmd {
         step: "nsfs-librgw", what: what.into(), argv: vec!["sh".into(), "-c".into(), line], cwd: b.clone(), sudo: false,
     };
-    let keys = format!("env AWS_ACCESS_KEY_ID={AWS_KEY} AWS_SECRET_ACCESS_KEY='{AWS_SECRET}'");
+    let keys = format!("env AWS_ACCESS_KEY_ID={AWS_KEY} AWS_SECRET_ACCESS_KEY='{AWS_SECRET}'{}",
+                       debug_env(o));
     let cmds = [
         sh("an nsfs gateway", "../src/script/rgw/rgw-vstart.sh --store nsfs --clean".into()),
         sh("write2", format!("{keys} bin/ceph_test_librgw_file_write2 --create --userid testid \"{conf}\"")),
