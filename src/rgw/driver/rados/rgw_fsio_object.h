@@ -253,10 +253,13 @@ private:
    * shadow's extent that is not a fenced hole, scanned down */
   int scan_size(const DoutPrefixProvider* dpp, uint64_t* size);
 
-  /* §4.1, W15:  a shadow's chunks and attribute clone to GC */
+  /* §4.1, W15:  a shadow's chunks and attribute clone to GC;  in a
+   * versioned bucket its clones are beside `base`, the version it was
+   * built from (§2.2) */
   int collect_shadow(const DoutPrefixProvider* dpp, const cls_rgw_fsio_id& id,
 		     const std::vector<cls_rgw_fsio_run>& extent,
-		     const ceph::buffer::list* pm = nullptr);
+		     const ceph::buffer::list* pm = nullptr,
+		     const std::string& base = {});
   /* §3.4, W15:  a construction that failed:  its clones to GC, then
    * fsio_leave as writer, which abandons the shadow */
   int abandon(const DoutPrefixProvider* dpp, const Source& src);
@@ -266,7 +269,8 @@ private:
   /* fsio_leave of cs in a role, through sequenced() */
   int leave(const DoutPrefixProvider* dpp, const cls_rgw_fsio_id& cs,
 	    bool writer, cls_rgw_fsio_leave_ret* ret,
-	    const cls_rgw_fsio_intent* intent = nullptr, bool handoff = false);
+	    const cls_rgw_fsio_intent* intent = nullptr, bool handoff = false,
+	    bool discard = false);
   /* §4.2, 8j:  a close whose publish could not complete hands it off:
    * the uncompleted-publish hint, then the hand-off leave;  the handle
    * then holds nothing of the write */

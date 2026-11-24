@@ -146,6 +146,22 @@ fn quick() -> Vec<Run> {
     v.push(run("quick-ww-handoff", &[("FSIO_MODEL_ROLES", "ww"), ("FSIO_MODEL_S3_OPS", "0"),
                                      ("FSIO_MODEL_HANDOFF", "1"), ("FSIO_MODEL_RESENDS", "0"),
                                      ("FSIO_MODEL_ZOMBIES", "0")]));
+    /* §3.5 item 4, 8h:  a close refused by policy, a discard leave, with
+     * a follower and with another writer (FSIO_MODEL_DISCARD, off
+     * elsewhere) */
+    v.push(run("quick-w-discard", &[("FSIO_MODEL_ROLES", "w"), ("FSIO_MODEL_S3_OPS", "0"),
+                                    ("FSIO_MODEL_DISCARD", "1")]));
+    v.push(run("quick-wr-discard", &[("FSIO_MODEL_ROLES", "wr"), ("FSIO_MODEL_S3_OPS", "0"),
+                                     ("FSIO_MODEL_DISCARD", "1"), ("FSIO_MODEL_RESENDS", "0"),
+                                     ("FSIO_MODEL_ZOMBIES", "0"),
+                                     ("FSIO_MODEL_EXPIRER_CRASHES", "0")]));
+    v.push(run("quick-ww-discard", &[("FSIO_MODEL_ROLES", "ww"), ("FSIO_MODEL_S3_OPS", "0"),
+                                     ("FSIO_MODEL_DISCARD", "1"), ("FSIO_MODEL_RESENDS", "0"),
+                                     ("FSIO_MODEL_ZOMBIES", "0")]));
+    v.push(run("quick-v-wr-discard", &[("FSIO_MODEL_VERSIONED", "1"), ("FSIO_MODEL_ROLES", "wr"),
+                                       ("FSIO_MODEL_S3_OPS", "0"), ("FSIO_MODEL_DISCARD", "1"),
+                                       ("FSIO_MODEL_RESENDS", "0"), ("FSIO_MODEL_ZOMBIES", "0"),
+                                       ("FSIO_MODEL_EXPIRER_CRASHES", "0")]));
     /* §3.5, C1:  object tags, a tag write racing a publish
      * (FSIO_MODEL_TAGS, off elsewhere) */
     v.push(run("quick-w-tags", &[("FSIO_MODEL_ROLES", "w"), ("FSIO_MODEL_S3_OPS", "2"),
@@ -484,6 +500,9 @@ fn sample() -> Vec<Run> {
         /* §4.2, 8j:  the hand-off (FSIO_MODEL_HANDOFF) */
         ("sample-wr-handoff", vec![("FSIO_MODEL_ROLES", "wr"), ("FSIO_MODEL_S3_OPS", "1"),
                                    ("FSIO_MODEL_HANDOFF", "1")]),
+        /* §3.5 item 4, 8h:  a refused close (FSIO_MODEL_DISCARD) */
+        ("sample-wr-discard", vec![("FSIO_MODEL_ROLES", "wr"), ("FSIO_MODEL_S3_OPS", "1"),
+                                   ("FSIO_MODEL_DISCARD", "1")]),
     ];
     configs
         .iter()

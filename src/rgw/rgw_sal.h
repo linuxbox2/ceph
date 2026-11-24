@@ -1209,10 +1209,16 @@ class Object {
 
       /* begin_write and end_write flags */
       static constexpr uint32_t WRITE_FLAG_NONE =     0x0000;
+      /* the closing writer's publish was refused (FSIO design §3.5 item
+       * 4):  its writes are discarded if it was the last writer, and
+       * otherwise left to the writers still bound */
+      static constexpr uint32_t WRITE_FLAG_DISCARD =  0x0001;
 
       /* close flags */
       static constexpr uint32_t CLOSE_FLAG_NONE =     0x0000;
       static constexpr uint32_t CLOSE_FLAG_DETACH =   0x0001;
+      /* as WRITE_FLAG_DISCARD, for a write the close ends */
+      static constexpr uint32_t CLOSE_FLAG_DISCARD =  0x0002;
 
       virtual int preadv(const struct iovec* iov, int iovcnt,
 			  uint64_t ofs, uint64_t* bytes_read,

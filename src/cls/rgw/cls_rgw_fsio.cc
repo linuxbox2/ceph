@@ -312,7 +312,7 @@ int join_once(cls_rgw_fsio_head& h, const join_in& in, join_out& out,
 int leave_once(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& caller,
 	       const cls_rgw_fsio_id& cs, bool writer, const expired_t& expired,
 	       leave_out& out, cls_rgw_fsio_effects& fx,
-	       const publish_intent* intent, bool handoff);
+	       const publish_intent* intent, bool handoff, bool discard);
 int rebind_once(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& caller,
 		const cls_rgw_fsio_id& from, const cls_rgw_fsio_id& to,
 		uint32_t readers, rebind_out& out);
@@ -336,13 +336,14 @@ int join(cls_rgw_fsio_head& h, const join_in& in, join_out& out,
 int leave(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& caller,
 	  uint64_t seq, const cls_rgw_fsio_id& cs, bool writer,
 	  const expired_t& expired, leave_out& out, cls_rgw_fsio_effects& fx,
-	  const publish_intent* intent, bool handoff)
+	  const publish_intent* intent, bool handoff, bool discard)
 {
   if (already_applied(h, caller, seq)) {
     out.already_applied = true;
     return 0;
   }
-  int r = leave_once(h, caller, cs, writer, expired, out, fx, intent, handoff);
+  int r = leave_once(h, caller, cs, writer, expired, out, fx, intent, handoff,
+		     discard);
   if (r == 0) {
     applied(h, caller, seq);
   }
@@ -503,6 +504,9 @@ int join_once(cls_rgw_fsio_head& h, const join_in& in, join_out& out,
       cs.state = state::CONSTRUCTING;
       cs.manifest_at = at::SHADOW;
       cs.shadow.emplace();
+      if (versioned) {
+	cs.shadow->base = hdr.cur_instance;	// §2.2, 8h
+      }
       hdr.chunk_sets.push_back(cs);
       hdr.cur_shadow = cs.id;
       bind = cs.id;
@@ -736,7 +740,7 @@ namespace {
 int leave_once(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& caller,
 	       const cls_rgw_fsio_id& cs, bool writer, const expired_t& expired,
 	       leave_out& out, cls_rgw_fsio_effects& fx,
-	       const publish_intent* intent, bool handoff)
+	       const publish_intent* intent, bool handoff, bool discard)
 {
   if (!h.hdr) {
     return -EINVAL;
@@ -804,6 +808,21 @@ int leave_once(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& caller,
        * can enter publishing (§4.2) */
       if (e->state != state::READY) {
 	return -EINVAL;
+      }
+      if (discard) {
+	/* §3.4, §3.5 item 4, 8h:  its publish refused:  retired as
+	 * superseded content is, drained once nothing is bound to it */
+	e->state = state::RETIRED;
+	if (h.hdr->cur_shadow && *h.hdr->cur_shadow == cs) {
+	  h.hdr->cur_shadow.reset();
+	}
+	--c.writers;
+	std::vector<cls_rgw_fsio_id> drained;
+	settle(h, drained, fx, caller);
+	if (!drained.empty()) {
+	  out.drained = drained.front();
+	}
+	return 0;
       }
       e->state = state::PUBLISHING;
       e->publishing.emplace();

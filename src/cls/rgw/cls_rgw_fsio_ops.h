@@ -199,6 +199,7 @@ struct cls_rgw_fsio_leave_op {
   std::set<uint64_t> expired;
   std::optional<cls_rgw_fsio_intent> intent;
   bool handoff = false;          // a writer's:  its publish handed off (§3.4, 8j)
+  bool discard = false;          // a writer's:  its publish refused (§3.4, 8h)
 
   void encode(ceph::buffer::list& bl) const {
     ENCODE_START(1, 1, bl);
@@ -209,6 +210,7 @@ struct cls_rgw_fsio_leave_op {
     encode(expired, bl);
     encode(intent, bl);
     encode(handoff, bl);
+    encode(discard, bl);
     ENCODE_FINISH(bl);
   }
   void decode(ceph::buffer::list::const_iterator& bl) {
@@ -220,6 +222,7 @@ struct cls_rgw_fsio_leave_op {
     decode(expired, bl);
     decode(intent, bl);
     decode(handoff, bl);
+    decode(discard, bl);
     DECODE_FINISH(bl);
   }
   void dump(ceph::Formatter *f) const;

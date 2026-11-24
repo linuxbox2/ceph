@@ -1340,7 +1340,8 @@ int RadosFSIOObject::begin_write(const DoutPrefixProvider* dpp, uint32_t flags,
 int RadosFSIOObject::leave(const DoutPrefixProvider* dpp,
 			   const cls_rgw_fsio_id& id, bool writer,
 			   cls_rgw_fsio_leave_ret* ret,
-			   const cls_rgw_fsio_intent* intent, bool handoff)
+			   const cls_rgw_fsio_intent* intent, bool handoff,
+			   bool discard)
 {
   int r = sequenced(dpp, [&] (neorados::WriteOp& op) {
     cls_rgw_fsio_leave_op in;
@@ -1349,6 +1350,7 @@ int RadosFSIOObject::leave(const DoutPrefixProvider* dpp,
     in.cs = id;
     in.writer = writer;
     in.handoff = handoff;
+    in.discard = discard;
     if (intent) {
       in.intent = *intent;	// §4.2 step 2:  the claim, the epoch returned
     }
@@ -1406,7 +1408,8 @@ int RadosFSIOObject::keeps_hint(const DoutPrefixProvider* dpp, bool* keep)
 int RadosFSIOObject::collect_shadow(const DoutPrefixProvider* dpp,
 				    const cls_rgw_fsio_id& id,
 				    const std::vector<cls_rgw_fsio_run>& extent,
-				    const ceph::buffer::list* given)
+				    const ceph::buffer::list* given,
+				    const std::string& version)
 {
   if (given && given->length()) {
     return store->getRados()->send_manifest_to_gc(
@@ -1416,8 +1419,14 @@ int RadosFSIOObject::collect_shadow(const DoutPrefixProvider* dpp,
   /* its pseudo-manifest, on its attribute clone:  the head's data chunk
    * when the head holds data, else the attributes-only clone (§2.4) */
   const auto& marker = info.bucket.marker;
+  std::string base = head_oid;
   auto aioc = head_ioc;
-  aioc.set_key(head_oid);
+  if (!is_null(version)) {
+    if (int r = instance_obj(version, &base, &aioc); r < 0) {
+      return r;
+    }
+  }
+  aioc.set_key(base);
   ceph::buffer::list pm;
   sys::error_code ec;
   for (const char role : {'d', 'a'}) {
@@ -1425,7 +1434,7 @@ int RadosFSIOObject::collect_shadow(const DoutPrefixProvider* dpp,
     op.get_xattr("user.rgw.fsio.pm", &pm, nullptr);
     ec.clear();
     store->get_neorados().execute(
-      neorados::Object{cls_rgw_fsio_clone_name(marker, role, id, head_oid)},
+      neorados::Object{cls_rgw_fsio_clone_name(marker, role, id, base)},
       aioc, std::move(op), nullptr, ceph::async::use_blocked[ec]);
     if (!ec) {
       break;
@@ -1433,7 +1442,7 @@ int RadosFSIOObject::collect_shadow(const DoutPrefixProvider* dpp,
   }
   if (ec || !pm.length()) {
     ldpp_dout(dpp, 0) << "ERROR: FSIO:  no pseudo-manifest for "
-		      << id.to_str() << " on " << head_oid << dendl;
+		      << id.to_str() << " on " << base << dendl;
     return -EIO;
   }
   return store->getRados()->send_manifest_to_gc(
@@ -1462,7 +1471,8 @@ int RadosFSIOObject::drain(const DoutPrefixProvider* dpp, cls_rgw_fsio_id id)
       }
     } else if (e && e->manifest_at == cls_rgw_fsio_manifest_at::SHADOW &&
 	       e->shadow) {
-      if (int r = collect_shadow(dpp, id, e->shadow->extent); r < 0) {
+      if (int r = collect_shadow(dpp, id, e->shadow->extent, nullptr,
+				 e->shadow->base); r < 0) {
 	return r;
       }
     }
@@ -1541,7 +1551,9 @@ int RadosFSIOObject::close(const DoutPrefixProvider* dpp, uint32_t flags)
 {
   int uncompleted = 0;
   if (writing) {
-    if (int r = end_write(dpp, flags); r == -EAGAIN) {
+    const uint32_t wflags = (flags & CLOSE_FLAG_DISCARD) ? WRITE_FLAG_DISCARD
+							  : WRITE_FLAG_NONE;
+    if (int r = end_write(dpp, wflags); r == -EAGAIN) {
       /* §4.2, 8j:  nobody is left to retry this publish:  handed off */
       if (int e = handoff(dpp); e < 0) {
 	return e;
@@ -2556,6 +2568,18 @@ int RadosFSIOObject::end_write(const DoutPrefixProvider* dpp, uint32_t flags)
     }
     return finished(std::nullopt);
   }
+  if (flags & WRITE_FLAG_DISCARD) {
+    /* §3.4, §3.5 item 4, 8h:  its publish refused before its leave:  the
+     * shadow retired if this was its last writer, else left to the
+     * writers still bound;  no size report, claim or publish hint.  A
+     * version already written was completed above, never discarded */
+    cls_rgw_fsio_leave_ret ret;
+    if (int r = leave(dpp, wcs, true, &ret, nullptr, false, true);
+	r < 0 && r != -EINVAL) {
+      return r;
+    }
+    return finished(ret.drained);
+  }
   if (dirty || unsure) {
     if (int r = report_hint(dpp); r < 0) {
       return r;
@@ -2661,7 +2685,7 @@ Object::FSIOResult RadosObject::get_fsio_handle(const DoutPrefixProvider* dpp,
   }
   if (size >= 0) {
     if (int r = hdl->ftruncate(dpp, size, 0); r < 0) {
-      hdl->close(dpp, 0);
+      hdl->close(dpp, FSIOObject::CLOSE_FLAG_DISCARD);
       return FSIOResult{r, nullptr};
     }
   }

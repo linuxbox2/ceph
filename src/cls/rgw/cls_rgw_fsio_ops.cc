@@ -553,7 +553,8 @@ int rgw_fsio_leave(cls_method_context_t hctx, ceph::buffer::list* in,
     }
     fsio::leave_out lout;
     int r = fsio::leave(h, op.caller, op.seq, op.cs, op.writer, op.expired,
-			lout, fx, intent ? &*intent : nullptr, op.handoff);
+			lout, fx, intent ? &*intent : nullptr, op.handoff,
+			op.discard);
     ret.already_applied = lout.already_applied;
     ret.publishing = lout.publishing;
     ret.abandoned = lout.abandoned;

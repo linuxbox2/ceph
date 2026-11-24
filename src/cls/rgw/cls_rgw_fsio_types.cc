@@ -49,6 +49,7 @@ void cls_rgw_fsio_shadow::dump(ceph::Formatter *f) const
   encode_json("trunc_epoch", trunc_epoch, f);
   encode_json("trunc_low", trunc_low, f);
   encode_json("extent", extent, f);
+  encode_json("base", base, f);
 }
 
 std::list<cls_rgw_fsio_shadow> cls_rgw_fsio_shadow::generate_test_instances()
@@ -60,6 +61,7 @@ std::list<cls_rgw_fsio_shadow> cls_rgw_fsio_shadow::generate_test_instances()
   i.trunc_epoch = 3;
   i.trunc_low = 4;
   i.extent.push_back(cls_rgw_fsio_run{5, 7});
+  i.base = "v1";
   o.push_back(std::move(i));
   o.emplace_back();
   return o;
@@ -468,6 +470,7 @@ void cls_rgw_fsio_leave_op::dump(ceph::Formatter *f) const
   encode_json("expired", expired, f);
   encode_json("intent", intent, f);
   encode_json("handoff", handoff, f);
+  encode_json("discard", discard, f);
 }
 
 std::list<cls_rgw_fsio_leave_op> cls_rgw_fsio_leave_op::generate_test_instances()
@@ -481,6 +484,7 @@ std::list<cls_rgw_fsio_leave_op> cls_rgw_fsio_leave_op::generate_test_instances(
   i.expired.insert(5);
   i.intent = cls_rgw_fsio_intent::generate_test_instances().front();
   i.handoff = true;
+  i.discard = true;
   o.push_back(std::move(i));
   o.emplace_back();
   return o;

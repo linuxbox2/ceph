@@ -6099,6 +6099,18 @@ int NSFSObject::NSFSFSIOObject::begin_write(const DoutPrefixProvider* dpp, uint3
 int NSFSObject::NSFSFSIOObject::end_write(const DoutPrefixProvider* dpp, uint32_t flags)
 {
   writing = false;
+  if (flags & WRITE_FLAG_DISCARD) {
+    /* FSIO design §3.5 item 4, 8h:  refused:  the shadow's name goes, and
+     * the next begin_write() reclones from the published object;  the
+     * handle's readers keep the unlinked file until then */
+    if (binding == Binding::SHADOW && !doomed) {
+      if (shadow_dir_fd >= 0 && !shadow_name.empty()) {
+	::unlinkat(shadow_dir_fd, shadow_name.c_str(), 0);
+      }
+      binding = Binding::PUBLISHED;
+    }
+    return 0;
+  }
   return publish(dpp, flags);
 }
 
@@ -6507,7 +6519,8 @@ int NSFSObject::NSFSFSIOObject::close(const DoutPrefixProvider* dpp, uint32_t fl
 
   int r = 0;
   if (writing && !doomed && binding == Binding::SHADOW) {
-    r = end_write(dpp, WRITE_FLAG_NONE);
+    r = end_write(dpp, (flags & CLOSE_FLAG_DISCARD) ? WRITE_FLAG_DISCARD
+						    : WRITE_FLAG_NONE);
   }
 
   if (!doomed && binding == Binding::SHADOW && ephemeral &&

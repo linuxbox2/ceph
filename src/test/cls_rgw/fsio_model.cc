@@ -37,6 +37,9 @@
  * (§4.2, 8j):  released, the uncompleted-publish hint, the hand-off
  * leave;  the FSIO expirer takes and publishes an uncompleted publish
  * whatever its gateway's liveness, or a later writer does;  unversioned.
+ * FSIO_MODEL_DISCARD=1 lets a writer's close be refused by policy (§3.5
+ * item 4, 8h):  a discard leave, which retires the shadow if it was the
+ * last writer, its acknowledged writes the administrator's to lose.
  * FSIO_MODEL_TAGS=1 gives the head object tags, which an S3 PUT sets and
  * tag writes change, and checks a publish keeps the tags it evaluated
  * (§3.5, C1);  unversioned.
@@ -379,6 +382,7 @@ struct Config {
   bool tags = false;             // FSIO_MODEL_TAGS:  object tags (§3.5, C1)
   bool create = false;           // FSIO_MODEL_CREATE:  creation (§3.1, Z24)
   bool handoff = false;          // FSIO_MODEL_HANDOFF:  the hand-off (§4.2, 8j)
+  bool discard = false;          // FSIO_MODEL_DISCARD:  a refused publish (§3.5, 8h)
   std::set<std::string> dup;     // FSIO_MODEL_DUP:  calls applied twice
 };
 
@@ -557,7 +561,7 @@ int m_leave(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& caller,
 	    uint64_t seq, const fid_t& cs, bool writer,
 	    const fsio::expired_t& expired, fsio::leave_out& out,
 	    cls_rgw_fsio_effects& fx, const fsio::publish_intent* intent,
-	    bool handoff = false)
+	    bool handoff = false, bool discard = false)
 {
   cls_rgw_fsio_leave_op op;
   op.caller = caller;
@@ -567,10 +571,11 @@ int m_leave(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& caller,
   op.expired = expired;
   op.intent = op_intent(intent);
   op.handoff = handoff;
+  op.discard = discard;
   ceph::buffer::list reply;
   const int r = on_cluster_head("fsio_leave", cls::rgw::method::fsio_leave, h, fx, op, [&] {
       return fsio::leave(h, caller, seq, cs, writer, expired, out, fx, intent,
-			 handoff);
+			 handoff, discard);
     }, &reply);
   if (cl.on && r == 0 && reply.length()) {
     if (auto ret = dec<cls_rgw_fsio_leave_ret>("fsio_leave", reply);
@@ -1041,11 +1046,11 @@ int counted_leave(cls_rgw_fsio_head& h, Gw& g, const fid_t& cs, bool writer,
 		  const std::set<uint64_t>& expired, fsio::leave_out& out,
 		  cls_rgw_fsio_effects& fx,
 		  const fsio::publish_intent* intent = nullptr,
-		  bool handoff = false)
+		  bool handoff = false, bool discard = false)
 {
   const auto seq = g.seq + 1;
   int r = m_leave(h, hd(g), seq, cs, writer, expired, out, fx, intent,
-		  handoff);
+		  handoff, discard);
   g.resend.reset();
   if (r == 0) {
     g.seq = seq;
@@ -1500,6 +1505,17 @@ std::optional<std::string> lose_join(Gw& g, const fsio::join_in& in)
 }
 
 std::string entry_tail(const World& w, const cls_rgw_fsio_chunk_set& e);
+
+/* §3.5 item 4, 8h:  a refused close's discard leave retired its shadow:
+ * its acknowledged writes, every writer's, are the administrator's to
+ * lose, as a revoked S3 PUT's are */
+void discarded(World& w, const fid_t& cs)
+{
+  const auto* e = w.head.hdr ? w.head.hdr->find(cs) : nullptr;
+  if (!e || e->state == state::RETIRED) {
+    w.acked[sname(cs)] = 0;
+  }
+}
 
 void gw_actions(const World& w0, size_t gi, std::vector<Action>& acts)
 {
@@ -2193,17 +2209,23 @@ void gw_actions(const World& w0, size_t gi, std::vector<Action>& acts)
 	}
       }
     }
-    for (int lost = 0; lost < 2; ++lost) {
-    if (lost && !(cfg.lost_reply && !g.did_lose)) {
+    for (int lost = 0; lost < 3; ++lost) {
+    /* lost == 2:  the close refused by policy (§3.5 item 4, 8h) */
+    const bool refused = lost == 2;
+    if (lost == 1 && !(cfg.lost_reply && !g.did_lose)) {
+      continue;
+    }
+    if (refused && !(cfg.discard && o.writer)) {
       continue;
     }
     acts.push_back({fmt::format("gw{} close-{} {}{}", glabel(g),
 				o.writer ? "write" : "read", o.storage,
+				refused ? " (refused)" :
 				lost ? " (reply lost)" : ""),
-	[gi, oi, inc, lost](World& w) -> std::optional<std::string> {
+	[gi, oi, inc, lost, refused](World& w) -> std::optional<std::string> {
 	  auto& g = w.gws[gi];
 	  auto o = g.opens[oi];
-	  if (cfg.sizes && o.writer) {
+	  if (cfg.sizes && o.writer && !refused) {
 	    /* end_write():  the writer reports, rebasing once if stale;  then
 	     * the hint covers its writes in the current epoch (§2.7,
 	     * close-to-open) */
@@ -2232,13 +2254,17 @@ void gw_actions(const World& w0, size_t gi, std::vector<Action>& acts)
 	  fsio::leave_out out;
 	  cls_rgw_fsio_effects fx;
 	  auto save = w.head;
-	  if (counted_leave(w.head, g, o.cs, o.writer, w.dead_for(g), out, fx) < 0) {
+	  if (counted_leave(w.head, g, o.cs, o.writer, w.dead_for(g), out, fx,
+			    nullptr, false, refused) < 0) {
 	    w.head = save;
 	    g.release_failed = 1;         // keeps its hint (H1)
 	    return std::nullopt;
 	  }
 	  apply_remove_head(w, fx);
-	  if (lost) {
+	  if (refused) {
+	    discarded(w, o.cs);
+	  }
+	  if (lost == 1) {
 	    /* §3, Z22:  applied, its reply lost:  the gateway knows only
 	     * what it sent */
 	    g.did_lose = 1;
@@ -2872,6 +2898,36 @@ void gw_actions_v(const World& w0, size_t gi, std::vector<Action>& acts)
 	      return std::nullopt;
 	    }});
       }
+    }
+    if (o.writer && cfg.discard) {
+      /* §3.5 item 4, 8h:  refused before step 1:  no claim, no
+       * placeholder, a discard leave */
+      acts.push_back({fmt::format("gw{} close-write {} (refused)", glabel(g),
+				  o.storage),
+	  [gi, oi](World& w) -> std::optional<std::string> {
+	    auto& g = w.gws[gi];
+	    auto o = g.opens[oi];
+	    g.opens.erase(g.opens.begin() + oi);
+	    fsio::leave_out out;
+	    cls_rgw_fsio_effects fx;
+	    auto save = w.head;
+	    if (counted_leave(w.head, g, o.cs, true, w.dead_for(g), out, fx,
+			      nullptr, false, true) < 0) {
+	      w.head = save;
+	      g.release_failed = 1;         // keeps its hint (H1)
+	      return std::nullopt;
+	    }
+	    apply_remove_head(w, fx);
+	    discarded(w, o.cs);
+	    if (!out.instance.empty()) {
+	      g.counted.insert(out.instance);  // to remove itself from (§2.5)
+	    }
+	    if (out.drained) {
+	      g.step = DRAIN_SEND;
+	      g.step_cs = *out.drained;
+	    }
+	    return std::nullopt;
+	  }});
     }
     acts.push_back({fmt::format("gw{} close-{} {}", glabel(g),
 				o.writer ? "write" : "read", o.storage),
@@ -5246,6 +5302,7 @@ TEST(FSIOModel, Explore)
   cfg.tags = env_int("FSIO_MODEL_TAGS", 0) != 0;
   cfg.create = env_int("FSIO_MODEL_CREATE", 0) != 0;
   cfg.handoff = env_int("FSIO_MODEL_HANDOFF", 0) != 0;
+  cfg.discard = env_int("FSIO_MODEL_DISCARD", 0) != 0;
   if (auto d = std::getenv("FSIO_MODEL_DUP")) {
     for (auto m : ceph::split(d, ",")) {
       cfg.dup.emplace(m);

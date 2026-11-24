@@ -2819,6 +2819,66 @@ TEST(OPEN2, WRITER_CLOSE_WITH_A_READER_PUBLISHES)
   EXPECT_FALSE(sf::exists(shadow_path(name)));
 }
 
+/* FSIO design §3.5 item 4, 8h:  a close refused by policy leaves the
+ * published object as it was and drops the shadow;  the next writer
+ * reclones from the published object */
+TEST(OPEN2, REFUSED_CLOSE_DISCARDS_THE_SHADOW)
+{
+  if (! have_fs_layout()) {
+    GTEST_SKIP() << "not a filesystem-backed driver";
+  }
+  using FSIO = rgw::sal::Object::FSIOObject;
+  const DoutPrefix dp(g_ceph_context, dout_subsys, "write2 test: ");
+  const std::string name{"close-refused"};
+  reset_object(name);
+  publish_p4(name);
+
+  std::unique_ptr<rgw::sal::Bucket> bucket;
+  auto obj = driver_object(&dp, name, &bucket);
+  ASSERT_TRUE(obj);
+  auto [r, w] = obj->get_fsio_handle(&dp, FSIO::OPEN_FLAG_WRITE);
+  ASSERT_EQ(r, 0);
+  ASSERT_EQ(fsio_write(w.get(), "QQ", 0), 0);
+  ASSERT_TRUE(sf::exists(shadow_path(name)));
+  ASSERT_EQ(w->close(&dp, FSIO::CLOSE_FLAG_DISCARD), 0);
+  EXPECT_EQ(contents_of(published_path(name)), "PPPP");
+  EXPECT_FALSE(sf::exists(shadow_path(name)));
+
+  auto [r2, w2] = obj->get_fsio_handle(&dp, FSIO::OPEN_FLAG_WRITE);
+  ASSERT_EQ(r2, 0);
+  ASSERT_EQ(fsio_write(w2.get(), "RR", 2), 0);
+  ASSERT_EQ(w2->close(&dp, FSIO::CLOSE_FLAG_NONE), 0);
+  EXPECT_EQ(contents_of(published_path(name)), "PPRR");
+}
+
+/* end_write() refused on a handle that stays open as a reader:  its next
+ * begin_write() reclones from the published object */
+TEST(OPEN2, REFUSED_END_WRITE_RECLONES_AT_THE_NEXT_WRITE)
+{
+  if (! have_fs_layout()) {
+    GTEST_SKIP() << "not a filesystem-backed driver";
+  }
+  using FSIO = rgw::sal::Object::FSIOObject;
+  const DoutPrefix dp(g_ceph_context, dout_subsys, "write2 test: ");
+  const std::string name{"endwrite-refused"};
+  reset_object(name);
+  publish_p4(name);
+
+  std::unique_ptr<rgw::sal::Bucket> bucket;
+  auto obj = driver_object(&dp, name, &bucket);
+  ASSERT_TRUE(obj);
+  auto [r, w] = obj->get_fsio_handle(&dp, FSIO::OPEN_FLAG_WRITE);
+  ASSERT_EQ(r, 0);
+  ASSERT_EQ(fsio_write(w.get(), "QQ", 0), 0);
+  ASSERT_EQ(w->end_write(&dp, FSIO::WRITE_FLAG_DISCARD), 0);
+  EXPECT_EQ(contents_of(published_path(name)), "PPPP");
+  EXPECT_FALSE(sf::exists(shadow_path(name)));
+  ASSERT_EQ(w->begin_write(&dp, FSIO::WRITE_FLAG_NONE), 0);
+  ASSERT_EQ(fsio_write(w.get(), "RR", 2), 0);
+  ASSERT_EQ(w->close(&dp, FSIO::CLOSE_FLAG_NONE), 0);
+  EXPECT_EQ(contents_of(published_path(name)), "PPRR");
+}
+
 /* FSIO_RADOS_DESIGN.md §4.3, the orderly shutdown's drain, through
  * rgw_umount().  On a second mount of the bucket, so the suite's own is
  * untouched */

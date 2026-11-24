@@ -3233,6 +3233,102 @@ TEST_F(FSIORadosPublishWait, CloseHandsOffAWrittenVersion)
   EXPECT_FALSE(rec.opens) << "the writer's open was left";
 }
 
+/* §3.4, §3.5 item 4, 8h:  a close refused by policy:  the discard leave
+ * retires the shadow, which drains at once, its chunks to GC;  S3 keeps
+ * the published content, and the next writer constructs from it */
+TEST_F(FSIORadosPublishWait, RefusedCloseDiscardsTheShadow)
+{
+  set_versioning(0);
+  const auto a = pattern(9 * MiB, 1);
+  ASSERT_EQ(0, put("obj", a));
+  const auto chunks = chunks_of("obj");
+  ASSERT_EQ(3u, chunks.size());
+  auto w = open("obj", true);
+  ASSERT_TRUE(w);
+  const auto id = rados_fsio(w)->writing_to();
+  ASSERT_EQ(0, write(w, 4 * MiB, {"Z"}));
+  ASSERT_EQ(0, w->close(env->dpp.get(),
+			rgw::sal::Object::FSIOObject::CLOSE_FLAG_DISCARD));
+  std::string now;
+  ASSERT_EQ(0, get("obj", &now));
+  EXPECT_TRUE(now == a) << "not the published content";
+  auto rec = records_of(head_of("obj"), 0);
+  EXPECT_TRUE(!rec.hdr || !entry_of(*rec.hdr, id)) << "the shadow's entry stayed";
+  EXPECT_TRUE(!rec.hdr || !rec.hdr->cur_shadow);
+  EXPECT_TRUE(gc_objects().count(clone_of(chunks[1], id).oid))
+    << "the written chunk's clone was not sent to GC";
+  auto w2 = open("obj", true);
+  ASSERT_TRUE(w2);
+  EXPECT_NE(id, rados_fsio(w2)->writing_to());
+  ASSERT_EQ(0, w2->close(env->dpp.get(), 0));
+}
+
+/* versioned:  refused before step 1, so no placeholder, no new version,
+ * the current version unchanged */
+TEST_F(FSIORadosPublishWait, RefusedVersionedCloseMakesNoVersion)
+{
+  std::string i1;
+  ASSERT_EQ(0, put("obj", pattern(9 * MiB, 1), &i1));
+  const auto before = versions("obj");
+  auto w = open("obj", true);
+  ASSERT_TRUE(w);
+  ASSERT_EQ(0, write(w, 4 * MiB, {"Z"}));
+  ASSERT_EQ(0, w->close(env->dpp.get(),
+			rgw::sal::Object::FSIOObject::CLOSE_FLAG_DISCARD));
+  EXPECT_EQ(before, versions("obj"));
+  EXPECT_EQ(i1, olh_instance("obj"));
+}
+
+/* §2.2, 8h:  a versioned shadow drained by a handle that did not build
+ * it finds its clones beside the version it was built from:  the second
+ * writer only joined, and the last refusal is its own */
+TEST_F(FSIORadosPublishWait, RefusedVersionedShadowDrainedByAJoiner)
+{
+  std::string i1;
+  ASSERT_EQ(0, put("obj", pattern(9 * MiB, 1), &i1));
+  auto w1 = open("obj", true);
+  ASSERT_TRUE(w1);
+  const auto id = rados_fsio(w1)->writing_to();
+  ASSERT_EQ(0, write(w1, 4 * MiB, {"Z"}));
+  auto w2 = open("obj", true);
+  ASSERT_TRUE(w2);
+  ASSERT_EQ(id, rados_fsio(w2)->writing_to()) << "the second writer joins";
+  const auto discard = rgw::sal::Object::FSIOObject::CLOSE_FLAG_DISCARD;
+  ASSERT_EQ(0, w1->close(env->dpp.get(), discard));
+  ASSERT_EQ(0, w2->close(env->dpp.get(), discard));
+  EXPECT_EQ(i1, olh_instance("obj"));
+  auto rec = records_of(head_of("obj"), 0);
+  EXPECT_TRUE(!rec.hdr || !entry_of(*rec.hdr, id)) << "the shadow's entry stayed";
+  const auto gco = gc_objects();
+  EXPECT_TRUE(std::any_of(gco.begin(), gco.end(), [&](const auto& kv) {
+		return kv.first.find(id.to_str()) != std::string::npos;
+	      }))
+    << "none of the shadow's objects went to GC";
+}
+
+/* a publish released after EAGAIN, its writer's open kept, then refused:
+ * the design's ECANCELED path (§3.5 item 4) */
+TEST_F(FSIORadosPublishWait, ReleasedPublishIsDiscarded)
+{
+  set_versioning(0);
+  const auto a = pattern(9 * MiB, 1);
+  ASSERT_EQ(0, put("obj", a));
+  auto w = open("obj", true);
+  ASSERT_TRUE(w);
+  const auto id = rados_fsio(w)->writing_to();
+  ASSERT_EQ(0, write(w, 4 * MiB, {"Z"}));
+  rados_fsio(w)->busy_publish_calls(1000);
+  ASSERT_EQ(-EAGAIN, w->end_write(env->dpp.get(), 0));
+  rados_fsio(w)->busy_publish_calls(0);
+  ASSERT_EQ(0, w->close(env->dpp.get(),
+			rgw::sal::Object::FSIOObject::CLOSE_FLAG_DISCARD));
+  std::string now;
+  ASSERT_EQ(0, get("obj", &now));
+  EXPECT_TRUE(now == a) << "not the published content";
+  auto rec = records_of(head_of("obj"), 0);
+  EXPECT_TRUE(!rec.hdr || !entry_of(*rec.hdr, id));
+}
+
 /* §3.6:  an unlinked generation's shadow still publishes */
 TEST_F(FSIORadosPublishWait, DiscardKeepsPublishing)
 {

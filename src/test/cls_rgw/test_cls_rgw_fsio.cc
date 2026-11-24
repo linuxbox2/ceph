@@ -228,6 +228,114 @@ TEST(cls_rgw_fsio, J8_handoff_with_another_writer_sets_nothing)
   EXPECT_EQ(1u, h.bound(s).writers);
 }
 
+/* §3.4, §3.5 item 4, 8h:  a discard leave, a close refused by policy */
+fsio::leave_out discard(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& inc,
+			const cls_rgw_fsio_id& cs, int expect = 0,
+			uint64_t seq = 0)
+{
+  fsio::leave_out out;
+  cls_rgw_fsio_effects fx;
+  EXPECT_EQ(expect, fsio::leave(h, inc, seq ? seq : next_seq(), cs, true, {},
+				out, fx, nullptr, false, true));
+  return out;
+}
+
+/* the last writer's, nothing else bound:  retired and drained at once,
+ * gone at fsio_forget;  the next writer constructs from the published */
+TEST(cls_rgw_fsio, H8_discard_retires_and_drains)
+{
+  auto h = head("C0");
+  auto s = construct(h, GW1);
+  const auto out = discard(h, GW1, s);
+  EXPECT_FALSE(out.publishing);
+  EXPECT_EQ(std::optional(s), out.drained);
+  ASSERT_TRUE(h.hdr);
+  const auto* e = h.hdr->find(s);
+  ASSERT_TRUE(e);
+  EXPECT_EQ(state::RETIRED, e->state);
+  EXPECT_TRUE(e->drained);
+  EXPECT_FALSE(h.hdr->cur_shadow);
+  cls_rgw_fsio_effects fx;
+  std::optional<cls_rgw_fsio_id> next;
+  ASSERT_EQ(0, fsio::forget(h, s, fx, &next));
+  EXPECT_TRUE(!h.hdr || !h.hdr->find(s));
+  /* the header went with the entry, so the join's own nonce names the
+   * new shadow:  a gateway's is random (§6.8) */
+  fsio::join_out jo;
+  cls_rgw_fsio_effects jfx;
+  ASSERT_EQ(0, fsio::join(h, {GW2, next_seq(), true, 2, 10, {}}, jo, jfx));
+  EXPECT_TRUE(jo.construct);
+  EXPECT_NE(s, jo.bound);
+}
+
+/* a follower bound:  retired, not drained, until the follower leaves */
+TEST(cls_rgw_fsio, H8_discard_with_a_follower)
+{
+  auto h = head("C0");
+  auto s = construct(h, GW1);
+  auto c0 = join_reader(h, GW2);
+  ASSERT_EQ(0, fsio::rebind(h, GW2, next_seq(), c0, s, 1));
+  const auto out = discard(h, GW1, s);
+  EXPECT_FALSE(out.drained);
+  const auto* e = h.hdr->find(s);
+  ASSERT_TRUE(e);
+  EXPECT_EQ(state::RETIRED, e->state);
+  EXPECT_FALSE(e->drained);
+  EXPECT_FALSE(h.hdr->cur_shadow);
+  fsio::leave_out lo;
+  cls_rgw_fsio_effects fx;
+  ASSERT_EQ(0, fsio::leave(h, GW2, next_seq(), s, false, {}, lo, fx));
+  EXPECT_EQ(std::optional(s), lo.drained);
+}
+
+/* another writer bound:  an ordinary leave;  the shadow stays theirs,
+ * and their leave freezes it */
+TEST(cls_rgw_fsio, H8_discard_with_another_writer)
+{
+  auto h = head("C0");
+  auto s = construct(h, GW1);
+  fsio::join_out jo;
+  cls_rgw_fsio_effects jfx;
+  ASSERT_EQ(0, fsio::join(h, {GW2, next_seq(), true, 1, 10, {}}, jo, jfx));
+  ASSERT_EQ(s, jo.bound);
+  const auto out = discard(h, GW1, s);
+  EXPECT_FALSE(out.drained);
+  const auto* e = h.hdr->find(s);
+  ASSERT_TRUE(e);
+  EXPECT_EQ(state::READY, e->state);
+  EXPECT_EQ(std::optional(s), h.hdr->cur_shadow);
+  EXPECT_EQ(1u, h.bound(s).writers);
+  leave_writer(h, GW2, s);
+  EXPECT_EQ(0, publish(h, GW2, s));
+}
+
+/* a publishing shadow is not discarded:  what publishes it publishes what
+ * was checked;  a resend of an applied discard is already applied */
+TEST(cls_rgw_fsio, H8_discard_of_publishing_fails_and_resend_applies_once)
+{
+  {
+    auto h = head("C0");
+    auto s = construct(h, GW1);
+    leave_writer(h, GW1, s);
+    discard(h, GW1, s, -EINVAL);
+    EXPECT_EQ(state::PUBLISHING, h.hdr->find(s)->state);
+  }
+  {
+    /* GW1's reader keeps its handle record, and with it the sequence
+     * number a resend is answered from (§3) */
+    auto h = head("C0");
+    auto s = construct(h, GW1);
+    join_reader(h, GW1);
+    auto c0 = join_reader(h, GW2);
+    ASSERT_EQ(0, fsio::rebind(h, GW2, next_seq(), c0, s, 1));
+    const auto seq = next_seq();
+    discard(h, GW1, s, 0, seq);
+    const auto again = discard(h, GW1, s, 0, seq);
+    EXPECT_TRUE(again.already_applied);
+    EXPECT_EQ(state::RETIRED, h.hdr->find(s)->state);
+  }
+}
+
 /* §3.8, 8j:  the expirer takes an uncompleted publish, which it then
  * publishes;  not while a writer is bound */
 TEST(cls_rgw_fsio, J8_expirer_takes_an_uncompleted_publish)

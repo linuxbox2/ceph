@@ -61,18 +61,22 @@ struct cls_rgw_fsio_shadow {
   /* reserved runs:  sorted, disjoint, merged when they touch, at most
    * rgw_fsio_extent_max_runs (§3.7, Z11) */
   std::vector<cls_rgw_fsio_run> extent;
+  /* versioned:  the version it was built from, beside which its clones
+   * are placed, for any handle that drains it (§2.2, 8h) */
+  std::string base;
 
   void encode(ceph::buffer::list& bl) const {
-    ENCODE_START(2, 2, bl);
+    ENCODE_START(3, 2, bl);
     encode(size_hint, bl);
     encode(mtime_hint, bl);
     encode(trunc_epoch, bl);
     encode(trunc_low, bl);
     encode(extent, bl);
+    encode(base, bl);
     ENCODE_FINISH(bl);
   }
   void decode(ceph::buffer::list::const_iterator& bl) {
-    DECODE_START(2, bl);
+    DECODE_START(3, bl);
     decode(size_hint, bl);
     decode(mtime_hint, bl);
     decode(trunc_epoch, bl);
@@ -83,6 +87,9 @@ struct cls_rgw_fsio_shadow {
       uint64_t highest;                 // version 1:  one highest index
       decode(highest, bl);
       extent = {{0, highest}};
+    }
+    if (struct_v >= 3) {
+      decode(base, bl);
     }
     DECODE_FINISH(bl);
   }

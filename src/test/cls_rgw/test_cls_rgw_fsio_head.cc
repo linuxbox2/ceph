@@ -873,6 +873,41 @@ TEST_F(FsioHead, HandoffAndTakeUncompleted)
   EXPECT_EQ(GW2, e->publishing->publisher);
 }
 
+/* §3.4, §3.5 item 4, 8h:  through the methods:  a publish released, its
+ * writer's open kept, then refused:  the discard leave retires the shadow
+ * and, nothing else bound, reports its drain */
+TEST_F(FsioHead, ReleasedThenDiscarded)
+{
+  std::string key;
+  const auto head = make_head(key);
+  const auto s = write_and_close(head);	// publishing, GW1's
+  ASSERT_EQ(0, call(head, cls::rgw::method::fsio_publish_release,
+		    cls_rgw_fsio_cs_op{GW1, s}, (cls_rgw_fsio_flags_ret*)nullptr));
+  cls_rgw_fsio_leave_op lop;
+  lop.caller = GW1;
+  lop.seq = 13;
+  lop.cs = s;
+  lop.writer = true;
+  lop.discard = true;
+  cls_rgw_fsio_leave_ret lret;
+  ASSERT_EQ(0, call(head, cls::rgw::method::fsio_leave, lop, &lret));
+  EXPECT_FALSE(lret.publishing);
+  EXPECT_EQ(std::optional(s), lret.drained);
+  std::string hb;
+  ASSERT_LE(0, getxattr(head, HDR, &hb));
+  buffer::list bl;
+  bl.append(hb);
+  cls_rgw_fsio_hdr hdr;
+  auto it = bl.cbegin();
+  decode(hdr, it);
+  EXPECT_FALSE(hdr.cur_shadow);
+  const auto e = std::find_if(hdr.chunk_sets.begin(), hdr.chunk_sets.end(),
+			      [&](const auto& x) { return x.id == s; });
+  ASSERT_NE(hdr.chunk_sets.end(), e);
+  EXPECT_EQ(cls_rgw_fsio_cs_state::RETIRED, e->state);
+  EXPECT_TRUE(e->drained);
+}
+
 /* §3, Z28 (A14):  a call naming an incarnation that is not its op's
  * origin returns EPERM and changes nothing */
 TEST_F(FsioHead, ForeignIncarnationReturnsEperm)

@@ -320,7 +320,8 @@ struct leave_out {
 int leave(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& caller,
 	  uint64_t seq, const cls_rgw_fsio_id& cs, bool writer,
 	  const expired_t& expired, leave_out& out, cls_rgw_fsio_effects& fx,
-	  const publish_intent* intent = nullptr, bool handoff = false);
+	  const publish_intent* intent = nullptr, bool handoff = false,
+	  bool discard = false);
 
 /* §3.8, 8j:  the expirer takes an uncompleted publish:  a ready shadow
  * with uncompleted_publish and no writer bound becomes publishing, the
