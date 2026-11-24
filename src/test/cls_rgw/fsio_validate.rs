@@ -12,8 +12,9 @@ edition = "2021"
 //!                    [--tests] [--progress] [--clone-latency] STEP|PRESET...
 //!
 //! Steps:
-//!   cls            the CLS head test and the neorados CLS test, and
-//!                  libcls_rgw calling no RGW symbol          (RADOS)
+//!   cls            the core's unit tests (no cluster), the CLS head
+//!                  test and the neorados CLS test, and libcls_rgw
+//!                  calling no RGW symbol                     (RADOS)
 //!   librgw-rados   ceph_test_librgw_file_fsio_put            (RADOS)
 //!   harness        unittest_rgw_fsio_geometry (no cluster), then
 //!                  ceph_test_rgw_fsio_rados, the driver's harness (RADOS)
@@ -164,7 +165,8 @@ fn main() {
         let mut targets = vec!["vstart-base", "erasure_code_plugins", "ceph-conf"];
         for s in &o.steps {
             targets.extend(match *s {
-                "cls" => &["cls_rgw", "ceph_test_cls_rgw_fsio_head", "ceph_test_neorados_cls_rgw_fsio"][..],
+                "cls" => &["cls_rgw", "unittest_cls_rgw_fsio", "ceph_test_cls_rgw_fsio_head",
+                           "ceph_test_neorados_cls_rgw_fsio"][..],
                 "librgw-rados" => &["rgw", "ceph_test_librgw_file_fsio_put"][..],
                 "harness" => &["unittest_rgw_fsio_geometry", "ceph_test_rgw_fsio_rados"][..],
                 "cluster-tier" | "model" => &["ceph_test_cls_rgw_fsio_model"][..],
@@ -254,6 +256,7 @@ fn rados_phase(o: &Opts, steps: &[&'static str], run_dir: &Path, summary: &mut V
                 "cls" => vec![
                     sh("cls", "libcls_rgw calls no RGW symbol",
                        "! nm -D --undefined-only lib/libcls_rgw.so | c++filt | grep ' rgw_'".into()),
+                    sh("cls", "the core's unit tests", format!("bin/unittest_cls_rgw_fsio{gf}")),
                     sh("cls", "the CLS head test", format!("env CEPH_CONF={conf} bin/ceph_test_cls_rgw_fsio_head{gf}")),
                     sh("cls", "the neorados CLS test", format!("env CEPH_CONF={conf} bin/ceph_test_neorados_cls_rgw_fsio{gf}")),
                 ],
