@@ -423,10 +423,8 @@ namespace rgw {
 	     * not return NULL */
 	    if ((flags & RGWFileHandle::FLAG_EXACT_MATCH) &&
 		!req.exact_matched) {
-	      lsubdout(get_context(), rgw, 15)
-	        << __func__
-		<< ": stat leaf not exact match file name = "
-		<< path << dendl;
+	      ldpp_dout_fmt(this, 15, "{}: stat leaf not exact match file name = {}",
+			    __func__, path);
 	      goto done;
 	    }
 	    fhr = lookup_fh(parent, path,
@@ -638,29 +636,23 @@ namespace rgw {
 
     /* should not happen */
     if (! rgw_fh) {
-      ldout(get_context(), 0) << __func__
-		       << " BUG no such src renaming path="
-		       << src_name
-		       << dendl;
+      ldpp_dout_fmt(this, 0, "{} BUG no such src renaming path={}", __func__,
+		    src_name);
       goto out;
     }
 
     /* forbid renaming of directories (unreasonable at scale) */
     if (rgw_fh->is_dir()) {
-      ldout(get_context(), 12) << __func__
-			<< " rejecting attempt to rename directory path="
-			<< rgw_fh->full_object_name()
-			<< dendl;
+      ldpp_dout_fmt(this, 12, "{} rejecting attempt to rename directory path={}",
+		    __func__, rgw_fh->full_object_name());
       rc = -EPERM;
       goto unlock;
     }
 
     /* forbid renaming open files (violates intent, for now) */
     if (rgw_fh->is_open()) {
-      ldout(get_context(), 12) << __func__
-			<< " rejecting attempt to rename open file path="
-			<< rgw_fh->full_object_name()
-			<< dendl;
+      ldpp_dout_fmt(this, 12, "{} rejecting attempt to rename open file path={}",
+		    __func__, rgw_fh->full_object_name());
       rc = -EPERM;
       goto unlock;
     }
@@ -735,10 +727,9 @@ namespace rgw {
 	dst_fh->set_times(t);
 	src_fh->set_times(t);
 
-	ldout(get_context(), 12) << __func__
-	  << " moved " << src_fh->full_object_name() << "/" << src_name
-	  << " -> " << dst_fh->full_object_name() << "/" << dst_name
-	  << dendl;
+	ldpp_dout_fmt(&dp, 12, "{} moved {}/{} -> {}/{}", __func__,
+		      src_fh->full_object_name(), src_name,
+		      dst_fh->full_object_name(), dst_name);
 	rc = 0;
 	goto unlock;
       }
@@ -761,24 +752,14 @@ namespace rgw {
 	if ((crc != 0) ||
 	    ((crc = req.get_ret()) != 0)) {
 	  rc = crc;
-	  ldout(get_context(), 1)
-	    << __func__
-	    << " rename step 0 failed src="
-	    << src_fh->full_object_name() << " " << src_name
-	    << " dst=" << dst_fh->full_object_name()
-	    << " " << dst_name
-	    << "rc " << rc
-	    << dendl;
+	  ldpp_dout_fmt(this, 1, "{} rename step 0 failed src={} {} dst={} {} rc {}",
+			__func__, src_fh->full_object_name(), src_name,
+			dst_fh->full_object_name(), dst_name, rc);
 	  goto unlock;
 	}
-	ldout(get_context(), 12)
-	  << __func__
-	  << " rename step 0 success src="
-	  << src_fh->full_object_name() << " " << src_name
-	  << " dst=" << dst_fh->full_object_name()
-	  << " " << dst_name
-	  << " rc " << crc
-	  << dendl;
+	ldpp_dout_fmt(this, 12, "{} rename step 0 success src={} {} dst={} {} rc {}",
+		      __func__, src_fh->full_object_name(), src_name,
+		      dst_fh->full_object_name(), dst_name, crc);
 	/* update dst change id */
 	dst_fh->set_times(t);
       }
@@ -789,25 +770,15 @@ namespace rgw {
 			  RGWFileHandle::FLAG_UNLINK_THIS);
 	/* !LOCKED, -ref */
 	if (! rc) {
-	  ldout(get_context(), 12)
-	    << __func__
-	    << " rename step 1 success src="
-	    << src_fh->full_object_name() << " " << src_name
-	    << " dst=" << dst_fh->full_object_name()
-	    << " " << dst_name
-	    << " rc " << rc
-	    << dendl;
+	  ldpp_dout_fmt(this, 12, "{} rename step 1 success src={} {} dst={} {} rc {}",
+			__func__, src_fh->full_object_name(), src_name,
+			dst_fh->full_object_name(), dst_name, rc);
 	  /* update src change id */
 	  src_fh->set_times(t);
 	} else {
-	  ldout(get_context(), 1)
-	    << __func__
-	    << " rename step 1 failed src="
-	    << src_fh->full_object_name() << " " << src_name
-	    << " dst=" << dst_fh->full_object_name()
-	    << " " << dst_name
-	    << " rc " << rc
-	    << dendl;
+	  ldpp_dout_fmt(this, 1, "{} rename step 1 failed src={} {} dst={} {} rc {}",
+			__func__, src_fh->full_object_name(), src_name,
+			dst_fh->full_object_name(), dst_name, rc);
 	}
       }
       goto out;
@@ -1334,15 +1305,10 @@ namespace rgw {
     }
 
     if (ldlog_p1(get_context(), ceph_subsys_rgw, 15)) {
-      lsubdout(get_context(), rgw, 15)
-	<< __func__
-	<< " get keys for: "
-	<< rgw_fh->object_name()
-	<< " keys:"
-	<< dendl;
+      ldpp_dout_fmt(this, 15, "{} get keys for: {} keys:", __func__,
+		    rgw_fh->object_name());
       for (const auto& attr: req.get_attrs()) {
-	lsubdout(get_context(), rgw, 15)
-	  << "\tkey: " << attr.first << dendl;
+	ldpp_dout_fmt(this, 15, "\tkey: {}", attr.first);
       }
     }
 
@@ -1619,10 +1585,8 @@ namespace rgw {
       obj_name += "/";
     }
 
-    lsubdout(get_context(), rgw, 17)
-      << __func__
-      << " update old versioned fh : " << obj_name
-      << dendl;
+    ldpp_dout_fmt(this, 17, "{} update old versioned fh : {}", __func__,
+		  obj_name);
 
     RGWSetAttrsRequest req(cct, user->clone(), rgw_fh->bucket_name(), obj_name);
 
@@ -1635,10 +1599,7 @@ namespace rgw {
     rc2 = req.get_ret();
 
     if ((rc != 0) || (rc2 != 0)) {
-      lsubdout(get_context(), rgw, 17)
-	<< __func__
-	<< " update fh failed : " << obj_name
-	<< dendl;
+      ldpp_dout_fmt(this, 17, "{} update fh failed : {}", __func__, obj_name);
     }
   } /* RGWLibFS::update_fh */
 
@@ -1652,11 +1613,8 @@ namespace rgw {
     public:
       explicit ObjUnref(RGWLibFS* _fs) : fs(_fs) {}
       void operator()(RGWFileHandle* fh) const {
-	lsubdout(fs->get_context(), rgw, 5)
-	  << __PRETTY_FUNCTION__
-	  << fh->name
-	  << " before ObjUnref refs=" << fh->get_refcnt()
-	  << dendl;
+	ldpp_dout_fmt(fs, 5, "{} {} before ObjUnref refs={}",
+		      __PRETTY_FUNCTION__, fh->name, fh->get_refcnt());
 	/* Whole-cache leak sweep.  The per-entry checks a test makes only
 	 * cover handles it enumerated;  this sees every handle the cache
 	 * still holds.  At drain the only references left should be the
@@ -1674,10 +1632,8 @@ namespace rgw {
 	  const auto refcnt = fh->get_refcnt();
 	  const auto expected = 1 /* sentinel */ + stateless_pins_for(fh);
 	  if (refcnt != expected) {
-	    lsubdout(fs->get_context(), rgw, 0)
-	      << "LEAK " << fh->name
-	      << " refs=" << refcnt << " expected=" << expected
-	      << dendl;
+	    ldpp_dout_fmt(fs, 0, "LEAK {} refs={} expected={}", fh->name,
+			  refcnt, expected);
 	    ++sweep_leaks;
 	  }
 	}
@@ -1692,38 +1648,8 @@ namespace rgw {
     rele();
   } /* RGWLibFS::close */
 
-  inline std::ostream& operator<<(std::ostream &os, fh_key const &fhk) {
-    os << "<fh_key: bucket=";
-    os << fhk.fh_hk.bucket;
-    os << "; object=";
-    os << fhk.fh_hk.object;
-    os << ">";
-    return os;
-  }
 
-  inline std::ostream& operator<<(std::ostream &os, struct timespec const &ts) {
-      os << "<timespec: tv_sec=";
-      os << ts.tv_sec;
-      os << "; tv_nsec=";
-      os << ts.tv_nsec;
-      os << ">";
-    return os;
-  }
 
-  std::ostream& operator<<(std::ostream &os, RGWLibFS::event const &ev) {
-    os << "<event:";
-      switch (ev.t) {
-      case RGWLibFS::event::type::READDIR:
-	os << "type=READDIR;";
-	break;
-      default:
-	os << "type=UNKNOWN;";
-	break;
-      };
-    os << "fid=" << ev.fhk.fh_hk.bucket << ":" << ev.fhk.fh_hk.object
-       << ";ts=" << ev.ts << ">";
-    return os;
-  }
 
   void RGWLibFS::gc()
   {
@@ -1745,18 +1671,12 @@ namespace rgw {
 
     do {
       (void) clock_gettime(CLOCK_MONOTONIC_COARSE, &now);
-      lsubdout(get_context(), rgw, 15)
-	<< "GC: top of expire loop"
-	<< " now=" << now
-	<< " expire_s=" << expire_s
-	<< dendl;
+      ldpp_dout_fmt(this, 15, "GC: top of expire loop now=<timespec: tv_sec={}; "
+		    "tv_nsec={}> expire_s={}", now.tv_sec, now.tv_nsec, expire_s);
       {
 	lock_guard guard(state.mtx); /* LOCKED */
-	lsubdout(get_context(), rgw, 15)
-	  << "GC: processing"
-	  << " count=" << events.size()
-	  << " events"
-	  << dendl;
+	ldpp_dout_fmt(this, 15, "GC: processing count={} events",
+		      events.size());
         /* just return if no events */
 	if (events.empty()) {
 	  return;
@@ -1777,21 +1697,16 @@ namespace rgw {
       } /* anon */
       /* !LOCKED */
       for (auto& ev : ve) {
-	lsubdout(get_context(), rgw, 15)
-	  << "try-expire ev: " << ev << dendl;
+	ldpp_dout_fmt(this, 15, "try-expire ev: {}", ev);
 	if (likely(ev.t == event::type::READDIR)) {
 	  RGWFileHandle* rgw_fh = lookup_handle(ev.fhk.fh_hk);
-	  lsubdout(get_context(), rgw, 15)
-	    << "ev rgw_fh: " << rgw_fh << dendl;
+	  ldpp_dout_fmt(this, 15, "ev rgw_fh: {}", fmt::ptr(rgw_fh));
 	  if (rgw_fh) {
 	    RGWFileHandle::directory* d;
 	    if (unlikely(! rgw_fh->is_dir())) {
-	      lsubdout(get_context(), rgw, 0)
-		<< __func__
-		<< " BUG non-directory found with READDIR event "
-		<< "(" << rgw_fh->bucket_name() << ","
-		<< rgw_fh->object_name() << ")"
-		<< dendl;
+	      ldpp_dout_fmt(this, 0, "{} BUG non-directory found with READDIR event ({},{})",
+			    __func__, rgw_fh->bucket_name(),
+			    rgw_fh->object_name());
 	      goto rele;
 	    }
 	    /* maybe clear state */
@@ -1802,18 +1717,16 @@ namespace rgw {
 	      struct timespec d_last_readdir = d->last_readdir;
 	      if (unlikely(ev_ts < d_last_readdir)) {
 		/* readdir cycle in progress, don't invalidate */
-		lsubdout(get_context(), rgw, 15)
-		  << "GC: delay expiration for "
-		  << rgw_fh->object_name()
-		  << " ev.ts=" << ev_ts
-		  << " last_readdir=" << d_last_readdir
-		  << dendl;
+		ldpp_dout_fmt(this, 15, "GC: delay expiration for {} "
+			      "ev.ts=<timespec: tv_sec={}; tv_nsec={}> "
+			      "last_readdir=<timespec: tv_sec={}; tv_nsec={}>",
+			      rgw_fh->object_name(), ev_ts.tv_sec,
+			      ev_ts.tv_nsec, d_last_readdir.tv_sec,
+			      d_last_readdir.tv_nsec);
 		continue;
 	      } else {
-		lsubdout(get_context(), rgw, 15)
-		  << "GC: expiring "
-		  << rgw_fh->object_name()
-		  << dendl;
+		ldpp_dout_fmt(this, 15, "GC: expiring {}",
+			      rgw_fh->object_name());
 		rgw_fh->clear_state();
 		rgw_fh->invalidate();
 	      }
@@ -1827,30 +1740,6 @@ namespace rgw {
     } while (! (stop || shutdown));
   } /* RGWLibFS::gc */
 
-  std::ostream& operator<<(std::ostream &os,
-			   RGWFileHandle const &rgw_fh)
-  {
-    const auto& fhk = rgw_fh.get_key();
-    const auto& fh = const_cast<RGWFileHandle&>(rgw_fh).get_fh();
-    os << "<RGWFileHandle:";
-    os << "addr=" << &rgw_fh << ";";
-    switch (fh->fh_type) {
-    case RGW_FS_TYPE_DIRECTORY:
-	os << "type=DIRECTORY;";
-	break;
-    case RGW_FS_TYPE_FILE:
-	os << "type=FILE;";
-	break;
-    default:
-	os << "type=UNKNOWN;";
-	break;
-      };
-    os << "fid=" << fhk.fh_hk.bucket << ":" << fhk.fh_hk.object << ";";
-    os << "name=" << rgw_fh.object_name() << ";";
-    os << "refcnt=" << rgw_fh.get_refcnt() << ";";
-    os << ">";
-    return os;
-  }
 
   RGWFileHandle::~RGWFileHandle() {
     /* !recycle case, handle may STILL be in handle table, BUT
@@ -1954,9 +1843,7 @@ namespace rgw {
   } /* RGWFileHandle::decode_attrs */
 
   bool RGWFileHandle::reclaim(const cohort::lru::ObjectFactory* newobj_fac) {
-    lsubdout(fs->get_context(), rgw, 17)
-      << __func__ << " " << *this
-      << dendl;
+    ldpp_dout_fmt(fs, 17, "{} {}", __func__, *this);
     auto factory = dynamic_cast<const RGWFileHandle::Factory*>(newobj_fac);
     if (factory == nullptr) {
       return false;
@@ -1990,16 +1877,14 @@ namespace rgw {
     return false;
   }
 
-  std::ostream& operator<<(std::ostream &os,
-			   RGWFileHandle::readdir_offset const &offset)
+  /* a readdir offset as text:  the cookie, the marker, or "(nil)" */
+  static std::string offset_str(RGWFileHandle::readdir_offset const &offset)
   {
     if (unlikely(!!std::get_if<uint64_t*>(&offset))) {
-      uint64_t* ioff = get<uint64_t*>(offset);
-      os << *ioff;
+      return fmt::format("{}", *get<uint64_t*>(offset));
     }
-    else
-      os << get<const char*>(offset);
-    return os;
+    const char* name = get<const char*>(offset);
+    return name ? name : "(nil)";
   }
 
   int RGWFileHandle::readdir(rgw_readdir_cb rcb, void *cb_arg,
@@ -2012,10 +1897,7 @@ namespace rgw {
     struct timespec now;
     CephContext* cct = fs->get_context();
 
-    lsubdout(cct, rgw, 10)
-      << __func__ << " readdir called on "
-      << object_name()
-      << dendl;
+    ldpp_dout_fmt(fs, 10, "{} readdir called on {}", __func__, object_name());
 
     directory* d = std::get_if<directory>(&variant_type);
     if (d) {
@@ -2066,10 +1948,7 @@ namespace rgw {
     lock_guard sguard(fs->state.mtx);
     fs->state.push_event(ev);
 
-    lsubdout(fs->get_context(), rgw, 15)
-      << __func__
-      << " final link count=" << state.nlink
-      << dendl;
+    ldpp_dout_fmt(fs, 15, "{} final link count={}", __func__, state.nlink);
 
     return rc;
   } /* RGWFileHandle::readdir */
@@ -2089,11 +1968,8 @@ namespace rgw {
       return -EISDIR;
 
     if (deleted()) {
-      lsubdout(fs->get_context(), rgw, 5)
-	<< __func__
-	<< " write attempted on deleted object "
-	<< this->object_name()
-	<< dendl;
+      ldpp_dout_fmt(fs, 5, "{} write attempted on deleted object {}", __func__,
+		    this->object_name());
       /* zap write transaction, if any */
       if (f->write_req) {
 	delete f->write_req;
@@ -2105,12 +1981,8 @@ namespace rgw {
     if (! f->write_req) {
       /* guard--we do not support (e.g., COW-backed) partial writes */
       if (off != 0) {
-	lsubdout(fs->get_context(), rgw, 5)
-	  << __func__
-	  << " " << object_name()
-	  << " non-0 initial write position " << off
-	  << " (mounting with -o sync required)"
-	  << dendl;
+	ldpp_dout_fmt(fs, 5, "{} {} non-0 initial write position {} (mounting with -o sync required)",
+		      __func__, object_name(), off);
 	return -EIO;
       }
 
@@ -2124,12 +1996,8 @@ namespace rgw {
 			    this, bucket_name(), object_name);
       rc = g_rgwlib->get_fe()->start_req(f->write_req);
       if (rc < 0) {
-	lsubdout(fs->get_context(), rgw, 5)
-	  << __func__
-	  << this->object_name()
-	  << " write start failed " << off
-	  << " (" << rc << ")"
-	  << dendl;
+	ldpp_dout_fmt(fs, 5, "{} {} write start failed {} ({})", __func__,
+		      this->object_name(), off, rc);
 	/* zap failed write transaction */
 	delete f->write_req;
 	f->write_req = nullptr;
@@ -2178,12 +2046,8 @@ namespace rgw {
       }
     } else {
       /* continuation failed (e.g., non-contiguous write position) */
-      lsubdout(fs->get_context(), rgw, 5)
-	<< __func__
-	<< object_name()
-	<< " failed write at position " << off
-	<< " (fails write transaction) "
-	<< dendl;
+      ldpp_dout_fmt(fs, 5, "{} {} failed write at position {} (fails write transaction) ",
+		    __func__, object_name(), off);
       /* zap failed write transaction */
       delete f->write_req;
       f->write_req = nullptr;
@@ -2205,10 +2069,8 @@ namespace rgw {
 
     file* f = std::get_if<file>(&variant_type);
     if (f && (f->write_req)) {
-      lsubdout(fs->get_context(), rgw, 10)
-	<< __func__
-	<< " finishing write trans on " << object_name()
-	<< dendl;
+      ldpp_dout_fmt(fs, 10, "{} finishing write trans on {}", __func__,
+		    object_name());
       rc = g_rgwlib->get_fe()->finish_req(f->write_req);
       if (! rc) {
 	rc = f->write_req->get_ret();
@@ -2324,9 +2186,8 @@ namespace rgw {
       if (! f->fsio_hdl) {
         /* the file's first open:  choose_path() ran its request */
         if (! fo || ! fo->sal_object) {
-          lsubdout(fs->get_context(), rgw, 0)
-            << __func__ << " " << obj_name
-            << ": an FSIO open with no request behind it" << dendl;
+          ldpp_dout_fmt(&dp, 0, "{} {}: an FSIO open with no request behind it",
+			__func__, obj_name);
           return -EINVAL;
         }
 
@@ -2392,11 +2253,8 @@ namespace rgw {
           f->sal_object = std::move(fo->sal_object);
           f->fsio_hdl = std::move(get<1>(f_result));
         } else {
-          lsubdout(fs->get_context(), rgw, 0)
-            << __func__ << " " << obj_name
-            << ": attempt to open FSIO handle failed rc=="
-            << std::get<0>(f_result)
-            << dendl;
+          ldpp_dout_fmt(&dp, 0, "{} {}: attempt to open FSIO handle failed rc=={}",
+			__func__, obj_name, std::get<0>(f_result));
           return std::get<0>(f_result);
         }
       }
@@ -2409,9 +2267,8 @@ namespace rgw {
         int rc = f->fsio_hdl->begin_write(
           &dp, rgw::sal::Object::FSIOObject::WRITE_FLAG_NONE, &writer);
         if (!!rc) {
-          lsubdout(fs->get_context(), rgw, 0)
-            << __func__ << " " << obj_name
-            << " failed to establish shadow for write open" << dendl;
+          ldpp_dout_fmt(&dp, 0, "{} {} failed to establish shadow for write open",
+			__func__, obj_name);
           return rc;
         }
       }
@@ -2423,9 +2280,8 @@ namespace rgw {
       if (write_open && (posix_flags & O_TRUNC) && f->fsio_hdl) {
         int rc = f->fsio_hdl->ftruncate(&dp, 0, 0);
         if (!!rc) {
-          lsubdout(fs->get_context(), rgw, 0)
-            << __func__ << " " << obj_name
-            << " failed to truncate shadow" << dendl;
+          ldpp_dout_fmt(&dp, 0, "{} {} failed to truncate shadow", __func__,
+			obj_name);
           return rc;
         }
       }
@@ -2510,9 +2366,8 @@ namespace rgw {
     }
     const bool serves = req.sal_bucket->have_fsio();
     if (! serves) {
-      lsubdout(fs->get_context(), rgw, 4)
-        << __func__ << " " << obj_name << ": bucket " << bkt_name
-        << " does not serve FSIO;  the legacy path" << dendl;
+      ldpp_dout_fmt(fs, 4, "{} {}: bucket {} does not serve FSIO;  the legacy path",
+		    __func__, obj_name, bkt_name);
     }
     {
       lock_guard guard(mtx);
@@ -2634,9 +2489,8 @@ namespace rgw {
 
     int rc = f->fsio_hdl->fsetattrs(&dp, attrs, 0);
     if (!! rc) {
-      lsubdout(fs->get_context(), rgw, 0)
-        << __func__ << " " << object_name()
-        << " failed to write unix attrs rc=" << rc << dendl;
+      ldpp_dout_fmt(&dp, 0, "{} {} failed to write unix attrs rc={}", __func__,
+		    object_name(), rc);
     }
   } /* RGWFileHandle::write_unix_attrs */
 
@@ -2653,9 +2507,8 @@ namespace rgw {
 
     int rc = f->fsio_hdl->discard(&dp, 0);
     if ((!! rc) && (rc != -ENOTSUP)) {
-      lsubdout(fs->get_context(), rgw, 0)
-        << __func__ << " " << object_name()
-        << " failed to discard shadow rc=" << rc << dendl;
+      ldpp_dout_fmt(&dp, 0, "{} {} failed to discard shadow rc={}", __func__,
+		    object_name(), rc);
     }
   } /* RGWFileHandle::discard_shadow */
 
@@ -2702,18 +2555,16 @@ namespace rgw {
         int rc = f->fsio_hdl->begin_write(
           &dp, rgw::sal::Object::FSIOObject::WRITE_FLAG_NONE, &writer);
         if (!! rc) {
-          lsubdout(fs->get_context(), rgw, 0)
-            << __func__ << " " << object_name()
-            << " failed to establish shadow for write upgrade" << dendl;
+          ldpp_dout_fmt(&dp, 0, "{} {} failed to establish shadow for write upgrade",
+			__func__, object_name());
           return rc;
         }
       }
       if ((posix_flags & O_TRUNC) && f->fsio_hdl) {
         int rc = f->fsio_hdl->ftruncate(&dp, 0, 0);
         if (!! rc) {
-          lsubdout(fs->get_context(), rgw, 0)
-            << __func__ << " " << object_name()
-            << " failed to truncate shadow on write upgrade" << dendl;
+          ldpp_dout_fmt(&dp, 0, "{} {} failed to truncate shadow on write upgrade",
+			__func__, object_name());
           return rc;
         }
       }
@@ -2733,9 +2584,8 @@ namespace rgw {
       int rc = f->fsio_hdl->end_write(
         &dp, rgw::sal::Object::FSIOObject::WRITE_FLAG_NONE);
       if (!! rc) {
-        lsubdout(fs->get_context(), rgw, 0)
-          << __func__ << " " << object_name()
-          << " failed to publish on last writer downgrade" << dendl;
+        ldpp_dout_fmt(&dp, 0, "{} {} failed to publish on last writer downgrade",
+		      __func__, object_name());
         return rc;
       }
     }
@@ -2979,10 +2829,8 @@ namespace rgw {
 
       rc = f->fsio_hdl->ftruncate(&dp, size, 0);
       if (!! rc) {
-        lsubdout(fs->get_context(), rgw, 0)
-          << __func__ << " " << object_name()
-          << " failed to truncate shadow to " << size
-          << " rc=" << rc << dendl;
+        ldpp_dout_fmt(&dp, 0, "{} {} failed to truncate shadow to {} rc={}",
+		      __func__, object_name(), size, rc);
       } else {
         set_size(size);
         if (! open && (f->write_opens == 0)) {
@@ -3056,9 +2904,8 @@ namespace rgw {
               publish_rc = f->fsio_hdl->end_write(&dp,
                         rgw::sal::Object::FSIOObject::WRITE_FLAG_NONE);
               if (!!publish_rc) {
-                lsubdout(fs->get_context(), rgw, 0)
-                  << __func__ << " " << object_name()
-                  << " failed to publish fsio handle " << dendl;
+                ldpp_dout_fmt(&dp, 0, "{} {} failed to publish fsio handle ",
+			      __func__, object_name());
               }
             }
           }
@@ -3081,9 +2928,8 @@ namespace rgw {
         if (f->fsio_hdl) {
           rc = f->fsio_hdl->close(&dp, close_flags);
           if (!! rc) {
-            lsubdout(fs->get_context(), rgw, 0)
-              << __func__ << " " << object_name()
-              << " failed to close via fsio handle " << dendl;
+            ldpp_dout_fmt(&dp, 0, "{} {} failed to close via fsio handle ",
+			  __func__, object_name());
           }
           /* reset fsio handles so re-opens see correct state */
           f->fsio_hdl.reset();
@@ -3163,30 +3009,16 @@ namespace rgw {
     }
   }
 
+  /* eof() runs after the request, whose req_state RGWOp's prefix reads */
   bool RGWListBucketsRequest::eof() {
-    if (unlikely(cct->_conf->subsys.should_gather(ceph_subsys_rgw, 15))) {
-      bool is_offset =
-	unlikely(!std::get_if<const char*>(&offset)) ||
-	!! get<const char*>(offset);
-      lsubdout(cct, rgw, 15) << "READDIR offset: " <<
-	((is_offset) ? offset : "(nil)")
-			     << " is_truncated: " << is_truncated
-			     << dendl;
-    }
+    ldpp_dout_fmt(rgw_fh->get_fs(), 15, "READDIR offset: {} is_truncated: {}",
+		  offset_str(offset), is_truncated);
     return !is_truncated && !rcb_eof;
   }
 
   bool RGWReaddirRequest::eof() {
-    if (unlikely(cct->_conf->subsys.should_gather(ceph_subsys_rgw, 15))) {
-      bool is_offset =
-	unlikely(!std::get_if<const char*>(&offset)) ||
-	!! get<const char*>(offset);
-      lsubdout(cct, rgw, 15) << "READDIR offset: " <<
-	((is_offset) ? offset : "(nil)")
-			     << " next marker: " << next_marker
-			     << " is_truncated: " << is_truncated
-			     << dendl;
-    }
+    ldpp_dout_fmt(rgw_fh->get_fs(), 15, "READDIR offset: {} next marker: {} is_truncated: {}",
+		  offset_str(offset), next_marker, is_truncated);
     return !is_truncated && !rcb_eof;
   }
 
@@ -3208,7 +3040,7 @@ namespace rgw {
     op_ret = -EINVAL;
 
     if (state->object->empty()) {
-      ldout(state->cct, 0) << __func__ << " called on empty object" << dendl;
+      ldpp_dout_fmt(this, 0, "{} called on empty object", __func__);
       goto done;
     }
 
@@ -3242,16 +3074,15 @@ namespace rgw {
 
     op_ret = processor->prepare(state->yield);
     if (op_ret < 0) {
-      ldout(state->cct, 20) << "processor->prepare() returned ret=" << op_ret
-			<< dendl;
+      ldpp_dout_fmt(this, 20, "processor->prepare() returned ret={}", op_ret);
       goto done;
     }
     filter = &*processor;
     if (compression_type != "none") {
       plugin = Compressor::create(state->cct, compression_type);
       if (! plugin) {
-        ldout(state->cct, 1) << "Cannot load plugin for rgw_compression_type "
-                         << compression_type << dendl;
+        ldpp_dout_fmt(this, 1, "Cannot load plugin for rgw_compression_type {}",
+		      compression_type);
       } else {
         compressor.emplace(state->cct, plugin, filter);
         filter = &*compressor;
@@ -3269,10 +3100,7 @@ namespace rgw {
 
     /* check guards (e.g., contig write) */
     if (eio) {
-      ldout(state->cct, 5)
-        << " chunks arrived in wrong order"
-        << " (mounting with -o sync required)"
-        << dendl;
+      ldpp_dout_fmt(this, 5, " chunks arrived in wrong order (mounting with -o sync required)");
       return -EIO;
     }
 
@@ -3335,11 +3163,10 @@ namespace rgw {
       cs_info.blocks = std::move(compressor->get_compression_blocks());
       encode(cs_info, tmp);
       attrs[RGW_ATTR_COMPRESSION] = tmp;
-      ldpp_dout(this, 20) << "storing " << RGW_ATTR_COMPRESSION
-			<< " with type=" << cs_info.compression_type
-			<< ", orig_size=" << cs_info.orig_size
-			<< ", compressor_message=" << cs_info.compressor_message
-			<< ", blocks=" << cs_info.blocks.size() << dendl;
+      ldpp_dout_fmt(this, 20, "storing {} with type={}, orig_size={}, compressor_message={}, blocks={}",
+		    RGW_ATTR_COMPRESSION, cs_info.compression_type,
+		    cs_info.orig_size, cs_info.compressor_message,
+		    cs_info.blocks.size());
     }
 
     etag.clear();
@@ -3541,8 +3368,8 @@ int rgw_statfs(struct rgw_fs *rgw_fs,
 
   int rc = g_rgwlib->get_driver()->cluster_stat(stats);
   if (rc < 0) {
-    lderr(fs->get_context()) << "ERROR: getting total cluster usage"
-                             << cpp_strerror(-rc) << dendl;
+    ldpp_dout_fmt(fs, -1, "ERROR: getting total cluster usage: {}",
+		  cpp_strerror(-rc));
     return rc;
   }
 
@@ -3792,9 +3619,7 @@ int rgw_lookup(struct rgw_fs *rgw_fs,
     /* special: after readdir--note extra ref()! */
     if (unlikely((strcmp(path, "..") == 0))) {
       rgw_fh = parent;
-      lsubdout(fs->get_context(), rgw, 17)
-	<< __func__ << " BANG"<< *rgw_fh
-	<< dendl;
+      ldpp_dout_fmt(fs, 17, "{} BANG {}", __func__, *rgw_fh);
       fs->ref(rgw_fh);
     } else {
       enum rgw_fh_type fh_type = fh_type_of(flags);
@@ -3876,9 +3701,7 @@ int rgw_fh_rele(struct rgw_fs *rgw_fs, struct rgw_file_handle *fh,
   RGWLibFS *fs = static_cast<RGWLibFS*>(rgw_fs->fs_private);
   RGWFileHandle* rgw_fh = get_rgwfh(fh);
 
-  lsubdout(fs->get_context(), rgw, 17)
-    << __func__ << " " << *rgw_fh
-    << dendl;
+  ldpp_dout_fmt(fs, 17, "{} {}", __func__, *rgw_fh);
 
   fs->unref(rgw_fh);
   return 0;
@@ -4084,10 +3907,8 @@ int rgw_readdir(struct rgw_fs *rgw_fs,
     return -EINVAL;
   }
 
-  lsubdout(parent->get_fs()->get_context(), rgw, 15)
-    << __func__
-    << " offset=" << *offset
-    << dendl;
+  ldpp_dout_fmt(parent->get_fs(), 15, "{} offset={}", __func__,
+		*offset);
 
   if ((*offset == 0) &&
       (flags & RGW_READDIR_FLAG_DOTDOT)) {
@@ -4115,10 +3936,8 @@ int rgw_readdir2(struct rgw_fs *rgw_fs,
     return -EINVAL;
   }
 
-  lsubdout(parent->get_fs()->get_context(), rgw, 15)
-    << __func__
-    << " offset=" << ((name) ? name : "(nil)")
-    << dendl;
+  ldpp_dout_fmt(parent->get_fs(), 15, "{} offset={}", __func__,
+		((name) ? name : "(nil)"));
 
   if ((! name) &&
       (flags & RGW_READDIR_FLAG_DOTDOT)) {

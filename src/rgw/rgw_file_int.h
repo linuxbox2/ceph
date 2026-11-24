@@ -35,6 +35,7 @@
 #include "include/buffer.h"
 #include "common/cohort_lru.h"
 #include "common/ceph_timer.h"
+#include "common/dout_fmt.h"
 #include "rgw_common.h"
 #include "rgw_lib.h"
 #include "rgw_ldap.h"
@@ -143,10 +144,20 @@ namespace rgw {
       }
       DECODE_FINISH(bl);
     }
-
-    friend std::ostream& operator<<(std::ostream &os, fh_key const &fhk);
-
   }; /* fh_key */
+
+} /* namespace rgw */
+
+template <>
+struct fmt::formatter<rgw::fh_key> {
+  constexpr auto parse(format_parse_context& ctx) { return ctx.begin(); }
+  auto format(const rgw::fh_key& fhk, format_context& ctx) const {
+    return fmt::format_to(ctx.out(), "<fh_key: bucket={}; object={}>",
+			  fhk.fh_hk.bucket, fhk.fh_hk.object);
+  }
+};
+
+namespace rgw {
 
   WRITE_CLASS_ENCODER(fh_key);
 
@@ -937,9 +948,6 @@ namespace rgw {
 
     ~RGWFileHandle() override;
 
-    friend std::ostream& operator<<(std::ostream &os,
-				    RGWFileHandle const &rgw_fh);
-
     class Factory : public cohort::lru::ObjectFactory
     {
     public:
@@ -969,6 +977,36 @@ namespace rgw {
     }; /* Factory */
 
   }; /* RGWFileHandle */
+
+} /* namespace rgw */
+
+template <>
+struct fmt::formatter<rgw::RGWFileHandle> {
+  constexpr auto parse(format_parse_context& ctx) { return ctx.begin(); }
+  auto format(const rgw::RGWFileHandle& rgw_fh, format_context& ctx) const {
+    const auto& fhk = rgw_fh.get_key();
+    const auto* fh = const_cast<rgw::RGWFileHandle&>(rgw_fh).get_fh();
+    const char* type = "UNKNOWN";
+    switch (fh->fh_type) {
+    case RGW_FS_TYPE_DIRECTORY:
+      type = "DIRECTORY";
+      break;
+    case RGW_FS_TYPE_FILE:
+      type = "FILE";
+      break;
+    default:
+      break;
+    }
+    return fmt::format_to(ctx.out(),
+			  "<RGWFileHandle:addr={};type={};fid={}:{};name={};"
+			  "refcnt={};>",
+			  fmt::ptr(&rgw_fh), type, fhk.fh_hk.bucket,
+			  fhk.fh_hk.object, rgw_fh.object_name(),
+			  rgw_fh.get_refcnt());
+  }
+};
+
+namespace rgw {
 
   WRITE_CLASS_ENCODER(RGWFileHandle);
 
@@ -1003,7 +1041,7 @@ namespace rgw {
   typedef std::tuple<RGWFileHandle*, uint32_t> LookupFHResult;
   typedef std::tuple<RGWFileHandle*, int> MkObjResult;
 
-  class RGWLibFS
+  class RGWLibFS : public DoutPrefixProvider
   {
     CephContext* cct;
     struct rgw_fs fs{};
@@ -1039,8 +1077,7 @@ namespace rgw {
 	: t(t), fhk(k), ts(ts) {}
     };
 
-    friend std::ostream& operator<<(std::ostream &os,
-				    RGWLibFS::event const &ev);
+    friend struct fmt::formatter<RGWLibFS::event>;
 
     using event_vector = /* boost::small_vector<event, 16> */
       std::vector<event>;
@@ -1259,9 +1296,8 @@ namespace rgw {
 	  if (user->load_user(dpp, null_yield) < 0) {
 	    int ret = user->store_user(dpp, null_yield, true);
 	    if (ret < 0) {
-	      lsubdout(get_context(), rgw, 10)
-		<< "NOTICE: failed to driver new user's info: ret=" << ret
-		<< dendl;
+	      ldpp_dout_fmt(this, 10, "NOTICE: failed to driver new user's info: ret={}",
+			    ret);
 	    }
 	  }
 	} /* auth success */
@@ -1311,9 +1347,7 @@ namespace rgw {
       lat.lock->unlock(); /* !LATCHED */
       get<0>(fhr) = fh;
       if (fh) {
-	    lsubdout(get_context(), rgw, 17)
-	      << __func__ << " 1 " << *fh
-	      << dendl;
+	    ldpp_dout_fmt(this, 17, "{} 1 {}", __func__, *fh);
       }
       return fhr;
     } /* lookup_fh(const fh_key&) */
@@ -1339,12 +1373,9 @@ namespace rgw {
       std::string key_name{parent->make_key_name(name)};
       fh_key fhk = parent->make_fhk(obj_name);
 
-      lsubdout(get_context(), rgw, 10)
-	<< __func__ << " called on "
-	<< parent->object_name() << " for " << key_name
-	<< " (" << obj_name << ")"
-	<< " -> " << fhk
-	<< dendl;
+      ldpp_dout_fmt(this, 10, "{} called on {} for {} ({}) -> {}", __func__,
+		    parent->object_name(), key_name, obj_name,
+		    fhk);
 
     retry:
       RGWFileHandle* fh =
@@ -1412,9 +1443,7 @@ namespace rgw {
     out:
       get<0>(fhr) = fh;
       if (fh) {
-	    lsubdout(get_context(), rgw, 17)
-	      << __func__ << " 2 " << *fh
-	      << dendl;
+	    ldpp_dout_fmt(this, 17, "{} 2 {}", __func__, *fh);
       }
       return fhr;
     } /*  lookup_fh(RGWFileHandle*, const char *, const uint32_t) */
@@ -1505,9 +1534,8 @@ namespace rgw {
 	  fh = &root_fh;
 	  goto out;
 	}
-	lsubdout(get_context(), rgw, 0)
-	  << __func__ << " handle lookup failed " << fhk
-	  << dendl;
+	ldpp_dout_fmt(this, 0, "{} handle lookup failed {}", __func__,
+		      fhk);
 	goto out;
       }
       fh->mtx.lock();
@@ -1536,6 +1564,12 @@ namespace rgw {
       }
 
       return fh;
+    }
+
+    CephContext* get_cct() const override { return cct; }
+    unsigned get_subsys() const override { return ceph_subsys_rgw; }
+    std::ostream& gen_prefix(std::ostream& out) const override {
+      return out << "librgw: ";
     }
 
     CephContext* get_context() {
@@ -1568,6 +1602,24 @@ namespace rgw {
     void close();
     void gc();
   }; /* RGWLibFS */
+
+} /* namespace rgw */
+
+template <>
+struct fmt::formatter<rgw::RGWLibFS::event> {
+  constexpr auto parse(format_parse_context& ctx) { return ctx.begin(); }
+  auto format(const rgw::RGWLibFS::event& ev, format_context& ctx) const {
+    const char* type =
+      ev.t == rgw::RGWLibFS::event::type::READDIR ? "READDIR" : "UNKNOWN";
+    return fmt::format_to(ctx.out(),
+			  "<event:type={};fid={}:{};ts=<timespec: tv_sec={}; "
+			  "tv_nsec={}>>",
+			  type, ev.fhk.fh_hk.bucket, ev.fhk.fh_hk.object,
+			  ev.ts.tv_sec, ev.ts.tv_nsec);
+  }
+};
+
+namespace rgw {
 
 static inline std::string make_uri(const std::string& bucket_name,
 				   const std::string& object_name) {
@@ -1658,10 +1710,8 @@ public:
     for (const auto& ent : buckets) {
       if (! this->operator()(ent.bucket.name, ent.bucket.name)) {
 	/* caller cannot accept more */
-	lsubdout(cct, rgw, 5) << "ListBuckets rcb failed"
-			      << " dirent=" << ent.bucket.name
-			      << " call count=" << ix
-			      << dendl;
+	ldpp_dout_fmt(this, 5, "ListBuckets rcb failed dirent={} call count={}",
+		      ent.bucket.name, ix);
 	rcb_eof = true;
 	return;
       }
@@ -1937,25 +1987,18 @@ public:
 	  /* send a file entry */
 	  auto obj_entry = *(di.get_obj_iter());
 
-	  lsubdout(cct, rgw, 15) << "RGWReaddirRequest "
-				 << __func__ << " "
-				 << "list uri=" << state->relative_uri << " "
-				 << " prefix=" << prefix << " "
-				 << " obj path=" << obj_entry.key.name
-				 << " (" << sref << ")" << ""
-				 << " mtime="
-				 << real_clock::to_time_t(obj_entry.meta.mtime)
-				 << " size=" << obj_entry.meta.accounted_size
-				 << dendl;
+	  ldpp_dout_fmt(this, 15, "RGWReaddirRequest {} list uri={}  prefix={}  obj path={} ({}) mtime={} size={}",
+			__func__, state->relative_uri, prefix,
+			obj_entry.key.name, sref,
+			real_clock::to_time_t(obj_entry.meta.mtime),
+			obj_entry.meta.accounted_size);
 
 	  if (! this->operator()(sref, next_marker, obj_entry.meta.mtime,
 				 obj_entry.meta.accounted_size,
 				 RGW_FS_TYPE_FILE)) {
 	    /* caller cannot accept more */
-	    lsubdout(cct, rgw, 5) << "readdir rcb caller signalled stop"
-				  << " dirent=" << sref.data()
-				  << " call count=" << ix
-				  << dendl;
+	    ldpp_dout_fmt(this, 5, "readdir rcb caller signalled stop dirent={} call count={}",
+			  sref.data(), ix);
 	    rcb_eof = true;
 	    return;
 	  }
@@ -1966,12 +2009,8 @@ public:
 	if (! di.skip_cp()) {
 	  auto sref = di.get_cp_sref();
 
-	  lsubdout(cct, rgw, 15) << "RGWReaddirRequest "
-				 << __func__ << " "
-				 << "list uri=" << state->relative_uri << " "
-				 << " prefix=" << prefix << " "
-				 << " cpref=" << sref
-				 << dendl;
+	  ldpp_dout_fmt(this, 15, "RGWReaddirRequest {} list uri={}  prefix={}  cpref={}",
+			__func__, state->relative_uri, prefix, sref);
 
 	  if (sref.empty()) {
 	    /* null path segment--could be created in S3 but has no NFS
@@ -1980,10 +2019,8 @@ public:
 	    if (! this->operator()(sref, next_marker, cnow, 0,
 				   RGW_FS_TYPE_DIRECTORY)) {
 	      /* caller cannot accept more */
-	      lsubdout(cct, rgw, 5) << "readdir rcb caller signalled stop"
-				    << " dirent=" << sref.data()
-				    << " call count=" << ix
-				    << dendl;
+	      ldpp_dout_fmt(this, 5, "readdir rcb caller signalled stop dirent={} call count={}",
+			    sref.data(), ix);
 	      rcb_eof = true;
 	      return;
 	    }
@@ -2892,13 +2929,8 @@ public:
     // try objects
     for (const auto& iter : objs) {
       auto& name = iter.key.name;
-      lsubdout(cct, rgw, 15) << "RGWStatLeafRequest "
-			     << __func__ << " "
-			     << "list uri=" << state->relative_uri << " "
-			     << " prefix=" << prefix << " "
-			     << " obj path=" << name << ""
-			     << " target = " << path << ""
-			     << dendl;
+      ldpp_dout_fmt(this, 15, "RGWStatLeafRequest {} list uri={}  prefix={}  obj path={} target = {}",
+		    __func__, state->relative_uri, prefix, name, path);
       /* XXX is there a missing match-dir case (trailing '/')? */
       matched = true;
       if (name == path) {
@@ -2909,13 +2941,8 @@ public:
     // try prefixes
     for (auto& iter : common_prefixes) {
       auto& name = iter.first;
-      lsubdout(cct, rgw, 15) << "RGWStatLeafRequest "
-			     << __func__ << " "
-			     << "list uri=" << state->relative_uri << " "
-			     << " prefix=" << prefix << " "
-			     << " pref path=" << name << " (not chomped)"
-			     << " target = " << path << ""
-			     << dendl;
+      ldpp_dout_fmt(this, 15, "RGWStatLeafRequest {} list uri={}  prefix={}  pref path={} (not chomped) target = {}",
+		    __func__, state->relative_uri, prefix, name, path);
       matched = true;
       /* match-dir case (trailing '/') */
       if (name == prefix + "/") {
