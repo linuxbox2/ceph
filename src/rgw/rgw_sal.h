@@ -1227,9 +1227,14 @@ class Object {
        * for a driver whose published object belongs to its writer */
       virtual int begin_write(const DoutPrefixProvider* dpp, uint32_t flags,
 			      const rgw_owner* writer = nullptr) = 0;
-      /* this handle's last write open returned:  the driver publishes if
-       * no writer remains, else this handle stays a reader */
+      /* this handle's last write open returned while read opens remain:
+       * the driver publishes if no writer remains, and the handle stays
+       * a reader */
       virtual int end_write(const DoutPrefixProvider* dpp, uint32_t flags) = 0;
+      /* the handle's last open returned:  a write it still holds is
+       * published, as end_write() does, then the handle is released;
+       * returns the publish's result.  Destroying a handle still open
+       * closes it */
       virtual int close(const DoutPrefixProvider* dpp, uint32_t flags) = 0;
       /* the object has been unlinked:  drop the shadow's name now,
        * refuse to publish it, and let the storage be reclaimed when

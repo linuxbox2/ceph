@@ -34,6 +34,7 @@
 #include "include/scope_guard.h"
 #include "common/Clock.h" // for ceph_clock_now()
 #include "common/async/spawn_throttle.h"
+#include "common/dout_fmt.h"
 #include "common/errno.h"
 #include "rgw_lc.h"
 
@@ -5854,6 +5855,7 @@ Object::FSIOResult NSFSObject::get_fsio_handle(const DoutPrefixProvider* dpp,
     }
     hdl->binding = FSIOObject::Binding::SHADOW;
     commit_sdir();
+    hdl->writing = for_write;
     return FSIOResult{0, std::move(hdl)};
   }
 
@@ -6023,6 +6025,7 @@ Object::FSIOResult NSFSObject::get_fsio_handle(const DoutPrefixProvider* dpp,
     hdl->resumed_existing = true;
     hdl->binding = FSIOObject::Binding::SHADOW;
     commit_sdir();
+    hdl->writing = for_write;
     return FSIOResult{0, std::move(hdl)};
   }
 
@@ -6034,6 +6037,7 @@ Object::FSIOResult NSFSObject::get_fsio_handle(const DoutPrefixProvider* dpp,
   hdl->shadow_fd = build_fd;
   hdl->binding = FSIOObject::Binding::SHADOW;
   commit_sdir();
+  hdl->writing = for_write;
   return FSIOResult{0, std::move(hdl)};
 } /* get_fsio_handle */
 
@@ -6085,11 +6089,16 @@ int NSFSObject::NSFSFSIOObject::commit(const DoutPrefixProvider* dpp, uint32_t f
 int NSFSObject::NSFSFSIOObject::begin_write(const DoutPrefixProvider* dpp, uint32_t flags,
 						const rgw_owner* writer)
 {
-  return binding == Binding::SHADOW ? 0 : reclone(dpp, OPEN_FLAG_NONE);
+  int r = binding == Binding::SHADOW ? 0 : reclone(dpp, OPEN_FLAG_NONE);
+  if (r == 0) {
+    writing = true;
+  }
+  return r;
 }
 
 int NSFSObject::NSFSFSIOObject::end_write(const DoutPrefixProvider* dpp, uint32_t flags)
 {
+  writing = false;
   return publish(dpp, flags);
 }
 
@@ -6496,6 +6505,11 @@ int NSFSObject::NSFSFSIOObject::close(const DoutPrefixProvider* dpp, uint32_t fl
     return 0;
   }
 
+  int r = 0;
+  if (writing && !doomed && binding == Binding::SHADOW) {
+    r = end_write(dpp, WRITE_FLAG_NONE);
+  }
+
   if (!doomed && binding == Binding::SHADOW && ephemeral &&
       !resumed_existing && shadow_dir_fd >= 0 && !shadow_name.empty()) {
     ::unlinkat(shadow_dir_fd, shadow_name.c_str(), 0);
@@ -6511,12 +6525,17 @@ int NSFSObject::NSFSFSIOObject::close(const DoutPrefixProvider* dpp, uint32_t fl
     shadow_dir_fd = -1;
   }
 
-  return 0;
+  return r;
 }
 
 NSFSObject::NSFSFSIOObject::~NSFSFSIOObject()
 {
-  close(nullptr, CLOSE_FLAG_DETACH);
+  const DoutPrefix dp(driver->ctx(), dout_subsys, "nsfs fsio: ");
+  if (shadow_fd >= 0 || shadow_dir_fd >= 0) {
+    ldpp_dout_fmt(&dp, 0, "ERROR: {}: destroyed while open, closing {}",
+		  __func__, leaf_name);
+  }
+  close(&dp, CLOSE_FLAG_NONE);
 }
 
 bool NSFSObject::is_sync_completed(const DoutPrefixProvider* dpp, optional_yield y,

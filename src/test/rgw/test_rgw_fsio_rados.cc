@@ -748,6 +748,27 @@ TEST_F(FSIORados, GuardRetriesAfterAPut)
  * object's bytes depend on their offset, so a misplaced read shows */
 static constexpr uint64_t MiB = 1 << 20;
 
+/* rgw_sal.h:  a handle destroyed while still open is closed, which
+ * publishes its write and gives up its open */
+TEST_F(FSIORados, DestroyedWhileOpenPublishes)
+{
+  const auto a = pattern(9 * MiB, 1);
+  ASSERT_EQ(0, put("obj", a));
+  cls_rgw_fsio_handle h;
+  {
+    auto w = open("obj", true);
+    ASSERT_TRUE(w);
+    h = rados_fsio(w)->handle();
+    ASSERT_EQ(0, write(w, 4 * MiB, {"Z"}));
+  }
+  std::string now;
+  ASSERT_EQ(0, get("obj", &now));
+  EXPECT_EQ('Z', now[4 * MiB]);
+  EXPECT_EQ(a.substr(0, 4 * MiB), now.substr(0, 4 * MiB));
+  auto rec = records_of(head_of("obj"), h.incarnation);
+  EXPECT_FALSE(rec.opens) << "the destroyed handle's open was left";
+}
+
 /* a reader reads the published content:  across the head segment's end,
  * across stripes, into several buffers, and short at its end */
 TEST_F(FSIORados, ReaderReadsThePublished)

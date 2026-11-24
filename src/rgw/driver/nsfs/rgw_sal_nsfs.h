@@ -1256,6 +1256,7 @@ public:
    std::string shadow_name;
    std::string leaf_name;
    bool ephemeral{false};
+   bool writing{false};
    std::vector<std::unique_ptr<nsfs::Directory>> dir_chain;
 
    friend class NSFSObject;

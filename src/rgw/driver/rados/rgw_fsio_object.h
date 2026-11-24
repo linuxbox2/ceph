@@ -36,6 +36,7 @@ public:
 		  neorados::IOContext head_ioc, cls_rgw_fsio_handle h)
     : store(store), info(info), key(std::move(key)),
       head_oid(std::move(head_oid)), head_ioc(std::move(head_ioc)), h(h) {}
+  ~RadosFSIOObject() override;
 
   /* §3.1, §4.1, §4.3:  the presence hints, the instance's open count in a
    * versioned bucket, then fsio_join as a reader or a writer;  a writer

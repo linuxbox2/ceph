@@ -16,6 +16,7 @@
 #include <fcntl.h>
 #include <stdint.h>
 #include <filesystem>
+#include <fstream>
 #include <sys/xattr.h>
 #include <sys/statvfs.h>
 #include <thread>
@@ -2675,6 +2676,147 @@ TEST(OPEN2, RESUME_EXISTING_SHADOW)
   ASSERT_EQ(get<0>(rdr), 0);
   ASSERT_EQ(get<1>(rdr), staged);
   ASSERT_EQ(o2h->close(r1), 0);
+}
+
+/* rgw_sal.h:  close() publishes a write the handle still holds, as
+ * end_write() does;  a reader joined to another handle's shadow publishes
+ * nothing;  a handle destroyed while open is closed, and publishes.  The
+ * handles are the driver's, with no librgw open around them */
+static std::string contents_of(const sf::path& p)
+{
+  std::ifstream in(p, std::ios::binary);
+  return std::string(std::istreambuf_iterator<char>(in), {});
+}
+
+static void publish_p4(const std::string& name)
+{
+  Open2Helper o2h(fs, bucket_fh);
+  ASSERT_EQ(get<0>(o2h.lookup(name)), 0);
+  auto ofw = o2h.open(O_RDWR, RGW_OPEN_FLAG_CREATE);
+  ASSERT_EQ(get<0>(ofw), 0);
+  auto w0 = get<1>(ofw);
+  ASSERT_EQ(get<0>(o2h.write(w0, std::string{"PPPP"}, 0, 4)), 0);
+  ASSERT_EQ(o2h.close(w0), 0);
+}
+
+static std::unique_ptr<rgw::sal::Object>
+driver_object(const DoutPrefixProvider* dpp, const std::string& name,
+	      std::unique_ptr<rgw::sal::Bucket>* bucket)
+{
+  auto* driver = rgw::g_rgwlib->get_driver();
+  if (driver->load_bucket(dpp, rgw_bucket(std::string(), bucket_name),
+			  bucket, null_yield) < 0) {
+    return nullptr;
+  }
+  return (*bucket)->get_object(rgw_obj_key(name));
+}
+
+static int fsio_write(rgw::sal::Object::FSIOObject* h, std::string data,
+		      uint64_t ofs)
+{
+  struct iovec iov{data.data(), data.size()};
+  uint64_t n = 0;
+  return h->pwritev(&iov, 1, ofs, &n, 0);
+}
+
+TEST(OPEN2, CLOSE_PUBLISHES_A_HELD_WRITE)
+{
+  if (! have_fs_layout()) {
+    GTEST_SKIP() << "not a filesystem-backed driver";
+  }
+  using FSIO = rgw::sal::Object::FSIOObject;
+  const DoutPrefix dp(g_ceph_context, dout_subsys, "write2 test: ");
+  const std::string name{"close-pub"};
+  reset_object(name);
+  publish_p4(name);
+
+  std::unique_ptr<rgw::sal::Bucket> bucket;
+  auto obj = driver_object(&dp, name, &bucket);
+  ASSERT_TRUE(obj);
+  auto [r, w] = obj->get_fsio_handle(&dp, FSIO::OPEN_FLAG_WRITE);
+  ASSERT_EQ(r, 0);
+  ASSERT_EQ(fsio_write(w.get(), "QQ", 0), 0);
+  EXPECT_EQ(contents_of(published_path(name)), "PPPP");
+  ASSERT_EQ(w->close(&dp, FSIO::CLOSE_FLAG_NONE), 0);
+  EXPECT_EQ(contents_of(published_path(name)), "QQPP");
+  EXPECT_FALSE(sf::exists(shadow_path(name)));
+}
+
+TEST(OPEN2, CLOSE_OF_A_JOINED_READER_PUBLISHES_NOTHING)
+{
+  if (! have_fs_layout()) {
+    GTEST_SKIP() << "not a filesystem-backed driver";
+  }
+  using FSIO = rgw::sal::Object::FSIOObject;
+  const DoutPrefix dp(g_ceph_context, dout_subsys, "write2 test: ");
+  const std::string name{"close-rdr"};
+  reset_object(name);
+  publish_p4(name);
+
+  std::unique_ptr<rgw::sal::Bucket> wb, rb;
+  auto wobj = driver_object(&dp, name, &wb);
+  auto robj = driver_object(&dp, name, &rb);
+  ASSERT_TRUE(wobj && robj);
+  auto [wr, w] = wobj->get_fsio_handle(&dp, FSIO::OPEN_FLAG_WRITE);
+  ASSERT_EQ(wr, 0);
+  ASSERT_EQ(fsio_write(w.get(), "QQ", 0), 0);
+  auto [rr, rd] = robj->get_fsio_handle(&dp, FSIO::OPEN_FLAG_NONE);
+  ASSERT_EQ(rr, 0);
+  ASSERT_TRUE(rd->resumed()) << "the reader should join the writer's shadow";
+  ASSERT_EQ(rd->close(&dp, FSIO::CLOSE_FLAG_NONE), 0);
+  EXPECT_EQ(contents_of(published_path(name)), "PPPP");
+  EXPECT_TRUE(sf::exists(shadow_path(name)));
+  ASSERT_EQ(w->close(&dp, FSIO::CLOSE_FLAG_NONE), 0);
+  EXPECT_EQ(contents_of(published_path(name)), "QQPP");
+}
+
+TEST(OPEN2, DESTROYED_WHILE_OPEN_PUBLISHES)
+{
+  if (! have_fs_layout()) {
+    GTEST_SKIP() << "not a filesystem-backed driver";
+  }
+  using FSIO = rgw::sal::Object::FSIOObject;
+  const DoutPrefix dp(g_ceph_context, dout_subsys, "write2 test: ");
+  const std::string name{"close-dtor"};
+  reset_object(name);
+  publish_p4(name);
+
+  std::unique_ptr<rgw::sal::Bucket> bucket;
+  auto obj = driver_object(&dp, name, &bucket);
+  ASSERT_TRUE(obj);
+  {
+    auto [r, w] = obj->get_fsio_handle(&dp, FSIO::OPEN_FLAG_WRITE);
+    ASSERT_EQ(r, 0);
+    ASSERT_EQ(fsio_write(w.get(), "QQ", 0), 0);
+  }
+  EXPECT_EQ(contents_of(published_path(name)), "QQPP");
+  EXPECT_FALSE(sf::exists(shadow_path(name)));
+}
+
+/* librgw:  the last write open returned while a read open remains
+ * publishes through end_write(), and the reader's close publishes
+ * nothing more */
+TEST(OPEN2, WRITER_CLOSE_WITH_A_READER_PUBLISHES)
+{
+  if (! have_fs_layout()) {
+    GTEST_SKIP() << "not a filesystem-backed driver";
+  }
+  const std::string name{"close-wr"};
+  reset_object(name);
+  publish_p4(name);
+
+  Open2Helper o2h(fs, bucket_fh);
+  ASSERT_EQ(get<0>(o2h.lookup(name)), 0);
+  auto ofw = o2h.open(O_RDWR, RGW_OPEN_FLAG_NONE);
+  ASSERT_EQ(get<0>(ofw), 0);
+  auto ofr = o2h.open(O_RDONLY, RGW_OPEN_FLAG_NONE);
+  ASSERT_EQ(get<0>(ofr), 0);
+  ASSERT_EQ(get<0>(o2h.write(get<1>(ofw), std::string{"QQ"}, 0, 2)), 0);
+  ASSERT_EQ(o2h.close(get<1>(ofw)), 0);
+  EXPECT_EQ(contents_of(published_path(name)), "QQPP");
+  ASSERT_EQ(o2h.close(get<1>(ofr)), 0);
+  EXPECT_EQ(contents_of(published_path(name)), "QQPP");
+  EXPECT_FALSE(sf::exists(shadow_path(name)));
 }
 
 TEST(OPEN2, UNLINK_LEAVES_NO_SHADOW)

@@ -3052,12 +3052,14 @@ namespace rgw {
         if (f->write_opens == 0) {
           if (f->fsio_hdl && ! deleted()) {
             write_unix_attrs();
-            publish_rc = f->fsio_hdl->end_write(&dp,
-                      rgw::sal::Object::FSIOObject::WRITE_FLAG_NONE);
-            if (!!publish_rc) {
-              lsubdout(fs->get_context(), rgw, 0)
-                << __func__ << " " << object_name()
-                << " failed to publish fsio handle " << dendl;
+            if (f->read_opens > 0) {
+              publish_rc = f->fsio_hdl->end_write(&dp,
+                        rgw::sal::Object::FSIOObject::WRITE_FLAG_NONE);
+              if (!!publish_rc) {
+                lsubdout(fs->get_context(), rgw, 0)
+                  << __func__ << " " << object_name()
+                  << " failed to publish fsio handle " << dendl;
+              }
             }
           }
           if (f->read_opens == 0) {

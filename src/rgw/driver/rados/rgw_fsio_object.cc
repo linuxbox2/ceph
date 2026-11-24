@@ -17,6 +17,7 @@
 #include "common/async/blocked_completion.h"
 #include "common/dout.h"
 #include "common/error_code.h"
+#include "common/dout_fmt.h"
 #include "common/random_string.h"
 #include "include/random.h"
 #include "neorados/cls/rgw_fsio.h"
@@ -1523,6 +1524,17 @@ int RadosFSIOObject::drain_count(const DoutPrefixProvider* dpp)
   fop.exec(neorados::cls::rgw_fsio::ocnt_forget(in));
   (void)exec(inst_oid, inst_ioc, std::move(fop));
   return 0;
+}
+
+RadosFSIOObject::~RadosFSIOObject()
+{
+  if (!reading && !writing) {
+    return;
+  }
+  const DoutPrefix dp(store->ctx(), dout_subsys, "rgw fsio: ");
+  ldpp_dout_fmt(&dp, 0, "ERROR: {}: destroyed while open, closing {}",
+		__func__, key);
+  close(&dp, CLOSE_FLAG_NONE);
 }
 
 int RadosFSIOObject::close(const DoutPrefixProvider* dpp, uint32_t flags)
