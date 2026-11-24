@@ -3050,6 +3050,102 @@ TEST_F(FSIORadosVersionedPublish, DeletedVersionCollectsItsHeadSegment)
   }
 }
 
+/* the driver's step 8g, its driver parts:  a publish call that stays
+ * busy is retried for rgw_fsio_publish_wait (W13);  past it the publish
+ * returns EAGAIN, and the next end_write() resumes it */
+class FSIORadosPublishWait : public FSIORadosVersionedPublish {
+protected:
+  void SetUp() override {
+    FSIORadosVersionedPublish::SetUp();
+    g_conf().set_val_or_die("rgw_fsio_publish_wait", "1");
+  }
+  void TearDown() override {
+    g_conf().set_val_or_die("rgw_fsio_publish_wait", "30");
+    FSIORadosVersionedPublish::TearDown();
+  }
+};
+
+/* unversioned:  busy within the wait, published at once */
+TEST_F(FSIORadosPublishWait, BusyHeadWriteWithinTheWait)
+{
+  set_versioning(0);
+  const auto a = pattern(9 * MiB, 1);
+  ASSERT_EQ(0, put("obj", a));
+  auto w = open("obj", true);
+  ASSERT_TRUE(w);
+  ASSERT_EQ(0, write(w, 4 * MiB, {"Z"}));
+  rados_fsio(w)->busy_publish_calls(2);
+  ASSERT_EQ(0, w->end_write(env->dpp.get(), 0));
+  std::string now;
+  ASSERT_EQ(0, get("obj", &now));
+  EXPECT_EQ('Z', now[4 * MiB]);
+}
+
+/* unversioned:  busy past the wait, EAGAIN, the shadow ready with the
+ * writer's open still counted;  the next end_write() publishes */
+TEST_F(FSIORadosPublishWait, BusyHeadWritePastTheWait)
+{
+  set_versioning(0);
+  const auto a = pattern(9 * MiB, 1);
+  ASSERT_EQ(0, put("obj", a));
+  auto w = open("obj", true);
+  ASSERT_TRUE(w);
+  const auto h = rados_fsio(w)->handle();
+  const auto id = rados_fsio(w)->writing_to();
+  ASSERT_EQ(0, write(w, 4 * MiB, {"Z"}));
+  rados_fsio(w)->busy_publish_calls(1000);
+  EXPECT_EQ(-EAGAIN, w->end_write(env->dpp.get(), 0));
+  EXPECT_EQ(std::optional(cls_rgw_fsio_cs_state::READY), state_of(id));
+  auto rec = records_of(head_of("obj"), h.incarnation);
+  ASSERT_TRUE(rec.opens);
+  EXPECT_EQ(1u, rec.opens->handles.at(h.handle).chunk_sets.at(id).writers);
+  std::string now;
+  ASSERT_EQ(0, get("obj", &now));
+  EXPECT_EQ("same", diff(now, a, a)) << "published past the wait";
+  rados_fsio(w)->busy_publish_calls(0);
+  ASSERT_EQ(0, w->end_write(env->dpp.get(), 0));
+  ASSERT_EQ(0, get("obj", &now));
+  EXPECT_EQ('Z', now[4 * MiB]);
+}
+
+/* versioned, W10:  written, its link busy past the wait:  EAGAIN, the
+ * shadow still publishing;  the next end_write() links and publishes,
+ * with no second instance */
+TEST_F(FSIORadosPublishWait, BusyLinkPastTheWait)
+{
+  std::string i1;
+  ASSERT_EQ(0, put("obj", pattern(9 * MiB, 1), &i1));
+  auto w = open("obj", true);
+  ASSERT_TRUE(w);
+  const auto id = rados_fsio(w)->writing_to();
+  ASSERT_EQ(0, write(w, 4 * MiB, {"Z"}));
+  auto* hdl = rados_fsio(w);
+  hdl->after_instance_write([&] { hdl->busy_publish_calls(1000); });
+  EXPECT_EQ(-EAGAIN, w->end_write(env->dpp.get(), 0));
+  EXPECT_EQ(std::optional(cls_rgw_fsio_cs_state::PUBLISHING), state_of(id));
+  EXPECT_EQ(i1, olh_instance("obj"));
+  const auto i2 = hdl->placed_instance();
+  hdl->busy_publish_calls(0);
+  ASSERT_EQ(0, w->end_write(env->dpp.get(), 0));
+  EXPECT_EQ(i2, olh_instance("obj"));
+  EXPECT_EQ((std::set<std::string>{i1, i2}), versions("obj"));
+}
+
+/* §3.6:  an unlinked generation's shadow still publishes */
+TEST_F(FSIORadosPublishWait, DiscardKeepsPublishing)
+{
+  set_versioning(0);
+  ASSERT_EQ(0, put("obj", pattern(9 * MiB, 1)));
+  auto w = open("obj", true);
+  ASSERT_TRUE(w);
+  ASSERT_EQ(0, write(w, 4 * MiB, {"Z"}));
+  EXPECT_EQ(0, w->discard(env->dpp.get(), 0));
+  ASSERT_EQ(0, w->end_write(env->dpp.get(), 0));
+  std::string now;
+  ASSERT_EQ(0, get("obj", &now));
+  EXPECT_EQ('Z', now[4 * MiB]);
+}
+
 /* Z15:  the new version's tags are the source version's at publish */
 TEST_F(FSIORadosVersionedPublish, TagsFromTheSourceVersion)
 {

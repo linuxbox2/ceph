@@ -2881,6 +2881,20 @@ options:
   default: 5
   services:
   - rgw
+- name: rgw_fsio_publish_wait
+  type: secs
+  level: advanced
+  desc: How long an FSIO publish waits on a busy bucket index or object
+  long_desc: A publish retries a call that meets a transient busy error
+    (ERR_BUSY_RESHARDING from the head write, the instance write or the
+    link, EAGAIN from a degraded object) with backoff, for at most this long
+    in all;  its size scan and content read are not counted (FSIO design
+    4.2, finding W13).  Past it, a publish that has not reached its head or
+    instance write releases its shadow, and one that has keeps it;  either
+    returns EAGAIN, and the next end_write() of the handle resumes it.
+  default: 30
+  services:
+  - rgw
 - name: rgw_fsio_hint_interval
   type: secs
   level: advanced

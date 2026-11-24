@@ -1233,7 +1233,9 @@ class Object {
       virtual int close(const DoutPrefixProvider* dpp, uint32_t flags) = 0;
       /* the object has been unlinked:  drop the shadow's name now,
        * refuse to publish it, and let the storage be reclaimed when
-       * the last open descriptor is returned (posix unlink) */
+       * the last open descriptor is returned (posix unlink).  A driver
+       * whose unlinked shadow still publishes, last writer wins (RADOS,
+       * FSIO_RADOS_DESIGN.md §3.6), returns 0 */
       virtual int discard(const DoutPrefixProvider* dpp, uint32_t flags) {
 	return -ENOTSUP;
       }

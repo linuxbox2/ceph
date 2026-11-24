@@ -1891,6 +1891,8 @@ int RadosFSIOObject::publish(const DoutPrefixProvider* dpp)
   const auto& marker = info.bucket.marker;
   auto aioc = head_ioc;
   aioc.set_key(head_oid);
+  const auto until = ceph::mono_clock::now() +
+    dpp->get_cct()->_conf.get_val<std::chrono::seconds>("rgw_fsio_publish_wait");
   /* 4:  the head write, atomic so it sets the ID tag and carries the
    * guard;  ECANCELED is an S3 write since RGW read the head, or a tag
    * write since this try read the tags:  read again and publish over it,
@@ -1927,28 +1929,31 @@ int RadosFSIOObject::publish(const DoutPrefixProvider* dpp)
     if (tags_read) {
       tags_read(*spec.expected_tags);
     }
-    RGWObjectCtx octx(store);
-    const rgw_obj obj(info.bucket, key);
-    octx.set_atomic(obj, true);
-    RGWRados::Object target(store->getRados(), info, octx, obj);
-    RGWRados::Object::Write wr(&target);
-    const std::string tag = gen_rand_alphanumeric(dpp->get_cct(), 32);
-    wr.meta.manifest = &m;
-    wr.meta.flags = PUT_OBJ_CREATE;
-    wr.meta.mtime = &mtime;
-    wr.meta.ptag = &tag;
-    wr.meta.owner = policy.get_owner();
-    wr.meta.bucket_owner = bowner_id;
-    wr.meta.fsio_publish = &spec;
-    wr.meta.fsio_published = &ret;
-    req_context rctx{dpp, null_yield, nullptr};
-    jspan_context trace(false, false);
-    w = wr.write_meta(size, size, attrs, rctx, trace);
-    if (w == 0 && wr.meta.canceled) {
-      /* RGW returns a head write its op failed with ECANCELED as a lost
-       * race, 0;  for the publish it did not apply */
-      w = -ECANCELED;
-    }
+    w = publish_wait(dpp, until, [&] {
+      RGWObjectCtx octx(store);
+      const rgw_obj obj(info.bucket, key);
+      octx.set_atomic(obj, true);
+      RGWRados::Object target(store->getRados(), info, octx, obj);
+      RGWRados::Object::Write wr(&target);
+      const std::string tag = gen_rand_alphanumeric(dpp->get_cct(), 32);
+      wr.meta.manifest = &m;
+      wr.meta.flags = PUT_OBJ_CREATE;
+      wr.meta.mtime = &mtime;
+      wr.meta.ptag = &tag;
+      wr.meta.owner = policy.get_owner();
+      wr.meta.bucket_owner = bowner_id;
+      wr.meta.fsio_publish = &spec;
+      wr.meta.fsio_published = &ret;
+      req_context rctx{dpp, null_yield, nullptr};
+      jspan_context trace(false, false);
+      int r = wr.write_meta(size, size, attrs, rctx, trace);
+      if (r == 0 && wr.meta.canceled) {
+	/* RGW returns a head write its op failed with ECANCELED as a lost
+	 * race, 0;  for the publish it did not apply */
+	r = -ECANCELED;
+      }
+      return r;
+    });
   }
   if (w == 0 && lose_reply) {
     w = -ETIMEDOUT;		// test:  applied, its reply lost
@@ -2003,7 +2008,9 @@ int RadosFSIOObject::publish(const DoutPrefixProvider* dpp)
 		      << " on " << head_oid << ":  " << cpp_strerror(-w)
 		      << dendl;
     publish_hint(dpp, false, r);
-    return w;
+    /* the tries or the wait spent:  the caller may try again (W13) */
+    return (w == -ECANCELED || w == -ERR_BUSY_RESHARDING || w == -EAGAIN)
+      ? -EAGAIN : w;
   }
   /* 5:  the replaced content's GC after the reply, when it was born
    * drained;  a retired chunk-set entry owns it otherwise (§2.2) */
@@ -2259,27 +2266,32 @@ int RadosFSIOObject::publish_versioned(const DoutPrefixProvider* dpp,
     n.holders = readers;
     encode(n, ispec.ocnt.emplace());
   }
-  RGWObjectCtx octx(store);
+  const auto until = ceph::mono_clock::now() +
+    dpp->get_cct()->_conf.get_val<std::chrono::seconds>("rgw_fsio_publish_wait");
   const rgw_obj obj(info.bucket, rgw_obj_key(key.name, intent.instance));
-  octx.set_atomic(obj, true);
   int w = 0;
   if (lose_instance != 2) {
-    RGWRados::Object target(store->getRados(), info, octx, obj);
-    RGWRados::Object::Write wr(&target);
-    const std::string tag = gen_rand_alphanumeric(dpp->get_cct(), 32);
-    wr.meta.manifest = &p.m;
-    wr.meta.flags = PUT_OBJ_CREATE;
-    wr.meta.mtime = &p.mtime;
-    wr.meta.ptag = &tag;
-    wr.meta.owner = p.policy.get_owner();
-    wr.meta.bucket_owner = p.bowner;
-    wr.meta.fsio_instance = &ispec;
-    req_context rctx{dpp, null_yield, nullptr};
-    jspan_context trace(false, false);
-    w = wr.write_meta(p.size, p.size, p.attrs, rctx, trace);
-    if (w == 0 && wr.meta.canceled) {
-      w = -ECANCELED;		// the claim not held, or no placeholder
-    }
+    w = publish_wait(dpp, until, [&] {
+      RGWObjectCtx octx(store);
+      octx.set_atomic(obj, true);
+      RGWRados::Object target(store->getRados(), info, octx, obj);
+      RGWRados::Object::Write wr(&target);
+      const std::string tag = gen_rand_alphanumeric(dpp->get_cct(), 32);
+      wr.meta.manifest = &p.m;
+      wr.meta.flags = PUT_OBJ_CREATE;
+      wr.meta.mtime = &p.mtime;
+      wr.meta.ptag = &tag;
+      wr.meta.owner = p.policy.get_owner();
+      wr.meta.bucket_owner = p.bowner;
+      wr.meta.fsio_instance = &ispec;
+      req_context rctx{dpp, null_yield, nullptr};
+      jspan_context trace(false, false);
+      int r = wr.write_meta(p.size, p.size, p.attrs, rctx, trace);
+      if (r == 0 && wr.meta.canceled) {
+	r = -ECANCELED;		// the claim not held, or no placeholder
+      }
+      return r;
+    });
   }
   if (lose_instance) {
     w = -ETIMEDOUT;		// test:  its reply lost
@@ -2296,7 +2308,9 @@ int RadosFSIOObject::publish_versioned(const DoutPrefixProvider* dpp,
     const auto c = ia.find("user.rgw.fsio.claim");
     if (!ec && c != ia.end() && c->second.to_str() == intent.token) {
       release_versioned(dpp, intent, readers);
-      return w;
+      /* not written:  the caller may try again (W13) */
+      return (w == -ERR_BUSY_RESHARDING || w == -EAGAIN || w == -ETIMEDOUT)
+	? -EAGAIN : w;
     }
     if (ec || !ia.count(RGW_ATTR_ID_TAG)) {
       cleanup_versioned(dpp, intent, readers);
@@ -2306,6 +2320,20 @@ int RadosFSIOObject::publish_versioned(const DoutPrefixProvider* dpp,
   if (instance_written) {
     instance_written();
   }
+  return complete_versioned(dpp, intent, epoch, until);
+}
+
+int RadosFSIOObject::complete_versioned(const DoutPrefixProvider* dpp,
+					const cls_rgw_fsio_intent& intent,
+					uint64_t epoch, ceph::mono_time until)
+{
+  std::string ioid;
+  neorados::IOContext iioc;
+  if (int r = instance_obj(intent.instance, &ioid, &iioc); r < 0) {
+    linking.emplace(intent, epoch);
+    return r;
+  }
+  const rgw_obj obj(info.bucket, rgw_obj_key(key.name, intent.instance));
   /* 5:  the link at the recorded epoch, retried, never released;  a
    * version removed before it leaves a phantom entry, unlinked (Z34) */
   /* whether the instance head is still the version it wrote */
@@ -2318,26 +2346,19 @@ int RadosFSIOObject::publish_versioned(const DoutPrefixProvider* dpp,
       ceph::async::use_blocked[ec]);
     return !ec;
   };
-  int l = -EIO;
-  for (int t = 0; t < 3 && l < 0; ++t) {
+  int l = publish_wait(dpp, until, [&] {
     RGWObjectCtx lctx(store);
-    l = store->getRados()->set_olh(dpp, lctx, info, obj, false, nullptr, epoch,
-				   ceph::real_time(), false, null_yield);
-    if (l == -ENOENT && !written()) {
-      /* Z34:  removed since its write, the index entry with it:  link_olh
-       * returns ENOENT;  nothing to link, the publish completes */
-      break;
-    }
-  }
-  if (l < 0 && l != -ENOENT) {
+    return store->getRados()->set_olh(dpp, lctx, info, obj, false, nullptr,
+				      epoch, ceph::real_time(), false,
+				      null_yield);
+  });
+  /* Z34:  removed since its write, the index entry with it:  link_olh
+   * returns ENOENT;  nothing to link, the publish completes */
+  if ((l < 0 && l != -ENOENT) || (l == -ENOENT && written())) {
     ldpp_dout(dpp, 0) << "ERROR: FSIO:  linking " << intent.instance << " of "
 		      << head_oid << ":  " << cpp_strerror(-l) << dendl;
-    return l;
-  }
-  if (l == -ENOENT && written()) {
-    ldpp_dout(dpp, 0) << "ERROR: FSIO:  linking " << intent.instance << " of "
-		      << head_oid << ":  " << cpp_strerror(-l) << dendl;
-    return l;
+    linking.emplace(intent, epoch);	// written:  never released (W10)
+    return (l == -ERR_BUSY_RESHARDING || l == -EAGAIN) ? -EAGAIN : l;
   }
   if (l == 0 && !written()) {
     /* Z34:  a link that succeeded over a version removed since:  its
@@ -2360,13 +2381,16 @@ int RadosFSIOObject::publish_versioned(const DoutPrefixProvider* dpp,
   in.versioned = true;
   in.marker = info.bucket.marker;
   cls_rgw_fsio_replace_ret ret;
-  neorados::WriteOp op;
-  op.exec(neorados::cls::rgw_fsio::replace_head(in, &ret));
-  if (int r = exec(head_oid, head_ioc, std::move(op)); r < 0) {
+  if (int r = publish_wait(dpp, until, [&] {
+	neorados::WriteOp op;
+	op.exec(neorados::cls::rgw_fsio::replace_head(in, &ret));
+	return exec(head_oid, head_ioc, std::move(op));
+      }); r < 0) {
     ldpp_dout(dpp, 0) << "ERROR: FSIO:  fsio_publish of " << wcs.to_str()
 		      << " on " << head_oid << ":  " << cpp_strerror(-r)
 		      << dendl;
-    return r;			// keeps its hint (H1)
+    linking.emplace(intent, epoch);	// keeps its hint (H1)
+    return (r == -ERR_BUSY_RESHARDING || r == -EAGAIN) ? -EAGAIN : r;
   }
   instance_hint(dpp, false, cls_rgw_fsio_hint_kind::PUBLISH, intent.instance,
 		h);
@@ -2374,6 +2398,34 @@ int RadosFSIOObject::publish_versioned(const DoutPrefixProvider* dpp,
     drain(dpp, *ret.drained);
   }
   return 0;
+}
+
+int RadosFSIOObject::publish_wait(const DoutPrefixProvider* dpp,
+				  ceph::mono_time until,
+				  fu2::function_view<int()> call)
+{
+  auto backoff = std::chrono::milliseconds(50);
+  for (;;) {
+    int r;
+    if (busy_calls > 0) {
+      --busy_calls;
+      r = -ERR_BUSY_RESHARDING;	// test:  busy_publish_calls()
+    } else {
+      r = call();
+    }
+    if (r != -ERR_BUSY_RESHARDING && r != -EAGAIN) {
+      return r;
+    }
+    const auto now = ceph::mono_clock::now();
+    if (now >= until) {
+      ldpp_dout(dpp, 1) << "FSIO:  a publish call on " << head_oid
+			<< " still busy at the end of rgw_fsio_publish_wait"
+			<< dendl;
+      return r;
+    }
+    std::this_thread::sleep_for(std::min<ceph::timespan>(backoff, until - now));
+    backoff = std::min(backoff * 2, std::chrono::milliseconds(1000));
+  }
 }
 
 int RadosFSIOObject::leave_count(const DoutPrefixProvider* dpp,
@@ -2403,6 +2455,33 @@ int RadosFSIOObject::end_write(const DoutPrefixProvider* dpp, uint32_t flags)
 {
   if (!writing) {
     return 0;
+  }
+  /* the end of a write session, once its publish completed */
+  auto finished = [&] (const std::optional<cls_rgw_fsio_id>& drained) {
+    writing = false;
+    if (drained) {
+      if (int d = drain(dpp, *drained); d < 0) {
+	return d;
+      }
+    }
+    if (!reading) {
+      uncount(dpp);
+      hinted = false;
+      return presence_hint(dpp, false, false);
+    }
+    return 0;
+  };
+  if (linking) {
+    /* W10:  written, not linked:  steps 5-6 again, never a second
+     * instance;  kept again if they do not complete */
+    const auto [i, e] = std::move(*linking);
+    linking.reset();
+    const auto until = ceph::mono_clock::now() +
+      dpp->get_cct()->_conf.get_val<std::chrono::seconds>("rgw_fsio_publish_wait");
+    if (int p = complete_versioned(dpp, i, e, until); p < 0) {
+      return p;
+    }
+    return finished(std::nullopt);
   }
   if (dirty || unsure) {
     if (int r = report_hint(dpp); r < 0) {
@@ -2455,18 +2534,7 @@ int RadosFSIOObject::end_write(const DoutPrefixProvider* dpp, uint32_t flags)
       return p;
     }
   }
-  writing = false;
-  if (ret.drained) {
-    if (int d = drain(dpp, *ret.drained); d < 0) {
-      return d;
-    }
-  }
-  if (!reading) {
-    uncount(dpp);
-    hinted = false;
-    return presence_hint(dpp, false, false);
-  }
-  return 0;
+  return finished(ret.drained);
 }
 
 Object::FSIOResult RadosObject::get_fsio_handle(const DoutPrefixProvider* dpp,

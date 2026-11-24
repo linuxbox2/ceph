@@ -59,6 +59,11 @@ public:
   int pwritev(const struct iovec* iov, int iovcnt, uint64_t ofs,
 	      uint64_t* bytes_written, uint32_t flags) override;
   int commit(const DoutPrefixProvider* dpp, uint32_t flags) override { return 0; }
+  /* §3.6:  an unlinked generation's shadow still publishes, last writer
+   * wins:  only local state, of which the handle keeps none to drop */
+  int discard(const DoutPrefixProvider* dpp, uint32_t flags) override {
+    return 0;
+  }
   /* §3.1:  a reader's handle joins as a writer too */
   /* §3.5 item 6:  a writer open records its identity at its join;  a
    * later one with another identity replaces it (fsio_writer_identity) */
@@ -123,6 +128,10 @@ public:
   void after_link(fu2::unique_function<void()> f) { linked = std::move(f); }
   /* test only:  the instance its last placeholder was for */
   const std::string& placed_instance() const { return placed; }
+  /* test only:  the next n publish calls (a head or instance write, a
+   * link, the versioned fsio_replace_head) return ERR_BUSY_RESHARDING
+   * without being sent (W13) */
+  void busy_publish_calls(int n) { busy_calls = n; }
   /* test only:  called on each try of the publish's head write, after
    * its read of the tags it evaluated, which it is given, and before the
    * write, so a test can write the tags in between (C1) */
@@ -278,6 +287,15 @@ private:
    * under `intent`, linked at `epoch` */
   int publish_versioned(const DoutPrefixProvider* dpp,
 			const cls_rgw_fsio_intent& intent, uint64_t epoch);
+  /* §4.2 steps 5-6:  the link at `epoch` and fsio_publish;  kept in
+   * `linking` for the next end_write() when either does not complete */
+  int complete_versioned(const DoutPrefixProvider* dpp,
+			 const cls_rgw_fsio_intent& intent, uint64_t epoch,
+			 ceph::mono_time until);
+  /* W13:  a publish call retried on ERR_BUSY_RESHARDING and EAGAIN, with
+   * backoff, until `until` */
+  int publish_wait(const DoutPrefixProvider* dpp, ceph::mono_time until,
+		   fu2::function_view<int()> call);
   /* §4.2, W10:  before the instance write:  its claim aborted, the shadow
    * released, then the cleanup */
   int release_versioned(const DoutPrefixProvider* dpp,
@@ -339,6 +357,10 @@ private:
   bool lose_reply = false;	// test only:  lose_publish_reply()
   fu2::unique_function<void(const ceph::buffer::list&)> tags_read;	// test only
   int lose_instance = 0;	// test only:  lose_instance_reply()
+  int busy_calls = 0;		// test only:  busy_publish_calls()
+  /* a versioned publish written and not yet linked:  its intent and
+   * epoch, which the next end_write() completes with (W10) */
+  std::optional<std::pair<cls_rgw_fsio_intent, uint64_t>> linking;
   fu2::unique_function<void()> instance_written;	// test only
   fu2::unique_function<void()> linked;	// test only
   std::string placed;		// test only:  placed_instance()
