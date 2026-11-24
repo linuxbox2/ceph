@@ -497,9 +497,14 @@ int m_join(cls_rgw_fsio_head& h, const fsio::join_in& in, fsio::join_out& out,
   op.expired = in.expired;
   op.instance = in.instance;
   op.marker = cl.marker;
+  /* as rgw_fsio_join() stats the head:  the cluster tier's head object
+   * holds data when it has an ID tag (rgw_part()), and its clone is then
+   * in role 'd' (§2.7) */
+  auto jin = in;
+  jin.head_data = h.exists && !h.id_tag.empty();
   ceph::buffer::list reply;
   const int r = on_cluster_head("fsio_join", cls::rgw::method::fsio_join, h, fx, op,
-				[&] { return fsio::join(h, in, out, fx); }, &reply);
+				[&] { return fsio::join(h, jin, out, fx); }, &reply);
   if (cl.on && r == 0 && reply.length()) {
     if (auto ret = dec<cls_rgw_fsio_join_ret>("fsio_join", reply);
 	ret && (ret->bound != out.bound || ret->construct != out.construct ||
