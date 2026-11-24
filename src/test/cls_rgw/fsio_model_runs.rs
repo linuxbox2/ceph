@@ -131,6 +131,14 @@ fn quick() -> Vec<Run> {
      * off elsewhere) */
     v.push(run("quick-w+r-keep-tail", &[("FSIO_MODEL_ROLES", "w+r"), ("FSIO_MODEL_S3_OPS", "1"),
                                         ("FSIO_MODEL_KEEP_TAIL", "1"), ("FSIO_MODEL_RESENDS", "0")]));
+    /* §3.1, Z24:  creation from no head, two creators meeting, an S3
+     * PUT onto a created name (FSIO_MODEL_CREATE, off elsewhere) */
+    v.push(run("quick-w-create", &[("FSIO_MODEL_ROLES", "w"), ("FSIO_MODEL_S3_OPS", "1"),
+                                   ("FSIO_MODEL_CREATE", "1"), ("FSIO_MODEL_RESENDS", "0")]));
+    v.push(run("quick-ww-create", &[("FSIO_MODEL_ROLES", "ww"), ("FSIO_MODEL_S3_OPS", "0"),
+                                    ("FSIO_MODEL_CREATE", "1"), ("FSIO_MODEL_RESENDS", "0")]));
+    v.push(run("quick-wr-create", &[("FSIO_MODEL_ROLES", "wr"), ("FSIO_MODEL_S3_OPS", "1"),
+                                    ("FSIO_MODEL_CREATE", "1"), ("FSIO_MODEL_RESENDS", "0")]));
     /* §3.5, C1:  object tags, a tag write racing a publish
      * (FSIO_MODEL_TAGS, off elsewhere) */
     v.push(run("quick-w-tags", &[("FSIO_MODEL_ROLES", "w"), ("FSIO_MODEL_S3_OPS", "2"),
@@ -462,6 +470,10 @@ fn sample() -> Vec<Run> {
         /* §3.3:  size reports and a truncate (FSIO_MODEL_SIZES) */
         ("sample-w+w-sizes", vec![("FSIO_MODEL_ROLES", "w+w"), ("FSIO_MODEL_S3_OPS", "1"),
                                   ("FSIO_MODEL_SIZES", "1")]),
+        /* §3.1, Z24:  creation (FSIO_MODEL_CREATE);  last, so the seeds
+         * before it stay as they were */
+        ("sample-ww-create", vec![("FSIO_MODEL_ROLES", "ww"), ("FSIO_MODEL_S3_OPS", "1"),
+                                  ("FSIO_MODEL_CREATE", "1")]),
     ];
     configs
         .iter()

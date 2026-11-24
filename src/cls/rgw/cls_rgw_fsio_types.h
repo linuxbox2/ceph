@@ -244,6 +244,9 @@ struct cls_rgw_fsio_hdr {
   std::vector<cls_rgw_fsio_chunk_set> chunk_sets;
   std::vector<cls_rgw_fsio_fenced_finalize> fenced_finalizes;
   std::optional<cls_rgw_fsio_handle> rename_hold;  // the renamer (§6.3, Z4)
+  /* §3.1 step 0, Z24:  a writer's create made the head, which no publish
+   * or S3 PUT has yet made an S3 object */
+  bool created = false;
 
   cls_rgw_fsio_id draw() { return cls_rgw_fsio_id{next_counter++, nonce}; }
   cls_rgw_fsio_chunk_set* find(const cls_rgw_fsio_id& id);
@@ -263,6 +266,7 @@ struct cls_rgw_fsio_hdr {
     encode(chunk_sets, bl);
     encode(fenced_finalizes, bl);
     encode(rename_hold, bl);
+    encode(created, bl);
     ENCODE_FINISH(bl);
   }
   void decode(ceph::buffer::list::const_iterator& bl) {
@@ -274,6 +278,7 @@ struct cls_rgw_fsio_hdr {
     decode(chunk_sets, bl);
     decode(fenced_finalizes, bl);
     decode(rename_hold, bl);
+    decode(created, bl);
     DECODE_FINISH(bl);
   }
   void dump(ceph::Formatter *f) const;

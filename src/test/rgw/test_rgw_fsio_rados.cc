@@ -2320,6 +2320,137 @@ TEST_F(FSIORadosAttrs, PublishEtagUnderNonMd5)
   EXPECT_NE(std::string::npos, s.find("-req-")) << s;
 }
 
+/* the driver's step 8e:  creation (FSIO design §3.1 steps 0, 1 and 7,
+ * §3.5, Z24).  A create-open of a name with no S3 object makes its head,
+ * a tracking-only head marked created, and a shadow with a fresh layout;
+ * its last writer's close publishes it, even with nothing written */
+class FSIORadosCreate : public FSIORadosGC {
+protected:
+  using FO = rgw::sal::Object::FSIOObject;
+
+  int create(const std::string& key, bool excl,
+	     std::unique_ptr<FO>* out,
+	     const rgw::sal::Object::FSIOCreateSpec* spec = nullptr,
+	     uint32_t more = 0) {
+    auto obj = bucket->get_object(rgw_obj_key(key));
+    auto [r, fh] = obj->get_fsio_handle(
+      env->dpp.get(), FO::OPEN_FLAG_WRITE | FO::OPEN_FLAG_CREATE |
+      (excl ? FO::OPEN_FLAG_EXCL : 0) | more, spec);
+    *out = std::move(fh);
+    return r;
+  }
+  int open_flags(const std::string& key, uint32_t flags,
+		 std::unique_ptr<FO>* out) {
+    auto obj = bucket->get_object(rgw_obj_key(key));
+    auto [r, fh] = obj->get_fsio_handle(env->dpp.get(), flags);
+    *out = std::move(fh);
+    return r;
+  }
+  /* the object as S3 reads it:  its state, or ENOENT */
+  int s3_size(const std::string& key, int64_t* size) {
+    auto obj = bucket->get_object(rgw_obj_key(key));
+    auto rop = obj->get_read_op();
+    if (int r = rop->prepare(null_yield, env->dpp.get()); r < 0) {
+      return r;
+    }
+    *size = obj->get_size();
+    return 0;
+  }
+};
+
+/* a created file written and closed is an S3 object with those bytes,
+ * its head carrying no FSIO records */
+TEST_F(FSIORadosCreate, CreateWriteCloseReads)
+{
+  std::unique_ptr<FO> w;
+  ASSERT_EQ(0, create("new", false, &w));
+  const auto h = rados_fsio(w)->handle();
+  int64_t size = 0;
+  EXPECT_EQ(-ENOENT, s3_size("new", &size)) << "visible before its publish";
+  ASSERT_EQ(0, write(w, 0, {"hello"}));
+  ASSERT_EQ(0, w->end_write(env->dpp.get(), 0));
+  std::string now;
+  ASSERT_EQ(0, get("new", &now));
+  EXPECT_EQ("hello", now);
+  EXPECT_FALSE(records_of(head_of("new"), h.incarnation).any_fsio);
+}
+
+/* NFS expects the file after CREATE and CLOSE:  published at zero bytes */
+TEST_F(FSIORadosCreate, CreateAndCloseWithNothingWritten)
+{
+  std::unique_ptr<FO> w;
+  ASSERT_EQ(0, create("empty", false, &w));
+  ASSERT_EQ(0, w->end_write(env->dpp.get(), 0));
+  int64_t size = -1;
+  ASSERT_EQ(0, s3_size("empty", &size));
+  EXPECT_EQ(0, size);
+}
+
+/* two unchecked creates of one name meet on one shadow;  both writes
+ * are published */
+TEST_F(FSIORadosCreate, TwoUncheckedCreatorsMeet)
+{
+  std::unique_ptr<FO> w1, w2;
+  ASSERT_EQ(0, create("both", false, &w1));
+  ASSERT_EQ(0, create("both", false, &w2));
+  EXPECT_EQ(rados_fsio(w1)->shadow_chunk(0).oid,
+	    rados_fsio(w2)->shadow_chunk(0).oid);
+  ASSERT_EQ(0, write(w1, 0, {"aaaa"}));
+  ASSERT_EQ(0, write(w2, 4, {"bbbb"}));
+  ASSERT_EQ(0, w1->end_write(env->dpp.get(), 0));
+  ASSERT_EQ(0, w2->end_write(env->dpp.get(), 0));
+  std::string now;
+  ASSERT_EQ(0, get("both", &now));
+  EXPECT_EQ("aaaabbbb", now);
+}
+
+/* an exclusive create fails on an S3 object and on a name being
+ * created;  a plain open of a name being created fails as absent */
+TEST_F(FSIORadosCreate, ExclusiveAndPlainOpens)
+{
+  ASSERT_EQ(0, put("obj", "data"));
+  std::unique_ptr<FO> x;
+  EXPECT_EQ(-EEXIST, create("obj", true, &x));
+  std::unique_ptr<FO> w;
+  ASSERT_EQ(0, create("new", true, &w));
+  EXPECT_EQ(-EEXIST, create("new", true, &x));
+  EXPECT_EQ(-ENOENT, open_flags("new", FO::OPEN_FLAG_NONE, &x));
+  EXPECT_EQ(-ENOENT, open_flags("new", FO::OPEN_FLAG_WRITE, &x));
+  ASSERT_EQ(0, w->end_write(env->dpp.get(), 0));
+  EXPECT_EQ(0, open_flags("new", FO::OPEN_FLAG_NONE, &x));
+}
+
+/* the create's attributes reach the published object */
+TEST_F(FSIORadosCreate, CreateSetsTheSpecAttributes)
+{
+  rgw::sal::Attrs attrs;
+  attrs[RGW_ATTR_UNIX1].append("unix-attrs");
+  rgw::sal::Object::FSIOCreateSpec spec;
+  spec.attrs = &attrs;
+  std::unique_ptr<FO> w;
+  ASSERT_EQ(0, create("attrs", false, &w, &spec));
+  ASSERT_EQ(0, w->end_write(env->dpp.get(), 0));
+  const auto head = head_of("attrs");
+  boost::container::flat_map<std::string, ceph::buffer::list> got;
+  neo().execute(neorados::Object{head.oid}, ioc_of(head.pool),
+		neorados::ReadOp{}.get_xattrs(&got, nullptr), nullptr,
+		ceph::async::use_blocked);
+  ASSERT_TRUE(got.count(RGW_ATTR_UNIX1));
+  EXPECT_EQ("unix-attrs", got[RGW_ATTR_UNIX1].to_str());
+}
+
+/* O_TRUNC on an existing object:  published at zero bytes */
+TEST_F(FSIORadosCreate, TruncateAtTheOpen)
+{
+  ASSERT_EQ(0, put("obj", pattern(9 * MiB, 1)));
+  std::unique_ptr<FO> w;
+  ASSERT_EQ(0, open_flags("obj", FO::OPEN_FLAG_WRITE | FO::OPEN_FLAG_TRUNC, &w));
+  ASSERT_EQ(0, w->end_write(env->dpp.get(), 0));
+  int64_t size = -1;
+  ASSERT_EQ(0, s3_size("obj", &size));
+  EXPECT_EQ(0, size);
+}
+
 /* the driver's step 3, element 4:  a join that must wait (FSIO design
  * §3.1 step 5, §4.1, W13).  The test holds a shadow constructing itself:
  * a raw fsio_join as writer under a handle number of its own, its

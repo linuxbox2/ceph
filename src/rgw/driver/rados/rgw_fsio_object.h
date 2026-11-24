@@ -42,6 +42,10 @@ public:
    * shadow */
   int open(const DoutPrefixProvider* dpp, bool writer,
 	   const rgw_owner* identity = nullptr);
+  /* §3.1 step 0, Z24:  before open(), a create-open's mode
+   * (cls_rgw_fsio::create_mode) and what its create sets:  the attribute
+   * clone's attributes, and the file's mtime */
+  void set_create(uint8_t mode, const Object::FSIOCreateSpec* spec);
 
   /* §2.7:  a writer open reads its shadow, otherwise the bound content;
    * short at the size;  a missing shadow chunk inside it reads as zeros
@@ -133,6 +137,15 @@ private:
   };
   int read_source(const DoutPrefixProvider* dpp, const std::string& oid,
 		  const neorados::IOContext& ioc, Source* src);
+  /* Z24:  a created name's layout:  a random tail prefix, the
+   * placement's stripe size, head size 0 and object size 0 (§3.1 step 7) */
+  int fresh_layout(const DoutPrefixProvider* dpp, ceph::buffer::list* pm);
+  /* Z24:  a created head's shadow:  its attribute clone written here,
+   * the fresh layout as its pseudo-manifest, then fsio_ready */
+  int construct_created(const DoutPrefixProvider* dpp, const cls_rgw_fsio_id& id);
+  /* §2.4:  a shadow's pseudo-manifest, from its attribute clone */
+  int shadow_pm(const DoutPrefixProvider* dpp, const cls_rgw_fsio_id& id,
+		ceph::buffer::list* pm);
   /* the OLH as the versioned join's guard reads it (§3.1) */
   struct Olh {
     std::string instance;
@@ -259,6 +272,8 @@ private:
   bool lose_reply = false;	// test only:  lose_publish_reply()
   std::function<void(const ceph::buffer::list&)> tags_read;	// test only
   std::string identity;		// the writer open's, as the join records it
+  uint8_t create = 0;		// a create-open's cls_rgw_fsio::create_mode
+  std::map<std::string, ceph::buffer::list> create_attrs;	// its create's
   ceph::real_time wmtime;	// its last write's
   ceph::real_time rmtime;	// the bound content's
   ceph::real_time wmtime_hint;	// the shadow's, as the join saw it

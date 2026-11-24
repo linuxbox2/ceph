@@ -279,18 +279,20 @@ public:
   /* after a call:  its result, the object, and each clone */
   void check(const char* method, const std::string& oid, int r_core,
 	     int r_cls, const Obj& pre, const Obj& want,
-	     const cls_rgw_fsio_effects& fx) {
+	     const cls_rgw_fsio_effects& fx, bool may_create = false) {
     if (r_cls == 0) {
       ++calls[method];
     }
     if (divergence) {
       return;
     }
-    /* §2.2:  no method creates a head, and each returns ENOENT on an
-     * absent one;  the core has no such check, and where the oracle's head
-     * is absent its result has no counterpart:  RGW's PUT makes no call
-     * there (state->exists), a gateway or the expirer gets ENOENT */
-    if (!pre.exists) {
+    /* §2.2:  no method creates a head, except fsio_join for a writer's
+     * create (Z24), which is compared as any call is;  each other returns
+     * ENOENT on an absent one;  the core has no such check, and where the
+     * oracle's head is absent its result has no counterpart:  RGW's PUT
+     * makes no call there (state->exists), a gateway or the expirer gets
+     * ENOENT */
+    if (!pre.exists && !may_create) {
       Obj got;
       if (r_cls != -ENOENT) {
 	diverge(fmt::format("cluster:  {} on the absent {} returned {}, not "

@@ -751,6 +751,79 @@ TEST_F(FsioHead, PublishComparesTags)
   }
 }
 
+/* §3.1 steps 0 and 1, Z24:  a writer's create of an absent name makes
+ * the head object, holding only its FSIO records, the header created and
+ * no head clone;  a plain open, a reader, and an exclusive create of the
+ * created name fail;  an unchecked one joins it;  an exclusive create of
+ * an S3 object fails */
+TEST_F(FsioHead, CreateMakesACreatedHead)
+{
+  const auto head = MARKER + fmt::format("_created{}", next++);
+  auto create = [&] (uint8_t mode, bool writer, cls_rgw_fsio_handle who,
+		     uint64_t seq, cls_rgw_fsio_join_ret* ret) {
+    cls_rgw_fsio_join_op op;
+    op.caller = who;
+    op.seq = seq;
+    op.writer = writer;
+    op.nonce = 1;
+    op.counter_seed = 10;
+    op.marker = MARKER;
+    op.create = mode;
+    return call(head, cls::rgw::method::fsio_join, op, ret,
+		who == GW2 ? &ioctx2 : nullptr);
+  };
+  cls_rgw_fsio_join_ret ret;
+  EXPECT_EQ(-ENOENT, create(0, true, GW1, 1, &ret));
+  EXPECT_EQ(-ENOENT, create(1, false, GW1, 1, &ret));
+  uint64_t size = 0;
+  EXPECT_EQ(-ENOENT, ioctx.stat(head, &size, nullptr)) << "a failed join made it";
+  ASSERT_EQ(0, create(1, true, GW1, 1, &ret));
+  EXPECT_TRUE(ret.construct);
+  ASSERT_EQ(0, ioctx.stat(head, &size, nullptr));
+  EXPECT_EQ(0u, size);
+  EXPECT_EQ(-ENODATA, getxattr(head, "user.rgw.idtag"));
+  std::string hb;
+  ASSERT_LE(0, getxattr(head, HDR, &hb));
+  cls_rgw_fsio_hdr hdr;
+  {
+    buffer::list bl;
+    bl.append(hb);
+    auto it = bl.cbegin();
+    decode(hdr, it);
+  }
+  EXPECT_TRUE(hdr.created);
+  auto io = keyed(head);
+  for (const char role : {'a', 'd'}) {
+    EXPECT_EQ(-ENOENT, io.stat(cls_rgw_fsio_clone_name(MARKER, role, ret.bound, head),
+			       &size, nullptr)) << "a created head was cloned";
+  }
+  cls_rgw_fsio_runs_op rop;
+  rop.caller = GW1;
+  rop.cs = ret.bound;
+  ASSERT_EQ(0, call(head, cls::rgw::method::fsio_ready, rop,
+		    (cls_rgw_fsio_flags_ret*)nullptr));
+  cls_rgw_fsio_join_ret r2;
+  EXPECT_EQ(-EEXIST, create(2, true, GW2, 1, &r2));
+  EXPECT_EQ(-ENOENT, create(0, true, GW2, 1, &r2));
+  EXPECT_EQ(-ENOENT, create(0, false, GW2, 1, &r2));
+  ASSERT_EQ(0, create(1, true, GW2, 1, &r2));
+  EXPECT_EQ(ret.bound, r2.bound) << "two creators meet on one file";
+  {
+    std::string key;
+    const auto s3 = make_head(key);
+    cls_rgw_fsio_join_op op;
+    op.caller = GW1;
+    op.seq = 1;
+    op.writer = true;
+    op.nonce = 1;
+    op.counter_seed = 10;
+    op.marker = MARKER;
+    op.create = 2;
+    EXPECT_EQ(-EEXIST, call(s3, cls::rgw::method::fsio_join, op, &ret));
+    EXPECT_EQ(-ENODATA, getxattr(s3, HDR));
+  }
+}
+
 /* §3, Z28 (A14):  a call naming an incarnation that is not its op's
  * origin returns EPERM and changes nothing */
 TEST_F(FsioHead, ForeignIncarnationReturnsEperm)

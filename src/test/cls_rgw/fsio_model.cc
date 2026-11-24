@@ -29,6 +29,10 @@
  * reader FSIOObject;  FSIO state is keyed by handle, design §2.7, Z4);
  * FSIO_MODEL_S3_OPS;  and switches, each 1 by default:
  * FSIO_MODEL_CRASHES, FSIO_MODEL_ZOMBIES, FSIO_MODEL_EXPIRER_CRASHES.
+ * FSIO_MODEL_CREATE=1 starts with no head:  every write open is a
+ * create, unchecked or exclusive, and checks what each returns, that a
+ * read of a created name fails before its publish, and that every
+ * created name is published (§3.1 steps 0 and 1, Z24);  unversioned.
  * FSIO_MODEL_TAGS=1 gives the head object tags, which an S3 PUT sets and
  * tag writes change, and checks a publish keeps the tags it evaluated
  * (§3.5, C1);  unversioned.
@@ -359,6 +363,7 @@ struct Config {
   bool sizes = false;            // FSIO_MODEL_SIZES:  the size hint (§3.3)
   bool lost_reply = false;       // FSIO_MODEL_LOST_REPLY:  a reply lost (Z22)
   bool tags = false;             // FSIO_MODEL_TAGS:  object tags (§3.5, C1)
+  bool create = false;           // FSIO_MODEL_CREATE:  creation (§3.1, Z24)
   std::set<std::string> dup;     // FSIO_MODEL_DUP:  calls applied twice
 };
 
@@ -450,7 +455,8 @@ template <typename Core, typename Op, typename Method>
 int on_cluster_head(const char* method, const Method& m,
 		    cls_rgw_fsio_head& h, cls_rgw_fsio_effects& fx,
 		    const Op& op, Core&& core,
-		    ceph::buffer::list* reply_out = nullptr)
+		    ceph::buffer::list* reply_out = nullptr,
+		    bool may_create = false)
 {
   if (!cl.on) {
     return core();
@@ -460,7 +466,7 @@ int on_cluster_head(const char* method, const Method& m,
   ceph::buffer::list reply;
   const auto oid = cl.head_oid();
   const int rc = cl.call(oid, pre, fx, m, enc(op), reply);
-  cl.check(method, oid, r, rc, pre, head_after(h, fx), fx);
+  cl.check(method, oid, r, rc, pre, head_after(h, fx), fx, may_create);
   /* a reply only when the CLS call succeeded:  on an absent head it
    * returns ENOENT where the core, with no such check, may succeed */
   if (reply_out) {
@@ -504,6 +510,7 @@ int m_join(cls_rgw_fsio_head& h, const fsio::join_in& in, fsio::join_out& out,
   op.expired = in.expired;
   op.instance = in.instance;
   op.marker = cl.marker;
+  op.create = static_cast<uint8_t>(in.create);
   /* as rgw_fsio_join() stats the head:  the cluster tier's head object
    * holds data when it has an ID tag (rgw_part()), and its clone is then
    * in role 'd' (§2.7) */
@@ -511,7 +518,8 @@ int m_join(cls_rgw_fsio_head& h, const fsio::join_in& in, fsio::join_out& out,
   jin.head_data = h.exists && !h.id_tag.empty();
   ceph::buffer::list reply;
   const int r = on_cluster_head("fsio_join", cls::rgw::method::fsio_join, h, fx, op,
-				[&] { return fsio::join(h, jin, out, fx); }, &reply);
+				[&] { return fsio::join(h, jin, out, fx); }, &reply,
+				in.writer && in.create != fsio::create_mode::NONE);
   if (cl.on && r == 0 && reply.length()) {
     if (auto ret = dec<cls_rgw_fsio_join_ret>("fsio_join", reply);
 	ret && (ret->bound != out.bound || ret->construct != out.construct ||
@@ -1089,6 +1097,7 @@ struct World {
   std::string ex_aborted;                        // the claim it aborted (V1)
   std::set<Hint> hints;                          // the FSIO open hints (§2.7)
   std::set<uint64_t> graced;                     // incarnations past their grace (§4.3)
+  std::set<std::string> creates;                 // shadows a create made (Z24)
   bool suspended = false;                        // versioning suspended (§2.5a)
   uint64_t olh_epoch = 0, next_i = 2, next_epoch = 1;
 
@@ -1148,7 +1157,7 @@ struct World {
     encode(ex_inst, bl); encode(ex_token, bl); encode(ex_aborted, bl);
     encode((uint32_t)hints.size(), bl);
     for (const auto& h : hints) h.encode(bl);
-    encode(graced, bl); encode(suspended, bl);
+    encode(graced, bl); encode(suspended, bl); encode(creates, bl);
     encode(next_epoch, bl);
     return bl.to_str();
   }
@@ -1479,6 +1488,11 @@ void gw_actions(const World& w0, size_t gi, std::vector<Action>& acts)
 	    auto& g = w.gws[gi];
 	    m_ready(w.head, hd(g), g.step_cs, {{0, 0}});
 	    g.step = NONE;
+	    /* Z24:  the create-open returns once its shadow is ready:  an
+	     * acknowledged create, which must end published, as a write */
+	    if (w.creates.count(sname(g.step_cs))) {
+	      ++w.acked[sname(g.step_cs)];
+	    }
 	    return std::nullopt;
 	  }});
       construct_abandon_actions(g, gi, inc, acts);
@@ -1844,9 +1858,15 @@ void gw_actions(const World& w0, size_t gi, std::vector<Action>& acts)
 	  fsio::join_out out;
 	  cls_rgw_fsio_effects fx;
 	  auto save = w.head;
+	  /* Z24:  a name being created is absent until its first publish */
+	  const bool unpublished = !w.head.exists || w.head.tracking_only();
 	  if (counted_join(w.head, g, in, out, fx) < 0) {
 	    w.head = save;
 	    return std::nullopt;
+	  }
+	  if (unpublished) {
+	    return fmt::format("gw{} opened a name with no S3 object to read",
+			       inc);
 	  }
 	  w.took_nonce();
 	  if (lost) {
@@ -1888,18 +1908,35 @@ void gw_actions(const World& w0, size_t gi, std::vector<Action>& acts)
     if (lost && !(cfg.lost_reply && !g.did_lose_join)) {
       continue;
     }
-    acts.push_back({fmt::format("gw{} open-write{}", glabel(g),
+    /* Z24:  with FSIO_MODEL_CREATE every write open is a create,
+     * unchecked, or exclusive (not with a lost reply) */
+    for (int excl = 0; excl < (cfg.create && !lost ? 2 : 1); ++excl) {
+    acts.push_back({fmt::format("gw{} open-write{}{}", glabel(g),
+				excl ? " (exclusive)" : "",
 				lost ? " (reply lost)" : ""),
-	[gi, inc, lost](World& w) -> std::optional<std::string> {
+	[gi, inc, lost, excl](World& w) -> std::optional<std::string> {
 	  auto& g = w.gws[gi];
 	  g.did_write = 1;
 	  fsio::join_in in{hd(g), 0, true, w.nonce_for_join(), 10, w.dead_for(g)};
+	  if (cfg.create) {
+	    in.create = excl ? fsio::create_mode::EXCLUSIVE
+			     : fsio::create_mode::UNCHECKED;
+	  }
 	  fsio::join_out out;
 	  cls_rgw_fsio_effects fx;
 	  auto save = w.head;
-	  if (counted_join(w.head, g, in, out, fx) < 0) {
+	  const bool named = w.head.exists;  // an S3 object, or being created
+	  if (int r = counted_join(w.head, g, in, out, fx); r < 0) {
 	    w.head = save;
+	    if (r == -EEXIST && !named) {
+	      return fmt::format("gw{}'s exclusive create of an absent name "
+				 "returned EEXIST", inc);
+	    }
 	    return std::nullopt;
+	  }
+	  if (excl && named) {
+	    return fmt::format("gw{}'s exclusive create succeeded over an "
+			       "existing name", inc);
 	  }
 	  w.took_nonce();
 	  apply_clones(w, fx, w.head_tok());   // its effects ran in the op
@@ -1907,6 +1944,12 @@ void gw_actions(const World& w0, size_t gi, std::vector<Action>& acts)
 	    return lose_join(g, in);
 	  }
 	  auto s = sname(out.bound);
+	  if (out.construct && w.head.hdr && w.head.hdr->created) {
+	    /* Z24:  the gateway writes the attribute clone, a fresh layout
+	     * as its pseudo-manifest:  no content */
+	    w.pms[s] = "";
+	    w.creates.insert(s);
+	  }
 	  g.opens.push_back(LOpen{true, out.bound, s});
 	  if (cfg.sizes) {
 	    g.hwm = out.size_hint;
@@ -1925,6 +1968,7 @@ void gw_actions(const World& w0, size_t gi, std::vector<Action>& acts)
 	  }
 	  return std::nullopt;
 	}});
+    }
   }
   for (size_t oi = 0; oi < g.opens.size(); ++oi) {
     const auto& o = g.opens[oi];
@@ -2855,7 +2899,10 @@ void s3_actions(const World& w0, std::vector<Action>& acts)
 	  in.r = fid_t{w.next_r++, 0};
 	  fsio::replace_out out;
 	  cls_rgw_fsio_effects fx;
-	  m_replace_head(w.head, in, out, fx);
+	  /* a PUT of a name with no head object replaces nothing */
+	  if (w.head.exists) {
+	    m_replace_head(w.head, in, out, fx);
+	  }
 	  apply_clones(w, fx, old);
 	  if (!out.keep_tail && !old.empty()) {
 	    w.gcq.push_back({old});
@@ -4868,6 +4915,8 @@ World initial(const std::string& roles, int s3_ops)
     v.tail = "C0";
     w.versions["I1"] = v;
     w.olh_cur = "I1";
+  } else if (cfg.create) {
+    w.storage.erase("C0");                 // no name yet:  no head (Z24)
   } else {
     w.head.exists = true;
     w.head.id_tag = "t0";
@@ -5043,12 +5092,16 @@ TEST(FSIOModel, Explore)
   cfg.sizes = env_int("FSIO_MODEL_SIZES", 0) != 0;
   cfg.lost_reply = env_int("FSIO_MODEL_LOST_REPLY", 0) != 0;
   cfg.tags = env_int("FSIO_MODEL_TAGS", 0) != 0;
+  cfg.create = env_int("FSIO_MODEL_CREATE", 0) != 0;
   if (auto d = std::getenv("FSIO_MODEL_DUP")) {
     for (auto m : ceph::split(d, ",")) {
       cfg.dup.emplace(m);
     }
   }
   cfg.versioned = env_int("FSIO_MODEL_VERSIONED", 0);
+  ASSERT_FALSE(cfg.create && cfg.versioned)
+    << "FSIO_MODEL_CREATE is unversioned:  a versioned create comes with "
+       "the versioned publish (plan 8f)";
   if (auto v = std::getenv("FSIO_MODEL_VSTART")) {
     cfg.vstart_null = std::string(v) == "null";
   }

@@ -393,17 +393,36 @@ bool others_bound(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& caller,
 int join_once(cls_rgw_fsio_head& h, const join_in& in, join_out& out,
 	      cls_rgw_fsio_effects& fx)
 {
-  /* 1. a tracking-only head:  the name is deleted */
-  if (h.tracking_only()) {
-    return -ENOENT;
-  }
+  /* 0. a writer's create:  an absent head is made, a tracking-only head
+   * whose header (3.) is created;  an S3 object fails an exclusive one
+   * (§3.1, Z24) */
+  bool creating = false;
   if (!h.exists) {
-    return -ENOENT;
+    if (!in.writer || in.create == create_mode::NONE) {
+      return -ENOENT;
+    }
+    h.exists = true;
+    creating = true;
+  } else if (h.tracking_only()) {
+    /* 1. a tracking-only head:  the name is deleted, unless it is being
+     * created, which a create joins, unchecked */
+    if (!h.hdr || !h.hdr->created || !in.writer ||
+	in.create == create_mode::NONE) {
+      return -ENOENT;
+    }
+    if (in.create == create_mode::EXCLUSIVE) {
+      return -EEXIST;
+    }
+  } else if (in.writer && in.create == create_mode::EXCLUSIVE &&
+	     !h.id_tag.empty()) {
+    return -EEXIST;
   }
   /* 2. lazy expiry, readers only;  what it empties is removed or
-   * drained (§2.2), a drain left to the FSIO expirer */
-  expire_readers(h, in.expired);
-  {
+   * drained (§2.2), a drain left to the FSIO expirer.  A head being
+   * created holds nothing to expire, and before 3. gives it its header
+   * settle() would take it for an empty tracking-only head */
+  if (!creating) {
+    expire_readers(h, in.expired);
     std::vector<cls_rgw_fsio_id> drained;
     settle(h, drained, fx, in.caller);
   }
@@ -413,6 +432,7 @@ int join_once(cls_rgw_fsio_head& h, const join_in& in, join_out& out,
     h.hdr->nonce = in.nonce;
     h.hdr->next_counter = in.counter_seed;
     h.hdr->cur_instance = in.instance;
+    h.hdr->created = creating;
   }
   auto& hdr = *h.hdr;
   /* §2.5a:  joining the null version is as in an unversioned bucket */
@@ -487,8 +507,9 @@ int join_once(cls_rgw_fsio_head& h, const join_in& in, join_out& out,
       bind = cs.id;
       out.construct = true;
       /* 7. versioned, the OLH holds no content:  the gateway clones the
-       * instance head itself (§4.1) */
-      if (!versioned) {
+       * instance head itself (§4.1);  a created head holds none either,
+       * and the gateway writes the shadow's attribute clone (Z24) */
+      if (!versioned && !hdr.created) {
 	fx.clones.push_back(cls_rgw_fsio_clone{
 	    cs.id, in.head_data ? 'd' : 'a', {},
 	    FSIO_SKIP_CHECK(W1_SHADOW_STORES_PSEUDO_MANIFEST) ? ceph::buffer::list{} : h.manifest});
@@ -932,6 +953,7 @@ int replace_head(cls_rgw_fsio_head& h, const replace_in& in, replace_out& out,
       return -ECANCELED;
     }
     h.tags = std::move(keep);
+    hdr.created = false;               // the name is an S3 object (Z24)
     /* the previous published chunk set:  the head's content, which the
      * publish replaces (§3.5;  the null version when suspended, §2.5a) */
     auto* prev = head_chunk_set(hdr);
@@ -1019,8 +1041,12 @@ int replace_head(cls_rgw_fsio_head& h, const replace_in& in, replace_out& out,
   }
 
   /* SUPERSEDE, DELETE:  the head object's content replaced;  its tags
-   * go with it (the recreated head keeps the OLH attributes only) */
+   * go with it (the recreated head keeps the OLH attributes only);  an
+   * S3 PUT makes a created name an S3 object (Z24) */
   h.tags.clear();
+  if (h.hdr && in.mode == replace_mode::SUPERSEDE) {
+    h.hdr->created = false;
+  }
   if (!h.hdr) {
     out.keep_tail = false;
     return 0;

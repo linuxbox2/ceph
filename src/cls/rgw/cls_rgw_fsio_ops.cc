@@ -336,7 +336,8 @@ int decode_op(ceph::buffer::list* in, T& op, const char* fn)
 
 /* a head method's frame:  load, the transition, store, apply */
 template <typename F>
-int on_head(cls_method_context_t hctx, const std::string& marker, F&& f)
+int on_head(cls_method_context_t hctx, const std::string& marker, F&& f,
+	    bool may_create = false)
 {
   cls_rgw_fsio_head h;
   loaded l;
@@ -344,7 +345,9 @@ int on_head(cls_method_context_t hctx, const std::string& marker, F&& f)
   if (r < 0) {
     return r;
   }
-  if ((r = require(h.exists)) < 0) {
+  /* §2.2:  only a writer's create-open makes a head (§3.1 step 0, Z24) */
+  const bool existed = h.exists;
+  if (!may_create && (r = require(h.exists)) < 0) {
     return r;
   }
   cls_rgw_fsio_effects fx;
@@ -353,6 +356,10 @@ int on_head(cls_method_context_t hctx, const std::string& marker, F&& f)
   }
   if (fx.remove_head) {
     return apply(hctx, marker, fx);   // the head goes, its records with it
+  }
+  if (!existed && h.exists && (r = cls_cxx_create(hctx, true)) < 0) {
+    CLS_ERR("ERROR: %s: cls_cxx_create returned %d", __func__, r);
+    return r;
   }
   if ((r = store_head(hctx, l, h)) < 0) {
     return r;
@@ -400,6 +407,7 @@ int rgw_fsio_join(cls_method_context_t hctx, ceph::buffer::list* in,
   int r = on_head(hctx, op.marker, [&](auto& h, auto& fx) {
     fsio::join_in jin{op.caller, op.seq, op.writer, op.nonce, op.counter_seed,
 		      op.expired, op.instance, op.identity};
+    jin.create = static_cast<fsio::create_mode>(op.create);
     uint64_t size = 0;
     if (h.exists && cls_cxx_stat(hctx, &size, nullptr) == 0) {
       jin.head_data = size > 0;
@@ -416,7 +424,7 @@ int rgw_fsio_join(cls_method_context_t hctx, ceph::buffer::list* in,
     ret.mtime_hint = jout.mtime_hint;
     ret.last_run = jout.last_run;
     return r;
-  });
+  }, op.writer && op.create != 0);
   if (r < 0) {
     return r;
   }

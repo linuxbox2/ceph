@@ -96,16 +96,23 @@ int RadosFSIOObject::read_source(const DoutPrefixProvider* dpp,
 {
   *src = Source{};
   src->oid = oid;
+  /* every xattr, not the two by name:  a head without one (a created or
+   * tracking-only head, §2.2) would fail the whole op with ENODATA */
   neorados::ReadOp op;
-  sys::error_code tag_ec, man_ec;
-  op.get_xattr(RGW_ATTR_ID_TAG, &src->id_tag, &tag_ec);
-  op.get_xattr(RGW_ATTR_MANIFEST, &src->manifest, &man_ec);
+  boost::container::flat_map<std::string, ceph::buffer::list> attrs;
+  op.get_xattrs(&attrs);
   op.stat(&src->head_size, &src->mtime);
   sys::error_code ec;
   store->get_neorados().execute(neorados::Object{oid}, ioc, std::move(op),
 				nullptr, ceph::async::use_blocked[ec]);
   if (ec) {
     return ceph::from_error_code(ec);
+  }
+  if (auto i = attrs.find(RGW_ATTR_ID_TAG); i != attrs.end()) {
+    src->id_tag = std::move(i->second);
+  }
+  if (auto i = attrs.find(RGW_ATTR_MANIFEST); i != attrs.end()) {
+    src->manifest = std::move(i->second);
   }
   /* the object's size is the manifest's;  an object without one is its
    * head */
@@ -285,15 +292,29 @@ int RadosFSIOObject::join(const DoutPrefixProvider* dpp, bool writer,
       if (r == 0) {
 	instance = "null";
       }
-      if (int s = read_source(dpp, head_oid, head_ioc, src); s < 0) {
+      int s = read_source(dpp, head_oid, head_ioc, src);
+      if (s < 0 && s != -ENOENT) {
 	return s;
       }
-      /* §6.2:  declined before the join, so it leaves no state */
-      if (int e = make_geometry(dpp, src->manifest, g); e < 0) {
-	return e;
-      }
-      if (src->id_tag.length()) {
-	op.cmpxattr(RGW_ATTR_ID_TAG, neorados::cmp_op::eq, src->id_tag);
+      /* §2.2:  no head, or a tracking-only one (no ID tag, no manifest):
+       * the name has no S3 object, and only a writer's create joins it,
+       * with no guard, since it read no tag (§3.1 step 0, Z24) */
+      if (s == -ENOENT || (!src->id_tag.length() && !src->manifest.length())) {
+	if (!writer || !create) {
+	  return -ENOENT;
+	}
+	if (s == -ENOENT) {
+	  *src = Source{};
+	  src->oid = head_oid;
+	}
+      } else {
+	/* §6.2:  declined before the join, so it leaves no state */
+	if (int e = make_geometry(dpp, src->manifest, g); e < 0) {
+	  return e;
+	}
+	if (src->id_tag.length()) {
+	  op.cmpxattr(RGW_ATTR_ID_TAG, neorados::cmp_op::eq, src->id_tag);
+	}
       }
     }
     cls_rgw_fsio_join_op in;
@@ -307,6 +328,7 @@ int RadosFSIOObject::join(const DoutPrefixProvider* dpp, bool writer,
     in.marker = info.bucket.marker;
     if (writer) {
       in.identity = identity;	// §3.5 item 6, Y16
+      in.create = create;
     }
     op.exec(neorados::cls::rgw_fsio::join(in, ret));
     r = exec(head_oid, head_ioc, std::move(op));
@@ -1110,12 +1132,132 @@ int RadosFSIOObject::open(const DoutPrefixProvider* dpp, bool writer,
   wmtime_hint = ret.mtime_hint;
   writing = true;
   binding = Binding::SHADOW;
+  /* Z24:  a writer joined a name with no S3 object:  a created head */
+  const bool created = !counted && !src.id_tag.length() &&
+    !src.manifest.length();
   if (ret.construct) {
-    if (int r = construct(dpp, src, wcs); r < 0) {
+    int r = created ? construct_created(dpp, wcs) : construct(dpp, src, wcs);
+    if (r < 0) {
       return abandon(dpp, src);
+    }
+  } else if (created) {
+    /* another create's shadow:  its layout is its attribute clone's */
+    ceph::buffer::list pm;
+    if (int r = shadow_pm(dpp, wcs, &pm); r < 0) {
+      return r;
+    }
+    if (int r = make_geometry(dpp, pm, &wgeo); r < 0) {
+      return r;
     }
   }
   return 0;
+}
+
+void RadosFSIOObject::set_create(uint8_t mode, const Object::FSIOCreateSpec* spec)
+{
+  create = mode;
+  if (!spec) {
+    return;
+  }
+  if (spec->attrs) {
+    create_attrs.insert(spec->attrs->begin(), spec->attrs->end());
+  }
+  if (spec->times && spec->times[1].tv_nsec != UTIME_OMIT) {
+    wmtime = ceph::real_clock::from_timespec(spec->times[1]);
+  }
+}
+
+int RadosFSIOObject::fresh_layout(const DoutPrefixProvider* dpp,
+				  ceph::buffer::list* pm)
+{
+  auto* rados = store->getRados();
+  const rgw_obj obj(info.bucket, key);
+  rgw_pool pool;
+  if (!rados->get_obj_data_pool(info.placement_rule, obj, &pool)) {
+    return -EIO;
+  }
+  uint64_t chunk = 0, alignment = 0;
+  if (int r = rados->get_max_chunk_size(pool, &chunk, dpp, &alignment); r < 0) {
+    return r;
+  }
+  uint64_t stripe = 0;
+  rados->get_max_aligned_size(dpp->get_cct()->_conf->rgw_obj_stripe_size,
+			      alignment, &stripe);
+  RGWObjManifest m;
+  m.set_trivial_rule(0, stripe);
+  RGWObjManifest::generator gen;
+  if (int r = gen.create_begin(dpp->get_cct(), &m, info.placement_rule,
+			       nullptr, info.bucket, obj); r < 0) {
+    return r;
+  }
+  m.set_obj_size(0);
+  encode(m, *pm);
+  return 0;
+}
+
+int RadosFSIOObject::construct_created(const DoutPrefixProvider* dpp,
+				       const cls_rgw_fsio_id& id)
+{
+  ceph::buffer::list pm;
+  if (int r = fresh_layout(dpp, &pm); r < 0) {
+    return r;
+  }
+  if (int r = make_geometry(dpp, pm, &wgeo); r < 0) {
+    return r;
+  }
+  /* §3.1 step 7:  role 'a', attributes only;  EEXIST is a resend's */
+  neorados::WriteOp op;
+  op.create(true);
+  op.setxattr("user.rgw.fsio.pm", pm);
+  for (const auto& [k, v] : create_attrs) {
+    op.setxattr(k, v);
+  }
+  auto aioc = head_ioc;
+  aioc.set_key(head_oid);
+  const auto attr_oid = cls_rgw_fsio_clone_name(info.bucket.marker, 'a', id,
+						head_oid);
+  if (int r = exec(attr_oid, aioc, std::move(op)); r < 0 && r != -EEXIST) {
+    ldpp_dout(dpp, 0) << "ERROR: FSIO:  writing " << attr_oid << ":  "
+		      << cpp_strerror(-r) << dendl;
+    return r;
+  }
+  cls_rgw_fsio_runs_op in;
+  in.caller = h;
+  in.cs = id;
+  in.size = 0;
+  in.mtime = ceph::real_clock::is_zero(wmtime) ? ceph::real_clock::now()
+					       : wmtime;
+  neorados::WriteOp rop;
+  rop.exec(neorados::cls::rgw_fsio::ready(in));
+  if (int r = exec(head_oid, head_ioc, std::move(rop)); r < 0) {
+    ldpp_dout(dpp, 0) << "ERROR: FSIO:  fsio_ready of " << id.to_str()
+		      << " on " << head_oid << ":  " << cpp_strerror(-r) << dendl;
+    return r;
+  }
+  wsize = 0;
+  return 0;
+}
+
+int RadosFSIOObject::shadow_pm(const DoutPrefixProvider* dpp,
+			       const cls_rgw_fsio_id& id,
+			       ceph::buffer::list* pm)
+{
+  auto aioc = head_ioc;
+  aioc.set_key(head_oid);
+  for (const char role : {'d', 'a'}) {
+    sys::error_code ec;
+    store->get_neorados().execute(
+      neorados::Object{cls_rgw_fsio_clone_name(info.bucket.marker, role, id,
+					       head_oid)},
+      aioc, neorados::ReadOp{}.get_xattr("user.rgw.fsio.pm", pm), nullptr,
+      ceph::async::use_blocked[ec]);
+    if (!ec) {
+      return 0;
+    }
+  }
+  ldpp_dout(dpp, 0) << "ERROR: FSIO:  no attribute clone for " << id.to_str()
+		    << " on " << head_oid << dendl;
+  return -EIO;
 }
 
 int RadosFSIOObject::abandon(const DoutPrefixProvider* dpp, const Source& src)
@@ -1885,13 +2027,18 @@ Object::FSIOResult RadosObject::get_fsio_handle(const DoutPrefixProvider* dpp,
 						const FSIOCreateSpec* spec,
 						const rgw_owner* writer)
 {
-  /* creating, truncating at the open:  later work elements */
-  if (flags & (FSIOObject::OPEN_FLAG_CREATE | FSIOObject::OPEN_FLAG_TRUNC |
-	       FSIOObject::OPEN_FLAG_EXCL)) {
-    return FSIOResult{-ENOTSUP, nullptr};
-  }
   auto* rados = store->getRados();
   const auto& info = bucket->get_info();
+  /* §3.1 step 0, Z24:  a create is a writer's;  a versioned create comes
+   * with the versioned publish (plan 8f) */
+  const bool create = flags & FSIOObject::OPEN_FLAG_CREATE;
+  if ((create || (flags & FSIOObject::OPEN_FLAG_TRUNC)) &&
+      !(flags & FSIOObject::OPEN_FLAG_WRITE)) {
+    return FSIOResult{-EINVAL, nullptr};
+  }
+  if (create && info.versioned()) {
+    return FSIOResult{-ENOTSUP, nullptr};
+  }
   /* the head, by name:  the OLH in a versioned bucket */
   rgw_raw_obj raw;
   rados->obj_to_raw(info.placement_rule,
@@ -1907,9 +2054,28 @@ Object::FSIOResult RadosObject::get_fsio_handle(const DoutPrefixProvider* dpp,
 			      rados->fsio_next_handle++};
   auto hdl = std::make_unique<RadosFSIOObject>(
     store, info, rgw_obj_key(get_key().name), raw.oid, std::move(ioc), h);
+  if (create) {
+    hdl->set_create(static_cast<uint8_t>(
+		      (flags & FSIOObject::OPEN_FLAG_EXCL)
+		      ? cls_rgw_fsio::create_mode::EXCLUSIVE
+		      : cls_rgw_fsio::create_mode::UNCHECKED), spec);
+  }
   if (int r = hdl->open(dpp, flags & FSIOObject::OPEN_FLAG_WRITE, writer);
       r < 0) {
     return FSIOResult{r, nullptr};
+  }
+  /* the create's size, else an O_TRUNC:  the writer's ftruncate (§3.3) */
+  int64_t size = -1;
+  if (create && spec && spec->size >= 0) {
+    size = spec->size;
+  } else if (flags & FSIOObject::OPEN_FLAG_TRUNC) {
+    size = 0;
+  }
+  if (size >= 0) {
+    if (int r = hdl->ftruncate(dpp, size, 0); r < 0) {
+      hdl->close(dpp, 0);
+      return FSIOResult{r, nullptr};
+    }
   }
   return FSIOResult{0, std::move(hdl)};
 }

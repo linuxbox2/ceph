@@ -182,6 +182,108 @@ TEST(cls_rgw_fsio, C1_publish_keeps_the_tags_it_was_given_to_expect)
   }
 }
 
+/* §3.1 step 0, Z24:  a writer's create-open of an absent name */
+int create_join(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& inc,
+		fsio::create_mode mode, fsio::join_out& out,
+		cls_rgw_fsio_effects& fx, bool writer = true)
+{
+  fsio::join_in in{inc, next_seq(), writer, 1, 10, {}};
+  in.create = mode;
+  return fsio::join(h, in, out, fx);
+}
+
+/* §3.1 steps 0 and 1, Z24:  only a writer's create makes a head;  it is
+ * a tracking-only head marked created, whose shadow is constructed with
+ * nothing cloned;  a second unchecked create joins it, an exclusive one
+ * or a plain open fails */
+TEST(cls_rgw_fsio, Z24_create_makes_a_created_head)
+{
+  cls_rgw_fsio_head h;
+  fsio::join_out out;
+  cls_rgw_fsio_effects fx;
+  EXPECT_EQ(-ENOENT, create_join(h, GW1, fsio::create_mode::NONE, out, fx));
+  EXPECT_EQ(-ENOENT, create_join(h, GW1, fsio::create_mode::UNCHECKED, out,
+				 fx, false));               // a reader never creates
+  ASSERT_EQ(0, create_join(h, GW1, fsio::create_mode::UNCHECKED, out, fx));
+  EXPECT_TRUE(h.exists);
+  EXPECT_TRUE(h.tracking_only());
+  ASSERT_TRUE(h.hdr);
+  EXPECT_TRUE(h.hdr->created);
+  EXPECT_TRUE(out.construct);
+  EXPECT_TRUE(fx.clones.empty()) << "a created head has nothing to clone";
+  EXPECT_FALSE(fx.remove_head) << "the head it made, removed";
+  const auto s = out.bound;
+  /* while it is constructing, a second writer waits */
+  fsio::join_out o2;
+  cls_rgw_fsio_effects fx2;
+  EXPECT_EQ(-CLS_RGW_ERR_FSIO_BUSY,
+	    create_join(h, GW2, fsio::create_mode::UNCHECKED, o2, fx2));
+  ASSERT_EQ(0, fsio::ready(h, GW1, s, {}));
+  EXPECT_EQ(-EEXIST, create_join(h, GW2, fsio::create_mode::EXCLUSIVE, o2, fx2));
+  EXPECT_EQ(-ENOENT, create_join(h, GW2, fsio::create_mode::NONE, o2, fx2));
+  EXPECT_EQ(-ENOENT, create_join(h, GW2, fsio::create_mode::NONE, o2, fx2,
+				 false));
+  ASSERT_EQ(0, create_join(h, GW2, fsio::create_mode::UNCHECKED, o2, fx2));
+  EXPECT_EQ(s, o2.bound) << "two creators meet on one file";
+  EXPECT_FALSE(o2.construct);
+}
+
+/* §3.1 step 0:  an S3 object fails an exclusive create;  an unchecked
+ * one joins it as an ordinary writer, cloning its head */
+TEST(cls_rgw_fsio, Z24_create_of_an_s3_object)
+{
+  auto h = head("C0");
+  fsio::join_out out;
+  cls_rgw_fsio_effects fx;
+  EXPECT_EQ(-EEXIST, create_join(h, GW1, fsio::create_mode::EXCLUSIVE, out, fx));
+  EXPECT_FALSE(h.hdr && h.hdr->created);
+  ASSERT_EQ(0, create_join(h, GW1, fsio::create_mode::UNCHECKED, out, fx));
+  EXPECT_FALSE(h.hdr->created);
+  EXPECT_TRUE(out.construct);
+  EXPECT_EQ(1u, fx.clones.size());
+}
+
+/* Z24:  a publish makes the created name an S3 object, as an S3 PUT
+ * onto its head does */
+TEST(cls_rgw_fsio, Z24_publish_and_supersede_clear_created)
+{
+  {
+    cls_rgw_fsio_head h;
+    fsio::join_out out;
+    cls_rgw_fsio_effects fx;
+    ASSERT_EQ(0, create_join(h, GW1, fsio::create_mode::UNCHECKED, out, fx));
+    ASSERT_EQ(0, fsio::ready(h, GW1, out.bound, {}));
+    leave_writer(h, GW1, out.bound);
+    ASSERT_EQ(0, publish(h, GW1, out.bound));
+    EXPECT_FALSE(h.hdr && h.hdr->created);
+  }
+  {
+    cls_rgw_fsio_head h;
+    fsio::join_out out;
+    cls_rgw_fsio_effects fx;
+    ASSERT_EQ(0, create_join(h, GW1, fsio::create_mode::UNCHECKED, out, fx));
+    ASSERT_EQ(0, fsio::ready(h, GW1, out.bound, {}));
+    ASSERT_EQ(0, supersede(h));
+    ASSERT_TRUE(h.hdr);
+    EXPECT_FALSE(h.hdr->created);
+  }
+}
+
+/* §3.1 step 1:  a created head whose constructor abandons its shadow,
+ * holding no opens, is removed */
+TEST(cls_rgw_fsio, Z24_abandoned_create_removes_the_head)
+{
+  cls_rgw_fsio_head h;
+  fsio::join_out out;
+  cls_rgw_fsio_effects fx;
+  ASSERT_EQ(0, create_join(h, GW1, fsio::create_mode::UNCHECKED, out, fx));
+  fsio::leave_out lout;
+  cls_rgw_fsio_effects lfx;
+  ASSERT_EQ(0, fsio::leave(h, GW1, next_seq(), out.bound, true, {}, lout, lfx));
+  EXPECT_TRUE(lout.abandoned);
+  EXPECT_TRUE(lfx.remove_head);
+}
+
 /* the head's content replaced:  its tags go with it */
 TEST(cls_rgw_fsio, C1_supersede_and_delete_clear_the_tags)
 {

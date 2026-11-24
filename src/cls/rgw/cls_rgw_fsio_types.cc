@@ -166,6 +166,7 @@ void cls_rgw_fsio_hdr::dump(ceph::Formatter *f) const
   encode_json("chunk_sets", chunk_sets, f);
   encode_json("fenced_finalizes", fenced_finalizes, f);
   encode_json("rename_hold", rename_hold, f);
+  encode_json("created", created, f);
 }
 
 std::list<cls_rgw_fsio_hdr> cls_rgw_fsio_hdr::generate_test_instances()
@@ -179,6 +180,7 @@ std::list<cls_rgw_fsio_hdr> cls_rgw_fsio_hdr::generate_test_instances()
   i.chunk_sets.push_back(cls_rgw_fsio_chunk_set::generate_test_instances().front());
   i.fenced_finalizes.push_back(cls_rgw_fsio_fenced_finalize::generate_test_instances().front());
   i.rename_hold = cls_rgw_fsio_handle{7, 1};
+  i.created = true;
   o.push_back(std::move(i));
   o.emplace_back();
   return o;
@@ -360,6 +362,7 @@ void cls_rgw_fsio_join_op::dump(ceph::Formatter *f) const
   encode_json("instance", instance, f);
   encode_json("marker", marker, f);
   encode_json("identity", identity, f);
+  encode_json("create", static_cast<uint32_t>(create), f);
 }
 
 std::list<cls_rgw_fsio_join_op> cls_rgw_fsio_join_op::generate_test_instances()
@@ -375,6 +378,7 @@ std::list<cls_rgw_fsio_join_op> cls_rgw_fsio_join_op::generate_test_instances()
   i.instance = "v7";
   i.marker = "v8";
   i.identity = "v9";
+  i.create = 2;
   o.push_back(std::move(i));
   o.emplace_back();
   return o;

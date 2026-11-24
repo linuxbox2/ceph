@@ -219,6 +219,8 @@ using expired_t = std::set<uint64_t>;
  * fsio_truncate) carry the handle's sequence number;  one not newer
  * than the handle's last_seq changes nothing and returns
  * already_applied (§3, Z22) */
+/* §3.1 step 0, Z24:  a writer's create-open */
+enum class create_mode : uint8_t { NONE, UNCHECKED, EXCLUSIVE };
 struct join_in {
   cls_rgw_fsio_handle caller;
   uint64_t seq = 0;
@@ -231,6 +233,7 @@ struct join_in {
   /* §2.7:  the head object holds data, an inline head segment, so its
    * clone is that segment's data chunk, role 'd';  else 'a' */
   bool head_data = false;
+  create_mode create = create_mode::NONE;
 };
 struct join_out {
   cls_rgw_fsio_id bound;
