@@ -9,7 +9,8 @@ edition = "2021"
 //!
 //!   fsio_validate.rs [--dry-run] [--no-build] [--build DIR]
 //!                    [--filter PATTERN] [--timeout SECS] [--reuse]
-//!                    [--tests] [--progress] [--clone-latency] STEP|PRESET...
+//!                    [--tests] [--progress] [--debug-rgw LEVEL]
+//!                    [--clone-latency] STEP|PRESET...
 //!
 //! Steps:
 //!   cls            the core's unit tests (no cluster), the CLS head
@@ -61,6 +62,11 @@ edition = "2021"
 //! with its assertions' text;  `--tests` lists every test, the passing
 //! ones with their time, on the console and in the summary.
 //!
+//! `--debug-rgw LEVEL` starts the harness with RGW's debug output at
+//! LEVEL on stderr, into its log (`CEPH_ARGS`:  the harness takes it only
+//! at startup, and sudo drops the caller's environment);  with
+//! `--filter`, for a failing test's trace.
+//!
 //! `--progress` prints each gtest test's result as it ends, in the steps
 //! whose tests are gtest binaries;  the model's runner prints each run's
 //! as it ends, with or without it.
@@ -107,6 +113,7 @@ struct Opts {
     reuse: bool,
     tests: bool,
     progress: bool,
+    debug_rgw: Option<u32>,
     clone_latency: bool,
 }
 
@@ -217,6 +224,10 @@ fn rados_phase(o: &Opts, steps: &[&'static str], run_dir: &Path, summary: &mut V
     let b = &o.build_dir;
     let conf = b.join("ceph.conf").display().to_string();
     let gf = gtest_filter(o);
+    /* --debug-rgw:  the harness's RGW output, set at its startup */
+    let dbg = o.debug_rgw.map_or(String::new(), |l| {
+        format!(" CEPH_ARGS='--debug-rgw={l} --log-to-stderr=true --err-to-stderr=true'")
+    });
     let sh = |step: &'static str, what: &str, line: String| Cmd {
         step, what: what.into(), argv: vec!["sh".into(), "-c".into(), line], cwd: b.clone(), sudo: true,
     };
@@ -268,7 +279,7 @@ fn rados_phase(o: &Opts, steps: &[&'static str], run_dir: &Path, summary: &mut V
                      --gtest_also_run_disabled_tests --gtest_filter='*CloneLatency*'"))],
                 "harness" => vec![
                     sh("harness", "the chunk geometry", "bin/unittest_rgw_fsio_geometry".to_string()),
-                    sh("harness", "the driver's harness", format!("env CEPH_CONF={conf} bin/ceph_test_rgw_fsio_rados{gf}")),
+                    sh("harness", "the driver's harness", format!("env CEPH_CONF={conf}{dbg} bin/ceph_test_rgw_fsio_rados{gf}")),
                 ],
                 "cluster-tier" => {
                     let runner = match model_runner(o) {
@@ -585,6 +596,7 @@ fn parse_args() -> Opts {
     let mut reuse = false;
     let mut tests = false;
     let mut progress = false;
+    let mut debug_rgw: Option<u32> = None;
     let mut clone_latency = false;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
@@ -593,6 +605,8 @@ fn parse_args() -> Opts {
             "--reuse" => reuse = true,
             "--tests" => tests = true,
             "--progress" => progress = true,
+            "--debug-rgw" => debug_rgw = Some(args.next().and_then(|v| v.parse().ok())
+                                              .unwrap_or_else(|| die("--debug-rgw needs a level"))),
             "--clone-latency" => clone_latency = true,
             "--no-build" => build = false,
             "--build" => build_dir = Some(PathBuf::from(args.next().unwrap_or_else(|| die("--build needs a directory")))),
@@ -603,7 +617,7 @@ fn parse_args() -> Opts {
             "core" => steps.extend(["cls", "cluster-tier", "model"]),
             "full" => steps.extend(STEPS),
             "-h" | "--help" => {
-                println!("usage:  fsio_validate.rs [--dry-run] [--no-build] [--build DIR] [--filter PATTERN] [--timeout SECS] [--reuse] [--tests] [--progress] [--clone-latency] STEP|PRESET...\n\
+                println!("usage:  fsio_validate.rs [--dry-run] [--no-build] [--build DIR] [--filter PATTERN] [--timeout SECS] [--reuse] [--tests] [--progress] [--debug-rgw LEVEL] [--clone-latency] STEP|PRESET...\n\
                           steps:  {}\npresets:  driver core full", STEPS.join(" "));
                 std::process::exit(0);
             }
@@ -632,7 +646,7 @@ fn parse_args() -> Opts {
         die("--clone-latency runs the harness:  name the harness step");
     }
     Opts { dry_run, build, build_dir, src, steps: ordered, filter, timeout, reuse, tests, progress,
-           clone_latency }
+           debug_rgw, clone_latency }
 }
 
 fn capture(cwd: &Path, argv: &[&str]) -> String {
