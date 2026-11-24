@@ -40,6 +40,7 @@
 #include "rgw/rgw_hex.h"
 #include "rgw/rgw_object_ownership.h"
 #include "rgw/rgw_tag.h"
+#include "rgw/rgw_xml.h"
 #include "rgw/rgw_req_context.h"
 #include "rgw/rgw_sal.h"
 #include "rgw/rgw_sal_config.h"
@@ -506,8 +507,9 @@ protected:
   }
 
   /* an object's content as an S3 GET reads it */
-  int get(const std::string& key, std::string* data) {
-    auto obj = bucket->get_object(rgw_obj_key(key));
+  int get(const std::string& key, std::string* data,
+	  const std::string& instance = {}) {
+    auto obj = bucket->get_object(rgw_obj_key(key, instance));
     auto rop = obj->get_read_op();
     if (int r = rop->prepare(null_yield, env->dpp.get()); r < 0) {
       return r;
@@ -2804,15 +2806,329 @@ TEST_F(FSIORadosVersioned, VersionedReaderReadsTheInstance)
   EXPECT_NE(std::string::npos, moved->find("~fsio_G")) << *moved;
 }
 
-/* §3.1 step 4, first case:  a reader joining with the instance a publish
- * in flight has linked binds that publishing shadow, and reads it through
- * the instance.  Written with the publish (the driver's step 8):  a
- * versioned publish in flight is its precondition.  It will check that
- * the reader counted itself on the linked instance, that its binding is
- * the publishing shadow, not the OLH's previous content, and that once
- * the publish completes the binding is the published instance's. */
-TEST_F(FSIORadosVersioned, DISABLED_LinkedPublishReadsThroughTheInstance)
+/* the driver's step 8f:  the versioned publish (FSIO design §4.2):  the
+ * placeholder and its claim, the leave with the intent, the readers
+ * counted and hinted, the instance write, the link, fsio_publish */
+class FSIORadosVersionedPublish : public FSIORadosAttrs {
+protected:
+  void SetUp() override {
+    FSIORadosAttrs::SetUp();
+    set_versioning(BUCKET_VERSIONED);
+  }
+  /* the instance the OLH names */
+  std::string olh_instance(const std::string& key) {
+    const auto head = head_of(key);
+    ceph::buffer::list bl;
+    boost::system::error_code ec;
+    neo().execute(neorados::Object{head.oid}, ioc_of(head.pool),
+		  neorados::ReadOp{}.get_xattr(RGW_ATTR_OLH_INFO, &bl), nullptr,
+		  ceph::async::use_blocked[ec]);
+    if (ec) {
+      return {};
+    }
+    RGWOLHInfo info;
+    auto it = bl.cbegin();
+    decode(info, it);
+    return info.target.key.instance;
+  }
+  /* the versions a listing shows */
+  std::set<std::string> versions(const std::string& key) {
+    rgw::sal::Bucket::ListParams params;
+    params.list_versions = true;
+    params.prefix = key;
+    rgw::sal::Bucket::ListResults res;
+    EXPECT_EQ(0, bucket->list(env->dpp.get(), params, 1000, res, null_yield));
+    std::set<std::string> v;
+    for (const auto& e : res.objs) {
+      if (e.key.name == key && !e.is_delete_marker()) {
+	v.insert(e.key.instance);
+      }
+    }
+    return v;
+  }
+  std::optional<ceph::buffer::list> xattr_of(const rgw_raw_obj& raw,
+					     const std::string& name) {
+    boost::container::flat_map<std::string, ceph::buffer::list> attrs;
+    boost::system::error_code ec;
+    neo().execute(neorados::Object{raw.oid}, ioc_of(raw.pool),
+		  neorados::ReadOp{}.get_xattrs(&attrs, nullptr), nullptr,
+		  ceph::async::use_blocked[ec]);
+    if (ec || !attrs.count(name)) {
+      return std::nullopt;
+    }
+    return attrs[name];
+  }
+  /* the shadow's chunk-set entry state, on the OLH head */
+  std::optional<cls_rgw_fsio_cs_state> state_of(const cls_rgw_fsio_id& id) {
+    auto rec = records_of(head_of("obj"), 0);
+    if (!rec.hdr) {
+      return std::nullopt;
+    }
+    const auto* e = entry_of(*rec.hdr, id);
+    return e ? std::optional(e->state) : std::nullopt;
+  }
+};
+
+/* a publish makes a new version, which the OLH names;  the old version
+ * keeps its bytes;  no claim, hint or FSIO record is left */
+TEST_F(FSIORadosVersionedPublish, VersionedPublishMakesANewVersion)
 {
+  const auto a = pattern(9 * MiB, 1);
+  std::string i1;
+  ASSERT_EQ(0, put("obj", a, &i1));
+  auto w = open("obj", true);
+  ASSERT_TRUE(w);
+  const auto h = rados_fsio(w)->handle();
+  ASSERT_EQ(0, write(w, 4 * MiB, {"Z"}));
+  ASSERT_EQ(0, w->end_write(env->dpp.get(), 0));
+  const auto i2 = olh_instance("obj");
+  EXPECT_NE(i1, i2);
+  EXPECT_EQ(rados_fsio(w)->placed_instance(), i2);
+  std::string now, old;
+  auto want = a;
+  want[4 * MiB] = 'Z';
+  ASSERT_EQ(0, get("obj", &now));
+  EXPECT_EQ("same", diff(now, want, a));
+  ASSERT_EQ(0, get("obj", &old, i1));
+  EXPECT_EQ("same", diff(old, a, a));
+  EXPECT_EQ((std::set<std::string>{i1, i2}), versions("obj"));
+  const auto ih = instance_of("obj", i2);
+  EXPECT_FALSE(xattr_of(ih, "user.rgw.fsio.claim")) << "the claim was left";
+  EXPECT_EQ(0, presence_hints(ih, h, cls_rgw_fsio_hint_target::INSTANCE_HEAD,
+			      cls_rgw_fsio_hint_kind::PUBLISH));
+  EXPECT_FALSE(records_of(head_of("obj"), h.incarnation).any_fsio);
+}
+
+/* §4.2 step 3, H3, W7:  a reader bound to the shadow is counted on the new
+ * version and hinted there;  its close takes both away.  A writer that
+ * leaves another writing deletes its placeholder and hint */
+TEST_F(FSIORadosVersionedPublish, PublisherCountsItsReaders)
+{
+  std::string i1;
+  ASSERT_EQ(0, put("obj", pattern(9 * MiB, 1), &i1));
+  auto a = open("obj", false);
+  ASSERT_TRUE(a);
+  ASSERT_EQ(0, a->begin_write(env->dpp.get(), 0));	// its reader follows
+  auto b = open("obj", true);
+  ASSERT_TRUE(b);
+  ASSERT_EQ(rados_fsio(a)->writing_to(), rados_fsio(b)->writing_to());
+  const auto ha = rados_fsio(a)->handle();
+  ASSERT_EQ(0, a->end_write(env->dpp.get(), 0));	// b still writes
+  const auto pa = rados_fsio(a)->placed_instance();
+  EXPECT_FALSE(bytes_of(instance_of("obj", pa))) << "a placeholder was left";
+  EXPECT_EQ(0, presence_hints(instance_of("obj", pa), ha,
+			      cls_rgw_fsio_hint_target::INSTANCE_HEAD,
+			      cls_rgw_fsio_hint_kind::PUBLISH));
+  ASSERT_EQ(0, b->end_write(env->dpp.get(), 0));
+  const auto i2 = olh_instance("obj");
+  ASSERT_EQ(rados_fsio(b)->placed_instance(), i2);
+  const auto ih = instance_of("obj", i2);
+  auto oc = ocnt_of(ih);
+  ASSERT_TRUE(oc);
+  EXPECT_EQ(1u, oc->holders.count(ha));
+  EXPECT_EQ(1, presence_hints(ih, ha, cls_rgw_fsio_hint_target::INSTANCE_HEAD));
+  ASSERT_EQ(0, a->close(env->dpp.get(), 0));
+  oc = ocnt_of(ih);
+  EXPECT_TRUE(!oc || !oc->holders.count(ha));
+  EXPECT_EQ(0, presence_hints(ih, ha, cls_rgw_fsio_hint_target::INSTANCE_HEAD));
+}
+
+/* W10:  a publish that cannot reach its instance write aborts its claim,
+ * releases the shadow, and cleans up:  no placeholder, no hint, the OLH
+ * unchanged, the shadow ready again */
+TEST_F(FSIORadosVersionedPublish, ReleaseBeforeTheInstanceWrite)
+{
+  std::string i1;
+  ASSERT_EQ(0, put("obj", pattern(9 * MiB, 1), &i1));
+  auto w = open("obj", true);
+  ASSERT_TRUE(w);
+  const auto h = rados_fsio(w)->handle();
+  const auto id = rados_fsio(w)->writing_to();
+  ASSERT_EQ(0, write(w, 4 * MiB, {"Z"}));
+  /* its attribute clone gone:  the publish cannot read its attributes */
+  remove_raw(clone_of(instance_of("obj", i1), id));
+  EXPECT_GT(0, w->end_write(env->dpp.get(), 0));
+  const auto p = rados_fsio(w)->placed_instance();
+  EXPECT_FALSE(bytes_of(instance_of("obj", p))) << "the placeholder was left";
+  EXPECT_EQ(0, presence_hints(instance_of("obj", p), h,
+			      cls_rgw_fsio_hint_target::INSTANCE_HEAD,
+			      cls_rgw_fsio_hint_kind::PUBLISH));
+  EXPECT_EQ(i1, olh_instance("obj"));
+  EXPECT_EQ(std::optional(cls_rgw_fsio_cs_state::READY), state_of(id));
+}
+
+/* §4.2:  an instance write whose reply is lost is decided by the
+ * instance head:  the claim gone, written, so it completes */
+TEST_F(FSIORadosVersionedPublish, AmbiguousInstanceWriteThatApplied)
+{
+  std::string i1;
+  ASSERT_EQ(0, put("obj", pattern(9 * MiB, 1), &i1));
+  auto w = open("obj", true);
+  ASSERT_TRUE(w);
+  ASSERT_EQ(0, write(w, 4 * MiB, {"Z"}));
+  rados_fsio(w)->lose_instance_reply(1);
+  ASSERT_EQ(0, w->end_write(env->dpp.get(), 0));
+  const auto i2 = olh_instance("obj");
+  EXPECT_EQ(rados_fsio(w)->placed_instance(), i2);
+  EXPECT_EQ((std::set<std::string>{i1, i2}), versions("obj"));
+}
+
+/* the claim still the token, not written, so it releases */
+TEST_F(FSIORadosVersionedPublish, AmbiguousInstanceWriteThatDidNot)
+{
+  std::string i1;
+  ASSERT_EQ(0, put("obj", pattern(9 * MiB, 1), &i1));
+  auto w = open("obj", true);
+  ASSERT_TRUE(w);
+  const auto id = rados_fsio(w)->writing_to();
+  ASSERT_EQ(0, write(w, 4 * MiB, {"Z"}));
+  rados_fsio(w)->lose_instance_reply(2);
+  EXPECT_GT(0, w->end_write(env->dpp.get(), 0));
+  EXPECT_FALSE(bytes_of(instance_of("obj", rados_fsio(w)->placed_instance())));
+  EXPECT_EQ(i1, olh_instance("obj"));
+  EXPECT_EQ((std::set<std::string>{i1}), versions("obj"));
+  EXPECT_EQ(std::optional(cls_rgw_fsio_cs_state::READY), state_of(id));
+}
+
+/* Z34:  a version removed between the instance write and the link leaves
+ * no phantom entry:  the linker finds no instance head and unlinks it */
+TEST_F(FSIORadosVersionedPublish, VersionRemovedBeforeTheLink)
+{
+  std::string i1;
+  ASSERT_EQ(0, put("obj", pattern(9 * MiB, 1), &i1));
+  auto w = open("obj", true);
+  ASSERT_TRUE(w);
+  ASSERT_EQ(0, write(w, 4 * MiB, {"Z"}));
+  auto* hdl = rados_fsio(w);
+  hdl->after_instance_write([&] {
+    auto o = bucket->get_object(rgw_obj_key("obj", hdl->placed_instance()));
+    auto d = o->get_delete_op();
+    EXPECT_EQ(0, d->delete_obj(env->dpp.get(), null_yield, 0));
+  });
+  ASSERT_EQ(0, w->end_write(env->dpp.get(), 0));
+  EXPECT_EQ((std::set<std::string>{i1}), versions("obj"));
+  EXPECT_EQ(i1, olh_instance("obj"));
+}
+
+/* §4.2 step 3, §8:  the published manifest names its head segment from
+ * the source instance, f(i1, id), as RGW's state read leaves it;  so a
+ * GET reads the new version, and deleting the version collects that
+ * chunk and its tail, the source version keeping its own */
+TEST_F(FSIORadosVersionedPublish, DeletedVersionCollectsItsHeadSegment)
+{
+  const auto a = pattern(9 * MiB, 1);
+  std::string i1;
+  ASSERT_EQ(0, put("obj", a, &i1));
+  const auto old_chunks = chunks_of("obj", i1);
+  auto w = open("obj", true);
+  ASSERT_TRUE(w);
+  const auto id = rados_fsio(w)->writing_to();
+  ASSERT_EQ(0, write(w, 4 * MiB, {"Z"}));
+  ASSERT_EQ(0, w->end_write(env->dpp.get(), 0));
+  const auto i2 = olh_instance("obj");
+  ASSERT_NE(i1, i2);
+  std::string now;
+  ASSERT_EQ(0, get("obj", &now, i2));
+  EXPECT_EQ('Z', now[4 * MiB]);
+  const auto seg = clone_of(instance_of("obj", i1), id);
+  ASSERT_TRUE(bytes_of(seg)) << seg.oid;
+  const auto tail = clone_of(old_chunks.at(1), id);
+  ASSERT_TRUE(bytes_of(tail)) << tail.oid;
+  {
+    auto o = bucket->get_object(rgw_obj_key("obj", i2));
+    auto d = o->get_delete_op();
+    ASSERT_EQ(0, d->delete_obj(env->dpp.get(), null_yield, 0));
+  }
+  ASSERT_EQ(0, gc_pass());
+  EXPECT_FALSE(bytes_of(seg)) << "the head segment was not collected";
+  EXPECT_FALSE(bytes_of(tail)) << "the tail was not collected";
+  std::string old;
+  ASSERT_EQ(0, get("obj", &old, i1));
+  EXPECT_EQ("same", diff(old, a, a));
+  for (const auto& c : old_chunks) {
+    EXPECT_TRUE(bytes_of(c)) << "the source version lost " << c.oid;
+  }
+}
+
+/* Z15:  the new version's tags are the source version's at publish */
+TEST_F(FSIORadosVersionedPublish, TagsFromTheSourceVersion)
+{
+  std::string i1;
+  ASSERT_EQ(0, put("obj", pattern(9 * MiB, 1), &i1));
+  auto w = open("obj", true);
+  ASSERT_TRUE(w);
+  ASSERT_EQ(0, write(w, 4 * MiB, {"Z"}));
+  {
+    auto o = bucket->get_object(rgw_obj_key("obj", i1));
+    auto bl = tags("source");
+    ASSERT_EQ(0, o->modify_obj_attrs(RGW_ATTR_TAGS, bl, null_yield,
+				     env->dpp.get()));
+  }
+  ASSERT_EQ(0, w->end_write(env->dpp.get(), 0));
+  auto t = xattr_of(instance_of("obj", olh_instance("obj")), RGW_ATTR_TAGS);
+  ASSERT_TRUE(t);
+  EXPECT_EQ("source", tag_value(*t));
+}
+
+/* §3.5:  in an object-lock bucket the new version gets the bucket's
+ * default retention, as a PUT does */
+TEST_F(FSIORadosVersionedPublish, DefaultRetention)
+{
+  {
+    RGWXMLParser parser;
+    ASSERT_TRUE(parser.init());
+    const std::string xml =
+      "<ObjectLockConfiguration><ObjectLockEnabled>Enabled</ObjectLockEnabled>"
+      "<Rule><DefaultRetention><Mode>GOVERNANCE</Mode><Days>1</Days>"
+      "</DefaultRetention></Rule></ObjectLockConfiguration>";
+    ASSERT_TRUE(parser.parse(xml.c_str(), xml.size(), 1));
+    RGWObjectLock lock;
+    RGWXMLDecoder::decode_xml("ObjectLockConfiguration", lock, &parser, true);
+    bucket->get_info().obj_lock = lock;
+    bucket->get_info().flags |= BUCKET_OBJ_LOCK_ENABLED;
+    ASSERT_EQ(0, bucket->put_info(env->dpp.get(), false, ceph::real_time(),
+				  null_yield));
+  }
+  std::string i1;
+  ASSERT_EQ(0, put("obj", pattern(9 * MiB, 1), &i1));
+  auto w = open("obj", true);
+  ASSERT_TRUE(w);
+  ASSERT_EQ(0, write(w, 4 * MiB, {"Z"}));
+  ASSERT_EQ(0, w->end_write(env->dpp.get(), 0));
+  EXPECT_TRUE(xattr_of(instance_of("obj", olh_instance("obj")),
+		       RGW_ATTR_OBJECT_RETENTION));
+}
+
+/* §3.1 step 4, first case:  a reader joining with the instance a publish
+ * in flight has linked binds that publishing shadow, counted on the
+ * linked instance, and reads the published bytes;  once the publish
+ * completes its binding is published at INSTANCE */
+TEST_F(FSIORadosVersionedPublish, LinkedPublishReadsThroughTheInstance)
+{
+  const auto a = pattern(9 * MiB, 1);
+  std::string i1;
+  ASSERT_EQ(0, put("obj", a, &i1));
+  auto w = open("obj", true);
+  ASSERT_TRUE(w);
+  ASSERT_EQ(0, write(w, 4 * MiB, {"Z"}));
+  std::unique_ptr<rgw::sal::Object::FSIOObject> r;
+  rados_fsio(w)->after_link([&] { r = open("obj", false); });
+  ASSERT_EQ(0, w->end_write(env->dpp.get(), 0));
+  ASSERT_TRUE(r);
+  const auto i2 = olh_instance("obj");
+  EXPECT_EQ(i2, rados_fsio(r)->instance()) << "counted on the linked instance";
+  EXPECT_EQ(rados_fsio(w)->writing_to(), rados_fsio(r)->bound())
+    << "bound the publishing shadow";
+  auto want = a;
+  want[4 * MiB] = 'Z';
+  EXPECT_EQ("same", diff(read(r, 0, 9 * MiB), want, a));
+  auto rec = records_of(head_of("obj"), rados_fsio(r)->handle().incarnation);
+  ASSERT_TRUE(rec.hdr);
+  const auto* e = entry_of(*rec.hdr, rados_fsio(r)->bound());
+  ASSERT_NE(nullptr, e);
+  EXPECT_EQ(cls_rgw_fsio_cs_state::PUBLISHED, e->state);
+  EXPECT_EQ(cls_rgw_fsio_manifest_at::INSTANCE, e->manifest_at);
+  ASSERT_EQ(0, r->close(env->dpp.get(), 0));
 }
 
 int main(int argc, char** argv)

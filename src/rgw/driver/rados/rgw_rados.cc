@@ -3548,6 +3548,16 @@ int RGWRados::swift_versioning_restore(RGWObjectCtx& obj_ctx,
                                   handler, y);
 }
 
+namespace {
+
+constexpr std::string_view FSIO_ATTR_PREFIX = "user.rgw.fsio.";
+constexpr std::string_view FSIO_ATTR_HDR = "user.rgw.fsio.hdr";
+constexpr std::string_view FSIO_ATTR_OCNT = "user.rgw.fsio.ocnt";
+constexpr std::string_view FSIO_ATTR_GEN = "user.rgw.fsio.gen";
+constexpr std::string_view FSIO_ATTR_CLAIM = "user.rgw.fsio.claim";
+
+} // anonymous namespace
+
 int RGWRados::Object::Write::_do_write_meta(uint64_t size, uint64_t accounted_size,
                                            map<string, bufferlist>& attrs,
                                            bool assume_noent, void *_index_op,
@@ -3618,6 +3628,13 @@ int RGWRados::Object::Write::_do_write_meta(uint64_t size, uint64_t accounted_si
   bool set_attr_id_tag = guard && target->obj.key.instance.empty() && (meta.if_nomatch == nullptr || meta.if_nomatch != "*"sv);
   target->fsio_write_keeps_tail = meta.keep_tail;
   target->fsio_publish = meta.fsio_publish;
+  if (meta.fsio_instance) {
+    /* §4.2 step 4:  only the claim's holder writes;  an aborted or absent
+     * placeholder fails ECANCELED or ENOENT, which meta.canceled carries */
+    bufferlist claim;
+    claim.append(meta.fsio_instance->token);
+    op.cmpxattr(FSIO_ATTR_CLAIM.data(), LIBRADOS_CMPXATTR_OP_EQ, claim);
+  }
   r = target->prepare_atomic_modification(rctx.dpp, op, reset_obj, ptag, meta.modify_tail, set_attr_id_tag, rctx.y);
   if (r < 0)
     return r;
@@ -3740,6 +3757,18 @@ int RGWRados::Object::Write::_do_write_meta(uint64_t size, uint64_t accounted_si
   ceph::real_time idx_restore_expiry_date;
   decode_restore_index_fields(attrs, nullptr,
                               idx_restore_status, idx_restore_expiry_date);
+
+  /* §3, the ordering rule (Z6):  after the head replacement and the ID
+   * tag's setxattr, so the replacement does not undo them */
+  if (meta.fsio_instance) {
+    op.rmxattr(FSIO_ATTR_CLAIM.data());
+    if (meta.fsio_instance->ocnt) {
+      op.setxattr(FSIO_ATTR_OCNT.data(), *meta.fsio_instance->ocnt);
+    }
+    if (meta.fsio_instance->tags.length()) {
+      op.setxattr(RGW_ATTR_TAGS, meta.fsio_instance->tags);
+    }
+  }
 
   if (!op.size())
     return 0;
@@ -6504,11 +6533,6 @@ int RGWRados::check_bucket_empty(const DoutPrefixProvider *dpp, RGWBucketInfo& b
 }
 
 namespace {
-
-constexpr std::string_view FSIO_ATTR_PREFIX = "user.rgw.fsio.";
-constexpr std::string_view FSIO_ATTR_HDR = "user.rgw.fsio.hdr";
-constexpr std::string_view FSIO_ATTR_OCNT = "user.rgw.fsio.ocnt";
-constexpr std::string_view FSIO_ATTR_GEN = "user.rgw.fsio.gen";
 
 /* §2.2:  a tracking-only head, FSIO's records and none of an ID tag, a
  * manifest or OLH info:  its S3 object was deleted under FSIO opens */

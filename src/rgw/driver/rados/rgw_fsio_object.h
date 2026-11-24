@@ -4,12 +4,13 @@
 #pragma once
 
 #include <cstdint>
-#include <functional>
 #include <map>
 #include <optional>
+#include <set>
 #include <string>
 #include <vector>
 
+#include "include/function2.hpp"
 #include "include/neorados/RADOS.hpp"
 #include "cls/rgw/cls_rgw_fsio_ops.h"
 #include "cls/rgw/cls_rgw_fsio_types.h"
@@ -110,10 +111,22 @@ public:
   /* test only:  the publish's head write applied, its reply treated as
    * lost, so the publish decides as the expirer would (§4.2, W21) */
   void lose_publish_reply(bool on) { lose_reply = on; }
+  /* test only:  the versioned instance write's reply lost:  1 after it
+   * applied, 2 without sending it;  the publish decides from the
+   * instance head (§4.2) */
+  void lose_instance_reply(int how) { lose_instance = how; }
+  /* test only:  called between the instance write and the link (Z34) */
+  void after_instance_write(fu2::unique_function<void()> f) {
+    instance_written = std::move(f);
+  }
+  /* test only:  called between the link and fsio_publish (§3.1 step 4) */
+  void after_link(fu2::unique_function<void()> f) { linked = std::move(f); }
+  /* test only:  the instance its last placeholder was for */
+  const std::string& placed_instance() const { return placed; }
   /* test only:  called on each try of the publish's head write, after
    * its read of the tags it evaluated, which it is given, and before the
    * write, so a test can write the tags in between (C1) */
-  void after_tags_read(std::function<void(const ceph::buffer::list&)> f) {
+  void after_tags_read(fu2::unique_function<void(const ceph::buffer::list&)> f) {
     tags_read = std::move(f);
   }
   /* test only:  each sequenced call sent twice with one sequence number,
@@ -201,6 +214,25 @@ private:
   /* §4.2 steps 1-5:  the last writer's publish of the shadow its leave
    * froze */
   int publish(const DoutPrefixProvider* dpp);
+  /* §4.2 steps 2-3, §3.5:  what either publish writes:  the size, the
+   * manifest, the attribute set with its ACL and ETag, the clone's tags,
+   * the owner, the sync policy */
+  struct Prepared {
+    RGWObjManifest m;
+    uint64_t size = 0;
+    std::map<std::string, ceph::buffer::list> attrs;
+    ceph::buffer::list clone_tags;
+    RGWAccessControlPolicy policy;
+    rgw_owner bowner;
+    RGWBucketSyncPolicyHandlerRef sync;
+    ceph::real_time mtime;
+  };
+  int prepare_publish(const DoutPrefixProvider* dpp, Prepared* p);
+  /* §3.5, C1:  PENDING when the sync policy exports the object with the
+   * tags it will keep */
+  int replication_status(const DoutPrefixProvider* dpp, const Prepared& p,
+			 const ceph::buffer::list& tags,
+			 std::map<std::string, ceph::buffer::list>* attrs);
   /* §3.5:  the publish hint naming the leaf clone f(head, r) */
   int publish_hint(const DoutPrefixProvider* dpp, bool add,
 		   const cls_rgw_fsio_id& r);
@@ -223,14 +255,49 @@ private:
   int keeps_hint(const DoutPrefixProvider* dpp, bool* keep);
   /* fsio_leave of cs in a role, through sequenced() */
   int leave(const DoutPrefixProvider* dpp, const cls_rgw_fsio_id& cs,
-	    bool writer, cls_rgw_fsio_leave_ret* ret);
+	    bool writer, cls_rgw_fsio_leave_ret* ret,
+	    const cls_rgw_fsio_intent* intent = nullptr);
+
+  /* §4.2, versioned:  an instance head's object, by its instance */
+  int instance_obj(const std::string& instance, std::string* oid,
+		   neorados::IOContext* ioc);
+  /* §2.7, §4.3:  a hint on an instance head, for `who` */
+  int instance_hint(const DoutPrefixProvider* dpp, bool add,
+		    cls_rgw_fsio_hint_kind kind, const std::string& instance,
+		    const cls_rgw_fsio_handle& who);
+  /* §4.2 step 3:  the handles with readers bound to a shadow */
+  int shadow_readers(const DoutPrefixProvider* dpp, const cls_rgw_fsio_id& cs,
+		     std::set<cls_rgw_fsio_handle>* readers);
+  /* §4.2 step 1:  an instance id and a token, the publish hint naming the
+   * instance head, and its placeholder holding the claim */
+  int place(const DoutPrefixProvider* dpp, cls_rgw_fsio_intent* intent);
+  /* the placeholder deleted while its claim is `claim`, then the hint */
+  void unplace(const DoutPrefixProvider* dpp, const cls_rgw_fsio_intent& intent,
+	       const std::string& claim);
+  /* §4.2 steps 3-6:  the versioned publish of the shadow the leave froze
+   * under `intent`, linked at `epoch` */
+  int publish_versioned(const DoutPrefixProvider* dpp,
+			const cls_rgw_fsio_intent& intent, uint64_t epoch);
+  /* §4.2, W10:  before the instance write:  its claim aborted, the shadow
+   * released, then the cleanup */
+  int release_versioned(const DoutPrefixProvider* dpp,
+			const cls_rgw_fsio_intent& intent,
+			const std::set<cls_rgw_fsio_handle>& readers);
+  /* §4.2, V4, H3f:  once no chunk-set entry names the instance, the
+   * readers' hints, the aborted placeholder and the publish hint */
+  void cleanup_versioned(const DoutPrefixProvider* dpp,
+			 const cls_rgw_fsio_intent& intent,
+			 const std::set<cls_rgw_fsio_handle>& readers);
+  /* §2.5, W7:  a reader off the count of the version its leave returned,
+   * when it is not the one it counted itself on */
+  int leave_count(const DoutPrefixProvider* dpp, const std::string& instance);
 
   /* the head's FSIO header */
   int read_header(const DoutPrefixProvider* dpp, cls_rgw_fsio_hdr* hdr);
   /* a sequenced call on the head:  the op exec, then seq advanced;
    * twice when the test asks */
   int sequenced(const DoutPrefixProvider* dpp,
-		const std::function<void(neorados::WriteOp&)>& build);
+		fu2::function_view<void(neorados::WriteOp&)> build);
 
   /* §2.3, §2.5:  where the bound content's head segment went:  the
    * generation's leaf clone f(head, r), or the deferred sibling */
@@ -270,7 +337,11 @@ private:
   bool unsure = false;		// a sequenced call's reply was lost (§3.3)
   bool twice = false;		// test only:  send_sequenced_twice()
   bool lose_reply = false;	// test only:  lose_publish_reply()
-  std::function<void(const ceph::buffer::list&)> tags_read;	// test only
+  fu2::unique_function<void(const ceph::buffer::list&)> tags_read;	// test only
+  int lose_instance = 0;	// test only:  lose_instance_reply()
+  fu2::unique_function<void()> instance_written;	// test only
+  fu2::unique_function<void()> linked;	// test only
+  std::string placed;		// test only:  placed_instance()
   std::string identity;		// the writer open's, as the join records it
   uint8_t create = 0;		// a create-open's cls_rgw_fsio::create_mode
   std::map<std::string, ceph::buffer::list> create_attrs;	// its create's

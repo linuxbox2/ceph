@@ -359,6 +359,16 @@ struct fsio_publish_spec {
   std::optional<ceph::buffer::list> expected_tags;
 };
 
+/* FSIO_RADOS_DESIGN.md §4.2 step 4:  a versioned publish's instance
+ * write, guarded by its placeholder's claim;  its post ops remove the
+ * claim and set the new version's open count and tags (Z15), after the
+ * head replacement and the ID tag's setxattr (§3, the ordering rule) */
+struct fsio_instance_spec {
+  std::string token;                        // the claim it holds
+  std::optional<ceph::buffer::list> ocnt;   // the readers counted on it (Z5, H3)
+  ceph::buffer::list tags;                  // the source version's
+};
+
 class RGWRados
 {
   friend class RGWGC;
@@ -951,6 +961,7 @@ public:
          * of that shadow, by that handle;  its reply, if wanted */
         const fsio_publish_spec *fsio_publish = nullptr;
         cls_rgw_fsio_replace_ret *fsio_published = nullptr;
+        const fsio_instance_spec *fsio_instance = nullptr;
 
         MetaParams() : mtime(NULL), rmattrs(NULL), data(NULL), manifest(NULL), ptag(NULL),
                  remove_objs(NULL), category(RGWObjCategory::Main), flags(0),

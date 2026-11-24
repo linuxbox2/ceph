@@ -108,6 +108,15 @@ namespace m = ::cls::rgw::method;
   return detail::call(m::fsio_rebind, in, ret, ec);
 }
 
+/* §4.2 step 6:  a versioned publish's fsio_replace_head, standalone on
+ * the OLH head (no RGW head write rides with it) */
+[[nodiscard]] inline auto replace_head(const cls_rgw_fsio_replace_op& in,
+                                       cls_rgw_fsio_replace_ret* ret = nullptr,
+                                       boost::system::error_code* ec = nullptr)
+{
+  return detail::call(m::fsio_replace_head, in, ret, ec);
+}
+
 [[nodiscard]] inline auto publish_release(const cls_rgw_fsio_cs_op& in)
 {
   return detail::call(m::fsio_publish_release, in);

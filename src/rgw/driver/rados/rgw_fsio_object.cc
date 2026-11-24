@@ -590,7 +590,7 @@ int RadosFSIOObject::read_header(const DoutPrefixProvider* dpp,
 }
 
 int RadosFSIOObject::sequenced(const DoutPrefixProvider* dpp,
-			       const std::function<void(neorados::WriteOp&)>& build)
+			       fu2::function_view<void(neorados::WriteOp&)> build)
 {
   int r = 0;
   for (int i = 0; i < (twice ? 2 : 1); ++i) {
@@ -1338,7 +1338,8 @@ int RadosFSIOObject::begin_write(const DoutPrefixProvider* dpp, uint32_t flags,
 
 int RadosFSIOObject::leave(const DoutPrefixProvider* dpp,
 			   const cls_rgw_fsio_id& id, bool writer,
-			   cls_rgw_fsio_leave_ret* ret)
+			   cls_rgw_fsio_leave_ret* ret,
+			   const cls_rgw_fsio_intent* intent)
 {
   int r = sequenced(dpp, [&] (neorados::WriteOp& op) {
     cls_rgw_fsio_leave_op in;
@@ -1346,6 +1347,9 @@ int RadosFSIOObject::leave(const DoutPrefixProvider* dpp,
     in.seq = seq + 1;
     in.cs = id;
     in.writer = writer;
+    if (intent) {
+      in.intent = *intent;	// §4.2 step 2:  the claim, the epoch returned
+    }
     op.exec(neorados::cls::rgw_fsio::leave(in, ret));
   });
   if (r < 0 && r != -EINVAL) {
@@ -1537,6 +1541,14 @@ int RadosFSIOObject::close(const DoutPrefixProvider* dpp, uint32_t flags)
   }
   reading = false;
   const bool lost = r == -EINVAL || ret.already_applied;
+  /* §2.5, W7:  the version its content became, which a publisher's
+   * instance write counted it on */
+  if (r == 0 && !ret.instance.empty() && !is_null(ret.instance) &&
+      ret.instance != inst) {
+    if (int c = leave_count(dpp, ret.instance); c < 0) {
+      return c;
+    }
+  }
   if (r == 0 && ret.drained) {
     if (int d = drain(dpp, *ret.drained); d < 0) {
       return d;
@@ -1701,31 +1713,26 @@ int RadosFSIOObject::scan_size(const DoutPrefixProvider* dpp, uint64_t* size)
   return 0;
 }
 
-int RadosFSIOObject::publish(const DoutPrefixProvider* dpp)
+int RadosFSIOObject::prepare_publish(const DoutPrefixProvider* dpp,
+				     Prepared* p)
 {
   const auto& marker = info.bucket.marker;
-  /* 1:  the hint first, naming the leaf clone the replaced content will
-   * be kept under (§3.5) */
-  const cls_rgw_fsio_id r{ceph::util::generate_random_number<uint64_t>(),
-			  ceph::util::generate_random_number<uint64_t>()};
-  if (int e = publish_hint(dpp, true, r); e < 0) {
-    return e;
-  }
   /* 2:  the size from the chunks, final while the shadow is publishing;
-   * the attributes and the pseudo-manifest from its attribute clone */
+   * the attributes and the pseudo-manifest from its attribute clone, the
+   * source instance's in a versioned bucket (§4.1) */
   uint64_t size = 0;
   if (int e = scan_size(dpp, &size); e < 0) {
-    publish_hint(dpp, false, r);
     return e;
   }
-  auto aioc = head_ioc;
-  aioc.set_key(head_oid);
+  const auto& base = counted ? inst_oid : head_oid;
+  auto aioc = counted ? inst_ioc : head_ioc;
+  aioc.set_key(base);
   boost::container::flat_map<std::string, ceph::buffer::list> xattrs;
   for (const char role : {'d', 'a'}) {
     xattrs.clear();
     sys::error_code ec;
     store->get_neorados().execute(
-      neorados::Object{cls_rgw_fsio_clone_name(marker, role, wcs, head_oid)},
+      neorados::Object{cls_rgw_fsio_clone_name(marker, role, wcs, base)},
       aioc, neorados::ReadOp{}.get_xattrs(&xattrs), nullptr,
       ceph::async::use_blocked[ec]);
     if (!ec && xattrs.count("user.rgw.fsio.pm")) {
@@ -1734,28 +1741,26 @@ int RadosFSIOObject::publish(const DoutPrefixProvider* dpp)
   }
   if (!xattrs.count("user.rgw.fsio.pm")) {
     ldpp_dout(dpp, 0) << "ERROR: FSIO:  no attribute clone for "
-		      << wcs.to_str() << " on " << head_oid << dendl;
-    publish_hint(dpp, false, r);
+		      << wcs.to_str() << " on " << base << dendl;
     return -EIO;
   }
   /* 3:  the manifest:  the pseudo-manifest under the shadow's id */
-  RGWObjManifest m;
+  RGWObjManifest& m = p->m;
   try {
     auto it = xattrs["user.rgw.fsio.pm"].cbegin();
     decode(m, it);
   } catch (const ceph::buffer::error&) {
-    publish_hint(dpp, false, r);
     return -EIO;
   }
   m.set_fsio(wcs);
   m.set_obj_size(size);
+  p->size = size;
   /* the publishing identity:  the publishing record's, which the freeze
    * copied from the freezing handle's write open (§3.5, Z14, Y16) */
   std::string who;
   {
     cls_rgw_fsio_hdr hdr;
     if (int e = read_header(dpp, &hdr); e < 0) {
-      publish_hint(dpp, false, r);
       return e;
     }
     for (const auto& e : hdr.chunk_sets) {
@@ -1768,29 +1773,26 @@ int RadosFSIOObject::publish(const DoutPrefixProvider* dpp)
   std::unique_ptr<rgw::sal::Bucket> bucket;
   if (int e = store->load_bucket(dpp, info.bucket, &bucket, null_yield);
       e < 0) {
-    publish_hint(dpp, false, r);
     return e;
   }
-  const auto& bowner_id = bucket->get_info().owner;
+  p->bowner = bucket->get_info().owner;
   /* the owner and ACL a PUT by the publishing identity without ACL
    * headers gets:  the bucket's ownership setting decides (§3.5, X14) */
   ACLOwner writer, bowner;
-  writer.id = who.empty() ? bowner_id : parse_owner(who);
-  bowner.id = bowner_id;
-  RGWAccessControlPolicy policy;
+  writer.id = who.empty() ? p->bowner : parse_owner(who);
+  bowner.id = p->bowner;
   std::string why;
   if (int e = rgw::s3::create_canned_acl(
 	writer, bowner, rgw::s3::get_object_ownership(bucket->get_attrs()),
-	"", policy, why); e < 0) {
+	"", p->policy, why); e < 0) {
     ldpp_dout(dpp, 0) << "ERROR: FSIO:  the publish's ACL for " << head_oid
 		      << ":  " << why << dendl;
-    publish_hint(dpp, false, r);
     return e;
   }
   /* the attribute set:  the clone's, as copy_obj() handles a source's,
-   * less FSIO's records, the tags (fsio_replace_head writes them, C1),
-   * and what names or derives from the replaced content (Z26;  §6.1:  a
-   * publish is uncompressed) */
+   * less FSIO's records, the tags (fsio_replace_head or the instance
+   * write writes them, C1, Z15), and what names or derives from the
+   * replaced content (Z26;  §6.1:  a publish is uncompressed) */
   static const std::set<std::string> dropped{
     RGW_ATTR_MANIFEST, RGW_ATTR_ID_TAG, RGW_ATTR_TAIL_TAG, "refcount",
     RGW_ATTR_PG_VER, RGW_ATTR_SOURCE_ZONE, RGW_ATTR_TAGS,
@@ -1799,7 +1801,7 @@ int RadosFSIOObject::publish(const DoutPrefixProvider* dpp)
     RGW_ATTR_CLOUD_TIER_TYPE, RGW_ATTR_RESTORE_STATUS, RGW_ATTR_RESTORE_TYPE,
     RGW_ATTR_RESTORE_TIME, RGW_ATTR_RESTORE_EXPIRY_DATE,
     RGW_ATTR_RESTORE_VERSIONED_EPOCH};
-  std::map<std::string, ceph::buffer::list> attrs;
+  auto& attrs = p->attrs;
   for (auto& [k, v] : xattrs) {
     if (k.starts_with("user.rgw.fsio.") || dropped.count(k)) {
       continue;
@@ -1809,39 +1811,86 @@ int RadosFSIOObject::publish(const DoutPrefixProvider* dpp)
   RGWRados::erase_copy_source_attrs(attrs,
 				    bucket->get_info().versioning_enabled());
   /* the tags the content had, for a tracking-only head (Z15) */
-  ceph::buffer::list tags;
   if (auto t = xattrs.find(RGW_ATTR_TAGS); t != xattrs.end()) {
-    tags = t->second;
+    p->clone_tags = t->second;
   }
-  RGWBucketSyncPolicyHandlerRef sync;
   if (int e = store->get_sync_policy_handler(dpp, std::nullopt, info.bucket,
-					     &sync, null_yield); e < 0) {
+					     &p->sync, null_yield); e < 0) {
     ldpp_dout(dpp, 0) << "ERROR: FSIO:  the sync policy for " << info.bucket
 		      << ":  " << cpp_strerror(-e) << dendl;
-    publish_hint(dpp, false, r);
     return e;
   }
-  policy.encode(attrs[RGW_ATTR_ACL]);
-  ceph::real_time mtime = std::max(wmtime_hint, wmtime);
-  if (ceph::real_clock::is_zero(mtime)) {
-    mtime = ceph::real_clock::now();
+  p->policy.encode(attrs[RGW_ATTR_ACL]);
+  p->mtime = std::max(wmtime_hint, wmtime);
+  if (ceph::real_clock::is_zero(p->mtime)) {
+    p->mtime = ceph::real_clock::now();
   }
   /* the ETag by the SAL's rule (§3.5, E1):  the content's MD5, read
    * through this handle up to the scanned size;  under rgw_non_md5_etag,
    * RGW's opaque form with the shadow's id */
   std::string etag;
   if (dpp->get_cct()->_conf->rgw_non_md5_etag) {
-    const auto ts = ceph::real_clock::to_timespec(mtime);
+    const auto ts = ceph::real_clock::to_timespec(p->mtime);
     etag = rgw_make_opaque_etag(
       wcs.to_str(), uint64_t(ts.tv_sec) * 1000000000ull + ts.tv_nsec);
   } else {
     wsize = size;
     if (int e = rgw::sal::fsio_content_md5(dpp, *this, size, &etag); e < 0) {
-      publish_hint(dpp, false, r);
       return e;
     }
   }
   attrs[RGW_ATTR_ETAG].append(etag);
+  return 0;
+}
+
+/* the sync policy's decision for tags as they will be kept (§3.5, C1) */
+int RadosFSIOObject::replication_status(const DoutPrefixProvider* dpp,
+					const Prepared& p,
+					const ceph::buffer::list& tags,
+					std::map<std::string, ceph::buffer::list>* attrs)
+{
+  RGWObjTags obj_tags;
+  if (tags.length()) {
+    try {
+      auto ti = tags.cbegin();
+      obj_tags.decode(ti);
+    } catch (const ceph::buffer::error&) {
+      ldpp_dout(dpp, 0) << "ERROR: FSIO:  undecodable tags on " << head_oid
+			<< dendl;
+      return -EIO;
+    }
+  }
+  attrs->erase(RGW_ATTR_OBJ_REPLICATION_STATUS);
+  if (p.sync && p.sync->bucket_exports_object(key.name, obj_tags)) {
+    (*attrs)[RGW_ATTR_OBJ_REPLICATION_STATUS].append("PENDING");
+  }
+  return 0;
+}
+
+int RadosFSIOObject::publish(const DoutPrefixProvider* dpp)
+{
+  /* 1:  the hint first, naming the leaf clone the replaced content will
+   * be kept under (§3.5) */
+  const cls_rgw_fsio_id r{ceph::util::generate_random_number<uint64_t>(),
+			  ceph::util::generate_random_number<uint64_t>()};
+  if (int e = publish_hint(dpp, true, r); e < 0) {
+    return e;
+  }
+  Prepared p;
+  if (int e = prepare_publish(dpp, &p); e < 0) {
+    publish_hint(dpp, false, r);
+    return e;
+  }
+  auto& m = p.m;
+  auto& attrs = p.attrs;
+  const auto size = p.size;
+  auto mtime = p.mtime;
+  const auto& tags = p.clone_tags;
+  const auto& policy = p.policy;
+  const auto& bowner_id = p.bowner;
+  const auto& marker = info.bucket.marker;
+  auto aioc = head_ioc;
+  aioc.set_key(head_oid);
   /* 4:  the head write, atomic so it sets the ID tag and carries the
    * guard;  ECANCELED is an S3 write since RGW read the head, or a tag
    * write since this try read the tags:  read again and publish over it,
@@ -1870,21 +1919,10 @@ int RadosFSIOObject::publish(const DoutPrefixProvider* dpp)
 	it != ha.end() && it->second.length(),
 	ht != ha.end() ? ht->second : ceph::buffer::list{}, tags);
     }
-    RGWObjTags obj_tags;
-    if (spec.expected_tags->length()) {
-      try {
-	auto ti = spec.expected_tags->cbegin();
-	obj_tags.decode(ti);
-      } catch (const ceph::buffer::error&) {
-	ldpp_dout(dpp, 0) << "ERROR: FSIO:  undecodable tags on " << head_oid
-			  << dendl;
-	publish_hint(dpp, false, r);
-	return -EIO;
-      }
-    }
-    attrs.erase(RGW_ATTR_OBJ_REPLICATION_STATUS);
-    if (sync && sync->bucket_exports_object(key.name, obj_tags)) {
-      attrs[RGW_ATTR_OBJ_REPLICATION_STATUS].append("PENDING");
+    if (int e = replication_status(dpp, p, *spec.expected_tags, &attrs);
+	e < 0) {
+      publish_hint(dpp, false, r);
+      return e;
     }
     if (tags_read) {
       tags_read(*spec.expected_tags);
@@ -1979,6 +2017,388 @@ int RadosFSIOObject::publish(const DoutPrefixProvider* dpp)
   return 0;
 }
 
+int RadosFSIOObject::instance_obj(const std::string& instance,
+				  std::string* oid, neorados::IOContext* ioc)
+{
+  rgw_raw_obj raw;
+  store->getRados()->obj_to_raw(info.placement_rule,
+				rgw_obj(info.bucket, rgw_obj_key(key.name, instance)),
+				&raw);
+  *oid = raw.oid;
+  try {
+    *ioc = rgw::init_iocontext(&*ndp, store->get_neorados(), raw.pool,
+			       ceph::async::use_blocked);
+  } catch (const sys::system_error& e) {
+    return ceph::from_error_code(e.code());
+  }
+  return 0;
+}
+
+int RadosFSIOObject::instance_hint(const DoutPrefixProvider* dpp, bool add,
+				   cls_rgw_fsio_hint_kind kind,
+				   const std::string& instance,
+				   const cls_rgw_fsio_handle& who)
+{
+  cls_rgw_fsio_hint_op in;
+  in.hint.kind = kind;
+  in.hint.target = cls_rgw_fsio_hint_target::INSTANCE_HEAD;
+  in.hint.bucket = info.bucket;
+  in.hint.key = rgw_obj_key(key.name, instance);
+  in.hint.incarnation = who.incarnation;
+  in.hint.handle = who.handle;
+  neorados::IOContext ioc;
+  if (int r = instance_obj(instance, &in.oid, &ioc); r < 0) {
+    return r;
+  }
+  const auto shards = static_cast<uint32_t>(
+    dpp->get_cct()->_conf.get_val<uint64_t>("rgw_fsio_open_hints_num_shards"));
+  neorados::WriteOp op;
+  if (add) {
+    op.exec(neorados::cls::rgw_fsio::open_hint_add(in));
+  } else {
+    op.exec(neorados::cls::rgw_fsio::open_hint_remove(in));
+  }
+  int r = exec(rgw::fsio::open_hint_shard_oid(
+		 rgw::fsio::open_hint_shard(in.oid, shards)),
+	       store->getRados()->fsio_hint_ioc(), std::move(op));
+  if (r < 0) {
+    ldpp_dout(dpp, 0) << "ERROR: FSIO:  " << (add ? "adding" : "removing")
+		      << " a hint of " << who.incarnation << "." << who.handle
+		      << " on " << in.oid << ":  " << cpp_strerror(-r) << dendl;
+  }
+  return r;
+}
+
+int RadosFSIOObject::shadow_readers(const DoutPrefixProvider* dpp,
+				    const cls_rgw_fsio_id& id,
+				    std::set<cls_rgw_fsio_handle>* readers)
+{
+  boost::container::flat_map<std::string, ceph::buffer::list> attrs;
+  sys::error_code ec;
+  store->get_neorados().execute(neorados::Object{head_oid}, head_ioc,
+				neorados::ReadOp{}.get_xattrs(&attrs), nullptr,
+				ceph::async::use_blocked[ec]);
+  if (ec) {
+    return ceph::from_error_code(ec);
+  }
+  static const std::string opens = "user.rgw.fsio.m.";
+  for (const auto& [k, v] : attrs) {
+    if (!k.starts_with(opens)) {
+      continue;
+    }
+    cls_rgw_fsio_opens o;
+    try {
+      auto it = v.cbegin();
+      decode(o, it);
+    } catch (const ceph::buffer::error&) {
+      return -EIO;
+    }
+    const auto inc = std::stoull(k.substr(opens.size()), nullptr, 16);
+    for (const auto& [hdl, ho] : o.handles) {
+      auto c = ho.chunk_sets.find(id);
+      if (c != ho.chunk_sets.end() && c->second.readers) {
+	readers->insert(cls_rgw_fsio_handle{inc, hdl});	// readers only (W7)
+      }
+    }
+  }
+  return 0;
+}
+
+int RadosFSIOObject::place(const DoutPrefixProvider* dpp,
+			   cls_rgw_fsio_intent* intent)
+{
+  rgw_obj_key k(key.name);
+  store->getRados()->gen_rand_obj_instance_name(&k);
+  intent->instance = k.instance;
+  intent->token = gen_rand_alphanumeric(dpp->get_cct(), 24);
+  placed = intent->instance;
+  if (int r = instance_hint(dpp, true, cls_rgw_fsio_hint_kind::PUBLISH,
+			    intent->instance, h); r < 0) {
+    return r;
+  }
+  std::string oid;
+  neorados::IOContext ioc;
+  int r = instance_obj(intent->instance, &oid, &ioc);
+  if (r == 0) {
+    /* §4.2 step 1, Z9:  absent to S3 (tracking-only), not in the index */
+    ceph::buffer::list claim;
+    claim.append(intent->token);
+    neorados::WriteOp op;
+    op.create(true);
+    op.setxattr("user.rgw.fsio.claim", std::move(claim));
+    r = exec(oid, ioc, std::move(op));
+  }
+  if (r < 0) {
+    ldpp_dout(dpp, 0) << "ERROR: FSIO:  the placeholder for "
+		      << intent->instance << " of " << head_oid << ":  "
+		      << cpp_strerror(-r) << dendl;
+    instance_hint(dpp, false, cls_rgw_fsio_hint_kind::PUBLISH,
+		  intent->instance, h);
+  }
+  return r;
+}
+
+void RadosFSIOObject::unplace(const DoutPrefixProvider* dpp,
+			      const cls_rgw_fsio_intent& intent,
+			      const std::string& claim)
+{
+  std::string oid;
+  neorados::IOContext ioc;
+  if (instance_obj(intent.instance, &oid, &ioc) == 0) {
+    ceph::buffer::list c;
+    c.append(claim);
+    neorados::WriteOp op;
+    op.cmpxattr("user.rgw.fsio.claim", neorados::cmp_op::eq, c);
+    op.remove();
+    exec(oid, ioc, std::move(op));	// gone or not held:  nothing to do
+  }
+  instance_hint(dpp, false, cls_rgw_fsio_hint_kind::PUBLISH, intent.instance,
+		h);
+}
+
+void RadosFSIOObject::cleanup_versioned(const DoutPrefixProvider* dpp,
+					const cls_rgw_fsio_intent& intent,
+					const std::set<cls_rgw_fsio_handle>& readers)
+{
+  /* V4:  while a chunk-set entry names the instance the placeholder is
+   * the expirer's to resolve, and the publish hint stays (H1) */
+  cls_rgw_fsio_hdr hdr;
+  if (read_header(dpp, &hdr) == 0) {
+    for (const auto& e : hdr.chunk_sets) {
+      if ((e.instance && *e.instance == intent.instance) ||
+	  (e.publishing && e.publishing->instance == intent.instance)) {
+	return;
+      }
+    }
+  }
+  for (const auto& r : readers) {		// H3f:  first its readers' hints
+    instance_hint(dpp, false, cls_rgw_fsio_hint_kind::PRESENCE,
+		  intent.instance, r);
+  }
+  unplace(dpp, intent, "aborted");
+}
+
+int RadosFSIOObject::release_versioned(const DoutPrefixProvider* dpp,
+				       const cls_rgw_fsio_intent& intent,
+				       const std::set<cls_rgw_fsio_handle>& readers)
+{
+  std::string oid;
+  neorados::IOContext ioc;
+  if (int r = instance_obj(intent.instance, &oid, &ioc); r < 0) {
+    return r;
+  }
+  /* W10:  its own claim aborted first, so no instance write can follow */
+  ceph::buffer::list token, aborted;
+  token.append(intent.token);
+  aborted.append("aborted");
+  neorados::WriteOp op;
+  op.cmpxattr("user.rgw.fsio.claim", neorados::cmp_op::eq, token);
+  op.setxattr("user.rgw.fsio.claim", std::move(aborted));
+  if (int r = exec(oid, ioc, std::move(op)); r == 0) {
+    neorados::WriteOp rop;
+    rop.exec(neorados::cls::rgw_fsio::publish_release(
+	       cls_rgw_fsio_cs_op{h, wcs}));
+    if (int e = exec(head_oid, head_ioc, std::move(rop)); e < 0) {
+      ldpp_dout(dpp, 0) << "ERROR: FSIO:  fsio_publish_release of "
+			<< wcs.to_str() << ":  " << cpp_strerror(-e) << dendl;
+    }
+  }
+  /* aborted already:  the expirer owns the shadow, and this cleans up */
+  cleanup_versioned(dpp, intent, readers);
+  return 0;
+}
+
+int RadosFSIOObject::publish_versioned(const DoutPrefixProvider* dpp,
+				       const cls_rgw_fsio_intent& intent,
+				       uint64_t epoch)
+{
+  std::string ioid;
+  neorados::IOContext iioc;
+  if (int r = instance_obj(intent.instance, &ioid, &iioc); r < 0) {
+    return r;
+  }
+  /* 3:  the readers bound to the shadow, each hinted on the new instance
+   * head before the open count names it (H3) */
+  std::set<cls_rgw_fsio_handle> readers;
+  int e = shadow_readers(dpp, wcs, &readers);
+  for (auto i = readers.begin(); e == 0 && i != readers.end(); ++i) {
+    e = instance_hint(dpp, true, cls_rgw_fsio_hint_kind::PRESENCE,
+		      intent.instance, *i);
+  }
+  Prepared p;
+  if (e == 0) {
+    e = prepare_publish(dpp, &p);
+  }
+  /* Z15:  the source version's tags at publish, else the clone's */
+  ceph::buffer::list tags = p.clone_tags;
+  if (e == 0 && counted) {
+    boost::container::flat_map<std::string, ceph::buffer::list> sa;
+    sys::error_code ec;
+    store->get_neorados().execute(neorados::Object{inst_oid}, inst_ioc,
+				  neorados::ReadOp{}.get_xattrs(&sa), nullptr,
+				  ceph::async::use_blocked[ec]);
+    if (!ec && sa.count(RGW_ATTR_ID_TAG)) {
+      auto t = sa.find(RGW_ATTR_TAGS);
+      tags = t == sa.end() ? ceph::buffer::list{} : t->second;
+    }
+  }
+  if (e == 0) {
+    e = replication_status(dpp, p, tags, &p.attrs);
+  }
+  if (e < 0) {
+    release_versioned(dpp, intent, readers);
+    return e;
+  }
+  /* 4:  the instance write is the publish:  guarded by the claim, its post
+   * ops the claim's removal, the open count and the tags (§3, Z6) */
+  fsio_instance_spec ispec;
+  ispec.token = intent.token;
+  ispec.tags = tags;
+  if (!readers.empty()) {
+    cls_rgw_fsio_ocnt n;
+    n.holders = readers;
+    encode(n, ispec.ocnt.emplace());
+  }
+  RGWObjectCtx octx(store);
+  const rgw_obj obj(info.bucket, rgw_obj_key(key.name, intent.instance));
+  octx.set_atomic(obj, true);
+  int w = 0;
+  if (lose_instance != 2) {
+    RGWRados::Object target(store->getRados(), info, octx, obj);
+    RGWRados::Object::Write wr(&target);
+    const std::string tag = gen_rand_alphanumeric(dpp->get_cct(), 32);
+    wr.meta.manifest = &p.m;
+    wr.meta.flags = PUT_OBJ_CREATE;
+    wr.meta.mtime = &p.mtime;
+    wr.meta.ptag = &tag;
+    wr.meta.owner = p.policy.get_owner();
+    wr.meta.bucket_owner = p.bowner;
+    wr.meta.fsio_instance = &ispec;
+    req_context rctx{dpp, null_yield, nullptr};
+    jspan_context trace(false, false);
+    w = wr.write_meta(p.size, p.size, p.attrs, rctx, trace);
+    if (w == 0 && wr.meta.canceled) {
+      w = -ECANCELED;		// the claim not held, or no placeholder
+    }
+  }
+  if (lose_instance) {
+    w = -ETIMEDOUT;		// test:  its reply lost
+  }
+  if (w < 0) {
+    /* the instance head decides:  the claim still the token, not written,
+     * so it releases;  an ID tag, written, so it completes;  otherwise
+     * the claim was aborted and the expirer owns the shadow (§4.2) */
+    boost::container::flat_map<std::string, ceph::buffer::list> ia;
+    sys::error_code ec;
+    store->get_neorados().execute(neorados::Object{ioid}, iioc,
+				  neorados::ReadOp{}.get_xattrs(&ia), nullptr,
+				  ceph::async::use_blocked[ec]);
+    const auto c = ia.find("user.rgw.fsio.claim");
+    if (!ec && c != ia.end() && c->second.to_str() == intent.token) {
+      release_versioned(dpp, intent, readers);
+      return w;
+    }
+    if (ec || !ia.count(RGW_ATTR_ID_TAG)) {
+      cleanup_versioned(dpp, intent, readers);
+      return w;
+    }
+  }
+  if (instance_written) {
+    instance_written();
+  }
+  /* 5:  the link at the recorded epoch, retried, never released;  a
+   * version removed before it leaves a phantom entry, unlinked (Z34) */
+  /* whether the instance head is still the version it wrote */
+  auto written = [&] {
+    ceph::buffer::list idt;
+    sys::error_code ec;
+    store->get_neorados().execute(
+      neorados::Object{ioid}, iioc,
+      neorados::ReadOp{}.get_xattr(RGW_ATTR_ID_TAG, &idt), nullptr,
+      ceph::async::use_blocked[ec]);
+    return !ec;
+  };
+  int l = -EIO;
+  for (int t = 0; t < 3 && l < 0; ++t) {
+    RGWObjectCtx lctx(store);
+    l = store->getRados()->set_olh(dpp, lctx, info, obj, false, nullptr, epoch,
+				   ceph::real_time(), false, null_yield);
+    if (l == -ENOENT && !written()) {
+      /* Z34:  removed since its write, the index entry with it:  link_olh
+       * returns ENOENT;  nothing to link, the publish completes */
+      break;
+    }
+  }
+  if (l < 0 && l != -ENOENT) {
+    ldpp_dout(dpp, 0) << "ERROR: FSIO:  linking " << intent.instance << " of "
+		      << head_oid << ":  " << cpp_strerror(-l) << dendl;
+    return l;
+  }
+  if (l == -ENOENT && written()) {
+    ldpp_dout(dpp, 0) << "ERROR: FSIO:  linking " << intent.instance << " of "
+		      << head_oid << ":  " << cpp_strerror(-l) << dendl;
+    return l;
+  }
+  if (l == 0 && !written()) {
+    /* Z34:  a link that succeeded over a version removed since:  its
+     * entry goes, as the removal's did */
+    RGWObjectCtx uctx(store);
+    if (int u = store->getRados()->unlink_obj_instance(
+	  dpp, uctx, info, obj, 0, null_yield, 0, false); u < 0) {
+      ldpp_dout(dpp, 0) << "ERROR: FSIO:  unlinking the removed "
+			<< intent.instance << ":  " << cpp_strerror(-u) << dendl;
+    }
+  }
+  if (linked) {
+    linked();
+  }
+  /* 6:  fsio_publish on the OLH head:  the shadow published at INSTANCE */
+  cls_rgw_fsio_replace_op in;
+  in.mode = static_cast<uint8_t>(cls_rgw_fsio::replace_mode::PUBLISH);
+  in.caller = h;
+  in.shadow = wcs;
+  in.versioned = true;
+  in.marker = info.bucket.marker;
+  cls_rgw_fsio_replace_ret ret;
+  neorados::WriteOp op;
+  op.exec(neorados::cls::rgw_fsio::replace_head(in, &ret));
+  if (int r = exec(head_oid, head_ioc, std::move(op)); r < 0) {
+    ldpp_dout(dpp, 0) << "ERROR: FSIO:  fsio_publish of " << wcs.to_str()
+		      << " on " << head_oid << ":  " << cpp_strerror(-r)
+		      << dendl;
+    return r;			// keeps its hint (H1)
+  }
+  instance_hint(dpp, false, cls_rgw_fsio_hint_kind::PUBLISH, intent.instance,
+		h);
+  if (ret.drained) {
+    drain(dpp, *ret.drained);
+  }
+  return 0;
+}
+
+int RadosFSIOObject::leave_count(const DoutPrefixProvider* dpp,
+				 const std::string& instance)
+{
+  std::string oid;
+  neorados::IOContext ioc;
+  if (int r = instance_obj(instance, &oid, &ioc); r < 0) {
+    return r;
+  }
+  cls_rgw_fsio_ocnt_op in;
+  in.holder = h;
+  cls_rgw_fsio_flags_ret ret;
+  neorados::WriteOp op;
+  op.exec(neorados::cls::rgw_fsio::ocnt_remove(in, &ret));
+  if (int r = exec(oid, ioc, std::move(op)); r < 0 && r != -ENOENT) {
+    ldpp_dout(dpp, 0) << "ERROR: FSIO:  fsio_ocnt_remove on " << oid << ":  "
+		      << cpp_strerror(-r) << dendl;
+    return r;
+  }
+  /* its hint goes once it is off the count (§4.3) */
+  return instance_hint(dpp, false, cls_rgw_fsio_hint_kind::PRESENCE, instance,
+		       h);
+}
+
 int RadosFSIOObject::end_write(const DoutPrefixProvider* dpp, uint32_t flags)
 {
   if (!writing) {
@@ -1989,11 +2409,38 @@ int RadosFSIOObject::end_write(const DoutPrefixProvider* dpp, uint32_t flags)
       return r;
     }
   }
-  cls_rgw_fsio_leave_ret ret;
-  if (int r = leave(dpp, wcs, true, &ret); r < 0) {
+  /* §4.2:  versioning enabled at the close makes the publish a new
+   * version, its claim placed before the leave;  suspended, the null
+   * version is written in place (§2.5a) */
+  std::unique_ptr<rgw::sal::Bucket> bucket;
+  if (int r = store->load_bucket(dpp, info.bucket, &bucket, null_yield);
+      r < 0) {
     return r;
   }
-  if (ret.publishing) {
+  std::optional<cls_rgw_fsio_intent> intent;
+  if (bucket->get_info().versioning_enabled()) {
+    intent.emplace();
+    if (int r = place(dpp, &*intent); r < 0) {
+      return r;
+    }
+  }
+  cls_rgw_fsio_leave_ret ret;
+  if (int r = leave(dpp, wcs, true, &ret, intent ? &*intent : nullptr);
+      r < 0) {
+    if (intent) {
+      unplace(dpp, *intent, intent->token);
+    }
+    return r;
+  }
+  if (intent && !ret.publishing) {
+    unplace(dpp, *intent, intent->token);	// another writer remains
+  }
+  if (intent && ret.publishing) {
+    /* §4.2:  the versioned publish releases or completes itself */
+    if (int p = publish_versioned(dpp, *intent, ret.olh_epoch); p < 0) {
+      return p;
+    }
+  } else if (ret.publishing) {
     /* §3.4, §4.2:  the last writer froze the shadow, and publishes it */
     if (int p = publish(dpp); p < 0) {
       /* a publisher that cannot proceed releases:  the shadow ready
