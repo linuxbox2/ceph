@@ -3131,6 +3131,87 @@ TEST_F(FSIORadosPublishWait, BusyLinkPastTheWait)
   EXPECT_EQ((std::set<std::string>{i1, i2}), versions("obj"));
 }
 
+/* the uncompleted-publish hints in the head's shard (§4.3, 8j) */
+static size_t uncompleted_hints(const rgw_raw_obj& head,
+				const cls_rgw_fsio_id& cs)
+{
+  auto* rados = static_cast<rgw::sal::RadosStore*>(env->driver)->getRados();
+  const auto shards = static_cast<uint32_t>(
+    g_conf().get_val<uint64_t>("rgw_fsio_open_hints_num_shards"));
+  cls_rgw_fsio_hint_list_op in;
+  in.uncompleted = true;
+  cls_rgw_fsio_hint_list_ret ret;
+  neorados::ReadOp op;
+  op.exec(neorados::cls::rgw_fsio::open_hint_list(in, &ret));
+  static_cast<rgw::sal::RadosStore*>(env->driver)->get_neorados().execute(
+    neorados::Object{rgw::fsio::open_hint_shard_oid(
+	rgw::fsio::open_hint_shard(head.oid, shards))},
+    rados->fsio_hint_ioc(), std::move(op), nullptr, ceph::async::use_blocked);
+  return std::count_if(ret.hints.begin(), ret.hints.end(),
+		       [&](const cls_rgw_fsio_hint& h) {
+			 return h.r && *h.r == cs;
+		       });
+}
+
+/* §4.2, 8j:  a close whose publish cannot complete hands it off:  EAGAIN,
+ * the uncompleted-publish hint, the shadow ready with no writer and
+ * uncompleted_publish set;  the next writer binds it, clearing the field,
+ * and its close publishes both writes */
+TEST_F(FSIORadosPublishWait, CloseHandsOffAnUncompletedPublish)
+{
+  set_versioning(0);
+  const auto a = pattern(9 * MiB, 1);
+  ASSERT_EQ(0, put("obj", a));
+  auto w = open("obj", true);
+  ASSERT_TRUE(w);
+  const auto id = rados_fsio(w)->writing_to();
+  ASSERT_EQ(0, write(w, 4 * MiB, {"Z"}));
+  rados_fsio(w)->busy_publish_calls(1000);
+  EXPECT_EQ(-EAGAIN, w->close(env->dpp.get(), 0));
+  const auto head = head_of("obj");
+  EXPECT_EQ(1u, uncompleted_hints(head, id));
+  auto rec = records_of(head, 0);
+  ASSERT_TRUE(rec.hdr);
+  const auto* e = entry_of(*rec.hdr, id);
+  ASSERT_NE(nullptr, e);
+  EXPECT_EQ(cls_rgw_fsio_cs_state::READY, e->state);
+  EXPECT_TRUE(e->uncompleted_publish);
+  auto w2 = open("obj", true);
+  ASSERT_TRUE(w2);
+  EXPECT_EQ(id, rados_fsio(w2)->writing_to()) << "the next writer binds it";
+  ASSERT_EQ(0, write(w2, 0, {"Y"}));
+  ASSERT_EQ(0, w2->close(env->dpp.get(), 0));
+  std::string now;
+  ASSERT_EQ(0, get("obj", &now));
+  EXPECT_EQ('Y', now[0]);
+  EXPECT_EQ('Z', now[4 * MiB]);
+}
+
+/* versioned:  a written version whose link cannot complete is handed
+ * off still publishing, uncompleted_publish set, its writer's open gone */
+TEST_F(FSIORadosPublishWait, CloseHandsOffAWrittenVersion)
+{
+  std::string i1;
+  ASSERT_EQ(0, put("obj", pattern(9 * MiB, 1), &i1));
+  auto w = open("obj", true);
+  ASSERT_TRUE(w);
+  const auto h = rados_fsio(w)->handle();
+  const auto id = rados_fsio(w)->writing_to();
+  ASSERT_EQ(0, write(w, 4 * MiB, {"Z"}));
+  auto* hdl = rados_fsio(w);
+  hdl->after_instance_write([&] { hdl->busy_publish_calls(1000); });
+  EXPECT_EQ(-EAGAIN, w->close(env->dpp.get(), 0));
+  const auto head = head_of("obj");
+  EXPECT_EQ(1u, uncompleted_hints(head, id));
+  auto rec = records_of(head, h.incarnation);
+  ASSERT_TRUE(rec.hdr);
+  const auto* e = entry_of(*rec.hdr, id);
+  ASSERT_NE(nullptr, e);
+  EXPECT_EQ(cls_rgw_fsio_cs_state::PUBLISHING, e->state);
+  EXPECT_TRUE(e->uncompleted_publish);
+  EXPECT_FALSE(rec.opens) << "the writer's open was left";
+}
+
 /* §3.6:  an unlinked generation's shadow still publishes */
 TEST_F(FSIORadosPublishWait, DiscardKeepsPublishing)
 {

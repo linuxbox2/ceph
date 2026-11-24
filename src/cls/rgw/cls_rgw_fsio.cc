@@ -312,7 +312,7 @@ int join_once(cls_rgw_fsio_head& h, const join_in& in, join_out& out,
 int leave_once(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& caller,
 	       const cls_rgw_fsio_id& cs, bool writer, const expired_t& expired,
 	       leave_out& out, cls_rgw_fsio_effects& fx,
-	       const publish_intent* intent);
+	       const publish_intent* intent, bool handoff);
 int rebind_once(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& caller,
 		const cls_rgw_fsio_id& from, const cls_rgw_fsio_id& to,
 		uint32_t readers, rebind_out& out);
@@ -336,13 +336,13 @@ int join(cls_rgw_fsio_head& h, const join_in& in, join_out& out,
 int leave(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& caller,
 	  uint64_t seq, const cls_rgw_fsio_id& cs, bool writer,
 	  const expired_t& expired, leave_out& out, cls_rgw_fsio_effects& fx,
-	  const publish_intent* intent)
+	  const publish_intent* intent, bool handoff)
 {
   if (already_applied(h, caller, seq)) {
     out.already_applied = true;
     return 0;
   }
-  int r = leave_once(h, caller, cs, writer, expired, out, fx, intent);
+  int r = leave_once(h, caller, cs, writer, expired, out, fx, intent, handoff);
   if (r == 0) {
     applied(h, caller, seq);
   }
@@ -496,6 +496,7 @@ int join_once(cls_rgw_fsio_head& h, const join_in& in, join_out& out,
     auto* sh = current_shadow(hdr);
     if (sh) {
       bind = sh->id;
+      sh->uncompleted_publish.reset();	// 8j:  its close publishes now
     } else {
       cls_rgw_fsio_chunk_set cs;
       cs.id = hdr.draw();
@@ -735,7 +736,7 @@ namespace {
 int leave_once(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& caller,
 	       const cls_rgw_fsio_id& cs, bool writer, const expired_t& expired,
 	       leave_out& out, cls_rgw_fsio_effects& fx,
-	       const publish_intent* intent)
+	       const publish_intent* intent, bool handoff)
 {
   if (!h.hdr) {
     return -EINVAL;
@@ -758,6 +759,28 @@ int leave_once(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& caller,
   if (writer) {
     if (c.writers == 0 || !e) {
       return -EINVAL;
+    }
+    if (handoff) {
+      /* §3.4, 8j:  a hand-off:  the writer's open goes and the publish is
+       * left uncompleted, nobody holding it:  a ready shadow unfrozen, a
+       * written versioned one still publishing */
+      if (e->state == state::READY) {
+	if (h.bound(cs).writers == 1) {
+	  e->uncompleted_publish = c.writer_identity;
+	}
+      } else if (e->state == state::PUBLISHING && e->publishing &&
+		 e->publishing->publisher == caller) {
+	e->uncompleted_publish = e->publishing->identity;
+      } else {
+	return -EINVAL;
+      }
+      --c.writers;
+      std::vector<cls_rgw_fsio_id> drained;
+      settle(h, drained, fx, caller);
+      if (!drained.empty()) {
+	out.drained = drained.front();
+      }
+      return 0;
     }
     if (h.bound(cs).writers == 1) {
       /* §3.4:  a constructor that gives up abandons its shadow, its GC
@@ -874,7 +897,9 @@ int publish_versioned(cls_rgw_fsio_head& h, const replace_in& in,
     return -CLS_RGW_ERR_FSIO_CONFLICT;
   }
   const auto publisher = sh->publishing->publisher;
-  if (in.complete ? !in.expired.count(publisher.incarnation) :
+  /* complete:  a dead publisher's, or one handed off (8j) */
+  if (in.complete ? (!in.expired.count(publisher.incarnation) &&
+		     !sh->uncompleted_publish) :
       publisher != in.caller) {
     return -CLS_RGW_ERR_FSIO_CONFLICT;
   }
@@ -883,6 +908,7 @@ int publish_versioned(cls_rgw_fsio_head& h, const replace_in& in,
   sh->manifest_at = at::INSTANCE;
   sh->instance = sh->publishing->instance;
   sh->publishing.reset();
+  sh->uncompleted_publish.reset();
   if (in.complete && !FSIO_SKIP_CHECK(V2_COMPLETE_REMOVES_DEAD_WRITERS)) {
     /* the writer opens of the dead:  the publisher's, whoever now holds
      * its publish (§4.2, V2) */
@@ -984,6 +1010,7 @@ int replace_head(cls_rgw_fsio_head& h, const replace_in& in, replace_out& out,
     sh->state = state::PUBLISHED;
     sh->manifest_at = at::HEAD;
     sh->publishing.reset();
+    sh->uncompleted_publish.reset();
     if (auto* o = h.find(in.caller)) {
       auto c = o->chunk_sets.find(sh_id);
       if (c != o->chunk_sets.end() && c->second.writers) {
@@ -1093,6 +1120,30 @@ int replace_head(cls_rgw_fsio_head& h, const replace_in& in, replace_out& out,
   out.keep_tail = kept;
   if (in.mode == replace_mode::DELETE && !h.holds_opens() && hdr.empty()) {
     h.hdr.reset();
+  }
+  return 0;
+}
+
+int take_uncompleted(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& caller,
+		     const cls_rgw_fsio_id& cs, const publish_intent* intent)
+{
+  if (!h.hdr) {
+    return -CLS_RGW_ERR_FSIO_CONFLICT;
+  }
+  auto* e = h.hdr->find(cs);
+  /* a writer bound since the hand-off:  its close publishes */
+  if (!e || e->state != state::READY || !e->uncompleted_publish ||
+      h.bound(cs).writers) {
+    return -CLS_RGW_ERR_FSIO_CONFLICT;
+  }
+  e->state = state::PUBLISHING;
+  e->publishing.emplace();
+  e->publishing->publisher = caller;
+  e->publishing->identity = *e->uncompleted_publish;
+  if (intent) {
+    e->publishing->instance = intent->instance;
+    e->publishing->token = intent->token;
+    e->publishing->olh_epoch = intent->now_epoch;
   }
   return 0;
 }

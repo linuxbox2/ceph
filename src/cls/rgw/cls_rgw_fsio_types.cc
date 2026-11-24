@@ -116,6 +116,7 @@ void cls_rgw_fsio_chunk_set::dump(ceph::Formatter *f) const
   encode_json("publishing", publishing, f);
   encode_json("drained", drained, f);
   encode_json("shares_tail", shares_tail, f);
+  encode_json("uncompleted_publish", uncompleted_publish, f);
   f->open_array_section("after");
   for (const auto& a : after) {
     encode_json("id", a, f);
@@ -135,6 +136,7 @@ std::list<cls_rgw_fsio_chunk_set> cls_rgw_fsio_chunk_set::generate_test_instance
   i.drained = true;
   i.shares_tail = true;
   i.after = {cls_rgw_fsio_id{2, 7}, cls_rgw_fsio_id{3, 7}};
+  i.uncompleted_publish = "v8";
   o.push_back(std::move(i));
   o.emplace_back();
   return o;
@@ -465,6 +467,7 @@ void cls_rgw_fsio_leave_op::dump(ceph::Formatter *f) const
   encode_json("writer", writer, f);
   encode_json("expired", expired, f);
   encode_json("intent", intent, f);
+  encode_json("handoff", handoff, f);
 }
 
 std::list<cls_rgw_fsio_leave_op> cls_rgw_fsio_leave_op::generate_test_instances()
@@ -477,6 +480,7 @@ std::list<cls_rgw_fsio_leave_op> cls_rgw_fsio_leave_op::generate_test_instances(
   i.writer = true;
   i.expired.insert(5);
   i.intent = cls_rgw_fsio_intent::generate_test_instances().front();
+  i.handoff = true;
   o.push_back(std::move(i));
   o.emplace_back();
   return o;
@@ -742,6 +746,8 @@ void cls_rgw_fsio_expire_op::dump(ceph::Formatter *f) const
   encode_json("caller", caller, f);
   encode_json("expired", expired, f);
   encode_json("clear", clear, f);
+  encode_json("uncompleted", uncompleted, f);
+  encode_json("intent", intent, f);
 }
 
 std::list<cls_rgw_fsio_expire_op> cls_rgw_fsio_expire_op::generate_test_instances()
@@ -751,6 +757,8 @@ std::list<cls_rgw_fsio_expire_op> cls_rgw_fsio_expire_op::generate_test_instance
   i.caller = cls_rgw_fsio_handle{1, 1};
   i.expired.insert(2);
   i.clear = cls_rgw_fsio_id{3, 7};
+  i.uncompleted = cls_rgw_fsio_id{4, 7};
+  i.intent = cls_rgw_fsio_intent::generate_test_instances().front();
   o.push_back(std::move(i));
   o.emplace_back();
   return o;
@@ -927,6 +935,7 @@ void cls_rgw_fsio_hint_list_op::dump(ceph::Formatter *f) const
     f->close_section();
   }
   encode_json("incarnation", incarnation, f);
+  encode_json("uncompleted", uncompleted, f);
 }
 
 std::list<cls_rgw_fsio_hint_list_op> cls_rgw_fsio_hint_list_op::generate_test_instances()
@@ -937,6 +946,7 @@ std::list<cls_rgw_fsio_hint_list_op> cls_rgw_fsio_hint_list_op::generate_test_in
   i.max = 2;
   i.bucket = rgw_bucket(rgw_bucket_key("", "b3", "m3"));
   i.incarnation = 4;
+  i.uncompleted = true;
   o.push_back(std::move(i));
   o.emplace_back();
   return o;

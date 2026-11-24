@@ -33,6 +33,10 @@
  * create, unchecked or exclusive, and checks what each returns, that a
  * read of a created name fails before its publish, and that every
  * created name is published (§3.1 steps 0 and 1, Z24);  unversioned.
+ * FSIO_MODEL_HANDOFF=1 lets a writer's publish fail and be handed off
+ * (§4.2, 8j):  released, the uncompleted-publish hint, the hand-off
+ * leave;  the FSIO expirer takes and publishes an uncompleted publish
+ * whatever its gateway's liveness, or a later writer does;  unversioned.
  * FSIO_MODEL_TAGS=1 gives the head object tags, which an S3 PUT sets and
  * tag writes change, and checks a publish keeps the tags it evaluated
  * (§3.5, C1);  unversioned.
@@ -183,7 +187,8 @@ struct LOpen {
 
 /* a hint (§2.7):  cls_rgw_fsio_hint, its target by name rather than by
  * bucket and key;  one shard, since each hint is handled on its own */
-enum class HintKind : uint8_t { PRESENCE = 1, PUBLISH = 2 };
+enum class HintKind : uint8_t { PRESENCE = 1, PUBLISH = 2,
+  UNCOMPLETED = 3 };		// an uncompleted publish (§4.3, 8j)
 enum class HintTarget : uint8_t { HEAD = 1, INSTANCE_HEAD = 2 };
 struct Hint {
   HintKind kind;
@@ -219,6 +224,11 @@ Hint publish_ih(const std::string& inst, const cls_rgw_fsio_handle& c)
   return Hint{HintKind::PUBLISH, HintTarget::INSTANCE_HEAD, inst,
 	      c.incarnation, c.handle};
 }
+/* 8j:  keyed by the shadow, not an incarnation */
+Hint uncompleted_hint(const fid_t& cs)
+{
+  return Hint{HintKind::UNCOMPLETED, HintTarget::HEAD, {}, 0, 0, cs};
+}
 
 enum Step : uint8_t { NONE, CONSTRUCT, PUBLISH_WRITE, PUBLISH_GC, DRAIN_SEND,
   PUBLISH_HINT, CONSTRUCT_LEAVE,
@@ -233,7 +243,9 @@ enum Step : uint8_t { NONE, CONSTRUCT, PUBLISH_WRITE, PUBLISH_GC, DRAIN_SEND,
    * rebuilt from the head */
   LOST_LEAVE, LOST_JOIN, LOST_REBIND, LOST_TRUNC,
   /* §3.5, C1:  the publisher reads the tags it evaluates policy with */
-  PUBLISH_READ };
+  PUBLISH_READ,
+  /* §4.2, 8j:  a publish that failed, handed off */
+  HANDOFF_HINT, HANDOFF_LEAVE };
 
 /* a handle's latest sequenced call, as sent (§3, Z22):  resent with the
  * same sequence number, it models a reply lost past the PG log's dup
@@ -279,6 +291,7 @@ struct Gw {
   bool step_born = false;
   std::optional<fid_t> step_drained;
   std::string step_tags;         // PUBLISH_READ:  the tags it evaluated (C1)
+  uint8_t did_handoff = 0;       // 8j:  one failed publish handed off
   uint8_t owe_head_hint = 0;     // PRESENCE_HINT_BEFORE_JOIN skipped:  to add
   uint8_t release_failed = 0;    // a release call failed:  keeps its hint (H1)
   std::string owe_ih_hint;       // PRESENCE_HINT_BEFORE_OCNT skipped:  to add
@@ -325,6 +338,7 @@ struct Gw {
     encode(lost_to, bl); encode(did_lose_rebind, bl); encode(did_lose_trunc, bl);
     encode((uint8_t)step, bl); encode(step_cs, bl); encode(step_r, bl);
     encode(step_born, bl); encode(step_drained, bl); encode(step_tags, bl);
+    encode(did_handoff, bl);
     encode(owe_head_hint, bl); encode(owe_ih_hint, bl);
     encode(release_failed, bl);
     encode(pending, bl); encode(pending_writer, bl); encode(counted, bl);
@@ -364,6 +378,7 @@ struct Config {
   bool lost_reply = false;       // FSIO_MODEL_LOST_REPLY:  a reply lost (Z22)
   bool tags = false;             // FSIO_MODEL_TAGS:  object tags (§3.5, C1)
   bool create = false;           // FSIO_MODEL_CREATE:  creation (§3.1, Z24)
+  bool handoff = false;          // FSIO_MODEL_HANDOFF:  the hand-off (§4.2, 8j)
   std::set<std::string> dup;     // FSIO_MODEL_DUP:  calls applied twice
 };
 
@@ -541,7 +556,8 @@ int m_join(cls_rgw_fsio_head& h, const fsio::join_in& in, fsio::join_out& out,
 int m_leave(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& caller,
 	    uint64_t seq, const fid_t& cs, bool writer,
 	    const fsio::expired_t& expired, fsio::leave_out& out,
-	    cls_rgw_fsio_effects& fx, const fsio::publish_intent* intent)
+	    cls_rgw_fsio_effects& fx, const fsio::publish_intent* intent,
+	    bool handoff = false)
 {
   cls_rgw_fsio_leave_op op;
   op.caller = caller;
@@ -550,9 +566,11 @@ int m_leave(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& caller,
   op.writer = writer;
   op.expired = expired;
   op.intent = op_intent(intent);
+  op.handoff = handoff;
   ceph::buffer::list reply;
   const int r = on_cluster_head("fsio_leave", cls::rgw::method::fsio_leave, h, fx, op, [&] {
-      return fsio::leave(h, caller, seq, cs, writer, expired, out, fx, intent);
+      return fsio::leave(h, caller, seq, cs, writer, expired, out, fx, intent,
+			 handoff);
     }, &reply);
   if (cl.on && r == 0 && reply.length()) {
     if (auto ret = dec<cls_rgw_fsio_leave_ret>("fsio_leave", reply);
@@ -745,6 +763,17 @@ int m_fenced_finalize(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& finalizer
     }
     return r;
   });
+}
+
+/* §3.8, 8j:  the expirer takes an uncompleted publish (fsio_expire) */
+int m_take(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& caller,
+	   const fid_t& cs, cls_rgw_fsio_effects& fx)
+{
+  cls_rgw_fsio_expire_op op;
+  op.caller = caller;
+  op.uncompleted = cs;
+  return on_cluster_head("fsio_expire", cls::rgw::method::fsio_expire, h, fx,
+			 op, [&] { return fsio::take_uncompleted(h, caller, cs); });
 }
 
 int m_expire(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& caller,
@@ -1011,15 +1040,17 @@ int counted_join(cls_rgw_fsio_head& h, Gw& g, fsio::join_in& in,
 int counted_leave(cls_rgw_fsio_head& h, Gw& g, const fid_t& cs, bool writer,
 		  const std::set<uint64_t>& expired, fsio::leave_out& out,
 		  cls_rgw_fsio_effects& fx,
-		  const fsio::publish_intent* intent = nullptr)
+		  const fsio::publish_intent* intent = nullptr,
+		  bool handoff = false)
 {
   const auto seq = g.seq + 1;
-  int r = m_leave(h, hd(g), seq, cs, writer, expired, out, fx, intent);
+  int r = m_leave(h, hd(g), seq, cs, writer, expired, out, fx, intent,
+		  handoff);
   g.resend.reset();
   if (r == 0) {
     g.seq = seq;
   }
-  if (r == 0 && g.resent < cfg.resends) {
+  if (r == 0 && g.resent < cfg.resends && !handoff) {
     Resend rs{Counted::LEAVE, seq, writer, 0, expired};
     rs.cs = cs;
     if (intent) {
@@ -1588,6 +1619,65 @@ void gw_actions(const World& w0, size_t gi, std::vector<Action>& acts)
 	    g.step_r = in.r;
 	    g.step_born = out.born_drained;
 	    g.step_drained = out.drained;
+	    return std::nullopt;
+	  }});
+      /* §4.2, 8j:  the publish fails, its wait spent:  released, then
+       * handed off, nobody left to retry it */
+      if (cfg.handoff && !g.did_handoff) {
+	acts.push_back({fmt::format("gw{} publish-fails {}", glabel(g),
+				    sname(g.step_cs)),
+	    [gi](World& w) -> std::optional<std::string> {
+	      auto& g = w.gws[gi];
+	      g.did_handoff = 1;
+	      w.hints.erase(publish_head(hd(g), g.step_r));
+	      if (m_publish_release(w.head, hd(g), g.step_cs) < 0) {
+		g.release_failed = 1;        // finalized meanwhile (H1)
+		g.step = NONE;
+		return std::nullopt;
+	      }
+	      g.step = HANDOFF_HINT;
+	      return std::nullopt;
+	    }});
+      }
+      break;
+    case HANDOFF_HINT:
+      /* §4.3:  the hint first, so the expirer always reaches it */
+      acts.push_back({fmt::format("gw{} handoff-hint {}", glabel(g),
+				  sname(g.step_cs)),
+	  [gi](World& w) -> std::optional<std::string> {
+	    auto& g = w.gws[gi];
+	    w.hints.insert(uncompleted_hint(g.step_cs));
+	    g.step = HANDOFF_LEAVE;
+	    return std::nullopt;
+	  }});
+      break;
+    case HANDOFF_LEAVE:
+      acts.push_back({fmt::format("gw{} handoff-leave {}", glabel(g),
+				  sname(g.step_cs)),
+	  [gi](World& w) -> std::optional<std::string> {
+	    auto& g = w.gws[gi];
+	    fsio::leave_out out;
+	    cls_rgw_fsio_effects fx;
+	    auto save = w.head;
+	    if (counted_leave(w.head, g, g.step_cs, true, w.dead_for(g), out, fx,
+			      nullptr, true) < 0) {
+	      w.head = save;
+	      g.release_failed = 1;          // keeps its hint (H1)
+	      g.step = NONE;
+	      return std::nullopt;
+	    }
+	    apply_remove_head(w, fx);
+	    /* its writer open is gone:  the gateway holds nothing */
+	    auto& v = g.opens;
+	    v.erase(std::remove_if(v.begin(), v.end(), [&](const LOpen& o) {
+		      return o.writer && o.cs == g.step_cs;
+		    }), v.end());
+	    if (out.drained) {
+	      g.step = DRAIN_SEND;
+	      g.step_cs = *out.drained;
+	    } else {
+	      g.step = NONE;
+	    }
 	    return std::nullopt;
 	  }});
       break;
@@ -3018,8 +3108,70 @@ std::optional<std::string> start_finalize(World& w, const fid_t& from,
 
 void expirer_actions(const World& w0, std::vector<Action>& acts)
 {
+  /* §4.3, 8j:  an uncompleted publish, whatever its gateway's liveness:
+   * taken and published;  its hint dropped once the shadow is published
+   * or gone, and kept while a writer is bound, whose close publishes or
+   * hands off again */
+  if (cfg.handoff && w0.ex == EX_IDLE) {
+    for (const auto& hnt : w0.hints) {
+      if (hnt.kind != HintKind::UNCOMPLETED || !hnt.r) {
+	continue;
+      }
+      const fid_t cs = *hnt.r;
+      const auto* e = w0.head.hdr ? w0.head.hdr->find(cs) : nullptr;
+      if (!e || e->state == state::PUBLISHED) {
+	acts.push_back({fmt::format("expirer uncompleted-drop {}", sname(cs)),
+	    [cs](World& w) -> std::optional<std::string> {
+	      w.hints.erase(uncompleted_hint(cs));
+	      return std::nullopt;
+	    }});
+      } else if (e->state == state::RETIRED && e->drained) {
+	/* retired by a fenced finalize:  its drain, as the pass's step 5;
+	 * readers still bound drain it themselves */
+	acts.push_back({fmt::format("expirer uncompleted-drain {}", sname(cs)),
+	    [cs](World& w) -> std::optional<std::string> {
+	      const auto* e = w.head.hdr ? w.head.hdr->find(cs) : nullptr;
+	      if (e) {
+		w.gcq.push_back(drain_objects(w, *e));
+		cls_rgw_fsio_effects fx;
+		std::optional<fid_t> next;
+		m_forget(w.head, cs, fx, &next);
+		apply_remove_head(w, fx);
+	      }
+	      return std::nullopt;
+	    }});
+      } else if (e->state == state::PUBLISHING && e->uncompleted_publish &&
+		 e->publishing &&
+		 w0.dead().count(e->publishing->publisher.incarnation)) {
+	/* taken by an expirer presumed dead since, which may still be
+	 * publishing:  a fenced finalize, as for any dead publisher (§3.7) */
+	acts.push_back({fmt::format("expirer decide-finalize-uncompleted {}",
+				    sname(cs)),
+	    [cs](World& w) -> std::optional<std::string> {
+	      w.ex_from = cs;
+	      w.ex = EX_FF_DECIDED;
+	      return std::nullopt;
+	    }});
+      } else if (e->state == state::READY && e->uncompleted_publish &&
+		 !w0.head.bound(cs).writers) {
+	acts.push_back({fmt::format("expirer take-uncompleted {}", sname(cs)),
+	    [cs](World& w) -> std::optional<std::string> {
+	      cls_rgw_fsio_effects fx;
+	      auto save = w.head;
+	      if (m_take(w.head, xh(w.ex_inc), cs, fx) < 0) {
+		w.head = save;
+		return fmt::format("the expirer could not take the uncompleted "
+				   "publish of {}", sname(cs));
+	      }
+	      w.ex_to = cs;
+	      w.ex = cfg.tags ? EX_FF_TAGS : EX_FF_PUBLISH;
+	      return std::nullopt;
+	    }});
+      }
+    }
+  }
   auto dead = w0.dead();
-  if (dead.empty()) {
+  if (dead.empty() && w0.ex == EX_IDLE) {
     return;
   }
   if (w0.ex != EX_IDLE && w0.ex_crashes > 0) {
@@ -5093,12 +5245,16 @@ TEST(FSIOModel, Explore)
   cfg.lost_reply = env_int("FSIO_MODEL_LOST_REPLY", 0) != 0;
   cfg.tags = env_int("FSIO_MODEL_TAGS", 0) != 0;
   cfg.create = env_int("FSIO_MODEL_CREATE", 0) != 0;
+  cfg.handoff = env_int("FSIO_MODEL_HANDOFF", 0) != 0;
   if (auto d = std::getenv("FSIO_MODEL_DUP")) {
     for (auto m : ceph::split(d, ",")) {
       cfg.dup.emplace(m);
     }
   }
   cfg.versioned = env_int("FSIO_MODEL_VERSIONED", 0);
+  ASSERT_FALSE(cfg.handoff && cfg.versioned)
+    << "FSIO_MODEL_HANDOFF is unversioned:  the versioned hand-off is the "
+       "unit and harness tests'";
   ASSERT_FALSE(cfg.create && cfg.versioned)
     << "FSIO_MODEL_CREATE is unversioned:  a versioned create comes with "
        "the versioned publish (plan 8f)";

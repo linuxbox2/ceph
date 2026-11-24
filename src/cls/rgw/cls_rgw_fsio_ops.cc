@@ -553,7 +553,7 @@ int rgw_fsio_leave(cls_method_context_t hctx, ceph::buffer::list* in,
     }
     fsio::leave_out lout;
     int r = fsio::leave(h, op.caller, op.seq, op.cs, op.writer, op.expired,
-			lout, fx, intent ? &*intent : nullptr);
+			lout, fx, intent ? &*intent : nullptr, op.handoff);
     ret.already_applied = lout.already_applied;
     ret.publishing = lout.publishing;
     ret.abandoned = lout.abandoned;
@@ -649,6 +649,17 @@ int rgw_fsio_expire(cls_method_context_t hctx, ceph::buffer::list* in,
   }
   cls_rgw_fsio_expire_ret ret;
   int r = on_head(hctx, {}, [&](auto& h, auto& fx) {
+    if (op.uncompleted) {
+      /* §3.8, 8j:  an uncompleted publish taken;  versioned, its claim's
+       * epoch the OSD's, as fsio_leave records a publisher's (X31) */
+      std::optional<fsio::publish_intent> intent;
+      if (op.intent) {
+	intent = to_core(*op.intent);
+	intent->now_epoch = osd_epoch();
+      }
+      return fsio::take_uncompleted(h, op.caller, *op.uncompleted,
+				    intent ? &*intent : nullptr);
+    }
     fsio::expire_out eout;
     int r = fsio::expire(h, op.caller, op.expired, op.clear, eout, fx);
     ret.drained = !eout.drained.empty();
@@ -992,8 +1003,16 @@ std::string incarnation_prefix(uint64_t incarnation)
   return fmt::format("{:016x}_", incarnation);
 }
 
+/* §4.3, 8j:  an uncompleted publish's hint is keyed by its head and
+ * shadow, not an incarnation:  the gateway that wrote it may be alive */
+constexpr std::string_view UNCOMPLETED_PREFIX = "uncompleted_";
+
 std::string hint_key(const cls_rgw_fsio_hint& h, const std::string& oid)
 {
+  if (h.kind == cls_rgw_fsio_hint_kind::UNCOMPLETED_PUBLISH) {
+    return fmt::format("{}{}_{}", UNCOMPLETED_PREFIX, oid,
+		       h.r ? h.r->to_str() : std::string{});
+  }
   auto k = fmt::format("{}{:016x}_{}_{}", incarnation_prefix(h.incarnation),
 		       h.handle, static_cast<unsigned>(h.kind), oid);
   if (h.r) {
@@ -1046,6 +1065,7 @@ int rgw_fsio_open_hint_list(cls_method_context_t hctx, ceph::buffer::list* in,
 				HINT_LIST_READ_MAX);
   /* the OSD seeks to the prefix when it sorts after the marker */
   const std::string prefix =
+    op.uncompleted ? std::string(UNCOMPLETED_PREFIX) :
     op.incarnation ? incarnation_prefix(*op.incarnation) : std::string{};
   std::map<std::string, ceph::buffer::list> vals;
   bool more = false;

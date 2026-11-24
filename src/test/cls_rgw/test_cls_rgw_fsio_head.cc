@@ -824,6 +824,55 @@ TEST_F(FsioHead, CreateMakesACreatedHead)
   }
 }
 
+/* §3.4, §3.8, 8j:  through the methods:  a released shadow handed off
+ * keeps its data, ready, uncompleted_publish set;  fsio_expire takes it,
+ * the taker its publisher */
+TEST_F(FsioHead, HandoffAndTakeUncompleted)
+{
+  std::string key;
+  const auto head = make_head(key);
+  const auto s = write_and_close(head);	// publishing, GW1's
+  ASSERT_EQ(0, call(head, cls::rgw::method::fsio_publish_release,
+		    cls_rgw_fsio_cs_op{GW1, s}, (cls_rgw_fsio_flags_ret*)nullptr));
+  cls_rgw_fsio_leave_op lop;
+  lop.caller = GW1;
+  lop.seq = 13;
+  lop.cs = s;
+  lop.writer = true;
+  lop.handoff = true;
+  cls_rgw_fsio_leave_ret lret;
+  ASSERT_EQ(0, call(head, cls::rgw::method::fsio_leave, lop, &lret));
+  EXPECT_FALSE(lret.publishing);
+  auto entry = [&] {
+    std::string hb;
+    EXPECT_LE(0, getxattr(head, HDR, &hb));
+    buffer::list bl;
+    bl.append(hb);
+    cls_rgw_fsio_hdr hdr;
+    auto it = bl.cbegin();
+    decode(hdr, it);
+    for (const auto& e : hdr.chunk_sets) {
+      if (e.id == s) {
+	return std::optional(e);
+      }
+    }
+    return std::optional<cls_rgw_fsio_chunk_set>{};
+  };
+  auto e = entry();
+  ASSERT_TRUE(e);
+  EXPECT_EQ(cls_rgw_fsio_cs_state::READY, e->state);
+  EXPECT_TRUE(e->uncompleted_publish);
+  cls_rgw_fsio_expire_op eop;
+  eop.caller = GW2;
+  eop.uncompleted = s;
+  cls_rgw_fsio_expire_ret eret;
+  ASSERT_EQ(0, call(head, cls::rgw::method::fsio_expire, eop, &eret, &ioctx2));
+  e = entry();
+  ASSERT_TRUE(e && e->publishing);
+  EXPECT_EQ(cls_rgw_fsio_cs_state::PUBLISHING, e->state);
+  EXPECT_EQ(GW2, e->publishing->publisher);
+}
+
 /* §3, Z28 (A14):  a call naming an incarnation that is not its op's
  * origin returns EPERM and changes nothing */
 TEST_F(FsioHead, ForeignIncarnationReturnsEperm)

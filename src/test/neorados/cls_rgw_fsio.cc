@@ -344,6 +344,45 @@ CORO_TEST_F(NeoRadosClsRgwFsio, OpenHintListFilters, FsioTest) {
   co_return;
 }
 
+/* §4.3, 8j:  an uncompleted-publish hint is keyed by its head and
+ * shadow;  its own listing returns it alone, an incarnation's never, a
+ * bucket's with the rest */
+CORO_TEST_F(NeoRadosClsRgwFsio, OpenHintListUncompleted, FsioTest) {
+  co_await execute(shard, WriteOp{}.exec(
+                     f::open_hint_add(hint_op(0xa1, 1, "b1", "k1"))));
+  auto u = hint_op(0xa1, 1, "b1", "k2");
+  u.hint.kind = cls_rgw_fsio_hint_kind::UNCOMPLETED_PUBLISH;
+  u.hint.r = cls_rgw_fsio_id{9, 7};
+  co_await execute(shard, WriteOp{}.exec(f::open_hint_add(u)));
+  {
+    cls_rgw_fsio_hint_list_op lop;
+    lop.uncompleted = true;
+    cls_rgw_fsio_hint_list_ret ret;
+    co_await execute(shard, ReadOp{}.exec(f::open_hint_list(lop, &ret)));
+    EXPECT_EQ(1u, ret.hints.size());
+    if (ret.hints.size() != 1u) {
+      co_return;
+    }
+    EXPECT_EQ(cls_rgw_fsio_hint_kind::UNCOMPLETED_PUBLISH, ret.hints[0].kind);
+    EXPECT_EQ(std::optional(cls_rgw_fsio_id{9, 7}), ret.hints[0].r);
+  }
+  {
+    cls_rgw_fsio_hint_list_op lop;
+    lop.incarnation = 0xa1;
+    cls_rgw_fsio_hint_list_ret ret;
+    co_await execute(shard, ReadOp{}.exec(f::open_hint_list(lop, &ret)));
+    EXPECT_EQ(1u, ret.hints.size());
+  }
+  {
+    cls_rgw_fsio_hint_list_op lop;
+    lop.bucket = bucket_named("b1");
+    cls_rgw_fsio_hint_list_ret ret;
+    co_await execute(shard, ReadOp{}.exec(f::open_hint_list(lop, &ret)));
+    EXPECT_EQ(2u, ret.hints.size());
+  }
+  co_return;
+}
+
 /* §3.3:  a writer's hint merges by max in its epoch;  a truncate sets
  * the size exactly in a new epoch;  a hint from the old epoch merges
  * nothing and gets the current epoch and size */

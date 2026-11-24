@@ -182,6 +182,79 @@ TEST(cls_rgw_fsio, C1_publish_keeps_the_tags_it_was_given_to_expect)
   }
 }
 
+/* §3.4, §4.2, 8j:  the hand-off of a released shadow:  the last writer's
+ * open goes without freezing, uncompleted_publish set, the shadow ready
+ * as cur_shadow;  a writer's join clears it;  with another writer
+ * remaining, nothing is set */
+TEST(cls_rgw_fsio, J8_handoff_leaves_an_uncompleted_publish)
+{
+  auto h = head("C0");
+  auto s = construct(h, GW1);
+  leave_writer(h, GW1, s);                       // publishing
+  ASSERT_EQ(0, fsio::publish_release(h, GW1, s));
+  fsio::leave_out out;
+  cls_rgw_fsio_effects fx;
+  ASSERT_EQ(0, fsio::leave(h, GW1, next_seq(), s, true, {}, out, fx, nullptr,
+			   true));
+  EXPECT_FALSE(out.publishing);
+  const auto* e = h.hdr->find(s);
+  ASSERT_TRUE(e);
+  EXPECT_EQ(state::READY, e->state);
+  EXPECT_TRUE(e->uncompleted_publish);
+  EXPECT_EQ(0u, h.bound(s).writers);
+  EXPECT_EQ(std::optional(s), h.hdr->cur_shadow);
+  /* a writer joining binds it and clears the field:  its close publishes */
+  fsio::join_out jo;
+  cls_rgw_fsio_effects jfx;
+  ASSERT_EQ(0, fsio::join(h, {GW2, next_seq(), true, 1, 10, {}}, jo, jfx));
+  EXPECT_EQ(s, jo.bound);
+  EXPECT_FALSE(h.hdr->find(s)->uncompleted_publish);
+  leave_writer(h, GW2, s);
+  ASSERT_EQ(0, publish(h, GW2, s));
+}
+
+TEST(cls_rgw_fsio, J8_handoff_with_another_writer_sets_nothing)
+{
+  auto h = head("C0");
+  auto s = construct(h, GW1);
+  fsio::join_out jo;
+  cls_rgw_fsio_effects jfx;
+  ASSERT_EQ(0, fsio::join(h, {GW2, next_seq(), true, 1, 10, {}}, jo, jfx));
+  fsio::leave_out out;
+  cls_rgw_fsio_effects fx;
+  ASSERT_EQ(0, fsio::leave(h, GW1, next_seq(), s, true, {}, out, fx, nullptr,
+			   true));
+  EXPECT_FALSE(h.hdr->find(s)->uncompleted_publish);
+  EXPECT_EQ(1u, h.bound(s).writers);
+}
+
+/* §3.8, 8j:  the expirer takes an uncompleted publish, which it then
+ * publishes;  not while a writer is bound */
+TEST(cls_rgw_fsio, J8_expirer_takes_an_uncompleted_publish)
+{
+  auto h = head("C0");
+  auto s = construct(h, GW1);
+  leave_writer(h, GW1, s);
+  ASSERT_EQ(0, fsio::publish_release(h, GW1, s));
+  fsio::leave_out out;
+  cls_rgw_fsio_effects fx;
+  ASSERT_EQ(0, fsio::leave(h, GW1, next_seq(), s, true, {}, out, fx, nullptr,
+			   true));
+  auto busy = h;
+  fsio::join_out jo;
+  cls_rgw_fsio_effects jfx;
+  ASSERT_EQ(0, fsio::join(busy, {GW2, next_seq(), true, 1, 10, {}}, jo, jfx));
+  EXPECT_EQ(-CLS_RGW_ERR_FSIO_CONFLICT,
+	    fsio::take_uncompleted(busy, EXPIRER, s));
+  ASSERT_EQ(0, fsio::take_uncompleted(h, EXPIRER, s));
+  const auto* e = h.hdr->find(s);
+  ASSERT_TRUE(e && e->publishing);
+  EXPECT_EQ(state::PUBLISHING, e->state);
+  EXPECT_EQ(EXPIRER, e->publishing->publisher);
+  ASSERT_EQ(0, publish(h, EXPIRER, s));
+  EXPECT_FALSE(h.hdr && h.hdr->find(s) && h.hdr->find(s)->uncompleted_publish);
+}
+
 /* §3.1 step 0, Z24:  a writer's create-open of an absent name */
 int create_join(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& inc,
 		fsio::create_mode mode, fsio::join_out& out,
@@ -817,6 +890,40 @@ cls_rgw_fsio_head olh()
 }
 
 } // anonymous namespace
+
+/* §3.4, §3.8, 8j:  a written versioned publish handed off:  still
+ * publishing, its writer's open gone;  the complete form admits it with
+ * no expired publisher */
+TEST(cls_rgw_fsio, J8_handoff_of_a_written_version)
+{
+  auto h = olh();
+  fsio::join_out out;
+  cls_rgw_fsio_effects fx;
+  ASSERT_EQ(0, fsio::join(h, {GW1, next_seq(), true, 1, 10, {}, "I1"}, out, fx));
+  ASSERT_EQ(0, fsio::ready(h, GW1, out.bound, {{0, 0}}));
+  fsio::publish_intent intent{"I2", "tok", 77};
+  fsio::leave_out lout;
+  cls_rgw_fsio_effects lfx;
+  ASSERT_EQ(0, fsio::leave(h, GW1, next_seq(), out.bound, true, {}, lout, lfx,
+			   &intent));
+  ASSERT_TRUE(lout.publishing);
+  ASSERT_EQ(0, fsio::leave(h, GW1, next_seq(), out.bound, true, {}, lout, lfx,
+			   nullptr, true));
+  const auto* e = h.hdr->find(out.bound);
+  ASSERT_TRUE(e);
+  EXPECT_EQ(state::PUBLISHING, e->state);
+  EXPECT_TRUE(e->uncompleted_publish);
+  EXPECT_EQ(0u, h.bound(out.bound).writers);
+  fsio::replace_in in;
+  in.mode = fsio::replace_mode::PUBLISH;
+  in.versioned = true;
+  in.complete = true;
+  in.caller = EXPIRER;
+  in.shadow = out.bound;
+  fsio::replace_out rout;
+  cls_rgw_fsio_effects rfx;
+  ASSERT_EQ(0, fsio::replace_head(h, in, rout, rfx));
+}
 
 TEST(cls_rgw_fsio_versioned, ocnt_add_and_remove)
 {

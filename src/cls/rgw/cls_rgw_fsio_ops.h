@@ -198,6 +198,7 @@ struct cls_rgw_fsio_leave_op {
   bool writer = false;
   std::set<uint64_t> expired;
   std::optional<cls_rgw_fsio_intent> intent;
+  bool handoff = false;          // a writer's:  its publish handed off (§3.4, 8j)
 
   void encode(ceph::buffer::list& bl) const {
     ENCODE_START(1, 1, bl);
@@ -207,6 +208,7 @@ struct cls_rgw_fsio_leave_op {
     encode(writer, bl);
     encode(expired, bl);
     encode(intent, bl);
+    encode(handoff, bl);
     ENCODE_FINISH(bl);
   }
   void decode(ceph::buffer::list::const_iterator& bl) {
@@ -217,6 +219,7 @@ struct cls_rgw_fsio_leave_op {
     decode(writer, bl);
     decode(expired, bl);
     decode(intent, bl);
+    decode(handoff, bl);
     DECODE_FINISH(bl);
   }
   void dump(ceph::Formatter *f) const;
@@ -568,12 +571,16 @@ struct cls_rgw_fsio_expire_op {
   cls_rgw_fsio_handle caller;
   std::set<uint64_t> expired;
   std::optional<cls_rgw_fsio_id> clear;   // an abandoned construction (§3.8)
+  std::optional<cls_rgw_fsio_id> uncompleted;  // an uncompleted publish to take (§3.8, 8j)
+  std::optional<cls_rgw_fsio_intent> intent;   // with it, versioned:  the claim
 
   void encode(ceph::buffer::list& bl) const {
     ENCODE_START(1, 1, bl);
     encode(caller, bl);
     encode(expired, bl);
     encode(clear, bl);
+    encode(uncompleted, bl);
+    encode(intent, bl);
     ENCODE_FINISH(bl);
   }
   void decode(ceph::buffer::list::const_iterator& bl) {
@@ -581,6 +588,8 @@ struct cls_rgw_fsio_expire_op {
     decode(caller, bl);
     decode(expired, bl);
     decode(clear, bl);
+    decode(uncompleted, bl);
+    decode(intent, bl);
     DECODE_FINISH(bl);
   }
   void dump(ceph::Formatter *f) const;
@@ -807,6 +816,7 @@ struct cls_rgw_fsio_hint_list_op {
   uint32_t max = 0;
   std::optional<rgw_bucket> bucket;
   std::optional<uint64_t> incarnation;
+  bool uncompleted = false;      // the uncompleted-publish hints instead (§4.3, 8j)
 
   void encode(ceph::buffer::list& bl) const {
     ENCODE_START(1, 1, bl);
@@ -814,6 +824,7 @@ struct cls_rgw_fsio_hint_list_op {
     encode(max, bl);
     encode(bucket, bl);
     encode(incarnation, bl);
+    encode(uncompleted, bl);
     ENCODE_FINISH(bl);
   }
   void decode(ceph::buffer::list::const_iterator& bl) {
@@ -822,6 +833,7 @@ struct cls_rgw_fsio_hint_list_op {
     decode(max, bl);
     decode(bucket, bl);
     decode(incarnation, bl);
+    decode(uncompleted, bl);
     DECODE_FINISH(bl);
   }
   void dump(ceph::Formatter *f) const;

@@ -139,6 +139,13 @@ fn quick() -> Vec<Run> {
                                     ("FSIO_MODEL_CREATE", "1"), ("FSIO_MODEL_RESENDS", "0")]));
     v.push(run("quick-wr-create", &[("FSIO_MODEL_ROLES", "wr"), ("FSIO_MODEL_S3_OPS", "1"),
                                     ("FSIO_MODEL_CREATE", "1"), ("FSIO_MODEL_RESENDS", "0")]));
+    /* §4.2, 8j:  a failed publish handed off, taken by the expirer or a
+     * later writer (FSIO_MODEL_HANDOFF, off elsewhere) */
+    v.push(run("quick-w-handoff", &[("FSIO_MODEL_ROLES", "w"), ("FSIO_MODEL_S3_OPS", "0"),
+                                    ("FSIO_MODEL_HANDOFF", "1"), ("FSIO_MODEL_RESENDS", "0")]));
+    v.push(run("quick-ww-handoff", &[("FSIO_MODEL_ROLES", "ww"), ("FSIO_MODEL_S3_OPS", "0"),
+                                     ("FSIO_MODEL_HANDOFF", "1"), ("FSIO_MODEL_RESENDS", "0"),
+                                     ("FSIO_MODEL_ZOMBIES", "0")]));
     /* §3.5, C1:  object tags, a tag write racing a publish
      * (FSIO_MODEL_TAGS, off elsewhere) */
     v.push(run("quick-w-tags", &[("FSIO_MODEL_ROLES", "w"), ("FSIO_MODEL_S3_OPS", "2"),
@@ -474,6 +481,9 @@ fn sample() -> Vec<Run> {
          * before it stay as they were */
         ("sample-ww-create", vec![("FSIO_MODEL_ROLES", "ww"), ("FSIO_MODEL_S3_OPS", "1"),
                                   ("FSIO_MODEL_CREATE", "1")]),
+        /* §4.2, 8j:  the hand-off (FSIO_MODEL_HANDOFF) */
+        ("sample-wr-handoff", vec![("FSIO_MODEL_ROLES", "wr"), ("FSIO_MODEL_S3_OPS", "1"),
+                                   ("FSIO_MODEL_HANDOFF", "1")]),
     ];
     configs
         .iter()

@@ -265,7 +265,11 @@ private:
   /* fsio_leave of cs in a role, through sequenced() */
   int leave(const DoutPrefixProvider* dpp, const cls_rgw_fsio_id& cs,
 	    bool writer, cls_rgw_fsio_leave_ret* ret,
-	    const cls_rgw_fsio_intent* intent = nullptr);
+	    const cls_rgw_fsio_intent* intent = nullptr, bool handoff = false);
+  /* §4.2, 8j:  a close whose publish could not complete hands it off:
+   * the uncompleted-publish hint, then the hand-off leave;  the handle
+   * then holds nothing of the write */
+  int handoff(const DoutPrefixProvider* dpp);
 
   /* §4.2, versioned:  an instance head's object, by its instance */
   int instance_obj(const std::string& instance, std::string* oid,

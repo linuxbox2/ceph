@@ -172,6 +172,9 @@ struct cls_rgw_fsio_chunk_set {
   bool drained = false;
   bool shares_tail = false;              // a tail-keeping write retired it (§3.6)
   std::set<cls_rgw_fsio_id> after;       // drains only after these have (§3.6)
+  /* §2.2, §4.2:  a hand-off left the last writer's publish uncompleted,
+   * nobody holding it:  that writer's identity (8j) */
+  std::optional<std::string> uncompleted_publish;
 
   bool is_shadow() const {
     return state == cls_rgw_fsio_cs_state::CONSTRUCTING ||
@@ -191,6 +194,7 @@ struct cls_rgw_fsio_chunk_set {
     encode(drained, bl);
     encode(shares_tail, bl);
     encode(after, bl);
+    encode(uncompleted_publish, bl);
     ENCODE_FINISH(bl);
   }
   void decode(ceph::buffer::list::const_iterator& bl) {
@@ -208,6 +212,7 @@ struct cls_rgw_fsio_chunk_set {
     decode(drained, bl);
     decode(shares_tail, bl);
     decode(after, bl);
+    decode(uncompleted_publish, bl);
     DECODE_FINISH(bl);
   }
   void dump(ceph::Formatter *f) const;
@@ -441,6 +446,7 @@ WRITE_CLASS_ENCODER(cls_rgw_fsio_ocnt)
 enum class cls_rgw_fsio_hint_kind : uint8_t {
   PRESENCE = 1,   // the incarnation holds FSIO state on the target
   PUBLISH  = 2,   // one publish's leftovers on the target
+  UNCOMPLETED_PUBLISH = 3,  // a publish handed off, nobody holding it (§4.3, 8j)
 };
 
 enum class cls_rgw_fsio_hint_target : uint8_t {
@@ -455,7 +461,8 @@ struct cls_rgw_fsio_hint {
   rgw_obj_key key;                // the name;  with its instance, for INSTANCE_HEAD
   uint64_t incarnation = 0;       // whose state it covers
   uint64_t handle = 0;            // which of its handles (Z4)
-  std::optional<cls_rgw_fsio_id> r;  // PUBLISH on a HEAD:  the leaf clone
+  std::optional<cls_rgw_fsio_id> r;  // PUBLISH on a HEAD:  the leaf clone;
+                                     // UNCOMPLETED_PUBLISH:  the shadow (8j)
 
   void encode(ceph::buffer::list& bl) const {
     ENCODE_START(1, 1, bl);

@@ -1339,7 +1339,7 @@ int RadosFSIOObject::begin_write(const DoutPrefixProvider* dpp, uint32_t flags,
 int RadosFSIOObject::leave(const DoutPrefixProvider* dpp,
 			   const cls_rgw_fsio_id& id, bool writer,
 			   cls_rgw_fsio_leave_ret* ret,
-			   const cls_rgw_fsio_intent* intent)
+			   const cls_rgw_fsio_intent* intent, bool handoff)
 {
   int r = sequenced(dpp, [&] (neorados::WriteOp& op) {
     cls_rgw_fsio_leave_op in;
@@ -1347,6 +1347,7 @@ int RadosFSIOObject::leave(const DoutPrefixProvider* dpp,
     in.seq = seq + 1;
     in.cs = id;
     in.writer = writer;
+    in.handoff = handoff;
     if (intent) {
       in.intent = *intent;	// §4.2 step 2:  the claim, the epoch returned
     }
@@ -1526,13 +1527,20 @@ int RadosFSIOObject::drain_count(const DoutPrefixProvider* dpp)
 
 int RadosFSIOObject::close(const DoutPrefixProvider* dpp, uint32_t flags)
 {
+  int uncompleted = 0;
   if (writing) {
-    if (int r = end_write(dpp, flags); r < 0) {
+    if (int r = end_write(dpp, flags); r == -EAGAIN) {
+      /* §4.2, 8j:  nobody is left to retry this publish:  handed off */
+      if (int e = handoff(dpp); e < 0) {
+	return e;
+      }
+      uncompleted = r;
+    } else if (r < 0) {
       return r;
     }
   }
   if (!reading) {
-    return 0;
+    return uncompleted;
   }
   cls_rgw_fsio_leave_ret ret;
   int r = leave(dpp, cs, false, &ret);
@@ -1577,10 +1585,13 @@ int RadosFSIOObject::close(const DoutPrefixProvider* dpp, uint32_t flags)
     }
   }
   if (keep || writing) {
-    return 0;
+    return uncompleted;
   }
   hinted = false;
-  return presence_hint(dpp, false, false);
+  if (int p = presence_hint(dpp, false, false); p < 0) {
+    return p;
+  }
+  return uncompleted;
 }
 
 int RadosFSIOObject::publish_hint(const DoutPrefixProvider* dpp, bool add,
@@ -2396,6 +2407,56 @@ int RadosFSIOObject::complete_versioned(const DoutPrefixProvider* dpp,
 		h);
   if (ret.drained) {
     drain(dpp, *ret.drained);
+  }
+  return 0;
+}
+
+int RadosFSIOObject::handoff(const DoutPrefixProvider* dpp)
+{
+  /* §4.3:  the hint first, keyed by the head and the shadow, so the
+   * expirer always reaches the uncompleted publish */
+  cls_rgw_fsio_hint_op in;
+  in.hint.kind = cls_rgw_fsio_hint_kind::UNCOMPLETED_PUBLISH;
+  in.hint.target = cls_rgw_fsio_hint_target::HEAD;
+  in.hint.bucket = info.bucket;
+  in.hint.key = rgw_obj_key(key.name);
+  in.hint.incarnation = h.incarnation;
+  in.hint.handle = h.handle;
+  in.hint.r = wcs;
+  in.oid = head_oid;
+  const auto shards = static_cast<uint32_t>(
+    dpp->get_cct()->_conf.get_val<uint64_t>("rgw_fsio_open_hints_num_shards"));
+  neorados::WriteOp op;
+  op.exec(neorados::cls::rgw_fsio::open_hint_add(in));
+  if (int r = exec(rgw::fsio::open_hint_shard_oid(
+		     rgw::fsio::open_hint_shard(in.oid, shards)),
+		   store->getRados()->fsio_hint_ioc(), std::move(op)); r < 0) {
+    ldpp_dout(dpp, 0) << "ERROR: FSIO:  the uncompleted-publish hint for "
+		      << wcs.to_str() << " on " << head_oid << ":  "
+		      << cpp_strerror(-r) << dendl;
+    return r;
+  }
+  cls_rgw_fsio_leave_ret ret;
+  if (int r = leave(dpp, wcs, true, &ret, nullptr, true); r < 0) {
+    return r;			// the hint stays, as a failed release's (H1)
+  }
+  ldpp_dout(dpp, 1) << "FSIO:  the publish of " << wcs.to_str() << " on "
+		    << head_oid << " handed off" << dendl;
+  /* a written version's publish hint:  the uncompleted-publish hint
+   * leads the expirer to it now */
+  if (linking) {
+    instance_hint(dpp, false, cls_rgw_fsio_hint_kind::PUBLISH,
+		  linking->first.instance, h);
+    linking.reset();
+  }
+  writing = false;
+  if (ret.drained) {
+    drain(dpp, *ret.drained);
+  }
+  if (!reading) {
+    uncount(dpp);
+    hinted = false;
+    return presence_hint(dpp, false, false);
   }
   return 0;
 }
