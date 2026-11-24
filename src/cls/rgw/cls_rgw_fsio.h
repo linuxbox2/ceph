@@ -91,6 +91,7 @@ enum class cls_rgw_fsio_check : uint8_t {
   LOST_TRUNCATE_KEEPS_EPOCH,           // the gateway's lost truncate (model)
   FINALIZE_RESEND_RETURNS_TO,          // fsio_fenced_finalize, §3.7
   FORGET_REPORTS_DRAIN_BY_STATE,       // fsio_forget, §3.4
+  C1_PUBLISH_COMPARES_TAGS,            // fsio_replace_head's publish, §3.5
 };
 
 #ifdef CLS_RGW_FSIO_SKIP_CHECKS
@@ -116,6 +117,7 @@ struct cls_rgw_fsio_head {
   std::optional<cls_rgw_fsio_hdr> hdr;
   std::map<uint64_t, cls_rgw_fsio_opens> opens;  // by incarnation
   bool olh = false;                    // carries RGW_ATTR_OLH_INFO (versioned)
+  ceph::buffer::list tags;             // RGW_ATTR_TAGS, opaque;  empty when absent
 
   /* §2.2:  no ID tag and no OLH info */
   bool tracking_only() const { return exists && id_tag.empty() && !olh; }
@@ -137,6 +139,7 @@ struct cls_rgw_fsio_head {
     encode(hdr, bl);
     encode(opens, bl);
     encode(olh, bl);
+    encode(tags, bl);
     ENCODE_FINISH(bl);
   }
   void decode(ceph::buffer::list::const_iterator& bl) {
@@ -147,10 +150,22 @@ struct cls_rgw_fsio_head {
     decode(hdr, bl);
     decode(opens, bl);
     decode(olh, bl);
+    decode(tags, bl);
     DECODE_FINISH(bl);
   }
 };
 WRITE_CLASS_ENCODER(cls_rgw_fsio_head)
+
+/* §3.5, Y18, Z15:  the tags an unversioned publish keeps:  the committed
+ * head's when it is an S3 object (it has an ID tag), else the tags the
+ * content had, which the publisher passes.  The gateway evaluates policy
+ * with the same rule (C1) */
+inline ceph::buffer::list fsio_publish_tags(bool head_is_object,
+					    const ceph::buffer::list& head_tags,
+					    const ceph::buffer::list& passed)
+{
+  return head_is_object ? head_tags : passed;
+}
 
 /* what the instance-head methods see and change */
 struct cls_rgw_fsio_instance_head {
@@ -324,6 +339,10 @@ struct replace_in {
   bool complete = false;            // versioned PUBLISH:  for a dead publisher
   expired_t expired;                // with complete
   bool keep_tail = false;           // SUPERSEDE:  the new object reuses the tail (Y2)
+  ceph::buffer::list tags;          // PUBLISH onto a tracking-only head (Z15)
+  /* unversioned PUBLISH:  the tags the publisher evaluated policy with;
+   * the publish fails with ECANCELED if it would keep others (C1) */
+  std::optional<ceph::buffer::list> expected_tags;
 };
 struct replace_out {
   bool keep_tail = false;           // else the caller collects the replaced chain

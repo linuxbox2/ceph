@@ -77,6 +77,8 @@ int load_head(cls_method_context_t hctx, cls_rgw_fsio_head& h, loaded& l)
 	h.manifest = v;
       } else if (k == OLH_INFO) {
 	h.olh = true;
+      } else if (k == TAGS) {
+	h.tags = v;
       } else if (k.starts_with(FSIO_PREFIX)) {
 	l.fsio[k] = v;
 	auto it = v.cbegin();
@@ -276,6 +278,8 @@ fsio::replace_in to_core(const cls_rgw_fsio_replace_op& op)
   in.complete = op.complete;
   in.expired = op.expired;
   in.keep_tail = op.keep_tail;
+  in.tags = op.tags;
+  in.expected_tags = op.expected_tags;
   return in;
 }
 
@@ -945,17 +949,10 @@ int rgw_fsio_replace_head(cls_method_context_t hctx, ceph::buffer::list* in,
       }
     }
   }
-  /* §3.5, Y18, Z15, C1:  the publish's only writer of tags:  the
-   * committed head's when it is an S3 object, else the tags the content
-   * had, which the publisher passes */
-  if (in_core.mode == fsio::replace_mode::PUBLISH) {
-    if (!h.id_tag.empty()) {
-      if (auto t = l.all.find(std::string(TAGS)); t != l.all.end()) {
-	kept[t->first] = t->second;
-      }
-    } else if (op.tags.length()) {
-      kept[std::string(TAGS)] = op.tags;
-    }
+  /* §3.5, Y18, Z15, C1:  the publish's only writer of tags:  those the
+   * core kept (fsio_publish_tags()) */
+  if (in_core.mode == fsio::replace_mode::PUBLISH && h.tags.length()) {
+    kept[std::string(TAGS)] = h.tags;
   }
   if (!fx.remove_head) {
     kept.merge(records_of(h));

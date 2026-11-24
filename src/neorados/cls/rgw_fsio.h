@@ -127,6 +127,12 @@ namespace m = ::cls::rgw::method;
   return detail::call(m::fsio_expire, in, ret, ec);
 }
 
+/* §3.5 item 6, Y16:  a later write open's identity, not sequenced */
+[[nodiscard]] inline auto writer_identity(const cls_rgw_fsio_identity_op& in)
+{
+  return detail::call(m::fsio_writer_identity, in);
+}
+
 /* §3.4 step 3:  the reply's drained is a holder the forget let drain */
 [[nodiscard]] inline auto forget(const cls_rgw_fsio_cs_op& in,
                                  cls_rgw_fsio_forget_ret* ret = nullptr,

@@ -152,7 +152,8 @@ protected:
   }
   /* the publish in the head write's op, RGW's writes after it */
   int publish(const std::string& head, const cls_rgw_fsio_id& s, uint64_t r,
-	      cls_rgw_fsio_replace_ret& ret, const std::string& tags = {}) {
+	      cls_rgw_fsio_replace_ret& ret, const std::string& tags = {},
+	      std::optional<std::string> expected = std::nullopt) {
     ObjectWriteOperation op;
     buffer::list out, t, m;
     int rval = 0;
@@ -160,6 +161,9 @@ protected:
     in.caller = GW1;
     in.shadow = s;
     in.tags.append(tags);
+    if (expected) {
+      in.expected_tags.emplace().append(*expected);
+    }
     cls_rgw_fsio_replace_head(op, in, &out, &rval);
     t.append("t1");
     m.append("S");
@@ -687,6 +691,60 @@ TEST_F(FsioHead, PublishKeepsTags)
     ASSERT_EQ(-ENODATA, getxattr(head, "user.rgw.idtag"));   // tracking-only
     cls_rgw_fsio_replace_ret ret;
     ASSERT_EQ(0, publish(head, s, 1012, ret, "tagB"));
+    std::string v;
+    ASSERT_LE(0, getxattr(head, "user.rgw.x-amz-tagging", &v));
+    EXPECT_EQ("tagB", v);
+  }
+}
+
+/* §3.5, C1:  a publish whose expected tags differ from those it would
+ * keep returns ECANCELED, and its op changes nothing:  RGW's writes after
+ * it do not land, the shadow stays publishing;  with them it applies */
+TEST_F(FsioHead, PublishComparesTags)
+{
+  {
+    std::string key;
+    const auto head = make_head(key);
+    buffer::list tg;
+    tg.append("tagA");
+    ASSERT_EQ(0, ioctx.setxattr(head, "user.rgw.x-amz-tagging", tg));
+    const auto s = write_and_close(head);
+    std::string hdr0;
+    ASSERT_LE(0, getxattr(head, HDR, &hdr0));
+    cls_rgw_fsio_replace_ret ret;
+    EXPECT_EQ(-ECANCELED, publish(head, s, 1020, ret, "tagC", "tagB"));
+    std::string v;
+    ASSERT_LE(0, getxattr(head, "user.rgw.idtag", &v));
+    EXPECT_EQ("t0", v) << "RGW's writes landed";
+    std::string hdr1;
+    ASSERT_LE(0, getxattr(head, HDR, &hdr1));
+    EXPECT_EQ(hdr0, hdr1);
+    ASSERT_EQ(0, publish(head, s, 1020, ret, "tagC", "tagA"));
+    ASSERT_LE(0, getxattr(head, "user.rgw.x-amz-tagging", &v));
+    EXPECT_EQ("tagA", v);
+  }
+  {
+    std::string key;                   // no tags:  absent matches empty
+    const auto head = make_head(key);
+    const auto s = write_and_close(head);
+    cls_rgw_fsio_replace_ret ret;
+    ASSERT_EQ(0, publish(head, s, 1021, ret, "tagC", ""));
+    EXPECT_EQ(-ENODATA, getxattr(head, "user.rgw.x-amz-tagging"));
+  }
+  {
+    std::string key;                   // tracking-only:  the passed tags
+    const auto head = make_head(key);
+    const auto s = write_and_close(head);
+    ObjectWriteOperation op;
+    buffer::list out;
+    int rval = 0;
+    auto in = replace(fsio::replace_mode::DELETE, 1022);
+    in.expected_id_tag = "t0";
+    cls_rgw_fsio_replace_head(op, in, &out, &rval);
+    ASSERT_EQ(0, ioctx.operate(head, &op, OPERATION_RETURNVEC));
+    cls_rgw_fsio_replace_ret ret;
+    EXPECT_EQ(-ECANCELED, publish(head, s, 1023, ret, "tagB", ""));
+    ASSERT_EQ(0, publish(head, s, 1023, ret, "tagB", "tagB"));
     std::string v;
     ASSERT_LE(0, getxattr(head, "user.rgw.x-amz-tagging", &v));
     EXPECT_EQ("tagB", v);

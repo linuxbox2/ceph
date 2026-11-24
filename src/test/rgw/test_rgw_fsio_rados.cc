@@ -35,7 +35,11 @@
 #include "rgw/driver/rados/rgw_rados.h"
 #include "rgw/driver/rados/rgw_sal_rados.h"
 #include "rgw/driver/rados/rgw_tools.h"
+#include "rgw/rgw_acl.h"
 #include "rgw/rgw_common.h"
+#include "rgw/rgw_hex.h"
+#include "rgw/rgw_object_ownership.h"
+#include "rgw/rgw_tag.h"
 #include "rgw/rgw_req_context.h"
 #include "rgw/rgw_sal.h"
 #include "rgw/rgw_sal_config.h"
@@ -2069,6 +2073,251 @@ TEST_F(FSIORadosPublish, PublishOfANonPublishingShadowFails)
   std::string now;
   ASSERT_EQ(0, get("obj", &now));
   EXPECT_EQ("same", diff(now, a, a));
+}
+
+/* the driver's step 8d:  the publish's attribute rules (FSIO design
+ * §3.5).  The writer is not the bucket's owner, so the ownership
+ * setting decides whose object the publish makes */
+class FSIORadosAttrs : public FSIORadosGC {
+protected:
+  const rgw_owner other{rgw_user{"", "fsio-other-writer"}};
+
+  std::unique_ptr<rgw::sal::Object::FSIOObject> open_as(
+    const std::string& key, const rgw_owner& who) {
+    auto obj = bucket->get_object(rgw_obj_key(key));
+    auto [r, fh] = obj->get_fsio_handle(
+      env->dpp.get(), rgw::sal::Object::FSIOObject::OPEN_FLAG_WRITE, nullptr,
+      &who);
+    EXPECT_EQ(0, r);
+    return std::move(fh);
+  }
+  void set_ownership(rgw::s3::ObjectOwnership o) {
+    rgw::s3::OwnershipControls c;
+    c.object_ownership = o;
+    rgw::sal::Attrs a;
+    encode(c, a[RGW_ATTR_OWNERSHIP_CONTROLS]);
+    ASSERT_EQ(0, bucket->merge_and_store_attrs(env->dpp.get(), a, null_yield));
+  }
+  /* an attribute of the head, read raw:  no object state in between */
+  std::optional<ceph::buffer::list> head_attr(const std::string& key,
+					      const std::string& name) {
+    const auto head = head_of(key);
+    boost::container::flat_map<std::string, ceph::buffer::list> attrs;
+    neo().execute(neorados::Object{head.oid}, ioc_of(head.pool),
+		  neorados::ReadOp{}.get_xattrs(&attrs, nullptr), nullptr,
+		  ceph::async::use_blocked);
+    if (auto i = attrs.find(name); i != attrs.end()) {
+      return i->second;
+    }
+    return std::nullopt;
+  }
+  void set_head_attr(const std::string& key, const char* name,
+		     const std::string& v) {
+    auto obj = bucket->get_object(rgw_obj_key(key));
+    ceph::buffer::list bl;
+    bl.append(v);
+    ASSERT_EQ(0, obj->modify_obj_attrs(name, bl, null_yield, env->dpp.get()));
+  }
+  /* the head's tags as S3 writes them:  one tag, "k" = v */
+  static ceph::buffer::list tags(const std::string& v) {
+    RGWObjTags t;
+    t.add_tag("k", v);
+    ceph::buffer::list bl;
+    t.encode(bl);
+    return bl;
+  }
+  void set_tags(const std::string& key, const std::string& v) {
+    auto obj = bucket->get_object(rgw_obj_key(key));
+    auto bl = tags(v);
+    ASSERT_EQ(0, obj->modify_obj_attrs(RGW_ATTR_TAGS, bl, null_yield,
+				       env->dpp.get()));
+  }
+  static std::string tag_value(const ceph::buffer::list& bl) {
+    RGWObjTags t;
+    auto it = bl.cbegin();
+    t.decode(it);
+    auto i = t.get_tags().find("k");
+    return i == t.get_tags().end() ? std::string{} : i->second;
+  }
+  std::optional<rgw_owner> acl_owner(const std::string& key) {
+    auto bl = head_attr(key, RGW_ATTR_ACL);
+    if (!bl) {
+      return std::nullopt;
+    }
+    RGWAccessControlPolicy policy;
+    auto it = bl->cbegin();
+    decode(policy, it);
+    return policy.get_owner().id;
+  }
+  /* a write of one byte by a writer opened as who, published */
+  void publish_as(const std::string& key, const rgw_owner& who) {
+    auto w = open_as(key, who);
+    ASSERT_TRUE(w);
+    ASSERT_EQ(0, write(w, 4 * MiB, {"Z"}));
+    ASSERT_EQ(0, w->end_write(env->dpp.get(), 0));
+  }
+  /* the writer_identity a handle's record holds for its shadow */
+  std::string identity_of(const std::string& key,
+			  const cls_rgw_fsio_handle& h) {
+    auto rec = records_of(head_of(key), h.incarnation);
+    if (!rec.opens) {
+      return "(no record)";
+    }
+    auto ho = rec.opens->handles.find(h.handle);
+    if (ho == rec.opens->handles.end()) {
+      return "(no handle)";
+    }
+    for (const auto& [id, c] : ho->second.chunk_sets) {
+      if (c.writers) {
+	return c.writer_identity;
+      }
+    }
+    return "(not a writer)";
+  }
+};
+
+/* §3.5 item 6, Y16:  a write open records its identity, at the open or
+ * at a reader's begin_write();  a later write open with another identity
+ * replaces it */
+TEST_F(FSIORadosAttrs, WriterRecordsItsIdentity)
+{
+  ASSERT_EQ(0, put("obj", pattern(9 * MiB, 1)));
+  const rgw_owner third{rgw_user{"", "fsio-third-writer"}};
+  auto w = open_as("obj", other);
+  ASSERT_TRUE(w);
+  const auto h = rados_fsio(w)->handle();
+  EXPECT_EQ(to_string(other), identity_of("obj", h));
+  ASSERT_EQ(0, w->begin_write(env->dpp.get(), 0, &third));
+  EXPECT_EQ(to_string(third), identity_of("obj", h));
+  auto r = open("obj", false);
+  ASSERT_TRUE(r);
+  ASSERT_EQ(0, r->begin_write(env->dpp.get(), 0, &other));
+  EXPECT_EQ(to_string(other), identity_of("obj", rados_fsio(r)->handle()));
+}
+
+/* §3.5, X14:  the owner and ACL a PUT by the writer without ACL headers
+ * gets, under each ownership setting */
+TEST_F(FSIORadosAttrs, PublishOwnerFollowsObjectWriter)
+{
+  ASSERT_EQ(0, put("obj", pattern(9 * MiB, 1)));
+  set_ownership(rgw::s3::ObjectOwnership::ObjectWriter);
+  publish_as("obj", other);
+  EXPECT_EQ(std::optional<rgw_owner>(other), acl_owner("obj"));
+}
+
+TEST_F(FSIORadosAttrs, PublishOwnerFollowsBucketOwnerEnforced)
+{
+  ASSERT_EQ(0, put("obj", pattern(9 * MiB, 1)));
+  set_ownership(rgw::s3::ObjectOwnership::BucketOwnerEnforced);
+  publish_as("obj", other);
+  EXPECT_EQ(std::optional<rgw_owner>(bucket->get_owner()), acl_owner("obj"));
+}
+
+/* without the bucket-owner-full-control canned ACL, which a publish never
+ * has, BucketOwnerPreferred keeps the writer */
+TEST_F(FSIORadosAttrs, PublishOwnerFollowsBucketOwnerPreferred)
+{
+  ASSERT_EQ(0, put("obj", pattern(9 * MiB, 1)));
+  set_ownership(rgw::s3::ObjectOwnership::BucketOwnerPreferred);
+  publish_as("obj", other);
+  EXPECT_EQ(std::optional<rgw_owner>(other), acl_owner("obj"));
+}
+
+/* Y18, C1:  tags set on the head after the writer opened survive the
+ * publish:  the attribute clone's older tags are not written over them */
+TEST_F(FSIORadosAttrs, PublishKeepsTheHeadsCurrentTags)
+{
+  ASSERT_EQ(0, put("obj", pattern(9 * MiB, 1)));
+  set_tags("obj", "at-open");
+  auto w = open_as("obj", other);
+  ASSERT_TRUE(w);
+  ASSERT_EQ(0, write(w, 4 * MiB, {"Z"}));
+  set_tags("obj", "at-publish");
+  ASSERT_EQ(0, w->end_write(env->dpp.get(), 0));
+  auto t = head_attr("obj", RGW_ATTR_TAGS);
+  ASSERT_TRUE(t);
+  EXPECT_EQ("at-publish", tag_value(*t));
+}
+
+/* §3.5, C1:  a tag write between the publish's read of the tags and its
+ * head write fails that try with ECANCELED;  the next try reads again,
+ * and the tags kept are the ones that try evaluated */
+TEST_F(FSIORadosAttrs, PublishRetriesOnATagWrite)
+{
+  ASSERT_EQ(0, put("obj", pattern(9 * MiB, 1)));
+  set_tags("obj", "first");
+  auto w = open_as("obj", other);
+  ASSERT_TRUE(w);
+  ASSERT_EQ(0, write(w, 4 * MiB, {"Z"}));
+  std::vector<std::string> evaluated;
+  rados_fsio(w)->after_tags_read([&] (const ceph::buffer::list& bl) {
+    evaluated.push_back(tag_value(bl));
+    if (evaluated.size() == 1) {
+      set_tags("obj", "second");
+    }
+  });
+  ASSERT_EQ(0, w->end_write(env->dpp.get(), 0));
+  ASSERT_EQ(2u, evaluated.size());
+  EXPECT_EQ("first", evaluated[0]);
+  EXPECT_EQ("second", evaluated[1]);
+  auto t = head_attr("obj", RGW_ATTR_TAGS);
+  ASSERT_TRUE(t);
+  EXPECT_EQ("second", tag_value(*t));
+  std::string now;
+  ASSERT_EQ(0, get("obj", &now));
+  EXPECT_EQ('Z', now[4 * MiB]);
+}
+
+/* §3.5:  the per-version attributes do not carry over, as a copy's
+ * source's do not */
+TEST_F(FSIORadosAttrs, PublishDropsPerVersionAttributes)
+{
+  ASSERT_EQ(0, put("obj", pattern(9 * MiB, 1)));
+  {
+    /* RGW decodes it as it sets it */
+    auto obj = bucket->get_object(rgw_obj_key("obj"));
+    ceph::buffer::list bl;
+    encode(ceph::real_clock::now() + std::chrono::hours(1), bl);
+    ASSERT_EQ(0, obj->modify_obj_attrs(RGW_ATTR_DELETE_AT, bl, null_yield,
+				       env->dpp.get()));
+  }
+  set_head_attr("obj", RGW_ATTR_OBJ_REPLICATION_STATUS, "COMPLETED");
+  publish_as("obj", other);
+  EXPECT_FALSE(head_attr("obj", RGW_ATTR_DELETE_AT));
+  EXPECT_FALSE(head_attr("obj", RGW_ATTR_OBJ_REPLICATION_STATUS));
+  EXPECT_TRUE(head_attr("obj", RGW_ATTR_ACL));
+}
+
+/* §3.5, E1:  the ETag is the published content's MD5, as an S3 PUT
+ * stores it:  bare hex, no trailing NUL */
+TEST_F(FSIORadosAttrs, PublishEtagIsTheContentMd5)
+{
+  ASSERT_EQ(0, put("obj", pattern(9 * MiB, 1)));
+  publish_as("obj", other);
+  std::string now;
+  ASSERT_EQ(0, get("obj", &now));
+  MD5 hash;
+  hash.SetFlags(EVP_MD_CTX_FLAG_NON_FIPS_ALLOW);
+  hash.Update(reinterpret_cast<const unsigned char*>(now.data()), now.size());
+  std::array<unsigned char, CEPH_CRYPTO_MD5_DIGESTSIZE> m;
+  hash.Final(m.data());
+  auto e = head_attr("obj", RGW_ATTR_ETAG);
+  ASSERT_TRUE(e);
+  EXPECT_EQ(std::string(buf_to_hex(m).data()), e->to_str());
+}
+
+/* under rgw_non_md5_etag, RGW's opaque form, with no read */
+TEST_F(FSIORadosAttrs, PublishEtagUnderNonMd5)
+{
+  ASSERT_EQ(0, put("obj", pattern(9 * MiB, 1)));
+  g_conf().set_val_or_die("rgw_non_md5_etag", "true");
+  publish_as("obj", other);
+  g_conf().set_val_or_die("rgw_non_md5_etag", "false");
+  auto e = head_attr("obj", RGW_ATTR_ETAG);
+  ASSERT_TRUE(e);
+  const auto s = e->to_str();
+  EXPECT_TRUE(s.starts_with("mtime-")) << s;
+  EXPECT_NE(std::string::npos, s.find("-req-")) << s;
 }
 
 /* the driver's step 3, element 4:  a join that must wait (FSIO design

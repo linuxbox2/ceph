@@ -11,6 +11,7 @@
 
 #include <boost/system/error_code.hpp>
 
+#include "cls/rgw/cls_rgw_fsio.h"
 #include "cls/rgw/cls_rgw_fsio_ops.h"
 #include "cls/rgw/cls_rgw_ops.h"
 #include "common/async/blocked_completion.h"
@@ -19,12 +20,16 @@
 #include "common/random_string.h"
 #include "include/random.h"
 #include "neorados/cls/rgw_fsio.h"
+#include "rgw_acl_s3.h"
 #include "rgw_aio_throttle.h"
+#include "rgw_bucket_sync.h"
 #include "rgw_fsio_hints.h"
 #include "rgw_obj_manifest.h"
+#include "rgw_object_ownership.h"
 #include "rgw_rados.h"
 #include "services/svc_zone.h"
 #include "rgw_sal_rados.h"
+#include "rgw_tag.h"
 #include "rgw_tools.h"
 
 #define dout_subsys ceph_subsys_rgw
@@ -300,6 +305,9 @@ int RadosFSIOObject::join(const DoutPrefixProvider* dpp, bool writer,
     in.counter_seed = g->max_counter() + 1;
     in.instance = instance;
     in.marker = info.bucket.marker;
+    if (writer) {
+      in.identity = identity;	// §3.5 item 6, Y16
+    }
     op.exec(neorados::cls::rgw_fsio::join(in, ret));
     r = exec(head_oid, head_ioc, std::move(op));
     if (r == -ECANCELED) {
@@ -1047,8 +1055,12 @@ int RadosFSIOObject::report_hint(const DoutPrefixProvider* dpp)
   return -EAGAIN;
 }
 
-int RadosFSIOObject::open(const DoutPrefixProvider* dpp, bool writer)
+int RadosFSIOObject::open(const DoutPrefixProvider* dpp, bool writer,
+			  const rgw_owner* who)
 {
+  if (writer && who) {
+    identity = to_string(*who);
+  }
   /* §4.3:  the hint first, so the expirer can always reach the state the
    * join records */
   if (!hinted) {
@@ -1131,12 +1143,26 @@ int RadosFSIOObject::abandon(const DoutPrefixProvider* dpp, const Source& src)
   return -EAGAIN;
 }
 
-int RadosFSIOObject::begin_write(const DoutPrefixProvider* dpp, uint32_t flags)
+int RadosFSIOObject::begin_write(const DoutPrefixProvider* dpp, uint32_t flags,
+				 const rgw_owner* writer)
 {
   if (writing) {
+    /* §3.5 item 6:  another write open, another identity:  recorded at
+     * once, not sequenced (idempotent by its effect) */
+    if (writer && to_string(*writer) != identity) {
+      identity = to_string(*writer);
+      neorados::WriteOp op;
+      op.exec(neorados::cls::rgw_fsio::writer_identity(
+		cls_rgw_fsio_identity_op{h, wcs, identity}));
+      if (int r = exec(head_oid, head_ioc, std::move(op)); r < 0) {
+	ldpp_dout(dpp, 0) << "ERROR: FSIO:  fsio_writer_identity on "
+			  << head_oid << ":  " << cpp_strerror(-r) << dendl;
+	return r;
+      }
+    }
     return 0;
   }
-  if (int r = open(dpp, true); r < 0) {
+  if (int r = open(dpp, true, writer); r < 0) {
     return r;
   }
   if (!reading || cs == wcs) {
@@ -1581,12 +1607,53 @@ int RadosFSIOObject::publish(const DoutPrefixProvider* dpp)
   }
   m.set_fsio(wcs);
   m.set_obj_size(size);
-  /* the attribute set:  the clone's, without FSIO's records and what
-   * names or derives from the old content;  the ETag a token of the
-   * shadow and its size, until the publish's own rules (plan, 8d) */
+  /* the publishing identity:  the publishing record's, which the freeze
+   * copied from the freezing handle's write open (§3.5, Z14, Y16) */
+  std::string who;
+  {
+    cls_rgw_fsio_hdr hdr;
+    if (int e = read_header(dpp, &hdr); e < 0) {
+      publish_hint(dpp, false, r);
+      return e;
+    }
+    for (const auto& e : hdr.chunk_sets) {
+      if (e.id == wcs && e.publishing) {
+	who = e.publishing->identity;
+      }
+    }
+  }
+  /* the bucket as it is now:  its owner and its ownership setting */
+  std::unique_ptr<rgw::sal::Bucket> bucket;
+  if (int e = store->load_bucket(dpp, info.bucket, &bucket, null_yield);
+      e < 0) {
+    publish_hint(dpp, false, r);
+    return e;
+  }
+  const auto& bowner_id = bucket->get_info().owner;
+  /* the owner and ACL a PUT by the publishing identity without ACL
+   * headers gets:  the bucket's ownership setting decides (§3.5, X14) */
+  ACLOwner writer, bowner;
+  writer.id = who.empty() ? bowner_id : parse_owner(who);
+  bowner.id = bowner_id;
+  RGWAccessControlPolicy policy;
+  std::string why;
+  if (int e = rgw::s3::create_canned_acl(
+	writer, bowner, rgw::s3::get_object_ownership(bucket->get_attrs()),
+	"", policy, why); e < 0) {
+    ldpp_dout(dpp, 0) << "ERROR: FSIO:  the publish's ACL for " << head_oid
+		      << ":  " << why << dendl;
+    publish_hint(dpp, false, r);
+    return e;
+  }
+  /* the attribute set:  the clone's, as copy_obj() handles a source's,
+   * less FSIO's records, the tags (fsio_replace_head writes them, C1),
+   * and what names or derives from the replaced content (Z26;  §6.1:  a
+   * publish is uncompressed) */
   static const std::set<std::string> dropped{
     RGW_ATTR_MANIFEST, RGW_ATTR_ID_TAG, RGW_ATTR_TAIL_TAG, "refcount",
+    RGW_ATTR_PG_VER, RGW_ATTR_SOURCE_ZONE, RGW_ATTR_TAGS,
     RGW_ATTR_ETAG, RGW_ATTR_CKSUM, RGW_ATTR_BLAKE3, RGW_ATTR_SHARE_MANIFEST,
+    RGW_ATTR_COMPRESSION,
     RGW_ATTR_CLOUD_TIER_TYPE, RGW_ATTR_RESTORE_STATUS, RGW_ATTR_RESTORE_TYPE,
     RGW_ATTR_RESTORE_TIME, RGW_ATTR_RESTORE_EXPIRY_DATE,
     RGW_ATTR_RESTORE_VERSIONED_EPOCH};
@@ -1597,38 +1664,111 @@ int RadosFSIOObject::publish(const DoutPrefixProvider* dpp)
     }
     attrs[k] = v;
   }
-  const std::string etag = fmt::format("fsio-{}-{}", wcs.to_str(), size);
-  attrs[RGW_ATTR_ETAG].append(etag.c_str(), etag.size() + 1);
+  RGWRados::erase_copy_source_attrs(attrs,
+				    bucket->get_info().versioning_enabled());
+  /* the tags the content had, for a tracking-only head (Z15) */
+  ceph::buffer::list tags;
+  if (auto t = xattrs.find(RGW_ATTR_TAGS); t != xattrs.end()) {
+    tags = t->second;
+  }
+  RGWBucketSyncPolicyHandlerRef sync;
+  if (int e = store->get_sync_policy_handler(dpp, std::nullopt, info.bucket,
+					     &sync, null_yield); e < 0) {
+    ldpp_dout(dpp, 0) << "ERROR: FSIO:  the sync policy for " << info.bucket
+		      << ":  " << cpp_strerror(-e) << dendl;
+    publish_hint(dpp, false, r);
+    return e;
+  }
+  policy.encode(attrs[RGW_ATTR_ACL]);
   ceph::real_time mtime = std::max(wmtime_hint, wmtime);
   if (ceph::real_clock::is_zero(mtime)) {
     mtime = ceph::real_clock::now();
   }
+  /* the ETag by the SAL's rule (§3.5, E1):  the content's MD5, read
+   * through this handle up to the scanned size;  under rgw_non_md5_etag,
+   * RGW's opaque form with the shadow's id */
+  std::string etag;
+  if (dpp->get_cct()->_conf->rgw_non_md5_etag) {
+    const auto ts = ceph::real_clock::to_timespec(mtime);
+    etag = rgw_make_opaque_etag(
+      wcs.to_str(), uint64_t(ts.tv_sec) * 1000000000ull + ts.tv_nsec);
+  } else {
+    wsize = size;
+    if (int e = rgw::sal::fsio_content_md5(dpp, *this, size, &etag); e < 0) {
+      publish_hint(dpp, false, r);
+      return e;
+    }
+  }
+  attrs[RGW_ATTR_ETAG].append(etag);
   /* 4:  the head write, atomic so it sets the ID tag and carries the
-   * guard;  ECANCELED is an S3 write since RGW read the head:  read
-   * again and publish over it, last writer wins (§3.5) */
-  const fsio_publish_spec spec{h, wcs, {}, r};
+   * guard;  ECANCELED is an S3 write since RGW read the head, or a tag
+   * write since this try read the tags:  read again and publish over it,
+   * last writer wins (§3.5) */
+  fsio_publish_spec spec{h, wcs, tags, r};
   cls_rgw_fsio_replace_ret ret;
   int w = -ECANCELED;
   for (int t = 0; t < 3 && w == -ECANCELED; ++t) {
+    /* §3.5, C1:  the tags the publish will keep, by the CLS's rule, so
+     * the replication status is decided on them;  the head write fails
+     * with ECANCELED if they changed */
+    {
+      boost::container::flat_map<std::string, ceph::buffer::list> ha;
+      sys::error_code ec;
+      store->get_neorados().execute(
+	neorados::Object{head_oid}, head_ioc,
+	neorados::ReadOp{}.get_xattrs(&ha), nullptr,
+	ceph::async::use_blocked[ec]);
+      if (ec) {
+	publish_hint(dpp, false, r);
+	return ceph::from_error_code(ec);
+      }
+      const auto it = ha.find(RGW_ATTR_ID_TAG);
+      const auto ht = ha.find(RGW_ATTR_TAGS);
+      spec.expected_tags = fsio_publish_tags(
+	it != ha.end() && it->second.length(),
+	ht != ha.end() ? ht->second : ceph::buffer::list{}, tags);
+    }
+    RGWObjTags obj_tags;
+    if (spec.expected_tags->length()) {
+      try {
+	auto ti = spec.expected_tags->cbegin();
+	obj_tags.decode(ti);
+      } catch (const ceph::buffer::error&) {
+	ldpp_dout(dpp, 0) << "ERROR: FSIO:  undecodable tags on " << head_oid
+			  << dendl;
+	publish_hint(dpp, false, r);
+	return -EIO;
+      }
+    }
+    attrs.erase(RGW_ATTR_OBJ_REPLICATION_STATUS);
+    if (sync && sync->bucket_exports_object(key.name, obj_tags)) {
+      attrs[RGW_ATTR_OBJ_REPLICATION_STATUS].append("PENDING");
+    }
+    if (tags_read) {
+      tags_read(*spec.expected_tags);
+    }
     RGWObjectCtx octx(store);
     const rgw_obj obj(info.bucket, key);
     octx.set_atomic(obj, true);
     RGWRados::Object target(store->getRados(), info, octx, obj);
     RGWRados::Object::Write wr(&target);
     const std::string tag = gen_rand_alphanumeric(dpp->get_cct(), 32);
-    ACLOwner owner;
-    owner.id = info.owner;
     wr.meta.manifest = &m;
     wr.meta.flags = PUT_OBJ_CREATE;
     wr.meta.mtime = &mtime;
     wr.meta.ptag = &tag;
-    wr.meta.owner = owner;
-    wr.meta.bucket_owner = info.owner;
+    wr.meta.owner = policy.get_owner();
+    wr.meta.bucket_owner = bowner_id;
     wr.meta.fsio_publish = &spec;
     wr.meta.fsio_published = &ret;
     req_context rctx{dpp, null_yield, nullptr};
     jspan_context trace(false, false);
     w = wr.write_meta(size, size, attrs, rctx, trace);
+    if (w == 0 && wr.meta.canceled) {
+      /* RGW returns a head write its op failed with ECANCELED as a lost
+       * race, 0;  for the publish it did not apply */
+      w = -ECANCELED;
+    }
   }
   if (w == 0 && lose_reply) {
     w = -ETIMEDOUT;		// test:  applied, its reply lost
@@ -1742,7 +1882,8 @@ int RadosFSIOObject::end_write(const DoutPrefixProvider* dpp, uint32_t flags)
 
 Object::FSIOResult RadosObject::get_fsio_handle(const DoutPrefixProvider* dpp,
 						uint32_t flags,
-						const FSIOCreateSpec* spec)
+						const FSIOCreateSpec* spec,
+						const rgw_owner* writer)
 {
   /* creating, truncating at the open:  later work elements */
   if (flags & (FSIOObject::OPEN_FLAG_CREATE | FSIOObject::OPEN_FLAG_TRUNC |
@@ -1766,7 +1907,8 @@ Object::FSIOResult RadosObject::get_fsio_handle(const DoutPrefixProvider* dpp,
 			      rados->fsio_next_handle++};
   auto hdl = std::make_unique<RadosFSIOObject>(
     store, info, rgw_obj_key(get_key().name), raw.oid, std::move(ioc), h);
-  if (int r = hdl->open(dpp, flags & FSIOObject::OPEN_FLAG_WRITE); r < 0) {
+  if (int r = hdl->open(dpp, flags & FSIOObject::OPEN_FLAG_WRITE, writer);
+      r < 0) {
     return FSIOResult{r, nullptr};
   }
   return FSIOResult{0, std::move(hdl)};

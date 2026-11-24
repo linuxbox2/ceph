@@ -924,6 +924,14 @@ int replace_head(cls_rgw_fsio_head& h, const replace_in& in, replace_out& out,
       return -CLS_RGW_ERR_FSIO_CONFLICT;
     }
     const auto sh_id = sh->id;
+    /* §3.5, C1:  the tags kept must be the tags the publisher evaluated;
+     * a tag write since its read fails the publish, which reads again */
+    auto keep = fsio_publish_tags(!h.id_tag.empty(), h.tags, in.tags);
+    if (in.expected_tags && !FSIO_SKIP_CHECK(C1_PUBLISH_COMPARES_TAGS) &&
+	!in.expected_tags->contents_equal(keep)) {
+      return -ECANCELED;
+    }
+    h.tags = std::move(keep);
     /* the previous published chunk set:  the head's content, which the
      * publish replaces (§3.5;  the null version when suspended, §2.5a) */
     auto* prev = head_chunk_set(hdr);
@@ -1010,7 +1018,9 @@ int replace_head(cls_rgw_fsio_head& h, const replace_in& in, replace_out& out,
     return 0;
   }
 
-  /* SUPERSEDE, DELETE:  the head object's content replaced */
+  /* SUPERSEDE, DELETE:  the head object's content replaced;  its tags
+   * go with it (the recreated head keeps the OLH attributes only) */
+  h.tags.clear();
   if (!h.hdr) {
     out.keep_tail = false;
     return 0;

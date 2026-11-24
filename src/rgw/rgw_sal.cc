@@ -25,6 +25,7 @@
 #include "common/async/blocked_completion.h"
 
 #include "rgw_sal.h"
+#include "rgw_hex.h"
 #ifdef WITH_RADOSGW_RADOS
 #include "rgw_sal_rados.h"
 #endif
@@ -544,6 +545,33 @@ std::string_view rgw_restore_type_dump(rgw::sal::RGWRestoreType type)
   default:
     return "";
   }
+}
+
+int fsio_content_md5(const DoutPrefixProvider* dpp,
+		     Object::FSIOObject& h, uint64_t size, std::string* hex)
+{
+  MD5 hash;
+  hash.SetFlags(EVP_MD_CTX_FLAG_NON_FIPS_ALLOW);
+  static constexpr uint64_t piece = 4 << 20;
+  std::string buf(piece, '\0');
+  for (uint64_t ofs = 0; ofs < size; ) {
+    struct iovec iov{buf.data(), std::min(piece, size - ofs)};
+    uint64_t n = 0;
+    if (int r = h.preadv(&iov, 1, ofs, &n, 0); r < 0) {
+      ldpp_dout(dpp, 0) << "ERROR: FSIO:  reading the content at " << ofs
+			<< " for its MD5:  " << cpp_strerror(-r) << dendl;
+      return r;
+    }
+    if (n == 0) {
+      return -EIO;		// short of the size it was given
+    }
+    hash.Update(reinterpret_cast<const unsigned char*>(buf.data()), n);
+    ofs += n;
+  }
+  std::array<unsigned char, CEPH_CRYPTO_MD5_DIGESTSIZE> m;
+  hash.Final(m.data());
+  *hex = buf_to_hex(m).data();
+  return 0;
 }
 
 } // namespace rgw::sal

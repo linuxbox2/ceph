@@ -32,6 +32,7 @@ constexpr std::string_view TAIL_TAG = "user.rgw.tail_tag";
 constexpr std::string_view MANIFEST = "user.rgw.manifest";
 constexpr std::string_view OLH_INFO = "user.rgw.olh.info";
 constexpr std::string_view OLH_PREFIX = "user.rgw.olh.";
+constexpr std::string_view TAGS = "user.rgw.x-amz-tagging";
 constexpr std::string_view FSIO_PREFIX = "user.rgw.fsio.";
 constexpr std::string_view HDR = "user.rgw.fsio.hdr";
 constexpr std::string_view OCNT = "user.rgw.fsio.ocnt";
@@ -102,6 +103,9 @@ inline Obj head_obj(const cls_rgw_fsio_head& h)
 {
   auto o = rgw_part(h.exists, h.id_tag, h.tail_tag, h.manifest, h.olh);
   if (o.exists) {
+    if (h.tags.length()) {
+      o.attrs[std::string(TAGS)] = h.tags;
+    }
     o.attrs.merge(records_of(h));
   }
   return o;

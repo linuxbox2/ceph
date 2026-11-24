@@ -1550,6 +1550,17 @@ namespace rgw {
 
     RGWUserInfo* get_user() { return &user->get_info(); }
 
+    /* a write open's identity, for a driver whose published object is its
+     * writer's (FSIO_RADOS_DESIGN.md §3.5):  the mount's user, as an
+     * owner, its account if it has one, as an S3 PUT's object owner */
+    rgw_owner fsio_writer() {
+      const auto& i = user->get_info();
+      if (!i.account_id.empty()) {
+        return i.account_id;
+      }
+      return i.user_id;
+    }
+
     void update_user(const DoutPrefixProvider *dpp) {
       (void) g_rgwlib->get_driver()->get_user_by_access_key(dpp, key.id, null_yield, &user);
     }

@@ -29,6 +29,9 @@
  * reader FSIOObject;  FSIO state is keyed by handle, design §2.7, Z4);
  * FSIO_MODEL_S3_OPS;  and switches, each 1 by default:
  * FSIO_MODEL_CRASHES, FSIO_MODEL_ZOMBIES, FSIO_MODEL_EXPIRER_CRASHES.
+ * FSIO_MODEL_TAGS=1 gives the head object tags, which an S3 PUT sets and
+ * tag writes change, and checks a publish keeps the tags it evaluated
+ * (§3.5, C1);  unversioned.
  * FSIO_MODEL_SKIP_CHECK names one check of the core to skip
  * (cls_rgw_fsio_check), to show the model finds its absence.
  * FSIO_MODEL_MAX_DEPTH (200) bounds a path:  one that reaches it is a
@@ -224,7 +227,9 @@ enum Step : uint8_t { NONE, CONSTRUCT, PUBLISH_WRITE, PUBLISH_GC, DRAIN_SEND,
   V_REL_RELEASE,
   /* a sequenced call's reply lost (§3, Z22):  the resend, then the reply
    * rebuilt from the head */
-  LOST_LEAVE, LOST_JOIN, LOST_REBIND, LOST_TRUNC };
+  LOST_LEAVE, LOST_JOIN, LOST_REBIND, LOST_TRUNC,
+  /* §3.5, C1:  the publisher reads the tags it evaluates policy with */
+  PUBLISH_READ };
 
 /* a handle's latest sequenced call, as sent (§3, Z22):  resent with the
  * same sequence number, it models a reply lost past the PG log's dup
@@ -269,6 +274,7 @@ struct Gw {
   fid_t step_r;
   bool step_born = false;
   std::optional<fid_t> step_drained;
+  std::string step_tags;         // PUBLISH_READ:  the tags it evaluated (C1)
   uint8_t owe_head_hint = 0;     // PRESENCE_HINT_BEFORE_JOIN skipped:  to add
   uint8_t release_failed = 0;    // a release call failed:  keeps its hint (H1)
   std::string owe_ih_hint;       // PRESENCE_HINT_BEFORE_OCNT skipped:  to add
@@ -314,7 +320,7 @@ struct Gw {
     encode(lost_check, bl); encode(lost_nonce, bl); encode(did_lose_join, bl);
     encode(lost_to, bl); encode(did_lose_rebind, bl); encode(did_lose_trunc, bl);
     encode((uint8_t)step, bl); encode(step_cs, bl); encode(step_r, bl);
-    encode(step_born, bl); encode(step_drained, bl);
+    encode(step_born, bl); encode(step_drained, bl); encode(step_tags, bl);
     encode(owe_head_hint, bl); encode(owe_ih_hint, bl);
     encode(release_failed, bl);
     encode(pending, bl); encode(pending_writer, bl); encode(counted, bl);
@@ -352,6 +358,7 @@ struct Config {
   bool keep_tail = false;        // FSIO_MODEL_KEEP_TAIL:  a copy onto itself (§3.6)
   bool sizes = false;            // FSIO_MODEL_SIZES:  the size hint (§3.3)
   bool lost_reply = false;       // FSIO_MODEL_LOST_REPLY:  a reply lost (Z22)
+  bool tags = false;             // FSIO_MODEL_TAGS:  object tags (§3.5, C1)
   std::set<std::string> dup;     // FSIO_MODEL_DUP:  calls applied twice
 };
 
@@ -776,6 +783,8 @@ int m_replace_head(cls_rgw_fsio_head& h, const fsio::replace_in& in,
   op.complete = in.complete;
   op.expired = in.expired;
   op.keep_tail = in.keep_tail;
+  op.tags = in.tags;
+  op.expected_tags = in.expected_tags;
   op.keep_attr_prefixes = {std::string(fc::OLH_PREFIX)};
   op.marker = cl.marker;
 
@@ -790,6 +799,9 @@ int m_replace_head(cls_rgw_fsio_head& h, const fsio::replace_in& in,
       if (k.starts_with(fc::OLH_PREFIX)) {
 	want.attrs[k] = v;
       }
+    }
+    if (in.mode == fsio::replace_mode::PUBLISH && h.tags.length()) {
+      want.attrs[std::string(fc::TAGS)] = h.tags;
     }
     if (!fx.remove_head) {
       want.attrs.merge(fc::records_of(h));
@@ -1028,6 +1040,9 @@ int counted_rebind(cls_rgw_fsio_head& h, Gw& g, const fid_t& from,
 }
 
 enum ExPhase : uint8_t { EX_IDLE, EX_FF_PUBLISH, EX_FF_RECLONE, EX_FF_DECIDED,
+  /* the fenced finalize's publish reads its tags first (§3.5, C1);
+   * before VF_DECIDED, which begins the versioned phases */
+  EX_FF_TAGS,
   /* versioned:  the fenced finalize as §4.2's sequence for `to` */
   VF_DECIDED, VF_CALL, VF_RECLONE, VF_WRITE, VF_LINK, VF_PUBLISH, VF_PLACE };
 
@@ -1063,6 +1078,9 @@ struct World {
   }
   std::map<std::string, std::string> recloned;   // to -> from
   std::map<std::string, int> published;          // shadow -> times published
+  /* §3.5, Z15:  shadow -> the head's tags its attribute clone copied */
+  std::map<std::string, std::string> ctags;
+  std::string ex_tags;                           // EX_FF_TAGS:  the tags it evaluated
   uint64_t next_c = 1, next_r = 1000, next_tag = 1, next_nonce = 1;
   /* versioned */
   std::map<std::string, Version> versions;       // "I<n>"
@@ -1118,6 +1136,7 @@ struct World {
     encode(same_data, bl);
     encode(trunc_size, bl); encode(ep_writes, bl);
     encode(published, bl);
+    encode(ctags, bl); encode(ex_tags, bl);
     encode(next_c, bl); encode(next_r, bl); encode(next_tag, bl);
     encode(next_nonce, bl);
     encode((uint32_t)versions.size(), bl);
@@ -1244,8 +1263,32 @@ void apply_clones(World& w, const cls_rgw_fsio_effects& fx,
       w.records[rn] = c.record.manifest.length() ? head_tok : "";
     } else if (c.role == 'a' || c.role == 'd') {
       w.pms[sname(c.r)] = tok(c.pm);
+      if (w.head.tags.length()) {
+	w.ctags[sname(c.r)] = tok(w.head.tags);
+      }
     }
   }
+}
+
+/* a tags token as the head holds it:  absent tags an empty list */
+ceph::buffer::list tags_bl(const std::string& t)
+{
+  return t.empty() ? ceph::buffer::list{} : tok_bl(t);
+}
+
+/* §3.5, Z15:  the tags a shadow's attribute clone copied */
+std::string ctag(const World& w, const std::string& s)
+{
+  auto i = w.ctags.find(s);
+  return i == w.ctags.end() ? std::string{} : i->second;
+}
+
+/* §3.5, Y18, Z15:  the tags a publish keeps, as the design states it:  an
+ * S3 object's own, else the content's;  stated apart from the core's
+ * fsio_publish_tags(), which the publish's check compares against */
+std::string design_tags(const World& w, const std::string& s)
+{
+  return !w.head.id_tag.empty() ? tok(w.head.tags) : ctag(w, s);
 }
 
 void apply_remove_head(World& w, const cls_rgw_fsio_effects& fx)
@@ -1450,6 +1493,18 @@ void gw_actions(const World& w0, size_t gi, std::vector<Action>& acts)
 	    auto& g = w.gws[gi];
 	    g.step_r = fid_t{w.next_r++, 0};
 	    w.hints.insert(publish_head(hd(g), g.step_r));
+	    g.step = cfg.tags ? PUBLISH_READ : PUBLISH_WRITE;
+	    return std::nullopt;
+	  }});
+      break;
+    case PUBLISH_READ:
+      /* §3.5, C1:  the tags the publish will keep, read for its policy */
+      acts.push_back({fmt::format("gw{} publish-read", glabel(g)),
+	  [gi](World& w) -> std::optional<std::string> {
+	    auto& g = w.gws[gi];
+	    g.step_tags = tok(fsio_publish_tags(
+	      !w.head.id_tag.empty(), w.head.tags,
+	      tags_bl(ctag(w, sname(g.step_cs)))));
 	    g.step = PUBLISH_WRITE;
 	    return std::nullopt;
 	  }});
@@ -1477,9 +1532,18 @@ void gw_actions(const World& w0, size_t gi, std::vector<Action>& acts)
 	    in.r = g.step_r;
 	    in.caller = hd(g);
 	    in.shadow = g.step_cs;
+	    in.tags = tags_bl(ctag(w, sname(g.step_cs)));
+	    if (cfg.tags) {
+	      in.expected_tags = tags_bl(g.step_tags);
+	    }
+	    const auto want_tags = design_tags(w, sname(g.step_cs));
 	    fsio::replace_out out;
 	    cls_rgw_fsio_effects fx;
 	    int r = m_replace_head(w.head, in, out, fx);
+	    if (r == -ECANCELED) {
+	      g.step = PUBLISH_READ;          // a tag write since:  read again
+	      return std::nullopt;
+	    }
 	    if (r < 0) {
 	      w.hints.erase(publish_head(hd(g), g.step_r));
 	      g.release_failed = 1;           // keeps its hint (H1)
@@ -1496,6 +1560,15 @@ void gw_actions(const World& w0, size_t gi, std::vector<Action>& acts)
 	    }
 	    if (++w.published[s] > 1) {
 	      return fmt::format("{} published twice", s);
+	    }
+	    if (tok(w.head.tags) != g.step_tags) {
+	      return fmt::format("{} published with tags '{}', its policy "
+				 "evaluated with '{}'", s, tok(w.head.tags),
+				 g.step_tags);
+	    }
+	    if (tok(w.head.tags) != want_tags) {
+	      return fmt::format("{} published with tags '{}', not '{}'", s,
+				 tok(w.head.tags), want_tags);
 	    }
 	    g.step = PUBLISH_GC;
 	    g.step_r = in.r;
@@ -2142,8 +2215,8 @@ void gw_actions_v(const World& w0, size_t gi, std::vector<Action>& acts)
   if (g.zombie && w0.graced.count(g.inc)) {
     return;                  // the lease:  stopped, its ops timed out (§4.3)
   }
-  if (g.step == PUBLISH_HINT || g.step == PUBLISH_WRITE ||
-      g.step == PUBLISH_GC) {
+  if (g.step == PUBLISH_HINT || g.step == PUBLISH_READ ||
+      g.step == PUBLISH_WRITE || g.step == PUBLISH_GC) {
     gw_actions(w0, gi, acts);  // a suspended bucket's publish (§2.5a)
     return;
   }
@@ -2790,8 +2863,29 @@ void s3_actions(const World& w0, std::vector<Action>& acts)
 	  w.head.exists = true;
 	  w.head.manifest = tok_bl(c);
 	  w.head.id_tag = fmt::format("t{}", w.next_tag++);
+	  if (cfg.tags) {
+	    /* a PUT replaces the tags, with tagging headers or without */
+	    w.head.tags = tok_bl(fmt::format("g{}", w.next_tag++));
+	  }
 	  return std::nullopt;
 	}});
+    /* §3.5, C1:  tag writes change only the head's tags attribute */
+    if (cfg.tags && w0.head_real()) {
+      acts.push_back({"s3 put-tagging",
+	  [](World& w) -> std::optional<std::string> {
+	    --w.s3_budget;
+	    w.head.tags = tok_bl(fmt::format("g{}", w.next_tag++));
+	    return std::nullopt;
+	  }});
+      if (w0.head.tags.length()) {
+	acts.push_back({"s3 delete-tagging",
+	    [](World& w) -> std::optional<std::string> {
+	      --w.s3_budget;
+	      w.head.tags.clear();
+	      return std::nullopt;
+	    }});
+      }
+    }
     /* §3.6, Y2:  a copy onto itself (or an append) reuses the tail:  the
      * head's data stays in its storage, under a new ID tag */
     if (cfg.keep_tail && w0.head_real() && !cfg.versioned) {
@@ -2799,6 +2893,7 @@ void s3_actions(const World& w0, std::vector<Action>& acts)
 	  [](World& w) -> std::optional<std::string> {
 	    --w.s3_budget;
 	    auto old = w.head_tok();
+	    const auto tags = w.head.tags;   // a copy keeps its source's
 	    fsio::replace_in in;
 	    in.mode = fsio::replace_mode::SUPERSEDE;
 	    in.r = fid_t{w.next_r++, 0};
@@ -2810,6 +2905,7 @@ void s3_actions(const World& w0, std::vector<Action>& acts)
 	    w.head.exists = true;
 	    w.head.manifest = tok_bl(old);
 	    w.head.id_tag = fmt::format("t{}", w.next_tag++);
+	    w.head.tags = tags;
 	    return std::nullopt;
 	  }});
     }
@@ -2914,7 +3010,21 @@ void expirer_actions(const World& w0, std::vector<Action>& acts)
 	  w.acked[ts] = w.acked[fs];
 	  w.base[ts] = w.base[fs];
 	  w.pms[ts] = w.pms[fs];
+	  if (auto t = ctag(w, fs); !t.empty()) {
+	    w.ctags[ts] = t;
+	  }
 	  w.recloned[ts] = fs;
+	  w.ex = cfg.tags ? EX_FF_TAGS : EX_FF_PUBLISH;
+	  return std::nullopt;
+	}});
+    return;
+  }
+  if (w0.ex == EX_FF_TAGS) {
+    /* §3.5, C1:  the tags the publish will keep, read for its policy */
+    acts.push_back({fmt::format("expirer publish-read {}", sname(w0.ex_to)),
+	[](World& w) -> std::optional<std::string> {
+	  w.ex_tags = tok(fsio_publish_tags(!w.head.id_tag.empty(), w.head.tags,
+					    tags_bl(ctag(w, sname(w.ex_to)))));
 	  w.ex = EX_FF_PUBLISH;
 	  return std::nullopt;
 	}});
@@ -2928,6 +3038,11 @@ void expirer_actions(const World& w0, std::vector<Action>& acts)
 	  in.r = fid_t{w.next_r++, 0};
 	  in.caller = xh(w.ex_inc);
 	  in.shadow = w.ex_to;
+	  in.tags = tags_bl(ctag(w, sname(w.ex_to)));
+	  if (cfg.tags) {
+	    in.expected_tags = tags_bl(w.ex_tags);
+	  }
+	  const auto want_tags = design_tags(w, sname(w.ex_to));
 	  fsio::replace_out out;
 	  cls_rgw_fsio_effects fx;
 	  auto save = w.head;
@@ -2935,7 +3050,11 @@ void expirer_actions(const World& w0, std::vector<Action>& acts)
 	    return v;
 	  }
 	  auto old = w.head_tok();
-	  if (int r = m_replace_head(w.head, in, out, fx); r < 0) {
+	  if (int r = m_replace_head(w.head, in, out, fx); r == -ECANCELED) {
+	    w.head = save;
+	    w.ex = EX_FF_TAGS;               // a tag write since:  read again
+	    return std::nullopt;
+	  } else if (r < 0) {
 	    w.head = save;
 	    return fmt::format("fenced finalize cannot publish {}:  {}",
 			       sname(w.ex_to), r);
@@ -2959,6 +3078,15 @@ void expirer_actions(const World& w0, std::vector<Action>& acts)
 	  w.ex = EX_IDLE;
 	  if (++w.published[s] > 1) {
 	    return fmt::format("{} published twice", s);
+	  }
+	  if (tok(w.head.tags) != w.ex_tags) {
+	    return fmt::format("{} published with tags '{}', its policy "
+			       "evaluated with '{}'", s, tok(w.head.tags),
+			       w.ex_tags);
+	  }
+	  if (tok(w.head.tags) != want_tags) {
+	    return fmt::format("{} published with tags '{}', not '{}'", s,
+			       tok(w.head.tags), want_tags);
 	  }
 	  return std::nullopt;
 	}});
@@ -4868,6 +4996,8 @@ TEST(FSIOModel, Explore)
        cls_rgw_fsio_check::H3_HINT_WAITS_FOR_LIVE_CLAIM},
       {"H3_PUBLISH_HINT_REMOVES_READER_HINTS",
        cls_rgw_fsio_check::H3_PUBLISH_HINT_REMOVES_READER_HINTS},
+      {"C1_PUBLISH_COMPARES_TAGS",
+       cls_rgw_fsio_check::C1_PUBLISH_COMPARES_TAGS},
       {"H3_PUBLISHER_CLEANUP_REMOVES_READER_HINTS",
        cls_rgw_fsio_check::H3_PUBLISHER_CLEANUP_REMOVES_READER_HINTS},
       {"W10_RELEASE_ONLY_WITH_LIVE_CLAIM",
@@ -4912,6 +5042,7 @@ TEST(FSIOModel, Explore)
   cfg.keep_tail = env_int("FSIO_MODEL_KEEP_TAIL", 0) != 0;
   cfg.sizes = env_int("FSIO_MODEL_SIZES", 0) != 0;
   cfg.lost_reply = env_int("FSIO_MODEL_LOST_REPLY", 0) != 0;
+  cfg.tags = env_int("FSIO_MODEL_TAGS", 0) != 0;
   if (auto d = std::getenv("FSIO_MODEL_DUP")) {
     for (auto m : ceph::split(d, ",")) {
       cfg.dup.emplace(m);

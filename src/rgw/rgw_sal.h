@@ -1223,8 +1223,10 @@ class Object {
       virtual int commit(const DoutPrefixProvider* dpp, uint32_t flags) = 0;
       /* this handle's first write open on the file:  the driver joins as a
        * writer, and makes the shadow its writes go to, recloning if the
-       * one it followed was published */
-      virtual int begin_write(const DoutPrefixProvider* dpp, uint32_t flags) = 0;
+       * one it followed was published.  writer, the write open's identity,
+       * for a driver whose published object belongs to its writer */
+      virtual int begin_write(const DoutPrefixProvider* dpp, uint32_t flags,
+			      const rgw_owner* writer = nullptr) = 0;
       /* this handle's last write open returned:  the driver publishes if
        * no writer remains, else this handle stays a reader */
       virtual int end_write(const DoutPrefixProvider* dpp, uint32_t flags) = 0;
@@ -1467,7 +1469,8 @@ class Object {
     using FSIOResult = std::tuple<int, std::unique_ptr<FSIOObject>>;
     virtual FSIOResult get_fsio_handle(const DoutPrefixProvider* dpp,
 				       uint32_t flags = FSIOObject::OPEN_FLAG_NONE,
-				       const FSIOCreateSpec* spec = nullptr) {
+				       const FSIOCreateSpec* spec = nullptr,
+				       const rgw_owner* writer = nullptr) {
       return FSIOResult{-ENOTSUP, nullptr};
     }
 
@@ -2176,6 +2179,12 @@ public:
 
   virtual void set_lua_background(rgw::lua::Background* background) = 0;
 };
+
+/* FSIO_RADOS_DESIGN.md §3.5, E1:  a publish's ETag, the MD5 of [0, size)
+ * as the FSIO handle reads it (holes as zeros), in lowercase hex;  every
+ * FSIO driver's publish computes it this way */
+int fsio_content_md5(const DoutPrefixProvider* dpp,
+		     Object::FSIOObject& h, uint64_t size, std::string* hex);
 
 // VectorBucket aliases Bucket (rgw_sal_fwd.h). Use Driver::load_vector_bucket()
 // to resolve its entrypoint before using the common object interface.

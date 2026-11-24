@@ -706,6 +706,9 @@ struct cls_rgw_fsio_replace_op {
   bool keep_tail = false;        // supersede:  the new object reuses the tail (Y2)
   ceph::buffer::list tags;       // publish onto a tracking-only head:  the
                                  // tags the content had (§3.5, Z15)
+  /* unversioned publish:  the tags the publisher evaluated policy with;
+   * ECANCELED if the publish would keep others (§3.5, C1) */
+  std::optional<ceph::buffer::list> expected_tags;
 
   void encode(ceph::buffer::list& bl) const {
     ENCODE_START(1, 1, bl);
@@ -721,6 +724,7 @@ struct cls_rgw_fsio_replace_op {
     encode(marker, bl);
     encode(keep_tail, bl);
     encode(tags, bl);
+    encode(expected_tags, bl);
     ENCODE_FINISH(bl);
   }
   void decode(ceph::buffer::list::const_iterator& bl) {
@@ -737,6 +741,7 @@ struct cls_rgw_fsio_replace_op {
     decode(marker, bl);
     decode(keep_tail, bl);
     decode(tags, bl);
+    decode(expected_tags, bl);
     DECODE_FINISH(bl);
   }
   void dump(ceph::Formatter *f) const;

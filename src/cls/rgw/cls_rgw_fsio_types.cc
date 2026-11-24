@@ -847,6 +847,9 @@ void cls_rgw_fsio_replace_op::dump(ceph::Formatter *f) const
   encode_json("marker", marker, f);
   encode_json("keep_tail", keep_tail, f);
   encode_json("tags", tags, f);
+  if (expected_tags) {
+    encode_json("expected_tags", *expected_tags, f);
+  }
 }
 
 std::list<cls_rgw_fsio_replace_op> cls_rgw_fsio_replace_op::generate_test_instances()
@@ -865,6 +868,7 @@ std::list<cls_rgw_fsio_replace_op> cls_rgw_fsio_replace_op::generate_test_instan
   i.marker = "v10";
   i.keep_tail = true;
   i.tags.append("C12");
+  i.expected_tags.emplace().append("v13");
   o.push_back(std::move(i));
   o.emplace_back();
   return o;

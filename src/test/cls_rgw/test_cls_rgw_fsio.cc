@@ -71,13 +71,18 @@ void leave_writer(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& inc,
 }
 
 int publish(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& inc, const cls_rgw_fsio_id& cs,
-	    uint64_t r = 1000)
+	    uint64_t r = 1000, const std::string& tags = {},
+	    std::optional<std::string> expected = std::nullopt)
 {
   fsio::replace_in in;
   in.mode = fsio::replace_mode::PUBLISH;
   in.r = cls_rgw_fsio_id{r, 0};
   in.caller = inc;
   in.shadow = cs;
+  in.tags.append(tags);
+  if (expected) {
+    in.expected_tags.emplace().append(*expected);
+  }
   fsio::replace_out out;
   cls_rgw_fsio_effects fx;
   return fsio::replace_head(h, in, out, fx);
@@ -128,6 +133,71 @@ TEST(cls_rgw_fsio, W4_deferred_publish_keeps_one_published_entry)
   /* the next current shadow is followable from s1 (rebind's half) */
   auto s2 = construct(h, GW2);
   EXPECT_EQ(0, fsio::rebind(h, GW1, next_seq(), s1, s2, 1));
+}
+
+/* §3.5, Y18, Z15, C1:  an unversioned publish keeps the S3 object's
+ * tags, or onto a tracking-only head the passed ones;  with expected tags
+ * that differ from those it returns ECANCELED and changes nothing */
+TEST(cls_rgw_fsio, C1_publish_keeps_the_tags_it_was_given_to_expect)
+{
+  {
+    auto h = head("C0");
+    h.tags.append("tagA");
+    auto s = construct(h, GW1);
+    leave_writer(h, GW1, s);
+    const auto before = h;
+    EXPECT_EQ(-ECANCELED, publish(h, GW1, s, 1000, "tagC", "tagB"));
+    ceph::buffer::list a, b;
+    encode(before, a);
+    encode(h, b);
+    EXPECT_TRUE(a.contents_equal(b)) << "a canceled publish changed the head";
+    ASSERT_EQ(0, publish(h, GW1, s, 1000, "tagC", "tagA"));
+    EXPECT_EQ("tagA", h.tags.to_str());
+  }
+  {
+    auto h = head("C0");             // no tags:  absent matches empty
+    auto s = construct(h, GW1);
+    leave_writer(h, GW1, s);
+    ASSERT_EQ(0, publish(h, GW1, s, 1000, "tagC", ""));
+    EXPECT_EQ(0u, h.tags.length());
+  }
+  {
+    auto h = head("C0");             // tracking-only:  the passed tags
+    h.tags.append("tagA");
+    auto s = construct(h, GW1);
+    h.id_tag.clear();
+    h.tags.clear();
+    leave_writer(h, GW1, s);
+    EXPECT_EQ(-ECANCELED, publish(h, GW1, s, 1000, "tagC", "tagA"));
+    ASSERT_EQ(0, publish(h, GW1, s, 1000, "tagC", "tagC"));
+    EXPECT_EQ("tagC", h.tags.to_str());
+  }
+  {
+    auto h = head("C0");             // no expected tags:  no check
+    h.tags.append("tagA");
+    auto s = construct(h, GW1);
+    leave_writer(h, GW1, s);
+    ASSERT_EQ(0, publish(h, GW1, s, 1000, "tagC"));
+    EXPECT_EQ("tagA", h.tags.to_str());
+  }
+}
+
+/* the head's content replaced:  its tags go with it */
+TEST(cls_rgw_fsio, C1_supersede_and_delete_clear_the_tags)
+{
+  auto h = head("C0");
+  h.tags.append("tagA");
+  ASSERT_EQ(0, supersede(h));
+  EXPECT_EQ(0u, h.tags.length());
+  h.tags.append("tagB");
+  fsio::replace_in in;
+  in.mode = fsio::replace_mode::DELETE;
+  in.r = cls_rgw_fsio_id{3000, 0};
+  in.expected_id_tag = h.id_tag;
+  fsio::replace_out out;
+  cls_rgw_fsio_effects fx;
+  ASSERT_EQ(0, fsio::replace_head(h, in, out, fx));
+  EXPECT_EQ(0u, h.tags.length());
 }
 
 /* W5:  the expirer decided a fenced finalize from an earlier read;  the

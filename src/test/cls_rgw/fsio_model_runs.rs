@@ -131,6 +131,12 @@ fn quick() -> Vec<Run> {
      * off elsewhere) */
     v.push(run("quick-w+r-keep-tail", &[("FSIO_MODEL_ROLES", "w+r"), ("FSIO_MODEL_S3_OPS", "1"),
                                         ("FSIO_MODEL_KEEP_TAIL", "1"), ("FSIO_MODEL_RESENDS", "0")]));
+    /* §3.5, C1:  object tags, a tag write racing a publish
+     * (FSIO_MODEL_TAGS, off elsewhere) */
+    v.push(run("quick-w-tags", &[("FSIO_MODEL_ROLES", "w"), ("FSIO_MODEL_S3_OPS", "2"),
+                                 ("FSIO_MODEL_TAGS", "1"), ("FSIO_MODEL_RESENDS", "0")]));
+    v.push(run("quick-wr-tags", &[("FSIO_MODEL_ROLES", "wr"), ("FSIO_MODEL_S3_OPS", "1"),
+                                  ("FSIO_MODEL_TAGS", "1"), ("FSIO_MODEL_RESENDS", "0")]));
     /* §3:  every call that is not sequence-numbered applied twice, its
      * first reply lost (FSIO_MODEL_DUP, off elsewhere) */
     v.push(run("quick-v-w-dup", &[("FSIO_MODEL_VERSIONED", "1"), ("FSIO_MODEL_ROLES", "w"),
@@ -316,6 +322,11 @@ fn skip_table() -> Vec<Check> {
            ("FSIO_MODEL_DUP", "fsio_fenced_finalize")], true),
         /* §3.4:  fsio_forget's resend not reporting the drain its first
          * application started (kept as a vector) */
+        /* §3.5:  a tag write between the publisher's read and its head
+         * write */
+        ("C1_PUBLISH_COMPARES_TAGS", unv,
+         &[("FSIO_MODEL_ROLES", "w"), ("FSIO_MODEL_S3_OPS", "1"), ("FSIO_MODEL_TAGS", "1"),
+           ("FSIO_MODEL_RESENDS", "0")], true),
         ("FORGET_REPORTS_DRAIN_BY_STATE", unv,
          &[("FSIO_MODEL_ROLES", "w+r"), ("FSIO_MODEL_KEEP_TAIL", "1"),
            ("FSIO_MODEL_DUP", "fsio_forget")], true),

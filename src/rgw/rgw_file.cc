@@ -2383,8 +2383,9 @@ namespace rgw {
           }
           specp = &spec;
         }
+        const rgw_owner writer = fs->fsio_writer();
         auto f_result = fo->sal_object->get_fsio_handle(&dp, hopen_flags,
-							specp);
+							specp, &writer);
         created = true;
         if (!get<0>(f_result)) {
           f->sal_bucket = std::move(fo->sal_bucket);
@@ -2404,8 +2405,9 @@ namespace rgw {
        * the driver joins as a writer (one this open made with
        * OPEN_FLAG_WRITE already is) */
       if (write_open && f->fsio_hdl && ! created && (f->write_opens == 0)) {
+        const rgw_owner writer = fs->fsio_writer();
         int rc = f->fsio_hdl->begin_write(
-          &dp, rgw::sal::Object::FSIOObject::WRITE_FLAG_NONE);
+          &dp, rgw::sal::Object::FSIOObject::WRITE_FLAG_NONE, &writer);
         if (!!rc) {
           lsubdout(fs->get_context(), rgw, 0)
             << __func__ << " " << obj_name
@@ -2696,8 +2698,9 @@ namespace rgw {
 
     if (want_write) {
       if (f->fsio_hdl && (f->write_opens == 0)) {
+        const rgw_owner writer = fs->fsio_writer();
         int rc = f->fsio_hdl->begin_write(
-          &dp, rgw::sal::Object::FSIOObject::WRITE_FLAG_NONE);
+          &dp, rgw::sal::Object::FSIOObject::WRITE_FLAG_NONE, &writer);
         if (!! rc) {
           lsubdout(fs->get_context(), rgw, 0)
             << __func__ << " " << object_name()
@@ -2966,8 +2969,9 @@ namespace rgw {
         }
       } else if (f->write_opens == 0) {
         /* no writer holds it:  the truncate is this handle's write */
+        const rgw_owner writer = fs->fsio_writer();
         rc = f->fsio_hdl->begin_write(
-          &dp, rgw::sal::Object::FSIOObject::WRITE_FLAG_NONE);
+          &dp, rgw::sal::Object::FSIOObject::WRITE_FLAG_NONE, &writer);
         if (!! rc) {
           return rc;
         }

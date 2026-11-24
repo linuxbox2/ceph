@@ -1152,9 +1152,12 @@ public:
 			 bool* truncated, list_parts_each_t&& each_func,
 			 optional_yield y) override;
 
+  /* writer is not used:  an nsfs object is its bucket owner's (the
+   * access model), whoever writes it */
   FSIOResult get_fsio_handle(const DoutPrefixProvider* dpp,
 			     uint32_t flags = FSIOObject::OPEN_FLAG_NONE,
-			     const FSIOCreateSpec* spec = nullptr) override;
+			     const FSIOCreateSpec* spec = nullptr,
+			     const rgw_owner* writer = nullptr) override;
 
   int stat_fsio_view(const DoutPrefixProvider* dpp, struct stat* st,
 		     Attrs* attrs, uint32_t flags) override;
@@ -1269,7 +1272,8 @@ public:
 			uint64_t ofs, uint64_t* bytes_written,
 			uint32_t flags) override;
     virtual int commit(const DoutPrefixProvider* dpp, uint32_t flags) override;
-    virtual int begin_write(const DoutPrefixProvider* dpp, uint32_t flags) override;
+    virtual int begin_write(const DoutPrefixProvider* dpp, uint32_t flags,
+			    const rgw_owner* writer = nullptr) override;
     virtual int end_write(const DoutPrefixProvider* dpp, uint32_t flags) override;
     int publish(const DoutPrefixProvider* dpp, uint32_t flags);
     int reclone(const DoutPrefixProvider* dpp, uint32_t flags);

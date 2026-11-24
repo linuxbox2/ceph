@@ -5771,7 +5771,8 @@ static int apply_create_spec(const DoutPrefixProvider* dpp,
 
 Object::FSIOResult NSFSObject::get_fsio_handle(const DoutPrefixProvider* dpp,
 						uint32_t flags,
-						const FSIOCreateSpec* spec)
+						const FSIOCreateSpec* spec,
+						const rgw_owner* writer)
 {
   if (!ent) {
     (void) stat(dpp);
@@ -6081,7 +6082,8 @@ int NSFSObject::NSFSFSIOObject::commit(const DoutPrefixProvider* dpp, uint32_t f
 /* the SAL's write bracket, over nsfs's in-process follow:  a writer
  * arriving on a shadow this handle published forks a new one and dup2()s
  * it onto the shared fd, and the last writer out publishes */
-int NSFSObject::NSFSFSIOObject::begin_write(const DoutPrefixProvider* dpp, uint32_t flags)
+int NSFSObject::NSFSFSIOObject::begin_write(const DoutPrefixProvider* dpp, uint32_t flags,
+						const rgw_owner* writer)
 {
   return binding == Binding::SHADOW ? 0 : reclone(dpp, OPEN_FLAG_NONE);
 }
@@ -6135,25 +6137,18 @@ int NSFSObject::NSFSFSIOObject::publish(const DoutPrefixProvider* dpp, uint32_t 
       std::string opaque = nsfs_version_id_from_statx(estx);
       etag_bl.append(opaque.c_str(), opaque.size());
     } else {
-      MD5 hash;
-      hash.SetFlags(EVP_MD_CTX_FLAG_NON_FIPS_ALLOW);
-      unsigned char m[CEPH_CRYPTO_MD5_DIGESTSIZE];
-      char buf[65536];
-      off_t off = 0;
-
-      for (;;) {
-	ssize_t nr = ::pread(shadow_fd, buf, sizeof(buf), off);
-	if (nr <= 0) {
-	  break;
-	}
-	hash.Update((const unsigned char*)buf, nr);
-	off += nr;
+      /* FSIO_RADOS_DESIGN.md §3.5, E1:  the content's MD5 as every FSIO
+       * driver computes it, read back through this handle */
+      struct stat sst;
+      if (::fstat(shadow_fd, &sst) < 0) {
+	return -errno;
       }
-      hash.Final(m);
-
-      append_bl(etag_bl, CEPH_CRYPTO_MD5_DIGESTSIZE * 2, [&](auto iter) {
-	return buf_to_hex(m, iter);
-      });
+      std::string hex;
+      if (int r = rgw::sal::fsio_content_md5(dpp, *this, sst.st_size, &hex);
+	  r < 0) {
+	return r;
+      }
+      etag_bl.append(hex);
     }
     fsetattr(dpp, RGW_ATTR_ETAG, etag_bl, 0);
   }

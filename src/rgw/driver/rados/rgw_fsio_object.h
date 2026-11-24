@@ -40,7 +40,8 @@ public:
    * versioned bucket, then fsio_join as a reader or a writer;  a writer
    * that must construct clones the content's chunks and readies the
    * shadow */
-  int open(const DoutPrefixProvider* dpp, bool writer);
+  int open(const DoutPrefixProvider* dpp, bool writer,
+	   const rgw_owner* identity = nullptr);
 
   /* §2.7:  a writer open reads its shadow, otherwise the bound content;
    * short at the size;  a missing shadow chunk inside it reads as zeros
@@ -54,7 +55,10 @@ public:
 	      uint64_t* bytes_written, uint32_t flags) override;
   int commit(const DoutPrefixProvider* dpp, uint32_t flags) override { return 0; }
   /* §3.1:  a reader's handle joins as a writer too */
-  int begin_write(const DoutPrefixProvider* dpp, uint32_t flags) override;
+  /* §3.5 item 6:  a writer open records its identity at its join;  a
+   * later one with another identity replaces it (fsio_writer_identity) */
+  int begin_write(const DoutPrefixProvider* dpp, uint32_t flags,
+		  const rgw_owner* writer = nullptr) override;
   /* §3.4:  the hint reported, then fsio_leave as writer;  the last
    * writer's freezes the shadow, which the publish (plan, driver step 8)
    * completes;  until it lands the freeze is released and -ENOTSUP */
@@ -102,6 +106,12 @@ public:
   /* test only:  the publish's head write applied, its reply treated as
    * lost, so the publish decides as the expirer would (§4.2, W21) */
   void lose_publish_reply(bool on) { lose_reply = on; }
+  /* test only:  called on each try of the publish's head write, after
+   * its read of the tags it evaluated, which it is given, and before the
+   * write, so a test can write the tags in between (C1) */
+  void after_tags_read(std::function<void(const ceph::buffer::list&)> f) {
+    tags_read = std::move(f);
+  }
   /* test only:  each sequenced call sent twice with one sequence number,
    * the second reply kept, as the Objecter's resend past the PG log's
    * dup window returns it (Z22) */
@@ -247,6 +257,8 @@ private:
   bool unsure = false;		// a sequenced call's reply was lost (§3.3)
   bool twice = false;		// test only:  send_sequenced_twice()
   bool lose_reply = false;	// test only:  lose_publish_reply()
+  std::function<void(const ceph::buffer::list&)> tags_read;	// test only
+  std::string identity;		// the writer open's, as the join records it
   ceph::real_time wmtime;	// its last write's
   ceph::real_time rmtime;	// the bound content's
   ceph::real_time wmtime_hint;	// the shadow's, as the join saw it

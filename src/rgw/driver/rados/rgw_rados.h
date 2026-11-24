@@ -355,6 +355,8 @@ struct fsio_publish_spec {
   /* the leaf clone's r, which the publisher's hint named first (§4.2
    * step 1);  drawn here when absent */
   std::optional<cls_rgw_fsio_id> r;
+  /* the tags the publisher evaluated policy with (§3.5, C1) */
+  std::optional<ceph::buffer::list> expected_tags;
 };
 
 class RGWRados
@@ -1336,6 +1338,12 @@ public:
    *                             are overwritten by values contained in attrs parameter.
    * Returns: 0 on success, -ERR# otherwise.
    */
+  /* the attributes a copy's source does not carry to its destination:
+   * per-version and per-instance ones, and the crypt key ones;  shared
+   * with an FSIO publish, a copy of its shadow (FSIO_RADOS_DESIGN.md §3.5) */
+  static void erase_copy_source_attrs(std::map<std::string, bufferlist>& src_attrs,
+                                      bool dest_versioned);
+
   int copy_obj(RGWObjectCtx& src_obj_ctx,
                RGWObjectCtx& dest_obj_ctx,
                const ACLOwner& owner, // owner of destination object
