@@ -891,11 +891,10 @@ int RadosFSIOObject::read_piece(const DoutPrefixProvider* dpp,
   return -EIO;
 }
 
-namespace {
 /* §4.5:  one call's chunk operations in flight together, at most a window
  * of them;  it completes when the last does, keeping the error of the
  * piece at the lowest offset */
-struct IoBatch {
+struct RadosFSIOObject::IoBatch {
   ceph::mutex lock = ceph::make_mutex("RadosFSIOObject::IoBatch");
   ceph::condition_variable cond;
   unsigned outstanding = 0;
@@ -921,7 +920,6 @@ struct IoBatch {
     cond.wait(l, [&] { return outstanding == 0; });
   }
 };
-} // anonymous namespace
 
 int RadosFSIOObject::preadv(const struct iovec* iov, int iovcnt, uint64_t ofs,
 			    uint64_t* bytes_read, uint32_t flags)
@@ -1128,6 +1126,76 @@ void RadosFSIOObject::drain_io()
   io_cond.wait(l, [this] { return in_flight == 0; });
 }
 
+void RadosFSIOObject::send_chunk(uint64_t index, const rgw_raw_obj& raw,
+				 const neorados::IOContext& ioc,
+				 std::vector<Pending> writes)
+{
+  rgw_cls_obj_check_attrs_prefix fence;
+  fence.check_prefix = "user.rgw.fsio.fence";
+  fence.fail_if_exist = true;
+  ceph::buffer::list fence_bl;
+  encode(fence, fence_bl);
+  neorados::WriteOp op;
+  op.exec(::cls::rgw::method::obj_check_attrs_prefix, fence_bl);
+  /* in arrival order, which the OSD keeps within an op;  contiguous
+   * ascending writes joined */
+  uint64_t off = 0;
+  ceph::buffer::list run;
+  for (auto& w : writes) {
+    if (run.length() && w.off == off + run.length()) {
+      run.append(w.data);
+      continue;
+    }
+    if (run.length()) {
+      op.write(off, std::move(run));
+      run.clear();
+    }
+    off = w.off;
+    run.append(w.data);
+  }
+  if (run.length()) {
+    op.write(off, std::move(run));
+  }
+  ++n_chunk_writes;
+  auto ws = std::make_shared<std::vector<Pending>>(std::move(writes));
+  store->get_neorados().execute(
+    neorados::Object{raw.oid}, ioc, std::move(op),
+    [this, index, raw, ioc, ws] (sys::error_code ec) {
+      chunk_done(index, raw, ioc, std::move(*ws), ceph::from_error_code(ec));
+    });
+}
+
+void RadosFSIOObject::chunk_done(uint64_t index, const rgw_raw_obj& raw,
+				 const neorados::IOContext& ioc,
+				 std::vector<Pending> writes, int r)
+{
+  /* the queue first:  once its calls are released the handle may go, and
+   * with no next op nothing here touches it after */
+  std::vector<Pending> next;
+  {
+    std::lock_guard q{queue_lock};
+    auto i = chunkq.find(index);
+    auto& waiting = i->second.waiting;
+    if (waiting.empty()) {
+      chunkq.erase(i);
+    } else {
+      const auto n = std::min<size_t>(
+	waiting.size(),
+	store->ctx()->_conf.get_val<uint64_t>("rgw_fsio_coalesce_extents"));
+      next.assign(std::make_move_iterator(waiting.begin()),
+		  std::make_move_iterator(waiting.begin() + n));
+      waiting.erase(waiting.begin(), waiting.begin() + n);
+    }
+  }
+  for (auto& w : writes) {
+    w.batch->done(w.pos, r);
+  }
+  /* the next op's calls still wait on it, so the handle is still here */
+  if (!next.empty()) {
+    send_chunk(index, raw, ioc, std::move(next));
+  }
+}
+
 int RadosFSIOObject::pwritev(const struct iovec* iov, int iovcnt,
 			     uint64_t ofs, uint64_t* bytes_written,
 			     uint32_t flags)
@@ -1143,11 +1211,6 @@ int RadosFSIOObject::pwritev(const struct iovec* iov, int iovcnt,
   for (int i = 0; i < iovcnt; ++i) {
     all.append(static_cast<const char*>(iov[i].iov_base), iov[i].iov_len);
   }
-  rgw_cls_obj_check_attrs_prefix fence;
-  fence.check_prefix = "user.rgw.fsio.fence";
-  fence.fail_if_exist = true;
-  ceph::buffer::list fence_bl;
-  encode(fence, fence_bl);
   const uint64_t window = dpp->get_cct()->_conf.get_val<uint64_t>(
     "rgw_fsio_io_window");
   /* §4.5:  every piece out together;  the submission stops at a piece it
@@ -1170,15 +1233,27 @@ int RadosFSIOObject::pwritev(const struct iovec* iov, int iovcnt,
       failed_chunk = c.index;
       break;
     }
-    ceph::buffer::list piece;
-    piece.substr_of(all, pos - ofs, len);
-    neorados::WriteOp op;
-    op.exec(::cls::rgw::method::obj_check_attrs_prefix, fence_bl);
-    op.write(pos - c.ofs, std::move(piece));
+    Pending w{pos - c.ofs, {}, b, pos};
+    w.data.substr_of(all, pos - ofs, len);
     b->start(window);
-    store->get_neorados().execute(
-      neorados::Object{raw.oid}, ioc, std::move(op),
-      [b, pos] (sys::error_code ec) { b->done(pos, ceph::from_error_code(ec)); });
+    /* §4.5:  out at once if the chunk has no write op in flight;  else
+     * it waits for that op, and goes out with the others waiting */
+    bool now = false;
+    {
+      std::lock_guard q{queue_lock};
+      auto& cq = chunkq[c.index];
+      if (!cq.sending) {
+	cq.sending = true;
+	now = true;
+      } else {
+	cq.waiting.push_back(std::move(w));
+      }
+    }
+    if (now) {
+      std::vector<Pending> one;
+      one.push_back(std::move(w));
+      send_chunk(c.index, raw, ioc, std::move(one));
+    }
     pos += len;
     sent = pos;
   }

@@ -1138,6 +1138,66 @@ TEST_F(FSIORados, WriteSpanningChunksReportsItsPrefix)
 			rgw::sal::Object::FSIOObject::CLOSE_FLAG_DISCARD));
 }
 
+/* §4.5:  concurrent small writes into one chunk coalesce:  the content
+ * is exact, in fewer write ops than writes */
+TEST_F(FSIORados, ConcurrentSmallWritesCoalesce)
+{
+  ASSERT_EQ(0, put("obj", pattern(4 * MiB, 1)));
+  auto w = open("obj", true);
+  ASSERT_TRUE(w);
+  constexpr int n = 64;
+  constexpr uint64_t blk = 4 * 1024;
+  std::string whole = pattern(4 * MiB, 1);
+  const auto before = rados_fsio(w)->chunk_writes();
+  std::atomic<int> failures{0};
+  std::vector<std::thread> ts;
+  for (int i = 0; i < n; ++i) {
+    const auto piece = pattern(blk, i + 10);
+    whole.replace(i * 2 * blk, blk, piece);	// every other block, chunk 0
+    ts.emplace_back([&w, &failures, i, piece] {
+      if (write(w, i * 2 * blk, {piece}) != 0) {
+	++failures;
+      }
+    });
+  }
+  for (auto& t : ts) {
+    t.join();
+  }
+  EXPECT_EQ(0, failures.load());
+  const auto ops = rados_fsio(w)->chunk_writes() - before;
+  EXPECT_LT(ops, uint64_t(n)) << "no write was coalesced";
+  std::cout << "[          ] " << n << " writes in " << ops << " ops" << std::endl;
+  ASSERT_EQ(0, w->close(env->dpp.get(), 0));
+  std::string now;
+  ASSERT_EQ(0, get("obj", &now));
+  EXPECT_TRUE(now == whole) << "a coalesced write was lost or misplaced";
+}
+
+/* §4.5:  overlapping concurrent writes, coalesced or not, each land whole:
+ * the block ends as one writer's, never a mix */
+TEST_F(FSIORados, OverlappingConcurrentWritesAreWhole)
+{
+  ASSERT_EQ(0, put("obj", pattern(MiB, 1)));
+  auto w = open("obj", true);
+  ASSERT_TRUE(w);
+  constexpr uint64_t blk = 4 * 1024;
+  std::vector<std::thread> ts;
+  for (int i = 0; i < 8; ++i) {
+    ts.emplace_back([&w, i] {
+      (void) write(w, 0, {std::string(blk, char('A' + i))});
+    });
+  }
+  for (auto& t : ts) {
+    t.join();
+  }
+  const auto got = read(w, 0, blk);
+  ASSERT_EQ(blk, got.size());
+  EXPECT_EQ(std::string(blk, got[0]), got) << "a mix of writers";
+  EXPECT_TRUE(got[0] >= 'A' && got[0] < 'A' + 8);
+  ASSERT_EQ(0, w->close(env->dpp.get(),
+			rgw::sal::Object::FSIOObject::CLOSE_FLAG_DISCARD));
+}
+
 /* §4.5:  concurrent writes that all need one new run make one fsio_extend */
 TEST_F(FSIORados, ConcurrentWritersExtendOncePerRun)
 {

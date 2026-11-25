@@ -3,7 +3,9 @@
 
 #pragma once
 
+#include <atomic>
 #include <cstdint>
+#include <memory>
 #include <map>
 #include <optional>
 #include <set>
@@ -151,6 +153,8 @@ public:
 
   /* the fsio_extend calls this handle has made */
   uint64_t extends() const { return n_extends; }
+  /* test only:  write ops sent to chunks (§4.5) */
+  uint64_t chunk_writes() const { return n_chunk_writes; }
 
 private:
   /* an object's head as a guard reads it:  its ID tag, its manifest, the
@@ -348,6 +352,26 @@ private:
 		 boost::container::flat_map<std::string, ceph::buffer::list>* xattrs);
   int exec(const std::string& oid, const neorados::IOContext& ioc,
 	   neorados::WriteOp op);
+  /* §4.5:  one call's chunk operations;  a write piece waiting for its
+   * chunk's op in flight;  per chunk, at most one write op in flight, the
+   * writes arriving meanwhile waiting in arrival order */
+  struct IoBatch;
+  struct Pending {
+    uint64_t off;			// within the chunk
+    ceph::buffer::list data;
+    std::shared_ptr<IoBatch> batch;	// its call's
+    uint64_t pos;			// in the file
+  };
+  struct ChunkQueue {
+    bool sending = false;
+    std::vector<Pending> waiting;
+  };
+  /* §4.5:  one op for these writes to a chunk, then the next waiting */
+  void send_chunk(uint64_t index, const rgw_raw_obj& raw,
+		  const neorados::IOContext& ioc, std::vector<Pending> writes);
+  void chunk_done(uint64_t index, const rgw_raw_obj& raw,
+		  const neorados::IOContext& ioc, std::vector<Pending> writes,
+		  int r);
   /* §4.5:  a read or write in flight, which a session change waits for */
   void io_begin();
   void io_end();
@@ -417,6 +441,10 @@ private:
   /* §4.5:  fsio_extend calls one at a time;  one size report at a time */
   ceph::mutex extend_lock = ceph::make_mutex("RadosFSIOObject::extend");
   ceph::mutex report_lock = ceph::make_mutex("RadosFSIOObject::report");
+  /* §4.5:  the chunks' write queues, never held across a RADOS operation */
+  ceph::mutex queue_lock = ceph::make_mutex("RadosFSIOObject::queue");
+  std::map<uint64_t, ChunkQueue> chunkq;	// by chunk index
+  std::atomic<uint64_t> n_chunk_writes{0};
 };
 
 } // namespace rgw::sal

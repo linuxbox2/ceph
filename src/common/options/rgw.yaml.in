@@ -2952,6 +2952,17 @@ options:
   min: 1
   services:
   - rgw
+- name: rgw_fsio_coalesce_extents
+  type: uint
+  level: advanced
+  desc: Waiting FSIO writes to one chunk sent together in one op
+  long_desc: An FSIO handle keeps at most one write op in flight per chunk;
+    writes arriving meanwhile wait, and when it completes up to this many
+    go out as one op, in arrival order (FSIO design 4.5).
+  default: 64
+  min: 1
+  services:
+  - rgw
 - name: rgw_fsio_check_origin
   type: bool
   level: dev
