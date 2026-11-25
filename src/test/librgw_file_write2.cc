@@ -2270,9 +2270,9 @@ TEST(OPEN2, EXCL)
 
 TEST(OPEN2, UNLINK1)
 {
-  /* posix unlink:  open descriptors keep operating on the doomed
-   * shadow, which is never published, and whose storage is reclaimed
-   * when the last open is returned */
+  /* unlink while a writer is open:  the open keeps working, and its
+   * shadow still publishes at the last close, last writer wins, as from
+   * every other delete (FSIO_RADOS_DESIGN.md §3.6) */
   std::unique_ptr<Open2Helper> o2h =
       std::make_unique<Open2Helper>(fs, bucket_fh);
   ASSERT_NE(o2h.get(), nullptr);
@@ -2310,13 +2310,15 @@ TEST(OPEN2, UNLINK1)
   ASSERT_EQ(get<0>(rdr), 0);
   ASSERT_EQ(get<1>(rdr), a4 + b4 + c4);
 
-  /* last close discards;  nothing is published */
+  /* the last close publishes the whole content under the name */
   ASSERT_EQ(o2h->close(w1), 0);
 
   struct rgw_file_handle* fh{nullptr};
   ret = rgw_lookup(fs, bucket_fh, "unlink1", &fh, nullptr, 0,
 		   RGW_LOOKUP_FLAG_NONE);
-  ASSERT_EQ(ret, -ENOENT);
+  ASSERT_EQ(ret, 0);
+  ASSERT_EQ(s3_contents("unlink1"), a4 + b4 + c4);
+  (void) rgw_fh_rele(fs, fh, RGW_FH_RELE_FLAG_NONE);
 }
 
 
@@ -3096,10 +3098,10 @@ TEST(OPEN2, UMOUNT_WAITS_FOR_A_CLOSE_AND_FAILS_NEW_OPENS)
   EXPECT_EQ(s3_contents(name), "QQPP");
 }
 
-TEST(OPEN2, UNLINK_LEAVES_NO_SHADOW)
+TEST(OPEN2, UNLINKED_WRITER_PUBLISHES_AT_CLOSE)
 {
-  /* direct evidence for UNLINK1:  the doomed shadow loses its name at
-   * unlink and its storage at last close */
+  /* direct evidence for UNLINK1:  the unlinked writer's shadow leaves the
+   * name's view at the unlink, and publishes at the last close */
   if (! fsio_inspectable()) {
     GTEST_SKIP() << "no fsio-inspect driver hint";
   }
@@ -3125,8 +3127,7 @@ TEST(OPEN2, UNLINK_LEAVES_NO_SHADOW)
 
   ASSERT_EQ(rgw_unlink(fs, bucket_fh, "unlink2", RGW_UNLINK_FLAG_NONE), 0);
 
-  /* the name is gone immediately;  on the nsfs/posix drivers that is
-   * observable in both the namespace and .shadow */
+  /* the name is gone immediately, from S3 and from the name's view */
   ASSERT_FALSE(s3_exists("unlink2"));
   ASSERT_FALSE(shadow_exists("unlink2"));
 
@@ -3135,8 +3136,10 @@ TEST(OPEN2, UNLINK_LEAVES_NO_SHADOW)
   ASSERT_EQ(get<0>(rdr), 0);
   ASSERT_EQ(get<1>(rdr), a4);
 
+  /* and its close publishes it, last writer wins */
   ASSERT_EQ(o2h->close(w1), 0);
-  ASSERT_FALSE(s3_exists("unlink2"));
+  ASSERT_TRUE(s3_exists("unlink2"));
+  ASSERT_EQ(s3_contents("unlink2"), a4);
   ASSERT_FALSE(shadow_exists("unlink2"));
 }
 

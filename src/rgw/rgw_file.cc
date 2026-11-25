@@ -599,8 +599,8 @@ namespace rgw {
     if (! rc || rc == -ENOENT) {
       // coverity[var_deref_op:SUPPRESS]
       rgw_fh->flags |= RGWFileHandle::FLAG_DELETED;
-      /* drop the shadow's name;  open descriptors keep working until
-       * the last is returned, and the view is never published */
+      /* open descriptors keep working;  a write they hold still
+       * publishes at the last close, last writer wins (FSIO design §3.6) */
       rgw_fh->discard_shadow();
       fh_cache.remove(rgw_fh->fh.fh_hk.object, rgw_fh,
 		      RGWFileHandle::FHCache::FLAG_LOCK);

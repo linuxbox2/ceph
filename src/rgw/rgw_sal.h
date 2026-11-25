@@ -1243,11 +1243,10 @@ class Object {
        * returns the publish's result.  Destroying a handle still open
        * closes it */
       virtual int close(const DoutPrefixProvider* dpp, uint32_t flags) = 0;
-      /* the object has been unlinked:  drop the shadow's name now,
-       * refuse to publish it, and let the storage be reclaimed when
-       * the last open descriptor is returned (posix unlink).  A driver
-       * whose unlinked shadow still publishes, last writer wins (RADOS,
-       * FSIO_RADOS_DESIGN.md §3.6), returns 0 */
+      /* the object has been unlinked:  this handle's shadow leaves the
+       * name's view, where the unlink did not already take it out, and
+       * still publishes at the last close, last writer wins
+       * (FSIO_RADOS_DESIGN.md §3.6) */
       virtual int discard(const DoutPrefixProvider* dpp, uint32_t flags) {
 	return -ENOTSUP;
       }
@@ -1280,14 +1279,12 @@ class Object {
       };
 
       bool resumed() const { return resumed_existing; }
-      bool is_doomed() const { return doomed; }
 
       FSIOObject() {}
       virtual ~FSIOObject() {}
 
     protected:
       bool resumed_existing{false};
-      bool doomed{false};
       Binding binding{Binding::SHADOW};
     }; /* FSIOObject */
 

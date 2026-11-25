@@ -6103,7 +6103,7 @@ int NSFSObject::NSFSFSIOObject::end_write(const DoutPrefixProvider* dpp, uint32_
     /* FSIO design §3.5 item 4, 8h:  refused:  the shadow's name goes, and
      * the next begin_write() reclones from the published object;  the
      * handle's readers keep the unlinked file until then */
-    if (binding == Binding::SHADOW && !doomed) {
+    if (binding == Binding::SHADOW) {
       if (shadow_dir_fd >= 0 && !shadow_name.empty()) {
 	::unlinkat(shadow_dir_fd, shadow_name.c_str(), 0);
       }
@@ -6118,9 +6118,6 @@ int NSFSObject::NSFSFSIOObject::publish(const DoutPrefixProvider* dpp, uint32_t 
 {
   if (shadow_fd < 0) {
     return -EBADF;
-  }
-  if (doomed) {
-    return -ESTALE; /* object was unlinked;  never publish */
   }
   if (binding == Binding::SHADOW_PUBLISHED) {
     return 0;
@@ -6490,24 +6487,23 @@ int NSFSObject::NSFSFSIOObject::ftruncate(const DoutPrefixProvider* dpp,
 int NSFSObject::NSFSFSIOObject::discard(const DoutPrefixProvider* dpp,
 					uint32_t flags)
 {
-  if (doomed) {
+  /* an unlinked file's shadow still publishes, last writer wins
+   * (FSIO_RADOS_DESIGN.md §3.6), but leaves the name's view now:  moved
+   * to a reserved temporary name in .shadow, which lookups and new opens
+   * do not find, and which publish() renames over the name at close */
+  if (binding != Binding::SHADOW ||
+      shadow_dir_fd < 0 || shadow_name.empty() ||
+      shadow_name.starts_with(nsfs::TMP_LINK_PREFIX)) {
     return 0;
   }
-
-  /* posix unlink:  remove the shadow's name now, but leave the open
-   * descriptors alone--readers and writers continue to operate on it
-   * normally, and the filesystem reclaims the storage when the last
-   * one is closed.  a subsequent open finds no shadow, and so creates
-   * a new one rather than rendezvousing with this (doomed) view */
-  if (binding != Binding::PUBLISHED &&
-      shadow_dir_fd >= 0 && !shadow_name.empty()) {
-    if ((::unlinkat(shadow_dir_fd, shadow_name.c_str(), 0) < 0) &&
-	(errno != ENOENT)) {
-      return -errno;
-    }
+  std::string tmp = std::string(nsfs::TMP_LINK_PREFIX) +
+    std::to_string(::getpid()) + "_" +
+    std::to_string(fsio_build_seq.fetch_add(1));
+  if (::renameat(shadow_dir_fd, shadow_name.c_str(),
+		 shadow_dir_fd, tmp.c_str()) < 0) {
+    return (errno == ENOENT) ? 0 : -errno;
   }
-
-  doomed = true;
+  shadow_name = std::move(tmp);
   return 0;
 }
 
@@ -6518,12 +6514,12 @@ int NSFSObject::NSFSFSIOObject::close(const DoutPrefixProvider* dpp, uint32_t fl
   }
 
   int r = 0;
-  if (writing && !doomed && binding == Binding::SHADOW) {
+  if (writing && binding == Binding::SHADOW) {
     r = end_write(dpp, (flags & CLOSE_FLAG_DISCARD) ? WRITE_FLAG_DISCARD
 						    : WRITE_FLAG_NONE);
   }
 
-  if (!doomed && binding == Binding::SHADOW && ephemeral &&
+  if (binding == Binding::SHADOW && ephemeral &&
       !resumed_existing && shadow_dir_fd >= 0 && !shadow_name.empty()) {
     ::unlinkat(shadow_dir_fd, shadow_name.c_str(), 0);
   }
