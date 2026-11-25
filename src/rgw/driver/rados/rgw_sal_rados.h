@@ -137,6 +137,8 @@ class RadosStore : public StoreDriver {
     }
 
     virtual int initialize(CephContext *cct, const DoutPrefixProvider *dpp) override;
+    /* FSIO_RADOS_DESIGN.md §7:  the gate's zone-wide part */
+    bool have_fsio() const override;
     virtual const std::string get_name() const override {
       return "rados";
     }
@@ -635,6 +637,10 @@ class RadosObject : public StoreObject {
 			       uint32_t flags = FSIOObject::OPEN_FLAG_NONE,
 			       const FSIOCreateSpec* spec = nullptr,
 			       const rgw_owner* writer = nullptr) override;
+    /* §3.1, §7:  the current shadow's hints over the published object;
+     * -ENOTSUP for a name only the S3 op path resolves */
+    int stat_fsio_view(const DoutPrefixProvider* dpp, struct stat* st,
+		       Attrs* attrs, uint32_t flags) override;
     void get_raw_obj(rgw_raw_obj* raw_obj);
     virtual std::unique_ptr<Object> clone() override {
       return std::unique_ptr<Object>(new RadosObject(*this));
@@ -743,6 +749,8 @@ class RadosBucket : public StoreBucket {
 
     virtual ~RadosBucket();
     virtual std::unique_ptr<Object> get_object(const rgw_obj_key& k) override;
+    /* FSIO_RADOS_DESIGN.md §7:  the gate, RGWRados::fsio_enabled() */
+    bool have_fsio() const override;
     virtual int list(const DoutPrefixProvider* dpp, ListParams&, int, ListResults&, optional_yield y) override;
     virtual int remove(const DoutPrefixProvider* dpp, bool delete_children, optional_yield y) override;
     virtual int remove_bypass_gc(int concurrent_max, bool

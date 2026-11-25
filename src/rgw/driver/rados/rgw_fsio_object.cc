@@ -2713,4 +2713,76 @@ Object::FSIOResult RadosObject::get_fsio_handle(const DoutPrefixProvider* dpp,
   return FSIOResult{0, std::move(hdl)};
 }
 
+int RadosObject::stat_fsio_view(const DoutPrefixProvider* dpp,
+				struct stat* st, Attrs* attrs, uint32_t flags)
+{
+  if (!bucket->have_fsio()) {
+    return -ENOTSUP;
+  }
+  /* the head by name, the OLH in a versioned bucket:  its FSIO header */
+  auto* rados = store->getRados();
+  const auto& info = bucket->get_info();
+  rgw_raw_obj raw;
+  rados->obj_to_raw(info.placement_rule,
+		    rgw_obj(info.bucket, rgw_obj_key(get_key().name)), &raw);
+  std::optional<cls_rgw_fsio_hdr> hdr;
+  ceph::buffer::list bl;
+  sys::error_code ec;
+  try {
+    auto ioc = rgw::init_iocontext(dpp, store->get_neorados(), raw.pool,
+				   ceph::async::use_blocked);
+    store->get_neorados().execute(
+      neorados::Object{raw.oid}, ioc,
+      neorados::ReadOp{}.get_xattr("user.rgw.fsio.hdr", &bl), nullptr,
+      ceph::async::use_blocked[ec]);
+  } catch (const sys::system_error& e) {
+    return ceph::from_error_code(e.code());
+  }
+  if (!ec) {
+    try {
+      auto it = bl.cbegin();
+      decode(hdr.emplace(), it);
+    } catch (const ceph::buffer::error&) {
+      return -EIO;
+    }
+  } else if (ec != sys::errc::no_such_file_or_directory &&
+	     ec != sys::errc::no_message_available) {
+    return ceph::from_error_code(ec);
+  }
+  /* a name being created:  no lookup finds it until its publish (§3.1) */
+  if (hdr && hdr->created) {
+    return -ENOTSUP;
+  }
+  /* no head, a tracking-only one, or a prefix:  the S3 op path's */
+  if (int r = load_obj_state(dpp, null_yield, true); r < 0) {
+    return r == -ENOENT ? -ENOTSUP : r;
+  }
+  if (!state.exists) {
+    return -ENOTSUP;
+  }
+  memset(st, 0, sizeof(*st));
+  st->st_mode = S_IFREG;
+  st->st_nlink = 1;
+  st->st_size = get_size();
+  st->st_mtim = ceph::real_clock::to_timespec(get_mtime());
+  /* §3.3:  a current shadow, ready or publishing:  its hints */
+  if (hdr && hdr->cur_shadow) {
+    for (const auto& e : hdr->chunk_sets) {
+      if (e.id != *hdr->cur_shadow || !e.shadow ||
+	  (e.state != cls_rgw_fsio_cs_state::READY &&
+	   e.state != cls_rgw_fsio_cs_state::PUBLISHING)) {
+	continue;
+      }
+      st->st_size = e.shadow->size_hint;
+      if (!ceph::real_clock::is_zero(e.shadow->mtime_hint)) {
+	st->st_mtim = ceph::real_clock::to_timespec(e.shadow->mtime_hint);
+      }
+    }
+  }
+  if (attrs) {
+    *attrs = get_attrs();
+  }
+  return 0;
+}
+
 } // namespace rgw::sal

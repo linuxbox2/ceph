@@ -3533,6 +3533,70 @@ TEST_F(FSIORadosVersionedCreate, SuspendedCreates)
   EXPECT_EQ("CD", now);
 }
 
+/* §3.1, §7, plan step 9:  stat_fsio_view(), the positional view a lookup
+ * resolves:  the current shadow's hints over the published object;
+ * -ENOTSUP for a name only the S3 op path resolves */
+class FSIORadosStatView : public FSIORadosVersionedCreate {
+protected:
+  int stat(const std::string& key, struct stat* st) {
+    auto obj = bucket->get_object(rgw_obj_key(key));
+    rgw::sal::Attrs attrs;
+    return obj->stat_fsio_view(env->dpp.get(), st, &attrs, 0);
+  }
+};
+
+TEST_F(FSIORadosStatView, PublishedObject)
+{
+  set_versioning(0);
+  ASSERT_EQ(0, put("obj", pattern(9 * MiB, 1)));
+  struct stat st;
+  ASSERT_EQ(0, stat("obj", &st));
+  EXPECT_TRUE(S_ISREG(st.st_mode));
+  EXPECT_EQ(int64_t(9 * MiB), st.st_size);
+}
+
+/* a writer's truncate sets the shadow's size hint at once:  the view
+ * shows it before the close, the published object its own */
+TEST_F(FSIORadosStatView, CurrentShadowBeforeClose)
+{
+  set_versioning(0);
+  ASSERT_EQ(0, put("obj", pattern(9 * MiB, 1)));
+  auto w = open("obj", true);
+  ASSERT_TRUE(w);
+  ASSERT_EQ(0, w->ftruncate(env->dpp.get(), 4 * MiB, 0));
+  struct stat st;
+  ASSERT_EQ(0, stat("obj", &st));
+  EXPECT_EQ(int64_t(4 * MiB), st.st_size);
+  std::string now;
+  ASSERT_EQ(0, get("obj", &now));
+  EXPECT_EQ(9 * MiB, now.size());
+  ASSERT_EQ(0, w->close(env->dpp.get(), 0));
+}
+
+/* a name being created, and a name with no head:  the S3 op path's */
+TEST_F(FSIORadosStatView, CreatedNameAndNoHead)
+{
+  set_versioning(0);
+  std::unique_ptr<FO> w;
+  ASSERT_EQ(0, create("new", true, &w));
+  struct stat st;
+  EXPECT_EQ(-ENOTSUP, stat("new", &st));
+  EXPECT_EQ(-ENOTSUP, stat("nothing", &st));
+  ASSERT_EQ(0, w->close(env->dpp.get(), 0));
+  ASSERT_EQ(0, stat("new", &st));
+  EXPECT_EQ(0, st.st_size);
+}
+
+/* versioned:  the current version's */
+TEST_F(FSIORadosStatView, CurrentVersion)
+{
+  ASSERT_EQ(0, put("obj", pattern(MiB, 1)));
+  ASSERT_EQ(0, put("obj", pattern(2 * MiB, 2)));
+  struct stat st;
+  ASSERT_EQ(0, stat("obj", &st));
+  EXPECT_EQ(int64_t(2 * MiB), st.st_size);
+}
+
 int main(int argc, char** argv)
 {
   ::testing::InitGoogleTest(&argc, argv);

@@ -40,6 +40,7 @@
 #include "common/ceph_argparse.h"
 #include "common/dout.h"
 #include "rgw_lib.h"
+#include "rgw_file_int.h"
 #include "rgw_sal.h"
 #include "driver/rados/rgw_sal_rados.h"
 #include "global/global_context.h"
@@ -82,24 +83,43 @@ struct {
   char** argv;
 } saved_args;
 
-/* write `fill` over the whole object through librgw:  RGW's PUT.  The
- * data pool exists once RGW has written an object, so it is opened
- * after the first */
+/* write `fill` over the whole object as an S3 PUT:  the SAL atomic
+ * writer, as RGWPutObj's.  librgw's own writes take FSIO's path on a
+ * bucket that serves FSIO, and so reach no head-write hook (plan step 9).
+ * `parent` is the bucket's handle.  The data pool exists once RGW has
+ * written an object, so it is opened after the first */
 void put(const std::string& name, char fill,
 	 struct rgw_file_handle* parent = nullptr)
 {
-  struct rgw_file_handle* fh = nullptr;
-  ASSERT_EQ(0, rgw_lookup(fs, parent ? parent : bucket_fh, name.c_str(), &fh,
-			  nullptr, 0, RGW_LOOKUP_FLAG_CREATE));
-  ASSERT_EQ(0, rgw_open(fs, fh, 0, 0));
+  const DoutPrefix dp(g_ceph_context, ceph_subsys_rgw, "fsio_put test: ");
+  auto* driver = rgw::g_rgwlib->get_driver();
+  std::unique_ptr<rgw::sal::Bucket> b;
+  rgw_bucket key;
+  key.name = rgw::get_rgwfh(parent ? parent : bucket_fh)->bucket_name();
+  ASSERT_EQ(0, driver->load_bucket(&dp, key, &b, null_yield));
+  auto obj = b->get_object(rgw_obj_key(name));
+  if (b->versioning_enabled()) {
+    obj->gen_rand_obj_instance_name();
+  }
+  ACLOwner owner;
+  owner.id = b->get_owner();
+  auto writer = driver->get_atomic_writer(
+    &dp, null_yield, obj.get(), owner, nullptr, 0,
+    gen_rand_alphanumeric(g_ceph_context, 16));
+  ASSERT_EQ(0, writer->prepare(null_yield));
   const std::string chunk(1 << 20, fill);
   for (size_t off = 0; off < SIZE; off += chunk.size()) {
-    size_t n = 0;
-    ASSERT_EQ(0, rgw_write(fs, fh, off, chunk.size(), &n,
-			   (void*)chunk.data(), RGW_WRITE_FLAG_NONE));
+    ceph::buffer::list bl;
+    bl.append(chunk);
+    ASSERT_EQ(0, writer->process(std::move(bl), off));
   }
-  ASSERT_EQ(0, rgw_close(fs, fh, RGW_CLOSE_FLAG_NONE));
-  rgw_fh_rele(fs, fh, 0);
+  ASSERT_EQ(0, writer->process({}, SIZE));
+  ceph::real_time mtime;
+  rgw::sal::Attrs attrs;
+  req_context rctx{&dp, null_yield, nullptr};
+  ASSERT_EQ(0, writer->complete(SIZE, "", &mtime, ceph::real_time(), attrs,
+				std::nullopt, ceph::real_time(), nullptr,
+				nullptr, nullptr, nullptr, nullptr, rctx, 0));
   if (!data.is_valid()) {
     ASSERT_EQ(0, cluster.ioctx_create(data_pool.c_str(), data));
     ASSERT_EQ(0, cluster2.ioctx_create(data_pool.c_str(), data2));

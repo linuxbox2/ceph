@@ -1196,6 +1196,18 @@ int RadosBucket::set_acl(const DoutPrefixProvider* dpp, RGWAccessControlPolicy &
   return 0;
 }
 
+bool RadosStore::have_fsio() const
+{
+  const DoutPrefix dp(rados->ctx(), dout_subsys, "rgw fsio: ");
+  return rados->fsio_zone_enabled(&dp);
+}
+
+bool RadosBucket::have_fsio() const
+{
+  const DoutPrefix dp(store->ctx(), dout_subsys, "rgw fsio: ");
+  return store->getRados()->fsio_enabled(&dp, info, null_yield);
+}
+
 std::unique_ptr<Object> RadosBucket::get_object(const rgw_obj_key& k)
 {
   return std::make_unique<RadosObject>(this->store, k, this);

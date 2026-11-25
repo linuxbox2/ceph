@@ -655,6 +655,9 @@ public:
    * use fsio_replace_head only where this holds */
   bool fsio_enabled(const DoutPrefixProvider *dpp, const RGWBucketInfo& info,
                     optional_yield y);
+  /* its zone-wide part:  the fsio zonegroup feature and the OSDs'
+   * release floor */
+  bool fsio_zone_enabled(const DoutPrefixProvider *dpp);
   /* FSIO_RADOS_DESIGN.md §6.5:  -ENOTEMPTY while an FSIO open hint names
    * the bucket, in a bucket that serves FSIO */
   int fsio_check_no_hints(const DoutPrefixProvider *dpp,

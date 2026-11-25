@@ -2797,8 +2797,7 @@ int RGWRados::create_vector_bucket(const DoutPrefixProvider* dpp,
  * pool of the bucket's placement replicated and not Crimson, CLONE_TO
  * having neither (X17, Z21);  a marker without '~', the separator of
  * FSIO's own names (§2.7, E2) */
-bool RGWRados::fsio_enabled(const DoutPrefixProvider *dpp,
-                            const RGWBucketInfo& info, optional_yield y)
+bool RGWRados::fsio_zone_enabled(const DoutPrefixProvider *dpp)
 {
   if (!svc.zone->get_zonegroup().supports(rgw::zone_features::fsio)) {
     ldpp_dout(dpp, 10) << "FSIO: off:  the zonegroup lacks the fsio feature"
@@ -2811,6 +2810,15 @@ bool RGWRados::fsio_enabled(const DoutPrefixProvider *dpp,
     ldpp_dout(dpp, 10) << "FSIO: off:  the OSDs' release floor is "
                        << int(release) << " (r=" << r << "), below vampire"
                        << dendl;
+    return false;
+  }
+  return true;
+}
+
+bool RGWRados::fsio_enabled(const DoutPrefixProvider *dpp,
+                            const RGWBucketInfo& info, optional_yield y)
+{
+  if (!fsio_zone_enabled(dpp)) {
     return false;
   }
   if (info.bucket.marker.find('~') != std::string::npos) {

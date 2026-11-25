@@ -1494,12 +1494,14 @@ class Object {
      *  runs per dirent.  st->st_mode carries the type, so one call
      *  disambiguates a file from a directory.
      *
-     *  Returns -ENOENT when neither view exists, and -ENOTSUP from a
-     *  driver with no positional view;  a caller which gets -ENOTSUP
-     *  falls back to resolving through the S3 op path, which is frozen
-     *  legacy and should not be extended.  A driver which later gains a
-     *  positional view (RADOS is expected to) implements this and its
-     *  callers stop taking the fallback, with no change at the caller.
+     *  Returns -ENOENT when neither view exists, and -ENOTSUP when the
+     *  driver has no positional view of this name:  a driver with none,
+     *  a bucket that does not serve one, or a name only the S3 op path
+     *  can resolve.  On RADOS that is any name with no head, since its
+     *  directories are prefixes, and a name being created, which no
+     *  lookup finds until its publish (FSIO_RADOS_DESIGN.md §3.1).  A
+     *  caller which gets -ENOTSUP falls back to resolving through the
+     *  S3 op path, which is frozen legacy and should not be extended.
      */
     virtual int stat_fsio_view(const DoutPrefixProvider* dpp,
 			       struct stat* st, Attrs* attrs,
