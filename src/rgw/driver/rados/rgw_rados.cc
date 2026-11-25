@@ -10011,7 +10011,10 @@ int RGWRados::olh_init_modification_impl(const DoutPrefixProvider *dpp, const RG
   bool has_tag = (state.exists && has_olh_tag(state.attrset));
 
   if (!state.exists) {
-    op.create(true);
+    /* §2.2, A33:  a tracking-only head reads as absent but is there:  an
+     * OLH is begun on it as on an absent object, its create not
+     * exclusive, with no null version pointing at itself */
+    op.create(!fsio_tracking_only(state));
   } else {
     op.assert_exists();
     struct timespec mtime_ts = real_clock::to_timespec(state.mtime);
