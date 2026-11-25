@@ -25,12 +25,14 @@ edition = "2021"
 //!   librgw-rados   ceph_test_librgw_file_fsio_put            (RADOS)
 //!   harness        unittest_rgw_fsio_geometry (no cluster), then
 //!                  ceph_test_rgw_fsio_rados, the driver's harness (RADOS)
+//!   bench          the harness's I/O benchmark:  reads and writes by call
+//!                  size and mode, against RGW PUT and GET   (RADOS)
 //!   write2-rados   write2, and nfsns with every group flag    (RADOS)
 //!   cluster-tier   the model's cluster tier, the origin check off (RADOS)
 //!   model          the model's in-memory tiers:  quick vectors skips
 //!   nsfs-librgw    write2, and nfsns with every group flag    (nsfs)
 //! Presets:
-//!   driver   cls librgw-rados harness write2-rados
+//!   driver   cls librgw-rados harness bench write2-rados
 //!   core     cls cluster-tier model
 //!   full     every step
 //!
@@ -107,9 +109,9 @@ use std::process::{Command, Stdio};
 const AWS_KEY: &str = "0555b35654ad1656d804";
 const AWS_SECRET: &str = "h7GhxuBLTrlhVUyxSPUKUV8r/2EI4ngqJxD7iBdBYLhwluN30JaT3Q==";
 
-const STEPS: &[&str] = &["cls", "librgw-rados", "harness", "write2-rados", "cluster-tier", "model",
-                         "nsfs-librgw"];
-const RADOS: &[&str] = &["cls", "librgw-rados", "harness", "write2-rados", "cluster-tier"];
+const STEPS: &[&str] = &["cls", "librgw-rados", "harness", "bench", "write2-rados", "cluster-tier",
+                         "model", "nsfs-librgw"];
+const RADOS: &[&str] = &["cls", "librgw-rados", "harness", "bench", "write2-rados", "cluster-tier"];
 
 struct Opts {
     dry_run: bool,
@@ -141,6 +143,7 @@ fn step_timeout(o: &Opts, step: &str) -> u64 {
         "build" => 1200,
         "model" => 1800,
         "cluster-tier" => 1200,
+        "bench" => 900,
         "nsfs-librgw" | "write2-rados" => 300,
         "rados-stop" | "rados-chown" => 120,
         _ => 180,
@@ -190,6 +193,7 @@ fn main() {
                            "ceph_test_neorados_cls_rgw_fsio"][..],
                 "librgw-rados" => &["rgw", "ceph_test_librgw_file_fsio_put"][..],
                 "harness" => &["unittest_rgw_fsio_geometry", "ceph_test_rgw_fsio_rados"][..],
+                "bench" => &["ceph_test_rgw_fsio_rados"][..],
                 "cluster-tier" | "model" => &["ceph_test_cls_rgw_fsio_model"][..],
                 "nsfs-librgw" | "write2-rados" =>
                     &["rgw", "ceph_test_librgw_file_write2", "ceph_test_librgw_file_nfsns"][..],
@@ -305,6 +309,19 @@ fn rados_phase(o: &Opts, steps: &[&'static str], run_dir: &Path, summary: &mut V
                             "{keys} bin/ceph_test_librgw_file_nfsns --create --userid testid \
                              --hier1 --dirs1 --marker1 --setattr --rename --readf --writef \"-c {conf}\"")),
                     ]
+                }
+                "bench" => {
+                    let extra = std::cell::RefCell::new(Vec::new());
+                    let c = sh("bench", "the I/O benchmark", format!(
+                        "env CEPH_CONF={conf} bin/ceph_test_rgw_fsio_rados \
+                         --gtest_also_run_disabled_tests --gtest_filter='*IoBench*'"));
+                    failed |= !exec(o, &c, run_dir, summary, |text| {
+                        let (note, lines) = bench_report(text, run_dir);
+                        *extra.borrow_mut() = lines;
+                        Some(note)
+                    });
+                    summary.extend(extra.into_inner());
+                    continue;
                 }
                 "harness" if o.clone_latency => vec![sh("harness", "the clone latency", format!(
                     "env CEPH_CONF={conf} bin/ceph_test_rgw_fsio_rados \
@@ -500,6 +517,90 @@ fn output_streamed(argv: &[String], cwd: &Path, show: impl Fn(&str) -> Option<St
 
 /// "[  PASSED  ] 18 tests." and "[  FAILED  ] 2 tests", or a tier's
 /// "N of M as expected"
+/// One benchmark case:  the test's `[ bench ]` line
+struct BenchCase {
+    op: String,
+    bytes: u64,
+    mode: String,
+    mibs: f64,
+    usec: f64,
+}
+
+fn bench_cases(text: &str) -> Vec<BenchCase> {
+    text.lines().filter_map(|l| {
+        let f: Vec<&str> = l.trim().strip_prefix("[ bench ]")?.trim().split('\t').collect();
+        if f.len() != 5 {
+            return None;
+        }
+        Some(BenchCase {
+            op: f[0].into(), bytes: f[1].parse().ok()?, mode: f[2].into(),
+            mibs: f[3].parse().ok()?, usec: f[4].parse().ok()?,
+        })
+    }).collect()
+}
+
+fn size_name(b: u64) -> String {
+    if b >= 1 << 20 { format!("{} MiB", b >> 20) } else { format!("{} KiB", b >> 10) }
+}
+
+/// The benchmark's cases saved as bench.tsv in the run directory, against
+/// the newest earlier run that has one:  the step's note, and one summary
+/// line per operation and size
+fn bench_report(text: &str, run_dir: &Path) -> (String, Vec<String>) {
+    let cases = bench_cases(text);
+    if cases.is_empty() {
+        return ("no cases".into(), vec![]);
+    }
+    let mut tsv = String::from("op\tbytes\tmode\tMiB/s\tusec/call\n");
+    for c in &cases {
+        tsv += &format!("{}\t{}\t{}\t{:.1}\t{:.1}\n", c.op, c.bytes, c.mode, c.mibs, c.usec);
+    }
+    let _ = std::fs::write(run_dir.join("bench.tsv"), &tsv);
+    /* the newest earlier run directory with a bench.tsv:  the names sort
+     * by time */
+    let earlier = run_dir.parent().and_then(|p| std::fs::read_dir(p).ok()).and_then(|rd| {
+        let mut dirs: Vec<PathBuf> = rd.filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|d| d != run_dir && d.join("bench.tsv").exists()).collect();
+        dirs.sort();
+        dirs.pop()
+    });
+    let before: Vec<BenchCase> = earlier.as_ref()
+        .and_then(|d| std::fs::read_to_string(d.join("bench.tsv")).ok())
+        .map(|t| bench_cases(&t.lines().skip(1).map(|l| format!("[ bench ] {l}"))
+                             .collect::<Vec<_>>().join("\n")))
+        .unwrap_or_default();
+    let find = |cs: &[BenchCase], op: &str, bytes: u64, mode: &str| {
+        cs.iter().find(|c| c.op == op && c.bytes == bytes && c.mode == mode).map(|c| c.mibs)
+    };
+    let mut keys: Vec<(String, u64)> = cases.iter().map(|c| (c.op.clone(), c.bytes)).collect();
+    keys.dedup();
+    let mut lines = vec![];
+    for (op, bytes) in keys {
+        let best = cases.iter().filter(|c| c.op == op && c.bytes == bytes && c.mode != "rgw")
+            .max_by(|a, b| a.mibs.total_cmp(&b.mibs));
+        let Some(best) = best else { continue };
+        let mut l = format!("{:<6} {:>7}:  {} {:.0} MiB/s", op, size_name(bytes), best.mode, best.mibs);
+        if let Some(base) = find(&cases, &op, bytes, "w1t1") {
+            l += &format!(";  {:.1}x w1t1", best.mibs / base);
+        }
+        if let Some(rgw) = find(&cases, &op, bytes, "rgw") {
+            l += &format!(", {:.1}x RGW", best.mibs / rgw);
+        }
+        if let Some(was) = find(&before, &op, bytes, &best.mode) {
+            let d = earlier.as_ref().and_then(|d| d.file_name()).map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default();
+            l += &format!(";  {:+.0}% on {d}", (best.mibs / was - 1.0) * 100.0);
+        }
+        lines.push(format!("{:<14} {l}", "bench"));
+    }
+    let note = match &earlier {
+        Some(d) => format!("{} cases;  against {}", cases.len(),
+                           d.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()),
+        None => format!("{} cases;  no earlier run", cases.len()),
+    };
+    (note, lines)
+}
+
 fn expected_count(text: &str) -> Option<String> {
     let mut parts: Vec<String> = Vec::new();
     for l in text.lines() {
@@ -664,7 +765,7 @@ fn parse_args() -> Opts {
             "--filter" => filter = Some(args.next().unwrap_or_else(|| die("--filter needs a pattern"))),
             "--timeout" => timeout = Some(args.next().and_then(|v| v.parse().ok())
                                           .unwrap_or_else(|| die("--timeout needs a number of seconds"))),
-            "driver" => steps.extend(["cls", "librgw-rados", "harness", "write2-rados"]),
+            "driver" => steps.extend(["cls", "librgw-rados", "harness", "bench", "write2-rados"]),
             "core" => steps.extend(["cls", "cluster-tier", "model"]),
             "full" => steps.extend(STEPS),
             "-h" | "--help" => {

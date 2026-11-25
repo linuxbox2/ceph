@@ -2765,6 +2765,172 @@ TEST_F(FSIORadosWait, JoinWaitsForReady)
   }
 }
 
+/* §4.5, plan 9f:  the I/O benchmark fsio_validate.rs's bench step runs;
+ * disabled, since it measures rather than tests.  Only each case's I/O is
+ * timed:  writes and reads by call size, with one chunk operation at a
+ * time on one thread (w1t1, the path before §4.5), a call's chunks
+ * together on one thread (w16t1), and eight threads on one handle
+ * (w16t8);  RGW PUTs and ranged GETs of the call size are the reference.
+ * Each case runs three times, its median time reported.  One line per
+ * case:  [ bench ] op, bytes per call, mode, MiB/s, and microseconds per
+ * call.  Reads check what they read */
+TEST_F(FSIORados, DISABLED_IoBench)
+{
+  using FO = rgw::sal::Object::FSIOObject;
+  using bench_clock = std::chrono::steady_clock;
+  auto& conf = g_ceph_context->_conf;
+  const auto window0 = conf.get_val<uint64_t>("rgw_fsio_io_window");
+  struct Mode { const char* name; uint64_t window; int threads; };
+  const Mode modes[] = {{"w1t1", 1, 1}, {"w16t1", 16, 1}, {"w16t8", 16, 8}};
+  const uint64_t sizes[] = {4 * 1024, 64 * 1024, MiB, 16 * MiB};
+  constexpr int reps = 3;
+  auto median = [] (std::vector<double> v) {
+    std::sort(v.begin(), v.end());
+    return v[v.size() / 2];
+  };
+  auto total_for = [] (uint64_t size) {
+    return std::max<uint64_t>(size == 4 * 1024 ? 4 * MiB : 64 * MiB, 8 * size);
+  };
+  auto report = [] (const char* op, uint64_t size, const char* mode,
+		    uint64_t total, double secs, int threads) {
+    const double calls = double(total / size);
+    std::cout << "[ bench ] " << op << '\t' << size << '\t' << mode << '\t'
+	      << fmt::format("{:.1f}\t{:.1f}", (total / double(MiB)) / secs,
+			     secs * 1e6 * threads / calls) << std::endl;
+  };
+  /* fn(ofs) over [0, total) in calls of size, the range split into one
+   * contiguous region per thread:  the wall-clock seconds, and errors */
+  auto run = [] (uint64_t total, uint64_t size, int threads, auto&& fn) {
+    std::atomic<int> errors{0};
+    const uint64_t per = total / threads;
+    const auto t0 = bench_clock::now();
+    std::vector<std::thread> ts;
+    for (int t = 0; t < threads; ++t) {
+      ts.emplace_back([&, t] {
+	for (uint64_t ofs = t * per; ofs < (t + 1) * per; ofs += size) {
+	  if (fn(ofs) != 0) {
+	    ++errors;
+	    return;
+	  }
+	}
+      });
+    }
+    for (auto& th : ts) {
+      th.join();
+    }
+    return std::make_pair(
+      std::chrono::duration<double>(bench_clock::now() - t0).count(),
+      errors.load());
+  };
+
+  for (const uint64_t size : sizes) {
+    const uint64_t total = total_for(size);
+    const std::string buf = pattern(size, 7);
+    for (const auto& m : modes) {
+      conf.set_val("rgw_fsio_io_window", std::to_string(m.window));
+      std::vector<double> times;
+      for (int t = 0; t < reps; ++t) {
+	const auto key = fmt::format("bench-w-{}-{}-{}", size, m.name, t);
+	ASSERT_EQ(0, put(key, "x"));
+	auto w = open(key, true);
+	ASSERT_TRUE(w);
+	auto [secs, errors] = run(total, size, m.threads, [&] (uint64_t ofs) {
+	  struct iovec iov{const_cast<char*>(buf.data()), buf.size()};
+	  uint64_t n = 0;
+	  return w->pwritev(&iov, 1, ofs, &n, 0);
+	});
+	EXPECT_EQ(0, errors) << key;
+	times.push_back(secs);
+	ASSERT_EQ(0, w->close(env->dpp.get(), FO::CLOSE_FLAG_DISCARD));
+      }
+      report("write", size, m.name, total, median(times), m.threads);
+    }
+    /* RGW:  PUTs of the call size */
+    {
+      std::vector<double> times;
+      for (int t = 0; t < reps; ++t) {
+	int errors = 0;
+	const auto t0 = bench_clock::now();
+	for (uint64_t i = 0; i < total / size; ++i) {
+	  /* a key per repetition:  each a create, as the FSIO cases' are */
+	  errors += put(fmt::format("bench-rgw-{}-{}-{}", size, t, i), buf) != 0;
+	}
+	times.push_back(
+	  std::chrono::duration<double>(bench_clock::now() - t0).count());
+	EXPECT_EQ(0, errors);
+      }
+      report("write", size, "rgw", total, median(times), 1);
+    }
+  }
+
+  for (const uint64_t size : sizes) {
+    const uint64_t total = total_for(size);
+    const std::string data = pattern(total, 9);
+    const auto key = fmt::format("bench-r-{}", size);
+    ASSERT_EQ(0, put(key, data));
+    {
+      /* one untimed read first, so no mode reads a colder cache than the
+       * others */
+      std::string warm;
+      ASSERT_EQ(0, get(key, &warm));
+    }
+    for (const auto& m : modes) {
+      conf.set_val("rgw_fsio_io_window", std::to_string(m.window));
+      auto r = open(key, false);
+      ASSERT_TRUE(r);
+      std::vector<double> times;
+      for (int t = 0; t < reps; ++t) {
+	std::string got(total, '\0');
+	auto [secs, errors] = run(total, size, m.threads, [&] (uint64_t ofs) {
+	  struct iovec iov{got.data() + ofs, size};
+	  uint64_t n = 0;
+	  const int e = r->preadv(&iov, 1, ofs, &n, 0);
+	  return e ? e : (n == size ? 0 : -EIO);
+	});
+	EXPECT_EQ(0, errors) << key << " " << m.name;
+	EXPECT_TRUE(got == data) << key << " " << m.name << " read wrong bytes";
+	times.push_back(secs);
+      }
+      report("read", size, m.name, total, median(times), m.threads);
+      ASSERT_EQ(0, r->close(env->dpp.get(), 0));
+    }
+    /* RGW:  ranged GETs of the call size */
+    {
+      auto obj = bucket->get_object(rgw_obj_key(key));
+      auto rop = obj->get_read_op();
+      ASSERT_EQ(0, rop->prepare(null_yield, env->dpp.get()));
+      std::vector<double> times;
+      for (int t = 0; t < reps; ++t) {
+	std::string got;
+	got.reserve(total);
+	int errors = 0;
+	const auto t0 = bench_clock::now();
+	for (uint64_t ofs = 0; ofs < total; ofs += size) {
+	  /* a read returns at most a stripe:  the call's range, piece by
+	   * piece */
+	  const int64_t last = ofs + size - 1;
+	  for (int64_t at = ofs; at <= last; ) {
+	    ceph::buffer::list bl;
+	    const int n = rop->read(at, last, bl, null_yield, env->dpp.get());
+	    if (n <= 0) {
+	      ++errors;
+	      break;
+	    }
+	    got.append(bl.to_str());
+	    at += n;
+	  }
+	}
+	times.push_back(
+	  std::chrono::duration<double>(bench_clock::now() - t0).count());
+	EXPECT_EQ(0, errors);
+	EXPECT_TRUE(got == data) << key << " rgw read wrong bytes";
+      }
+      report("read", size, "rgw", total, median(times), 1);
+    }
+  }
+  conf.set_val("rgw_fsio_io_window", std::to_string(window0));
+}
+
 /* the driver's step 3, element 5:  how long a writer's open takes to
  * construct objects of growing chunk counts, against rgw_fsio_join_wait
  * (plan §6.13).  A measurement, not a check:  disabled in ordinary runs,
