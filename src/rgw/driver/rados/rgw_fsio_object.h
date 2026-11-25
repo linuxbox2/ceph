@@ -10,6 +10,7 @@
 #include <string>
 #include <vector>
 
+#include "common/ceph_mutex.h"
 #include "include/function2.hpp"
 #include "include/neorados/RADOS.hpp"
 #include "cls/rgw/cls_rgw_fsio_ops.h"
@@ -347,6 +348,12 @@ private:
 		 boost::container::flat_map<std::string, ceph::buffer::list>* xattrs);
   int exec(const std::string& oid, const neorados::IOContext& ioc,
 	   neorados::WriteOp op);
+  /* §4.5:  a read or write in flight, which a session change waits for */
+  void io_begin();
+  void io_end();
+  void drain_io();
+  /* §2.7:  the size report, its caller holding report_lock */
+  int do_report_hint(const DoutPrefixProvider* dpp);
 
   RadosStore* store;
   RGWBucketInfo info;
@@ -401,6 +408,15 @@ private:
   bool reading = false;
   bool writing = false;
   bool reader_on_shadow = false;	// its reader followed its shadow (rebind)
+  /* §4.5:  what concurrent reads and writes share (the runs held, hwm,
+   * wsize, wmtime, trunc_epoch, others, dirty, unsure, last_report,
+   * n_extends, seg_moved, iocs), never held across a RADOS operation */
+  ceph::mutex state_lock = ceph::make_mutex("RadosFSIOObject::state");
+  ceph::condition_variable io_cond;
+  unsigned in_flight = 0;		// reads and writes in progress
+  /* §4.5:  fsio_extend calls one at a time;  one size report at a time */
+  ceph::mutex extend_lock = ceph::make_mutex("RadosFSIOObject::extend");
+  ceph::mutex report_lock = ceph::make_mutex("RadosFSIOObject::report");
 };
 
 } // namespace rgw::sal

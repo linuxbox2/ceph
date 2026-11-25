@@ -10,6 +10,7 @@
 #include <chrono>
 #include <map>
 #include <memory>
+#include <atomic>
 #include <thread>
 #include <set>
 #include <string>
@@ -1048,6 +1049,119 @@ TEST_F(FSIORados, WriterStatFollowsItsWrites)
   EXPECT_EQ(int64_t(9 * MiB), size_of(w));
   ASSERT_EQ(0, write(w, 20 * MiB - 1, {"e"}));
   EXPECT_EQ(int64_t(20 * MiB), size_of(w));
+}
+
+/* §4.5:  concurrent writes on one handle, disjoint, across six chunks:
+ * the publish carries every byte, and the size is the highest end */
+TEST_F(FSIORados, ConcurrentWritersOnOneHandle)
+{
+  ASSERT_EQ(0, put("obj", pattern(MiB, 1)));
+  auto w = open("obj", true);
+  ASSERT_TRUE(w);
+  constexpr int n = 8;
+  constexpr uint64_t span = 3 * MiB;		// 24 MiB:  six chunks
+  std::string whole(n * span, '\0');
+  std::atomic<int> failures{0};
+  std::vector<std::thread> ts;
+  for (int i = 0; i < n; ++i) {
+    const auto piece = pattern(span, i + 2);
+    whole.replace(i * span, span, piece);
+    ts.emplace_back([&w, &failures, i, piece] {
+      uint64_t done = 0;
+      if (write(w, i * span, {piece}, &done) != 0 || done != piece.size()) {
+	++failures;
+      }
+    });
+  }
+  for (auto& t : ts) {
+    t.join();
+  }
+  EXPECT_EQ(0, failures.load());
+  EXPECT_EQ(int64_t(n * span), size_of(w));
+  ASSERT_EQ(0, w->close(env->dpp.get(), 0));
+  std::string now;
+  ASSERT_EQ(0, get("obj", &now));
+  EXPECT_EQ(n * span, now.size());
+  EXPECT_TRUE(now == whole) << "a concurrent write was lost";
+}
+
+/* §4.5:  concurrent reads on one handle, overlapping, across six chunks */
+TEST_F(FSIORados, ConcurrentReadersOnOneHandle)
+{
+  const auto a = pattern(24 * MiB, 3);
+  ASSERT_EQ(0, put("obj", a));
+  auto r = open("obj", false);
+  ASSERT_TRUE(r);
+  std::atomic<int> wrong{0};
+  std::vector<std::thread> ts;
+  for (int i = 0; i < 8; ++i) {
+    ts.emplace_back([&r, &a, &wrong, i] {
+      const uint64_t ofs = i * (5 * MiB / 2);
+      const uint64_t len = std::min<uint64_t>(5 * MiB, a.size() - ofs);
+      std::string got;
+      if (read(r, ofs, {len}, &got) != 0 || got != a.substr(ofs, len)) {
+	++wrong;
+      }
+    });
+  }
+  for (auto& t : ts) {
+    t.join();
+  }
+  EXPECT_EQ(0, wrong.load());
+  ASSERT_EQ(0, r->close(env->dpp.get(), 0));
+}
+
+/* §4.5:  one call over four chunks, the third fenced:  the pieces go out
+ * together, and the call returns EIO having written the two before it */
+TEST_F(FSIORados, WriteSpanningChunksReportsItsPrefix)
+{
+  ASSERT_EQ(0, put("obj", pattern(16 * MiB, 1)));
+  auto w = open("obj", true);
+  ASSERT_TRUE(w);
+  const auto third = rados_fsio(w)->shadow_chunk(8 * MiB);
+  {
+    auto ioc = ioc_of(third.pool);
+    if (!third.loc.empty()) {
+      ioc.set_key(third.loc);
+    }
+    ceph::buffer::list bl;
+    bl.append("fenced");
+    neo().execute(neorados::Object{third.oid}, ioc,
+		  neorados::WriteOp{}.setxattr("user.rgw.fsio.fence",
+					       std::move(bl)),
+		  ceph::async::use_blocked);
+  }
+  uint64_t done = 0;
+  EXPECT_EQ(-EIO, write(w, 0, {pattern(16 * MiB, 5)}, &done));
+  EXPECT_EQ(8 * MiB, done) << "not the prefix before the fenced chunk";
+  ASSERT_EQ(0, w->close(env->dpp.get(),
+			rgw::sal::Object::FSIOObject::CLOSE_FLAG_DISCARD));
+}
+
+/* §4.5:  concurrent writes that all need one new run make one fsio_extend */
+TEST_F(FSIORados, ConcurrentWritersExtendOncePerRun)
+{
+  ASSERT_EQ(0, put("obj", pattern(MiB, 1)));
+  auto w = open("obj", true);
+  ASSERT_TRUE(w);
+  const auto before = rados_fsio(w)->extends();
+  std::vector<std::thread> ts;
+  std::atomic<int> failures{0};
+  for (int i = 0; i < 8; ++i) {
+    ts.emplace_back([&w, &failures, i] {
+      const auto piece = pattern(64 * 1024, i);
+      if (write(w, 400 * MiB + i * 64 * 1024, {piece}) != 0) {	// chunk 100
+	++failures;
+      }
+    });
+  }
+  for (auto& t : ts) {
+    t.join();
+  }
+  EXPECT_EQ(0, failures.load());
+  EXPECT_EQ(before + 1, rados_fsio(w)->extends());
+  ASSERT_EQ(0, w->close(env->dpp.get(),
+			rgw::sal::Object::FSIOObject::CLOSE_FLAG_DISCARD));
 }
 
 /* §3.3:  a truncate down cuts the end's chunk and removes every reserved

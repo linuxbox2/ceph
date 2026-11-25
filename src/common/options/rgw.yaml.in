@@ -2941,6 +2941,17 @@ options:
   min: 1
   services:
   - rgw
+- name: rgw_fsio_io_window
+  type: uint
+  level: advanced
+  desc: Chunk operations one FSIO read or write call has in flight at once
+  long_desc: An FSIO read or write that spans several chunks sends their
+    operations together, this many at a time, and returns when the last
+    completes (FSIO design 4.5).
+  default: 16
+  min: 1
+  services:
+  - rgw
 - name: rgw_fsio_check_origin
   type: bool
   level: dev

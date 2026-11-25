@@ -6,6 +6,9 @@
 #include <algorithm>
 #include <chrono>
 #include <cstring>
+#include <limits>
+#include <memory>
+#include <mutex>
 #include <set>
 #include <thread>
 
@@ -587,17 +590,25 @@ int RadosFSIOObject::construct(const DoutPrefixProvider* dpp,
 int RadosFSIOObject::ioc_for(const DoutPrefixProvider* dpp,
 			     const rgw_raw_obj& raw, neorados::IOContext* ioc)
 {
-  auto i = iocs.find(raw.pool);
-  if (i == iocs.end()) {
+  std::optional<neorados::IOContext> found;
+  {
+    std::lock_guard l{state_lock};
+    if (auto i = iocs.find(raw.pool); i != iocs.end()) {
+      found = i->second;
+    }
+  }
+  if (!found) {
+    /* §4.5:  the pool's lookup, or its creation, outside the lock */
     try {
-      i = iocs.emplace(raw.pool, rgw::init_iocontext(
-			 dpp, store->get_neorados(), raw.pool,
-			 rgw::create, ceph::async::use_blocked)).first;
+      found = rgw::init_iocontext(dpp, store->get_neorados(), raw.pool,
+				  rgw::create, ceph::async::use_blocked);
     } catch (const sys::system_error& e) {
       return ceph::from_error_code(e.code());
     }
+    std::lock_guard l{state_lock};
+    iocs.try_emplace(raw.pool, *found);
   }
-  *ioc = i->second;
+  *ioc = *found;
   if (!raw.loc.empty()) {
     ioc->set_key(raw.loc);
   }
@@ -659,11 +670,17 @@ int RadosFSIOObject::fstat(struct stat* st, uint32_t flags)
   ceph::real_time mtime;
   if (writing) {
     /* §3.3:  never a remembered length across a lost reply */
-    if (unsure) {
+    bool lost;
+    {
+      std::lock_guard l{state_lock};
+      lost = unsure;
+    }
+    if (lost) {
       if (int r = report_hint(&*ndp); r < 0) {
 	return r;
       }
     }
+    std::lock_guard l{state_lock};
     st->st_size = std::max(wsize, hwm);
     mtime = std::max(wmtime_hint, wmtime);
   } else {
@@ -679,6 +696,7 @@ int RadosFSIOObject::fstat(struct stat* st, uint32_t flags)
 int RadosFSIOObject::ftruncate(const DoutPrefixProvider* dpp, uint64_t size,
 			       uint32_t flags)
 {
+  drain_io();			// §4.5
   if (!writing) {
     return -EBADF;
   }
@@ -802,6 +820,7 @@ int RadosFSIOObject::find_moved_segment(const DoutPrefixProvider* dpp)
     if (int r = find_deferred(dpp, &rec); r < 0) {
       return r;
     }
+    std::lock_guard l{state_lock};
     seg_moved = cls_rgw_fsio_clone_name(marker, 'G', rec.clone, seg_oid);
     return 0;
   }
@@ -813,6 +832,7 @@ int RadosFSIOObject::find_moved_segment(const DoutPrefixProvider* dpp)
   for (const auto& e : hdr.chunk_sets) {
     if (e.id == cs && e.manifest_at == cls_rgw_fsio_manifest_at::CLONE &&
 	e.clone) {
+      std::lock_guard l{state_lock};
       seg_moved = cls_rgw_fsio_clone_name(marker, 'G', *e.clone, seg_oid);
       return 0;
     }
@@ -832,8 +852,13 @@ int RadosFSIOObject::read_piece(const DoutPrefixProvider* dpp,
     shadow ? std::optional<cls_rgw_fsio_id>{wcs} : std::nullopt);
   const bool segment = !shadow && c.index == 0 && raw.oid == seg_oid;
   for (int t = 0; t < 2; ++t) {
-    if (segment && seg_moved) {
-      raw.oid = *seg_moved;
+    std::optional<std::string> moved;
+    {
+      std::lock_guard l{state_lock};
+      moved = seg_moved;
+    }
+    if (segment && moved) {
+      raw.oid = *moved;
       raw.loc = seg_oid;
     }
     neorados::IOContext ioc;
@@ -841,7 +866,7 @@ int RadosFSIOObject::read_piece(const DoutPrefixProvider* dpp,
       return r;
     }
     neorados::ReadOp op;
-    if (segment && !seg_moved && seg_tag.length()) {
+    if (segment && !moved && seg_tag.length()) {
       op.cmpxattr(RGW_ATTR_ID_TAG, neorados::cmp_op::eq, seg_tag);
     }
     op.read(off, len, bl);
@@ -850,10 +875,11 @@ int RadosFSIOObject::read_piece(const DoutPrefixProvider* dpp,
 				  std::move(op), nullptr,
 				  ceph::async::use_blocked[ec]);
     int r = ceph::from_error_code(ec);
-    if (segment && !seg_moved && (r == -ECANCELED || r == -ENOENT)) {
+    if (segment && !moved && (r == -ECANCELED || r == -ENOENT)) {
       if (int m = find_moved_segment(dpp); m < 0) {
 	return m;
       }
+      std::lock_guard l{state_lock};
       ldpp_dout(dpp, 1) << "FSIO:  the head segment of " << seg_oid
 			<< " moved to " << *seg_moved << " (" << cpp_strerror(-r)
 			<< ")" << dendl;
@@ -865,6 +891,38 @@ int RadosFSIOObject::read_piece(const DoutPrefixProvider* dpp,
   return -EIO;
 }
 
+namespace {
+/* §4.5:  one call's chunk operations in flight together, at most a window
+ * of them;  it completes when the last does, keeping the error of the
+ * piece at the lowest offset */
+struct IoBatch {
+  ceph::mutex lock = ceph::make_mutex("RadosFSIOObject::IoBatch");
+  ceph::condition_variable cond;
+  unsigned outstanding = 0;
+  int first = 0;
+  uint64_t first_bad = std::numeric_limits<uint64_t>::max();
+
+  void start(uint64_t window) {
+    std::unique_lock l{lock};
+    cond.wait(l, [&] { return outstanding < window; });
+    ++outstanding;
+  }
+  void done(uint64_t ofs, int r) {
+    std::lock_guard l{lock};
+    if (r < 0 && ofs < first_bad) {
+      first_bad = ofs;
+      first = r;
+    }
+    --outstanding;
+    cond.notify_all();
+  }
+  void wait() {
+    std::unique_lock l{lock};
+    cond.wait(l, [&] { return outstanding == 0; });
+  }
+};
+} // anonymous namespace
+
 int RadosFSIOObject::preadv(const struct iovec* iov, int iovcnt, uint64_t ofs,
 			    uint64_t* bytes_read, uint32_t flags)
 {
@@ -873,9 +931,15 @@ int RadosFSIOObject::preadv(const struct iovec* iov, int iovcnt, uint64_t ofs,
     return -EBADF;
   }
   const DoutPrefixProvider* dpp = &*ndp;
+  io_begin();
+  struct End { RadosFSIOObject* o; ~End() { o->io_end(); } } end_io{this};
   const bool shadow = writing || reader_on_shadow;
   const FSIOGeometry& g = shadow ? wgeo : rgeo;
-  const uint64_t end = shadow ? std::max(wsize, hwm) : g.size();
+  uint64_t end;
+  {
+    std::lock_guard l{state_lock};
+    end = shadow ? std::max(wsize, hwm) : g.size();
+  }
   uint64_t total = 0;
   for (int i = 0; i < iovcnt; ++i) {
     total += iov[i].iov_len;
@@ -901,11 +965,56 @@ int RadosFSIOObject::preadv(const struct iovec* iov, int iovcnt, uint64_t ofs,
       }
     }
   };
+  /* §4.5:  every piece out together, into its own buffer;  the head
+   * segment's piece, which has the moved-name retry, read in turn */
+  struct Piece {
+    FSIOChunk c;
+    uint64_t pos = 0, len = 0;
+    ceph::buffer::list bl;
+    int r = 0;
+  };
+  std::vector<Piece> pieces;
   for (uint64_t pos = ofs; pos < ofs + want; ) {
     const FSIOChunk c = g.locate(dpp, pos);
     const uint64_t len = std::min(c.ofs + c.capacity, ofs + want) - pos;
-    ceph::buffer::list bl;
-    int r = read_piece(dpp, c, shadow, pos - c.ofs, len, &bl);
+    pieces.push_back(Piece{c, pos, len});
+    pos += len;
+  }
+  const uint64_t window = dpp->get_cct()->_conf.get_val<uint64_t>(
+    "rgw_fsio_io_window");
+  auto b = std::make_shared<IoBatch>();
+  std::vector<Piece*> in_turn;
+  for (auto& p : pieces) {
+    const rgw_raw_obj raw = FSIOGeometry::named(
+      p.c, info.bucket.marker,
+      shadow ? std::optional<cls_rgw_fsio_id>{wcs} : std::nullopt);
+    if (!shadow && p.c.index == 0 && raw.oid == seg_oid) {
+      in_turn.push_back(&p);
+      continue;
+    }
+    neorados::IOContext ioc;
+    if (p.r = ioc_for(dpp, raw, &ioc); p.r < 0) {
+      continue;
+    }
+    neorados::ReadOp op;
+    op.read(p.pos - p.c.ofs, p.len, &p.bl);
+    b->start(window);
+    store->get_neorados().execute(
+      neorados::Object{raw.oid}, ioc, std::move(op), nullptr,
+      [b, pp = &p] (sys::error_code ec) {
+	pp->r = ceph::from_error_code(ec);
+	b->done(pp->pos, pp->r);
+      });
+  }
+  for (auto* p : in_turn) {
+    p->r = read_piece(dpp, p->c, shadow, p->pos - p->c.ofs, p->len, &p->bl);
+  }
+  b->wait();
+  for (auto& p : pieces) {
+    const FSIOChunk& c = p.c;
+    const uint64_t len = p.len;
+    auto& bl = p.bl;
+    const int r = p.r;
     if (r == -ENOENT && shadow) {
       bl.clear();		// a hole in the shadow:  zeros (Z11)
     } else if (r < 0 || (!shadow && bl.length() < len)) {
@@ -914,11 +1023,10 @@ int RadosFSIOObject::preadv(const struct iovec* iov, int iovcnt, uint64_t ofs,
 			<< (r < 0 ? cpp_strerror(-r) : "short") << dendl;
       return -EIO;
     }
-    for (const auto& b : bl.buffers()) {
-      put(b.c_str(), b.length());
+    for (const auto& buf : bl.buffers()) {
+      put(buf.c_str(), buf.length());
     }
     put(nullptr, len - bl.length());	// the rest of a short shadow chunk
-    pos += len;
   }
   *bytes_read = want;
   return 0;
@@ -941,11 +1049,23 @@ void RadosFSIOObject::know(const cls_rgw_fsio_run& run)
 
 int RadosFSIOObject::reserve(const DoutPrefixProvider* dpp, uint64_t index)
 {
-  for (const auto& r : known) {
-    if (r.first <= index && index <= r.last) {
+  auto held = [this, index] {
+    for (const auto& r : known) {
+      if (r.first <= index && index <= r.last) {
+	return true;
+      }
+    }
+    return false;
+  };
+  {
+    std::lock_guard l{state_lock};
+    if (held()) {
       return 0;
     }
   }
+  /* §4.5:  one fsio_extend at a time;  a call that waited here finds the
+   * run another reserved */
+  std::lock_guard x{extend_lock};
   /* §3.7:  an append extends the highest run by its own length, between
    * rgw_fsio_extent_reserve and extent_reserve_max;  a far write adds a run
    * of rgw_fsio_extent_reserve */
@@ -953,9 +1073,15 @@ int RadosFSIOObject::reserve(const DoutPrefixProvider* dpp, uint64_t index)
   const uint64_t base = dpp->get_cct()->_conf.get_val<uint64_t>(
     "rgw_fsio_extent_reserve");
   cls_rgw_fsio_run run{index, index + base - 1};
-  if (!known.empty() && index == known.back().last + 1) {
-    const uint64_t len = known.back().last - known.back().first + 1;
-    run.last = index + std::min(std::max(len, base), extent_reserve_max) - 1;
+  {
+    std::lock_guard l{state_lock};
+    if (held()) {
+      return 0;
+    }
+    if (!known.empty() && index == known.back().last + 1) {
+      const uint64_t len = known.back().last - known.back().first + 1;
+      run.last = index + std::min(std::max(len, base), extent_reserve_max) - 1;
+    }
   }
   cls_rgw_fsio_runs_op in;
   in.caller = h;
@@ -976,9 +1102,30 @@ int RadosFSIOObject::reserve(const DoutPrefixProvider* dpp, uint64_t index)
 		      << " on " << head_oid << ":  " << cpp_strerror(-r) << dendl;
     return r;
   }
+  std::lock_guard l{state_lock};
   ++n_extends;
   know(run);
   return 0;
+}
+
+void RadosFSIOObject::io_begin()
+{
+  std::lock_guard l{state_lock};
+  ++in_flight;
+}
+
+void RadosFSIOObject::io_end()
+{
+  std::lock_guard l{state_lock};
+  if (--in_flight == 0) {
+    io_cond.notify_all();
+  }
+}
+
+void RadosFSIOObject::drain_io()
+{
+  std::unique_lock l{state_lock};
+  io_cond.wait(l, [this] { return in_flight == 0; });
 }
 
 int RadosFSIOObject::pwritev(const struct iovec* iov, int iovcnt,
@@ -990,6 +1137,8 @@ int RadosFSIOObject::pwritev(const struct iovec* iov, int iovcnt,
     return -EBADF;
   }
   const DoutPrefixProvider* dpp = &*ndp;
+  io_begin();
+  struct End { RadosFSIOObject* o; ~End() { o->io_end(); } } end_io{this};
   ceph::buffer::list all;
   for (int i = 0; i < iovcnt; ++i) {
     all.append(static_cast<const char*>(iov[i].iov_base), iov[i].iov_len);
@@ -999,57 +1148,93 @@ int RadosFSIOObject::pwritev(const struct iovec* iov, int iovcnt,
   fence.fail_if_exist = true;
   ceph::buffer::list fence_bl;
   encode(fence, fence_bl);
+  const uint64_t window = dpp->get_cct()->_conf.get_val<uint64_t>(
+    "rgw_fsio_io_window");
+  /* §4.5:  every piece out together;  the submission stops at a piece it
+   * cannot send, and the call reports its longest successful prefix */
+  auto b = std::make_shared<IoBatch>();
   const uint64_t end = ofs + all.length();
+  uint64_t sent = ofs;
+  int r = 0;
+  uint64_t failed_chunk = 0;
   for (uint64_t pos = ofs; pos < end; ) {
     const FSIOChunk c = wgeo.locate(dpp, pos);
     const uint64_t len = std::min(c.ofs + c.capacity, end) - pos;
-    if (int r = reserve(dpp, c.index); r < 0) {
-      return r;
+    if (r = reserve(dpp, c.index); r < 0) {
+      failed_chunk = c.index;
+      break;
     }
     const rgw_raw_obj raw = FSIOGeometry::named(c, info.bucket.marker, wcs);
     neorados::IOContext ioc;
-    if (int r = ioc_for(dpp, raw, &ioc); r < 0) {
-      return r;
+    if (r = ioc_for(dpp, raw, &ioc); r < 0) {
+      failed_chunk = c.index;
+      break;
     }
     ceph::buffer::list piece;
     piece.substr_of(all, pos - ofs, len);
     neorados::WriteOp op;
     op.exec(::cls::rgw::method::obj_check_attrs_prefix, fence_bl);
     op.write(pos - c.ofs, std::move(piece));
-    int r = exec(raw.oid, ioc, std::move(op));
-    if (r == -ECANCELED) {
-      /* §3.7:  the chunk write fence:  a fenced finalize took the shadow
-       * over, and no retry can land this write */
-      ldpp_dout(dpp, 0) << "ERROR: FSIO:  chunk " << c.index << " ("
-			<< raw.oid << ") of " << wcs.to_str()
-			<< " is fenced" << dendl;
-      return -EIO;
-    }
-    if (r < 0) {
-      ldpp_dout(dpp, 0) << "ERROR: FSIO:  writing chunk " << c.index << " ("
-			<< raw.oid << ") of " << wcs.to_str() << ":  "
-			<< cpp_strerror(-r) << dendl;
-      return r;
-    }
+    b->start(window);
+    store->get_neorados().execute(
+      neorados::Object{raw.oid}, ioc, std::move(op),
+      [b, pos] (sys::error_code ec) { b->done(pos, ceph::from_error_code(ec)); });
     pos += len;
-    hwm = std::max(hwm, pos);
-    *bytes_written = pos - ofs;
+    sent = pos;
   }
-  dirty = true;
-  wmtime = ceph::real_clock::now();
-  /* §7:  periodically only while another handle watches */
+  b->wait();
+  const uint64_t good = std::min(sent, b->first_bad);
+  if (b->first_bad < sent) {
+    r = b->first;
+    failed_chunk = wgeo.locate(dpp, b->first_bad).index;
+  }
+  if (good > ofs) {
+    std::lock_guard l{state_lock};
+    hwm = std::max(hwm, good);
+    dirty = true;
+    wmtime = ceph::real_clock::now();
+  }
+  *bytes_written = good - ofs;
+  if (r == -ECANCELED) {
+    /* §3.7:  the chunk write fence:  a fenced finalize took the shadow
+     * over, and no retry can land this write */
+    ldpp_dout_fmt(dpp, 0, "ERROR: FSIO:  chunk {} of {} is fenced",
+		  failed_chunk, wcs.to_str());
+    return -EIO;
+  }
+  if (r < 0) {
+    ldpp_dout_fmt(dpp, 0, "ERROR: FSIO:  writing chunk {} of {}:  {}",
+		  failed_chunk, wcs.to_str(), cpp_strerror(-r));
+    return r;
+  }
+  /* §7:  periodically only while another handle watches;  §4.5:  never
+   * behind a report already running */
   const auto interval = dpp->get_cct()->_conf.get_val<std::chrono::seconds>(
     "rgw_fsio_hint_interval");
-  if (others && ceph::mono_clock::now() - last_report >= interval) {
-    if (int r = report_hint(dpp); r < 0) {
-      ldpp_dout(dpp, 1) << "FSIO:  a periodic size report on " << head_oid
-			<< " failed:  " << cpp_strerror(-r) << dendl;
+  bool due;
+  {
+    std::lock_guard l{state_lock};
+    due = others && ceph::mono_clock::now() - last_report >= interval;
+  }
+  if (due) {
+    std::unique_lock rl{report_lock, std::try_to_lock};
+    if (rl.owns_lock()) {
+      if (int e = do_report_hint(dpp); e < 0) {
+	ldpp_dout_fmt(dpp, 1, "FSIO:  a periodic size report on {} failed:  {}",
+		      head_oid, cpp_strerror(-e));
+      }
     }
   }
   return 0;
 }
 
 int RadosFSIOObject::report_hint(const DoutPrefixProvider* dpp)
+{
+  std::lock_guard rl{report_lock};
+  return do_report_hint(dpp);
+}
+
+int RadosFSIOObject::do_report_hint(const DoutPrefixProvider* dpp)
 {
   if (!writing) {
     return -EBADF;
@@ -1059,9 +1244,14 @@ int RadosFSIOObject::report_hint(const DoutPrefixProvider* dpp)
     cls_rgw_fsio_hint_size_op in;
     in.caller = h;
     in.cs = wcs;
-    in.trunc_epoch = trunc_epoch;
-    in.size = hwm;
-    in.mtime = wmtime;
+    uint64_t seen_hwm;
+    ceph::real_time seen_mtime;
+    {
+      std::lock_guard l{state_lock};
+      in.trunc_epoch = trunc_epoch;
+      in.size = seen_hwm = hwm;
+      in.mtime = seen_mtime = wmtime;
+    }
     cls_rgw_fsio_hint_size_ret ret;
     neorados::WriteOp op;
     op.exec(neorados::cls::rgw_fsio::hint(in, &ret));
@@ -1071,21 +1261,27 @@ int RadosFSIOObject::report_hint(const DoutPrefixProvider* dpp)
 			<< dendl;
       return r;
     }
-    trunc_epoch = ret.trunc_epoch;
-    others = ret.others;
-    if (!ret.stale) {
-      wsize = ret.size;
-      dirty = false;
-      unsure = false;
-      last_report = ceph::mono_clock::now();
-      return 0;
+    {
+      std::lock_guard l{state_lock};
+      trunc_epoch = ret.trunc_epoch;
+      others = ret.others;
+      if (!ret.stale) {
+	wsize = ret.size;
+	/* §4.5:  a write since it read them is still to report */
+	if (hwm == seen_hwm && wmtime == seen_mtime) {
+	  dirty = false;
+	}
+	unsure = false;
+	last_report = ceph::mono_clock::now();
+	return 0;
+      }
     }
     /* §2.7:  a truncate landed since its last report, and it cannot tell
      * which of its writes came after it:  the chunk at its high-water mark
      * says;  what the truncate cut is not reported */
     uint64_t end = ret.size;
-    if (hwm > 0) {
-      const FSIOChunk c = wgeo.locate(dpp, hwm - 1);
+    if (seen_hwm > 0) {
+      const FSIOChunk c = wgeo.locate(dpp, seen_hwm - 1);
       const rgw_raw_obj raw = FSIOGeometry::named(c, info.bucket.marker, wcs);
       neorados::IOContext ioc;
       if (int r = ioc_for(dpp, raw, &ioc); r < 0) {
@@ -1105,10 +1301,12 @@ int RadosFSIOObject::report_hint(const DoutPrefixProvider* dpp)
 	end = std::max(end, c.ofs + len);
       }
     }
+    std::lock_guard l{state_lock};
     ldpp_dout(dpp, 10) << "FSIO:  " << wcs.to_str() << " truncated since its "
-		       << "last report:  rebased from " << hwm << " to " << end
-		       << " at epoch " << trunc_epoch << dendl;
-    hwm = end;
+		       << "last report:  rebased from " << seen_hwm << " to "
+		       << end << " at epoch " << trunc_epoch << dendl;
+    /* §4.5:  a write that landed since it read hwm wrote past the truncate */
+    hwm = hwm == seen_hwm ? end : std::max(hwm, end);
     wsize = ret.size;
   }
   return -EAGAIN;
@@ -1342,6 +1540,7 @@ int RadosFSIOObject::abandon(const DoutPrefixProvider* dpp, const Source& src)
 int RadosFSIOObject::begin_write(const DoutPrefixProvider* dpp, uint32_t flags,
 				 const rgw_owner* writer)
 {
+  drain_io();			// §4.5:  a rebind moves what reads bind to
   if (writing) {
     /* §3.5 item 6:  another write open, another identity:  recorded at
      * once, not sequenced (idempotent by its effect) */
@@ -1602,6 +1801,7 @@ RadosFSIOObject::~RadosFSIOObject()
 
 int RadosFSIOObject::close(const DoutPrefixProvider* dpp, uint32_t flags)
 {
+  drain_io();			// §4.5
   int uncompleted = 0;
   if (writing) {
     const uint32_t wflags = (flags & CLOSE_FLAG_DISCARD) ? WRITE_FLAG_DISCARD
@@ -2718,6 +2918,7 @@ int RadosFSIOObject::leave_count(const DoutPrefixProvider* dpp,
 
 int RadosFSIOObject::end_write(const DoutPrefixProvider* dpp, uint32_t flags)
 {
+  drain_io();			// §4.5:  the publish reads hwm
   if (!writing) {
     return 0;
   }
