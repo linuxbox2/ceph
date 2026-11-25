@@ -463,7 +463,7 @@ int RadosFSIOObject::clone_chunks(const DoutPrefixProvider* dpp,
       try {
 	ioc = iocs.emplace(raw.pool, rgw::init_iocontext(
 			     dpp, store->get_neorados(), raw.pool,
-			     ceph::async::use_blocked)).first;
+			     rgw::create, ceph::async::use_blocked)).first;
       } catch (const sys::system_error& e) {
 	first = ceph::from_error_code(e.code());
 	break;
@@ -576,7 +576,7 @@ int RadosFSIOObject::ioc_for(const DoutPrefixProvider* dpp,
     try {
       i = iocs.emplace(raw.pool, rgw::init_iocontext(
 			 dpp, store->get_neorados(), raw.pool,
-			 ceph::async::use_blocked)).first;
+			 rgw::create, ceph::async::use_blocked)).first;
     } catch (const sys::system_error& e) {
       return ceph::from_error_code(e.code());
     }
@@ -2802,7 +2802,7 @@ Object::FSIOResult RadosObject::get_fsio_handle(const DoutPrefixProvider* dpp,
   neorados::IOContext ioc;
   try {
     ioc = rgw::init_iocontext(dpp, store->get_neorados(), raw.pool,
-			      ceph::async::use_blocked);
+			      rgw::create, ceph::async::use_blocked);
   } catch (const sys::system_error& e) {
     return FSIOResult{ceph::from_error_code(e.code()), nullptr};
   }

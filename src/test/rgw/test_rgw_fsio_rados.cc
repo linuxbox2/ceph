@@ -3602,6 +3602,44 @@ TEST_F(FSIORadosStatView, CurrentVersion)
   EXPECT_EQ(int64_t(2 * MiB), st.st_size);
 }
 
+/* a bucket whose data pool does not exist yet:  FSIO creates it on its
+ * first write, as RGW does on a PUT's (rgw_get_rados_ref()) */
+class FSIORadosNewPool : public FSIORadosCreate {
+protected:
+  std::string pool_name;
+
+  void SetUp() override {
+    FSIORadosCreate::SetUp();
+    pool_name = "fsio-test-pool-" +
+      gen_rand_alphanumeric_lower(g_ceph_context, 12);
+    bucket->get_info().bucket.explicit_placement.data_pool =
+      rgw_pool(pool_name);
+  }
+  void TearDown() override {
+    FSIORadosCreate::TearDown();
+    sys::error_code ec;
+    neo().delete_pool(pool_name, ceph::async::use_blocked[ec]);
+  }
+  bool pool_exists() {
+    sys::error_code ec;
+    neo().lookup_pool(pool_name, ceph::async::use_blocked[ec]);
+    return !ec;
+  }
+};
+
+TEST_F(FSIORadosNewPool, CreateMakesTheDataPool)
+{
+  ASSERT_FALSE(pool_exists());
+  std::unique_ptr<FO> w;
+  ASSERT_EQ(0, create("first", false, &w));
+  EXPECT_TRUE(pool_exists());
+  ASSERT_EQ(0, write(w, 0, {"hello"}));
+  ASSERT_EQ(0, w->close(env->dpp.get(), 0));
+  std::string now;
+  ASSERT_EQ(0, get("first", &now));
+  EXPECT_EQ("hello", now);
+}
+
 /* §2.4, plan step 9b:  a handle's attributes.  A writer's are its
  * shadow's attribute clone's, carried to the head by the publish;  a
  * reader's are its bound content's, and it sets none;  FSIO's own records
