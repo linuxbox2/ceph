@@ -92,6 +92,7 @@ enum class cls_rgw_fsio_check : uint8_t {
   FINALIZE_RESEND_RETURNS_TO,          // fsio_fenced_finalize, §3.7
   FORGET_REPORTS_DRAIN_BY_STATE,       // fsio_forget, §3.4
   C1_PUBLISH_COMPARES_TAGS,            // fsio_replace_head's publish, §3.5
+  OLH_BEGUN_ON_TRACKING_ONLY,          // RGW's OLH on a created head, §3.1 (model)
 };
 
 #ifdef CLS_RGW_FSIO_SKIP_CHECKS
@@ -234,6 +235,9 @@ struct join_in {
    * clone is that segment's data chunk, role 'd';  else 'a' */
   bool head_data = false;
   create_mode create = create_mode::NONE;
+  /* with create, versioned:  the caller read a delete marker as the
+   * name's current version, so the name has none (§3.1 step 0, 8i) */
+  bool absent = false;
 };
 struct join_out {
   cls_rgw_fsio_id bound;

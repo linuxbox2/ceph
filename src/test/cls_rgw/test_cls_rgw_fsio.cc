@@ -1033,6 +1033,149 @@ TEST(cls_rgw_fsio, J8_handoff_of_a_written_version)
   ASSERT_EQ(0, fsio::replace_head(h, in, rout, rfx));
 }
 
+/* §3.1 step 0, 8i:  a create over a delete marker, on an OLH with an ID
+ * tag:  the gateway's absent */
+fsio::join_in absent_create(const cls_rgw_fsio_handle& inc,
+			    fsio::create_mode mode, uint64_t nonce = 2)
+{
+  fsio::join_in in{inc, next_seq(), true, nonce, 10, {}};
+  in.create = mode;
+  in.absent = true;
+  return in;
+}
+
+/* a new generation:  nothing cloned, created, cur_instance cleared;  a
+ * writer of the deleted version keeps its shadow, deferred */
+TEST(cls_rgw_fsio, I8_absent_create_begins_a_new_generation)
+{
+  auto h = olh();
+  h.id_tag = "t0";
+  fsio::join_out o1;
+  cls_rgw_fsio_effects fx1;
+  ASSERT_EQ(0, fsio::join(h, {GW1, next_seq(), true, 1, 10, {}, "I1"}, o1, fx1));
+  ASSERT_EQ(0, fsio::ready(h, GW1, o1.bound, {{0, 0}}));
+  fsio::join_out o2;
+  cls_rgw_fsio_effects fx2;
+  ASSERT_EQ(0, fsio::join(h, absent_create(GW2, fsio::create_mode::EXCLUSIVE),
+			  o2, fx2));
+  EXPECT_TRUE(o2.construct);
+  EXPECT_NE(o1.bound, o2.bound);
+  EXPECT_TRUE(fx2.clones.empty()) << "a created shadow clones nothing";
+  EXPECT_TRUE(h.hdr->created);
+  EXPECT_TRUE(h.hdr->cur_instance.empty());
+  EXPECT_EQ(std::optional(o2.bound), h.hdr->cur_shadow);
+  const auto* d = h.hdr->find(o1.bound);
+  ASSERT_TRUE(d);
+  EXPECT_EQ(state::READY, d->state);
+  EXPECT_EQ(1u, h.bound(o1.bound).writers);
+}
+
+/* a creation under way:  joined unchecked, refused exclusive;  absent
+ * without create is invalid */
+TEST(cls_rgw_fsio, I8_absent_creators_meet)
+{
+  auto h = olh();
+  h.id_tag = "t0";
+  fsio::join_out o1;
+  cls_rgw_fsio_effects fx;
+  ASSERT_EQ(0, fsio::join(h, absent_create(GW1, fsio::create_mode::UNCHECKED),
+			  o1, fx));
+  ASSERT_EQ(0, fsio::ready(h, GW1, o1.bound, {}));
+  fsio::join_out o2;
+  EXPECT_EQ(-EEXIST, fsio::join(h, absent_create(GW2,
+						 fsio::create_mode::EXCLUSIVE),
+				o2, fx));
+  fsio::join_out o3;
+  ASSERT_EQ(0, fsio::join(h, absent_create(GW2, fsio::create_mode::UNCHECKED),
+			  o3, fx));
+  EXPECT_FALSE(o3.construct);
+  EXPECT_EQ(o1.bound, o3.bound);
+  fsio::join_in bad{GW3, next_seq(), true, 3, 10, {}};
+  bad.absent = true;
+  fsio::join_out o4;
+  EXPECT_EQ(-EINVAL, fsio::join(h, bad, o4, fx));
+}
+
+/* created is cleared by a join naming a version, and by the versioned
+ * publish (§3.4, 8i) */
+TEST(cls_rgw_fsio, I8_created_cleared_by_a_version)
+{
+  {
+    auto h = olh();
+    h.id_tag = "t0";
+    fsio::join_out o1;
+    cls_rgw_fsio_effects fx;
+    ASSERT_EQ(0, fsio::join(h, absent_create(GW1,
+					     fsio::create_mode::UNCHECKED),
+			    o1, fx));
+    ASSERT_TRUE(h.hdr->created);
+    fsio::join_out o2;
+    ASSERT_EQ(0, fsio::join(h, {GW2, next_seq(), false, 1, 10, {}, "I2"},
+			    o2, fx));
+    EXPECT_FALSE(h.hdr->created);
+  }
+  {
+    auto h = olh();
+    h.id_tag = "t0";
+    fsio::join_out o1;
+    cls_rgw_fsio_effects fx;
+    ASSERT_EQ(0, fsio::join(h, absent_create(GW1,
+					     fsio::create_mode::UNCHECKED),
+			    o1, fx));
+    ASSERT_EQ(0, fsio::ready(h, GW1, o1.bound, {}));
+    fsio::publish_intent intent{"I2", "tok", 77};
+    fsio::leave_out lout;
+    cls_rgw_fsio_effects lfx;
+    ASSERT_EQ(0, fsio::leave(h, GW1, next_seq(), o1.bound, true, {}, lout,
+			     lfx, &intent));
+    ASSERT_TRUE(lout.publishing);
+    fsio::replace_in in;
+    in.mode = fsio::replace_mode::PUBLISH;
+    in.versioned = true;
+    in.caller = GW1;
+    in.shadow = o1.bound;
+    fsio::replace_out rout;
+    cls_rgw_fsio_effects rfx;
+    ASSERT_EQ(0, fsio::replace_head(h, in, rout, rfx));
+    /* nothing bound to it, the published entry went, and the empty
+     * header with it */
+    EXPECT_TRUE(!h.hdr || !h.hdr->created);
+  }
+}
+
+/* §3.7 V1, §3.3 W7, 8i:  a created name's publish claims an instance
+ * though its header names no version:  it is versioned, so a fenced
+ * finalize needs its claim aborted, and no follower arrives while it
+ * publishes */
+TEST(cls_rgw_fsio, I8_created_publish_is_versioned)
+{
+  auto h = olh();
+  h.id_tag = "t0";
+  const auto c0 = join_reader(h, GW2);
+  fsio::join_out o1;
+  cls_rgw_fsio_effects fx;
+  ASSERT_EQ(0, fsio::join(h, absent_create(GW1, fsio::create_mode::UNCHECKED),
+			  o1, fx));
+  ASSERT_TRUE(o1.construct);
+  ASSERT_EQ(0, fsio::ready(h, GW1, o1.bound, {}));
+  fsio::publish_intent intent{"I2", "tok", 77};
+  fsio::leave_out lout;
+  cls_rgw_fsio_effects lfx;
+  ASSERT_EQ(0, fsio::leave(h, GW1, next_seq(), o1.bound, true, {}, lout, lfx,
+			   &intent));
+  ASSERT_TRUE(lout.publishing);
+  ASSERT_TRUE(h.hdr->cur_instance.empty());
+  EXPECT_EQ(-CLS_RGW_ERR_FSIO_BUSY,
+	    fsio::rebind(h, GW2, next_seq(), c0, o1.bound, 1));
+  fsio::publish_intent to_intent{"I3", "tok3", 78};
+  cls_rgw_fsio_id to;
+  EXPECT_EQ(-CLS_RGW_ERR_FSIO_CONFLICT,
+	    fsio::fenced_finalize(h, EXPIRER, o1.bound, {I1}, to,
+				  &to_intent));            // not aborted
+  EXPECT_EQ(0, fsio::fenced_finalize(h, EXPIRER, o1.bound, {I1}, to,
+				     &to_intent, "I2"));
+}
+
 TEST(cls_rgw_fsio_versioned, ocnt_add_and_remove)
 {
   auto ih = instance_head("C1");

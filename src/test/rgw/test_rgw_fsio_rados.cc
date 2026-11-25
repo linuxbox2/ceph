@@ -1328,6 +1328,8 @@ protected:
     auto obj = bucket->get_object(rgw_obj_key(key));
     auto del = obj->get_delete_op();
     del->params.bucket_owner = bucket->get_owner();
+    /* as S3's DELETE:  a versioned bucket's is a delete marker */
+    del->params.versioning_status = bucket->get_info().versioning_status();
     return del->delete_obj(env->dpp.get(), null_yield, 0);
   }
 
@@ -3423,6 +3425,112 @@ TEST_F(FSIORadosVersionedPublish, LinkedPublishReadsThroughTheInstance)
   EXPECT_EQ(cls_rgw_fsio_cs_state::PUBLISHED, e->state);
   EXPECT_EQ(cls_rgw_fsio_manifest_at::INSTANCE, e->manifest_at);
   ASSERT_EQ(0, r->close(env->dpp.get(), 0));
+}
+
+/* §3.1 step 0, §4.1, 8i:  creates in a versioned bucket:  of a name with
+ * no OLH, whose first link begins the OLH on the created head (RGW's
+ * olh_init_modification_impl());  over a delete marker;  suspended */
+class FSIORadosVersionedCreate : public FSIORadosVersionedPublish {
+protected:
+  using FO = rgw::sal::Object::FSIOObject;
+  int create(const std::string& key, bool excl, std::unique_ptr<FO>* out) {
+    auto obj = bucket->get_object(rgw_obj_key(key));
+    auto [r, fh] = obj->get_fsio_handle(
+      env->dpp.get(),
+      FO::OPEN_FLAG_WRITE | FO::OPEN_FLAG_CREATE | (excl ? FO::OPEN_FLAG_EXCL : 0));
+    *out = std::move(fh);
+    return r;
+  }
+  int open_flags(const std::string& key, uint32_t flags) {
+    auto obj = bucket->get_object(rgw_obj_key(key));
+    auto [r, fh] = obj->get_fsio_handle(env->dpp.get(), flags);
+    if (fh) {
+      fh->close(env->dpp.get(), 0);
+    }
+    return r;
+  }
+};
+
+/* a name that never existed:  its create is its first version */
+TEST_F(FSIORadosVersionedCreate, CreatesTheFirstVersion)
+{
+  std::unique_ptr<FO> w;
+  ASSERT_EQ(0, create("obj", true, &w));
+  ASSERT_EQ(0, write(w, 0, {"AB"}));
+  ASSERT_EQ(0, w->close(env->dpp.get(), 0));
+  const auto v = versions("obj");
+  ASSERT_EQ(1u, v.size());
+  EXPECT_EQ(*v.begin(), olh_instance("obj"));
+  std::string now;
+  ASSERT_EQ(0, get("obj", &now));
+  EXPECT_EQ("AB", now);
+}
+
+/* an S3 versioned PUT linked between the create's join and its close
+ * begins the OLH on the created head;  the create's publish is then the
+ * current version, last writer wins */
+TEST_F(FSIORadosVersionedCreate, CreateRacedByAPut)
+{
+  std::unique_ptr<FO> w;
+  ASSERT_EQ(0, create("obj", false, &w));
+  std::string put_inst;
+  ASSERT_EQ(0, put("obj", pattern(MiB, 1), &put_inst));
+  ASSERT_EQ(0, write(w, 0, {"AB"}));
+  ASSERT_EQ(0, w->close(env->dpp.get(), 0));
+  const auto v = versions("obj");
+  EXPECT_EQ(2u, v.size());
+  EXPECT_TRUE(v.count(put_inst));
+  EXPECT_NE(put_inst, olh_instance("obj"));
+  std::string now;
+  ASSERT_EQ(0, get("obj", &now));
+  EXPECT_EQ("AB", now);
+}
+
+/* a delete marker:  no open without create;  an exclusive create
+ * publishes a new current version on top */
+TEST_F(FSIORadosVersionedCreate, CreateOverADeleteMarker)
+{
+  std::string i1;
+  ASSERT_EQ(0, put("obj", pattern(MiB, 1), &i1));
+  ASSERT_EQ(0, remove("obj"));
+  EXPECT_EQ(-ENOENT, open_flags("obj", FO::OPEN_FLAG_NONE));
+  EXPECT_EQ(-ENOENT, open_flags("obj", FO::OPEN_FLAG_WRITE));
+  std::unique_ptr<FO> w;
+  ASSERT_EQ(0, create("obj", true, &w));
+  ASSERT_EQ(0, write(w, 0, {"AB"}));
+  ASSERT_EQ(0, w->close(env->dpp.get(), 0));
+  const auto v = versions("obj");
+  EXPECT_EQ(2u, v.size());
+  EXPECT_TRUE(v.count(i1));
+  EXPECT_NE(i1, olh_instance("obj"));
+  std::string now;
+  ASSERT_EQ(0, get("obj", &now));
+  EXPECT_EQ("AB", now);
+}
+
+/* suspended:  the unversioned create, the null version;  over a null
+ * delete marker, RGW's suspended PUT on the OLH links it again */
+TEST_F(FSIORadosVersionedCreate, SuspendedCreates)
+{
+  set_versioning(BUCKET_VERSIONED | BUCKET_VERSIONS_SUSPENDED);
+  std::unique_ptr<FO> w;
+  ASSERT_EQ(0, create("s1", true, &w));
+  ASSERT_EQ(0, write(w, 0, {"AB"}));
+  ASSERT_EQ(0, w->close(env->dpp.get(), 0));
+  std::string now;
+  ASSERT_EQ(0, get("s1", &now));
+  EXPECT_EQ("AB", now);
+
+  ASSERT_EQ(0, put("s2", pattern(MiB, 1)));
+  ASSERT_EQ(0, remove("s2"));
+  EXPECT_EQ(-ENOENT, open_flags("s2", FO::OPEN_FLAG_NONE));
+  std::unique_ptr<FO> w2;
+  ASSERT_EQ(0, create("s2", true, &w2));
+  ASSERT_EQ(0, write(w2, 0, {"CD"}));
+  ASSERT_EQ(0, w2->close(env->dpp.get(), 0));
+  now.clear();
+  ASSERT_EQ(0, get("s2", &now));
+  EXPECT_EQ("CD", now);
 }
 
 int main(int argc, char** argv)

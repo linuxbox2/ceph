@@ -408,6 +408,7 @@ int rgw_fsio_join(cls_method_context_t hctx, ceph::buffer::list* in,
     fsio::join_in jin{op.caller, op.seq, op.writer, op.nonce, op.counter_seed,
 		      op.expired, op.instance, op.identity};
     jin.create = static_cast<fsio::create_mode>(op.create);
+    jin.absent = op.absent;
     uint64_t size = 0;
     if (h.exists && cls_cxx_stat(hctx, &size, nullptr) == 0) {
       jin.head_data = size > 0;

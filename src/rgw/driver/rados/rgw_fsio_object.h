@@ -174,8 +174,10 @@ private:
     std::string instance;
     ceph::buffer::list id_tag;
     ceph::buffer::list ver;
+    bool removed = false;	// a delete marker is current (§4.1, 8i)
   };
-  /* 0 and the OLH;  -ENOENT when the head is no OLH */
+  /* 0 and the OLH, `removed` for a delete marker;  -ENOENT when the head
+   * is no OLH */
   int read_olh(const DoutPrefixProvider* dpp, Olh* olh);
   /* §2.5, §4.3:  the presence hint on the instance head, then ocnt_add;
    * and the reverse */

@@ -398,6 +398,9 @@ int join_once(cls_rgw_fsio_head& h, const join_in& in, join_out& out,
    * whose header (3.) is created;  an S3 object fails an exclusive one
    * (§3.1, Z24) */
   bool creating = false;
+  if (in.absent && (!in.writer || in.create == create_mode::NONE)) {
+    return -EINVAL;
+  }
   if (!h.exists) {
     if (!in.writer || in.create == create_mode::NONE) {
       return -ENOENT;
@@ -415,7 +418,9 @@ int join_once(cls_rgw_fsio_head& h, const join_in& in, join_out& out,
       return -EEXIST;
     }
   } else if (in.writer && in.create == create_mode::EXCLUSIVE &&
-	     !h.id_tag.empty()) {
+	     !h.id_tag.empty() && !in.absent) {
+    /* the OLH's ID tag says nothing of a name whose current version is
+     * a delete marker:  absent decides below */
     return -EEXIST;
   }
   /* 2. lazy expiry, readers only;  what it empties is removed or
@@ -436,6 +441,22 @@ int join_once(cls_rgw_fsio_head& h, const join_in& in, join_out& out,
     h.hdr->created = creating;
   }
   auto& hdr = *h.hdr;
+  if (in.absent) {
+    /* §3.1 step 0, 8i:  a create over a delete marker:  a creation under
+     * way is joined, or refused if exclusive;  otherwise a new generation
+     * of a name being created */
+    if (hdr.created && hdr.cur_instance.empty()) {
+      if (in.create == create_mode::EXCLUSIVE) {
+	return -EEXIST;
+      }
+    } else {
+      hdr.cur_instance.clear();
+      hdr.cur_shadow.reset();
+      hdr.created = true;
+    }
+  } else if (!is_null(in.instance)) {
+    hdr.created = false;	// §3.4, 8i:  the name has a current version
+  }
   /* §2.5a:  joining the null version is as in an unversioned bucket */
   const bool versioned = !is_null(in.instance);
   /* 4. versioned:  a reader joining with the instance a publish in
@@ -875,9 +896,12 @@ int rebind_once(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& caller,
     return -EINVAL;
   }
   /* versioned:  no follower arrives between the publisher's read of the
-   * readers and the publish (§3, W7).  A null current version counts:
-   * with versioning enabled, its publish makes a new version */
-  if (!h.hdr->cur_instance.empty() && t->state == state::PUBLISHING &&
+   * readers and the publish (§3, W7).  A publish that claimed an
+   * instance, a created name's included though its header names no
+   * version;  or any over a header naming one, a null current version
+   * counting, since the header cannot tell suspended from enabled */
+  if (t->state == state::PUBLISHING && t->publishing &&
+      (!t->publishing->instance.empty() || !h.hdr->cur_instance.empty()) &&
       !FSIO_SKIP_CHECK(W7_REBIND_WAITS_ON_PUBLISHING)) {
     return -CLS_RGW_ERR_FSIO_BUSY;
   }
@@ -923,6 +947,7 @@ int publish_versioned(cls_rgw_fsio_head& h, const replace_in& in,
     return -CLS_RGW_ERR_FSIO_CONFLICT;
   }
   const auto sh_id = sh->id;
+  hdr.created = false;               // the name is an S3 object (Z24, 8i)
   sh->state = state::PUBLISHED;
   sh->manifest_at = at::INSTANCE;
   sh->instance = sh->publishing->instance;
@@ -1288,8 +1313,10 @@ int fenced_finalize(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& finalizer,
 	 f->publishing->publisher != finalizer)) {
       return -CLS_RGW_ERR_FSIO_CONFLICT;
     }
-    /* versioned:  the publisher's claim aborted first (§3.7, V1) */
-    if (!hdr.cur_instance.empty() && aborted != f->publishing->instance &&
+    /* versioned, a publish that claimed an instance:  its claim aborted
+     * first (§3.7, V1);  a created name's header names no version */
+    if (!f->publishing->instance.empty() &&
+	aborted != f->publishing->instance &&
 	!FSIO_SKIP_CHECK(V1_FINALIZE_REQUIRES_ABORTED_CLAIM)) {
       return -CLS_RGW_ERR_FSIO_CONFLICT;
     }

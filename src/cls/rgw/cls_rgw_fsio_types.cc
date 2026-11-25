@@ -367,6 +367,7 @@ void cls_rgw_fsio_join_op::dump(ceph::Formatter *f) const
   encode_json("marker", marker, f);
   encode_json("identity", identity, f);
   encode_json("create", static_cast<uint32_t>(create), f);
+  encode_json("absent", absent, f);
 }
 
 std::list<cls_rgw_fsio_join_op> cls_rgw_fsio_join_op::generate_test_instances()
@@ -383,6 +384,7 @@ std::list<cls_rgw_fsio_join_op> cls_rgw_fsio_join_op::generate_test_instances()
   i.marker = "v8";
   i.identity = "v9";
   i.create = 2;
+  i.absent = true;
   o.push_back(std::move(i));
   o.emplace_back();
   return o;

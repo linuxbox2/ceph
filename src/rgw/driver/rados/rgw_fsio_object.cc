@@ -156,7 +156,8 @@ int RadosFSIOObject::read_olh(const DoutPrefixProvider* dpp, Olh* olh)
     auto it = info_bl.cbegin();
     decode(oi, it);
     if (oi.removed) {
-      return -ENOENT;		// a delete marker, or removed:  no version
+      olh->removed = true;	// a delete marker:  no current version
+      return 0;
     }
     olh->instance = oi.target.key.instance;
   } catch (const ceph::buffer::error& e) {
@@ -258,12 +259,30 @@ int RadosFSIOObject::join(const DoutPrefixProvider* dpp, bool writer,
   for (int t = 0; t < tries; ) {
     neorados::WriteOp op;
     std::string instance;
+    bool absent = false;
     Olh olh;
     int r = info.versioned() ? read_olh(dpp, &olh) : -ENOENT;
     if (r < 0 && r != -ENOENT) {
       return r;
     }
-    if (r == 0 && !is_null(olh.instance)) {
+    if (r == 0 && olh.removed) {
+      /* §3.1 step 0, §4.1, 8i:  a delete marker:  the name has no current
+       * version;  only a writer's create joins, absent, guarded by the
+       * OLH it read, so a version linked since fails it */
+      if (!writer || !create) {
+	return -ENOENT;
+      }
+      if (counted) {
+	if (int u = uncount(dpp); u < 0) {
+	  return u;
+	}
+      }
+      absent = true;
+      *src = Source{};
+      src->oid = head_oid;
+      op.cmpxattr(RGW_ATTR_OLH_ID_TAG, neorados::cmp_op::eq, olh.id_tag);
+      op.cmpxattr(RGW_ATTR_OLH_VER, neorados::cmp_op::eq, olh.ver);
+    } else if (r == 0 && !is_null(olh.instance)) {
       /* §2.5:  count on the instance the OLH names;  a relink since the
        * last try moved it, so the old count comes off first */
       if (counted && inst != olh.instance) {
@@ -330,6 +349,7 @@ int RadosFSIOObject::join(const DoutPrefixProvider* dpp, bool writer,
     if (writer) {
       in.identity = identity;	// §3.5 item 6, Y16
       in.create = create;
+      in.absent = absent;
     }
     op.exec(neorados::cls::rgw_fsio::join(in, ret));
     r = exec(head_oid, head_ioc, std::move(op));
@@ -1973,6 +1993,10 @@ int RadosFSIOObject::publish(const DoutPrefixProvider* dpp)
       const std::string tag = gen_rand_alphanumeric(dpp->get_cct(), 32);
       wr.meta.manifest = &m;
       wr.meta.flags = PUT_OBJ_CREATE;
+      /* as RGW's PUT:  in a suspended bucket the head write links the
+       * null version, over a delete marker too (§2.5a, 8i);  in an
+       * unversioned one it is no versioned op */
+      wr.meta.olh_epoch = 0;
       wr.meta.mtime = &mtime;
       wr.meta.ptag = &tag;
       wr.meta.owner = policy.get_owner();
@@ -2641,15 +2665,12 @@ Object::FSIOResult RadosObject::get_fsio_handle(const DoutPrefixProvider* dpp,
 {
   auto* rados = store->getRados();
   const auto& info = bucket->get_info();
-  /* §3.1 step 0, Z24:  a create is a writer's;  a versioned create comes
-   * with the versioned publish (plan 8f) */
+  /* §3.1 step 0, Z24:  a create is a writer's;  in a versioned bucket,
+   * of a name with no OLH or a delete marker (8i) */
   const bool create = flags & FSIOObject::OPEN_FLAG_CREATE;
   if ((create || (flags & FSIOObject::OPEN_FLAG_TRUNC)) &&
       !(flags & FSIOObject::OPEN_FLAG_WRITE)) {
     return FSIOResult{-EINVAL, nullptr};
-  }
-  if (create && info.versioned()) {
-    return FSIOResult{-ENOTSUP, nullptr};
   }
   /* the head, by name:  the OLH in a versioned bucket */
   rgw_raw_obj raw;

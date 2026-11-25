@@ -1,0 +1,47 @@
+# V1_FINALIZE_REQUIRES_ABORTED_CLAIM, a created name (8i, 2026-11-25):
+# a versioned create's publish released after EAGAIN, its shadow ready
+# with its writer's open kept;  the writer places a new claim (I3) and is
+# partitioned;  the expirer decides a fenced finalize of the ready shadow
+# ("no claim:  ready");  the zombie's resent leave freezes it with intent
+# I3, and its instance write and link land, since nobody aborted I3's
+# claim;  the expirer then publishes the same shadow again ("fenced
+# finalize of S1.10, already published").  Found by quick-v-w-create-none:
+# V1 was tested on the header's cur_instance, which a created name's
+# header lacks;  it is now the publishing record's claimed instance.
+# skip: V1_FINALIZE_REQUIRES_ABORTED_CLAIM
+# env: FSIO_MODEL_VERSIONED=1 FSIO_MODEL_VSTART=none FSIO_MODEL_ROLES=w FSIO_MODEL_S3_OPS=0 FSIO_MODEL_CREATE=1
+gw1 read-olh-write
+gw1 open-write 
+gw1 ready S1.10
+gw1 write S1.10
+gw1 close-write S1.10
+gw1 publish-hint
+gw1 placeholder I2
+gw1 close-leave S1.10
+gw1 publish-read S1.10
+gw1 release-abort I2
+gw1 publish-release S1.10
+gw1 unplace-aborted I2
+gw1 publish-hint
+gw1 placeholder I3
+gw1 partition
+gw1 resend fsio_leave
+expirer decide-finalize S1.10
+gw1 close-leave S1.10
+gw1 publish-read S1.10
+gw1 instance-write I3
+gw1 link I3
+gw1 crash
+expirer publish-hint for S1.10
+expirer placeholder I4
+expirer fenced-finalize S1.10
+expirer crash
+expirer grace 1
+expirer grace 100
+expirer hint I3 for 1
+expirer abort I4
+expirer decide-finalize S1.10
+expirer publish-hint for S1.10
+expirer placeholder I5
+expirer fenced-finalize S1.10
+expirer reclone S1.12

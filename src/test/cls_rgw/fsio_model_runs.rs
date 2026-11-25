@@ -146,6 +146,36 @@ fn quick() -> Vec<Run> {
     v.push(run("quick-ww-handoff", &[("FSIO_MODEL_ROLES", "ww"), ("FSIO_MODEL_S3_OPS", "0"),
                                      ("FSIO_MODEL_HANDOFF", "1"), ("FSIO_MODEL_RESENDS", "0"),
                                      ("FSIO_MODEL_ZOMBIES", "0")]));
+    /* §3.1 step 0, 8i:  versioned creates:  of a name with no OLH, a PUT
+     * or DELETE racing it;  over a delete marker;  a writer of the deleted
+     * version still open (FSIO_MODEL_CREATE with FSIO_MODEL_VERSIONED) */
+    v.push(run("quick-v-w-create-none", &[("FSIO_MODEL_VERSIONED", "1"), ("FSIO_MODEL_VSTART", "none"),
+                                          ("FSIO_MODEL_ROLES", "w"), ("FSIO_MODEL_S3_OPS", "0"),
+                                          ("FSIO_MODEL_CREATE", "1")]));
+    v.push(run("quick-v-ww-create-none", &[("FSIO_MODEL_VERSIONED", "1"), ("FSIO_MODEL_VSTART", "none"),
+                                           ("FSIO_MODEL_ROLES", "ww"), ("FSIO_MODEL_S3_OPS", "0"),
+                                           ("FSIO_MODEL_CREATE", "1"), ("FSIO_MODEL_RESENDS", "0"),
+                                           ("FSIO_MODEL_ZOMBIES", "0"), ("FSIO_MODEL_CRASHES", "0"),
+                                           ("FSIO_MODEL_EXPIRER_CRASHES", "0")]));
+    v.push(run("quick-v-wr-create-none", &[("FSIO_MODEL_VERSIONED", "1"), ("FSIO_MODEL_VSTART", "none"),
+                                           ("FSIO_MODEL_ROLES", "wr"), ("FSIO_MODEL_S3_OPS", "1"),
+                                           ("FSIO_MODEL_CREATE", "1"), ("FSIO_MODEL_RESENDS", "0"),
+                                           ("FSIO_MODEL_ZOMBIES", "0"),
+                                           ("FSIO_MODEL_EXPIRER_CRASHES", "0")]));
+    v.push(run("quick-v-ww-create-marker", &[("FSIO_MODEL_VERSIONED", "1"), ("FSIO_MODEL_VSTART", "marker"),
+                                             ("FSIO_MODEL_ROLES", "ww"), ("FSIO_MODEL_S3_OPS", "0"),
+                                             ("FSIO_MODEL_CREATE", "1"), ("FSIO_MODEL_RESENDS", "0"),
+                                             ("FSIO_MODEL_ZOMBIES", "0"), ("FSIO_MODEL_CRASHES", "0"),
+                                             ("FSIO_MODEL_EXPIRER_CRASHES", "0")]));
+    v.push(run("quick-v-wr-create-marker", &[("FSIO_MODEL_VERSIONED", "1"), ("FSIO_MODEL_VSTART", "marker"),
+                                             ("FSIO_MODEL_ROLES", "wr"), ("FSIO_MODEL_S3_OPS", "0"),
+                                             ("FSIO_MODEL_CREATE", "1"), ("FSIO_MODEL_RESENDS", "0"),
+                                             ("FSIO_MODEL_ZOMBIES", "0")]));
+    v.push(run("quick-v-ww-create", &[("FSIO_MODEL_VERSIONED", "1"), ("FSIO_MODEL_ROLES", "ww"),
+                                      ("FSIO_MODEL_S3_OPS", "1"), ("FSIO_MODEL_CREATE", "1"),
+                                      ("FSIO_MODEL_RESENDS", "0"), ("FSIO_MODEL_ZOMBIES", "0"),
+                                      ("FSIO_MODEL_CRASHES", "0"),
+                                      ("FSIO_MODEL_EXPIRER_CRASHES", "0")]));
     /* §3.5 item 4, 8h:  a close refused by policy, a discard leave, with
      * a follower and with another writer (FSIO_MODEL_DISCARD, off
      * elsewhere) */
@@ -358,6 +388,11 @@ fn skip_table() -> Vec<Check> {
         ("C1_PUBLISH_COMPARES_TAGS", unv,
          &[("FSIO_MODEL_ROLES", "w"), ("FSIO_MODEL_S3_OPS", "1"), ("FSIO_MODEL_TAGS", "1"),
            ("FSIO_MODEL_RESENDS", "0")], true),
+        /* 8i:  RGW's OLH begun on a created head;  skipped, the link
+         * fails and the create is never published */
+        ("OLH_BEGUN_ON_TRACKING_ONLY", ver,
+         &[("FSIO_MODEL_ROLES", "w"), ("FSIO_MODEL_S3_OPS", "0"), ("FSIO_MODEL_CREATE", "1"),
+           ("FSIO_MODEL_VSTART", "none"), ("FSIO_MODEL_RESENDS", "0")], true),
         ("FORGET_REPORTS_DRAIN_BY_STATE", unv,
          &[("FSIO_MODEL_ROLES", "w+r"), ("FSIO_MODEL_KEEP_TAIL", "1"),
            ("FSIO_MODEL_DUP", "fsio_forget")], true),
@@ -503,6 +538,10 @@ fn sample() -> Vec<Run> {
         /* §3.5 item 4, 8h:  a refused close (FSIO_MODEL_DISCARD) */
         ("sample-wr-discard", vec![("FSIO_MODEL_ROLES", "wr"), ("FSIO_MODEL_S3_OPS", "1"),
                                    ("FSIO_MODEL_DISCARD", "1")]),
+        /* §3.1 step 0, 8i:  creates over a delete marker */
+        ("sample-v-ww-create-marker", [v, &[("FSIO_MODEL_VSTART", "marker"),
+                                            ("FSIO_MODEL_ROLES", "ww"), ("FSIO_MODEL_S3_OPS", "1"),
+                                            ("FSIO_MODEL_CREATE", "1")]].concat()),
     ];
     configs
         .iter()

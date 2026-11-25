@@ -57,6 +57,7 @@ struct cls_rgw_fsio_join_op {
   std::string marker;            // the bucket's, to name a head clone (§2.7)
   std::string identity;          // a writer:  its NFS open's (§3.5, Y16)
   uint8_t create = 0;            // a writer:  cls_rgw_fsio::create_mode (§3.1 step 0)
+  bool absent = false;           // with create:  a delete marker is current (§3.1, 8i)
 
   void encode(ceph::buffer::list& bl) const {
     ENCODE_START(1, 1, bl);
@@ -70,6 +71,7 @@ struct cls_rgw_fsio_join_op {
     encode(marker, bl);
     encode(identity, bl);
     encode(create, bl);
+    encode(absent, bl);
     ENCODE_FINISH(bl);
   }
   void decode(ceph::buffer::list::const_iterator& bl) {
@@ -84,6 +86,7 @@ struct cls_rgw_fsio_join_op {
     decode(marker, bl);
     decode(identity, bl);
     decode(create, bl);
+    decode(absent, bl);
     DECODE_FINISH(bl);
   }
   void dump(ceph::Formatter *f) const;

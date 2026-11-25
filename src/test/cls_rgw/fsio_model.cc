@@ -37,6 +37,11 @@
  * (§4.2, 8j):  released, the uncompleted-publish hint, the hand-off
  * leave;  the FSIO expirer takes and publishes an uncompleted publish
  * whatever its gateway's liveness, or a later writer does;  unversioned.
+ * With FSIO_MODEL_VERSIONED, FSIO_MODEL_CREATE makes a write open that
+ * finds no current version a create (§3.1 step 0, 8i):  with
+ * FSIO_MODEL_VSTART=none no head and no OLH, =marker a delete marker over
+ * I1;  the publish's link, or an S3 versioned PUT or DELETE, begins the
+ * OLH on a created head.
  * FSIO_MODEL_DISCARD=1 lets a writer's close be refused by policy (§3.5
  * item 4, 8h):  a discard leave, which retires the shadow if it was the
  * last writer, its acknowledged writes the administrator's to lose.
@@ -313,6 +318,7 @@ struct Gw {
   /* versioned */
   std::string pending;           // the instance an open in progress read
   bool pending_writer = false;
+  uint8_t pending_create = 0;    // 8i:  0 none, 1 unchecked, 2 exclusive
   std::set<std::string> counted; // instances whose open count holds it (§2.5)
   std::string step_inst;         // V_OCNT_SEND:  that instance
   std::string pub_instance;      // the publish's new version
@@ -345,6 +351,7 @@ struct Gw {
     encode(owe_head_hint, bl); encode(owe_ih_hint, bl);
     encode(release_failed, bl);
     encode(pending, bl); encode(pending_writer, bl); encode(counted, bl);
+    encode(pending_create, bl);
     encode(step_inst, bl); encode(pub_instance, bl); encode(pub_incs, bl);
     encode(pub_epoch, bl); encode(pub_token, bl);
     encode(released, bl); encode(pub_retry, bl);
@@ -374,6 +381,8 @@ struct Config {
   int expirer_crashes = 1;
   int versioned = 0;
   bool vstart_null = false;      // FSIO_MODEL_VSTART=null
+  bool vstart_none = false;      // FSIO_MODEL_VSTART=none:  no head, no OLH (8i)
+  bool vstart_marker = false;    // FSIO_MODEL_VSTART=marker:  a delete marker (8i)
   int resends = 1;               // FSIO_MODEL_RESENDS:  per handle (Z22)
   bool reopen = false;           // FSIO_MODEL_REOPEN:  a second read open (W12)
   bool keep_tail = false;        // FSIO_MODEL_KEEP_TAIL:  a copy onto itself (§3.6)
@@ -530,6 +539,7 @@ int m_join(cls_rgw_fsio_head& h, const fsio::join_in& in, fsio::join_out& out,
   op.instance = in.instance;
   op.marker = cl.marker;
   op.create = static_cast<uint8_t>(in.create);
+  op.absent = in.absent;
   /* as rgw_fsio_join() stats the head:  the cluster tier's head object
    * holds data when it has an ID tag (rgw_part()), and its clone is then
    * in role 'd' (§2.7) */
@@ -1216,7 +1226,12 @@ struct World {
     }
     return d;
   }
-  bool head_real() const { return head.exists && !head.id_tag.empty(); }
+  /* an S3 object on the head:  an OLH's ID tag (8i) is not one, unless
+   * the null version's content is there (§2.5a) */
+  bool head_real() const {
+    return head.exists && !head.id_tag.empty() &&
+      (!head.olh || head.manifest.length());
+  }
   std::string head_tok() const { return head_real() ? tok(head.manifest) : ""; }
 };
 
@@ -2366,6 +2381,26 @@ void ocnt_send(World& w, const std::string& inst)
  * incarnation to that version's open count, then joins (§2.5, §3.1);  a
  * close leaves, and the count goes when nothing is bound to the version;
  * the last writer's close publishes a new version (§4.2, normal path) */
+/* §3.1 step 0, 8i:  RGW begins an OLH on a name with none, absent or a
+ * tracking-only head (A33):  an ID tag, an OLH tag, no OLH info until the
+ * link.  Skipped:  on a tracking-only head its create was exclusive and
+ * met the object, so nothing links (false) */
+bool begin_olh(World& w)
+{
+  if (w.head.olh) {
+    return true;
+  }
+  if (w.head.exists && FSIO_SKIP_CHECK(OLH_BEGUN_ON_TRACKING_ONLY)) {
+    return false;
+  }
+  w.head.exists = true;
+  w.head.olh = true;
+  if (w.head.id_tag.empty()) {
+    w.head.id_tag = fmt::format("o{}", w.next_tag++);
+  }
+  return true;
+}
+
 void gw_actions_v(const World& w0, size_t gi, std::vector<Action>& acts)
 {
   const auto& g = w0.gws[gi];
@@ -2439,14 +2474,51 @@ void gw_actions_v(const World& w0, size_t gi, std::vector<Action>& acts)
 	    }
 	    fsio::join_in in{hd(g), 0, g.pending_writer, w.nonce_for_join(), 10,
 			     w.dead_for(g), g.pending};
+	    if (g.pending_create) {
+	      in.create = g.pending_create == 2 ? fsio::create_mode::EXCLUSIVE
+						 : fsio::create_mode::UNCHECKED;
+	      /* §3.1 step 0, 8i:  an OLH with no current version names a
+	       * delete marker */
+	      in.absent = g.pending.empty() && w.head.olh;
+	    }
+	    const bool excl = g.pending_create == 2;
+	    const bool under_way = w.head.hdr && w.head.hdr->created;
 	    fsio::join_out out;
 	    cls_rgw_fsio_effects fx;
 	    auto save = w.head;
-	    if (counted_join(w.head, g, in, out, fx) < 0) {
+	    if (int r = counted_join(w.head, g, in, out, fx); r < 0) {
 	      w.head = save;
+	      if (r == -EEXIST && g.pending.empty() && !under_way) {
+		return fmt::format("gw{}'s exclusive create of a name with no "
+				   "current version returned EEXIST", inc);
+	      }
 	      return std::nullopt;
 	    }
+	    if (excl && !g.pending.empty()) {
+	      return fmt::format("gw{}'s exclusive create succeeded over "
+				 "version {}", inc, g.pending);
+	    }
 	    w.took_nonce();
+	    if (g.pending.empty()) {
+	      /* 8i:  a create of a name with no current version:  the null
+	       * path, nothing cloned, the attribute clone the gateway's */
+	      auto sn = sname(out.bound);
+	      g.opens.push_back(LOpen{true, out.bound, sn, ""});
+	      if (out.construct) {
+		if (!w.head.hdr || !w.head.hdr->created) {
+		  return fmt::format("gw{}'s create of {} constructed a "
+				     "shadow on a head not being created",
+				     inc, sn);
+		}
+		w.pms[sn] = "";
+		w.creates.insert(sn);
+		w.storage.insert(sn);
+		w.base[sn] = "";
+		g.step = CONSTRUCT;
+		g.step_cs = out.bound;
+	      }
+	      return std::nullopt;
+	    }
 	    const auto cur = w.versions.at(w.olh_cur).tail;
 	    if (!g.pending_writer) {
 	      const auto* e = w.head.hdr->find(out.bound);
@@ -2488,6 +2560,10 @@ void gw_actions_v(const World& w0, size_t gi, std::vector<Action>& acts)
 	    auto& g = w.gws[gi];
 	    m_ready(w.head, hd(g), g.step_cs, {{0, 0}});
 	    g.step = NONE;
+	    /* Z24, 8i:  the create-open returns once its shadow is ready */
+	    if (w.creates.count(sname(g.step_cs))) {
+	      ++w.acked[sname(g.step_cs)];
+	    }
 	    return std::nullopt;
 	  }});
       construct_abandon_actions(g, gi, inc, acts);
@@ -2592,6 +2668,10 @@ void gw_actions_v(const World& w0, size_t gi, std::vector<Action>& acts)
       acts.push_back({fmt::format("gw{} link {}", glabel(g), g.pub_instance),
 	  [gi](World& w) -> std::optional<std::string> {
 	    auto& g = w.gws[gi];
+	    if (!begin_olh(w)) {
+	      g.step = NONE;                   // the link fails:  ECANCELED
+	      return std::nullopt;
+	    }
 	    if (g.pub_epoch > w.olh_epoch) {
 	      w.olh_cur = g.pub_instance;
 	      w.olh_epoch = g.pub_epoch;
@@ -2834,26 +2914,34 @@ void gw_actions_v(const World& w0, size_t gi, std::vector<Action>& acts)
 	(writer ? (g.did_write || g.role == 'r') : (g.did_read || g.role == 'w'))) {
       continue;
     }
-    acts.push_back({fmt::format("gw{} {}read-olh-{}", glabel(g),
-				reopen ? "re" : "", writer ? "write" : "read"),
-	[gi, writer, reopen](World& w) -> std::optional<std::string> {
+    /* 8i:  with FSIO_MODEL_CREATE a write open is a create, unchecked
+     * or exclusive */
+    for (int excl = 0; excl < (writer && cfg.create ? 2 : 1); ++excl) {
+    acts.push_back({fmt::format("gw{} {}read-olh-{}{}", glabel(g),
+				reopen ? "re" : "", writer ? "write" : "read",
+				excl ? " (exclusive)" : ""),
+	[gi, writer, reopen, excl](World& w) -> std::optional<std::string> {
 	  auto& g = w.gws[gi];
 	  if (reopen) {
 	    g.did_reopen = 1;
 	  } else {
 	    (writer ? g.did_write : g.did_read) = 1;
 	  }
-	  if (w.olh_cur.empty()) {
-	    return std::nullopt;             // a delete marker:  ENOENT
+	  const bool create = writer && cfg.create;
+	  if (w.olh_cur.empty() && !create) {
+	    return std::nullopt;   // a delete marker, or no OLH:  ENOENT (§4.1)
 	  }
 	  g.pending = w.olh_cur;
 	  g.pending_writer = writer;
+	  g.pending_create = create ? (excl ? 2 : 1) : 0;
 	  /* §2.5a:  the null version has no open count;  joining is as in
-	   * an unversioned bucket */
-	  g.step = w.olh_cur == "null" && !FSIO_SKIP_CHECK(NULL_IS_HEAD) ?
+	   * an unversioned bucket;  nor has a name with no current version */
+	  g.step = w.olh_cur.empty() ||
+	    (w.olh_cur == "null" && !FSIO_SKIP_CHECK(NULL_IS_HEAD)) ?
 	    V_JOIN : V_COUNT;
 	  return std::nullopt;
 	}});
+    }
   }
   for (size_t oi = 0; oi < g.opens.size(); ++oi) {
     const auto& o = g.opens[oi];
@@ -3556,6 +3644,9 @@ void s3_actions_v(const World& w0, std::vector<Action>& acts)
     acts.push_back({"s3 put",
 	[](World& w) -> std::optional<std::string> {
 	  --w.s3_budget;
+	  if (!begin_olh(w)) {
+	    return std::nullopt;             // the link fails
+	  }
 	  auto inst = fmt::format("I{}", w.next_i++);
 	  auto c = fmt::format("C{}", w.next_c++);
 	  w.storage.insert(c);
@@ -3600,6 +3691,8 @@ void s3_actions_v(const World& w0, std::vector<Action>& acts)
 	--w.s3_budget;
 	if (w.suspended) {
 	  remove_null(w);                    // the null version goes too
+	} else if (!begin_olh(w)) {
+	  return std::nullopt;               // the link fails
 	}
 	w.olh_cur.clear();                   // a delete marker
 	w.olh_epoch = w.next_epoch++;
@@ -3824,7 +3917,7 @@ void expirer_actions_v(const World& w0, std::vector<Action>& acts)
 	     * publish goes on */
 	    auto vi = w.versions.find(w.ex_inst);
 	    if (vi != w.versions.end() && !vi->second.ih.id_tag.empty() &&
-		vi->second.epoch > w.olh_epoch) {
+		vi->second.epoch > w.olh_epoch && begin_olh(w)) {
 	      w.olh_cur = w.ex_inst;
 	      w.olh_epoch = vi->second.epoch;
 	    }
@@ -4102,7 +4195,7 @@ void expirer_actions_v(const World& w0, std::vector<Action>& acts)
     auto complete = [from, dead](World& w, bool link)
       -> std::optional<std::string> {
       const auto* e = w.head.hdr->find(from);
-      if (link && e->publishing->olh_epoch > w.olh_epoch) {
+      if (link && e->publishing->olh_epoch > w.olh_epoch && begin_olh(w)) {
 	w.olh_cur = e->publishing->instance;
 	w.olh_epoch = e->publishing->olh_epoch;
       }
@@ -5113,16 +5206,21 @@ World initial(const std::string& roles, int s3_ops)
     v.tail = "C0";
     w.versions["null"] = v;
     w.olh_cur = "null";
+  } else if (cfg.versioned && cfg.vstart_none) {
+    w.storage.erase("C0");                 // no name yet:  no head, no OLH
   } else if (cfg.versioned) {
     w.head.exists = true;                  // the OLH:  no content of its own
     w.head.olh = true;
+    if (cfg.create) {
+      w.head.id_tag = "o0";                // RGW's OLH carries an ID tag
+    }
     Version v;
     v.ih.exists = true;
     v.ih.id_tag = "i0";
     v.ih.manifest = tok_bl("C0");
     v.tail = "C0";
     w.versions["I1"] = v;
-    w.olh_cur = "I1";
+    w.olh_cur = cfg.vstart_marker ? "" : "I1";   // "":  a delete marker
   } else if (cfg.create) {
     w.storage.erase("C0");                 // no name yet:  no head (Z24)
   } else {
@@ -5255,6 +5353,8 @@ TEST(FSIOModel, Explore)
        cls_rgw_fsio_check::H3_PUBLISH_HINT_REMOVES_READER_HINTS},
       {"C1_PUBLISH_COMPARES_TAGS",
        cls_rgw_fsio_check::C1_PUBLISH_COMPARES_TAGS},
+      {"OLH_BEGUN_ON_TRACKING_ONLY",
+       cls_rgw_fsio_check::OLH_BEGUN_ON_TRACKING_ONLY},
       {"H3_PUBLISHER_CLEANUP_REMOVES_READER_HINTS",
        cls_rgw_fsio_check::H3_PUBLISHER_CLEANUP_REMOVES_READER_HINTS},
       {"W10_RELEASE_ONLY_WITH_LIVE_CLAIM",
@@ -5312,11 +5412,10 @@ TEST(FSIOModel, Explore)
   ASSERT_FALSE(cfg.handoff && cfg.versioned)
     << "FSIO_MODEL_HANDOFF is unversioned:  the versioned hand-off is the "
        "unit and harness tests'";
-  ASSERT_FALSE(cfg.create && cfg.versioned)
-    << "FSIO_MODEL_CREATE is unversioned:  a versioned create comes with "
-       "the versioned publish (plan 8f)";
   if (auto v = std::getenv("FSIO_MODEL_VSTART")) {
     cfg.vstart_null = std::string(v) == "null";
+    cfg.vstart_none = std::string(v) == "none";
+    cfg.vstart_marker = std::string(v) == "marker";
   }
   std::string roles(env_int("FSIO_MODEL_GATEWAYS", 2), 'f');
   if (auto r = std::getenv("FSIO_MODEL_ROLES")) {
