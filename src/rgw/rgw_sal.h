@@ -1201,7 +1201,8 @@ class Object {
       /* the caller intends to write:  a shadow is created if none
        * exists.  absent it no shadow is ever constructed--a reader
        * binds to the published object, and follows the shadow if a
-       * writer later creates one */
+       * writer later creates one.  OPEN_FLAG_CREATE without it creates an
+       * absent object, empty, and returns a reader bound to it */
       static constexpr uint32_t OPEN_FLAG_WRITE =     0x0010;
 
       /* commit flags */

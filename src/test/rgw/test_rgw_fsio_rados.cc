@@ -2465,6 +2465,50 @@ TEST_F(FSIORadosCreate, ReopenAnEmptyPublishedFile)
   EXPECT_EQ("x", now);
 }
 
+/* a read-only create (POSIX O_RDONLY|O_CREAT):  an absent name is
+ * created empty and published, and the handle is a reader */
+TEST_F(FSIORadosCreate, ReadOnlyCreateMakesAnEmptyObject)
+{
+  std::unique_ptr<FO> r;
+  ASSERT_EQ(0, open_flags("ro", FO::OPEN_FLAG_CREATE, &r));
+  int64_t size = -1;
+  ASSERT_EQ(0, s3_size("ro", &size)) << "not published at the open";
+  EXPECT_EQ(0, size);
+  EXPECT_EQ(-EBADF, write(r, 0, {"x"}));
+  ASSERT_EQ(0, r->close(env->dpp.get(), 0));
+}
+
+/* ...and an existing one is only read:  no rewrite at the open */
+TEST_F(FSIORadosCreate, ReadOnlyCreateOfAnExistingObjectChangesNothing)
+{
+  ASSERT_EQ(0, put("ro", pattern(MiB, 1)));
+  auto id_tag = [this] {
+    const auto h = head_of("ro");
+    ceph::buffer::list raw;
+    neo().execute(neorados::Object{h.oid}, ioc_of(h.pool),
+		  neorados::ReadOp{}.get_xattr(RGW_ATTR_ID_TAG, &raw), nullptr,
+		  ceph::async::use_blocked);
+    return raw.to_str();
+  };
+  const auto before = id_tag();
+  ASSERT_FALSE(before.empty());
+  std::unique_ptr<FO> r;
+  ASSERT_EQ(0, open_flags("ro", FO::OPEN_FLAG_CREATE, &r));
+  EXPECT_EQ(before, id_tag()) << "the open rewrote the head";
+  std::string now;
+  ASSERT_EQ(0, read(r, 0, {MiB}, &now));
+  EXPECT_EQ(pattern(MiB, 1), now);
+  ASSERT_EQ(0, r->close(env->dpp.get(), 0));
+}
+
+TEST_F(FSIORadosCreate, ReadOnlyExclusiveCreateOfAnExistingObject)
+{
+  ASSERT_EQ(0, put("ro", pattern(MiB, 1)));
+  std::unique_ptr<FO> r;
+  EXPECT_EQ(-EEXIST, open_flags("ro", FO::OPEN_FLAG_CREATE |
+				FO::OPEN_FLAG_EXCL, &r));
+}
+
 TEST_F(FSIORadosCreate, CreateSetsTheSpecAttributes)
 {
   rgw::sal::Attrs attrs;

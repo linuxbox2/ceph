@@ -2796,9 +2796,37 @@ Object::FSIOResult RadosObject::get_fsio_handle(const DoutPrefixProvider* dpp,
   /* §3.1 step 0, Z24:  a create is a writer's;  in a versioned bucket,
    * of a name with no OLH or a delete marker (8i) */
   const bool create = flags & FSIOObject::OPEN_FLAG_CREATE;
-  if ((create || (flags & FSIOObject::OPEN_FLAG_TRUNC)) &&
+  if ((flags & FSIOObject::OPEN_FLAG_TRUNC) &&
       !(flags & FSIOObject::OPEN_FLAG_WRITE)) {
     return FSIOResult{-EINVAL, nullptr};
+  }
+  /* a read-only create (POSIX O_RDONLY|O_CREAT):  where the name is
+   * absent, the create as a writer's, exclusive so it never rewrites
+   * content, published empty at once;  then a reader bound to the name */
+  if (create && !(flags & FSIOObject::OPEN_FLAG_WRITE)) {
+    const uint32_t rflags =
+      flags & ~(FSIOObject::OPEN_FLAG_CREATE | FSIOObject::OPEN_FLAG_EXCL);
+    const bool excl = flags & FSIOObject::OPEN_FLAG_EXCL;
+    if (!excl) {
+      auto rd = get_fsio_handle(dpp, rflags, nullptr, writer);
+      if (std::get<0>(rd) != -ENOENT) {
+        return rd;
+      }
+    }
+    auto [r, w] = get_fsio_handle(
+      dpp, rflags | FSIOObject::OPEN_FLAG_WRITE |
+      FSIOObject::OPEN_FLAG_CREATE | FSIOObject::OPEN_FLAG_EXCL, spec, writer);
+    if (r == -EEXIST && !excl) {
+      /* created by another between the two:  read it */
+      return get_fsio_handle(dpp, rflags, nullptr, writer);
+    }
+    if (r < 0) {
+      return FSIOResult{r, nullptr};
+    }
+    if (int r = w->close(dpp, 0); r < 0) {
+      return FSIOResult{r, nullptr};
+    }
+    return get_fsio_handle(dpp, rflags, nullptr, writer);
   }
   /* the head, by name:  the OLH in a versioned bucket */
   rgw_raw_obj raw;
