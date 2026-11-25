@@ -2446,6 +2446,25 @@ TEST_F(FSIORadosCreate, ExclusiveAndPlainOpens)
 }
 
 /* the create's attributes reach the published object */
+/* an empty file FSIO published has a separate head segment whose chunk
+ * was never written:  a write open's construction clones nothing for it */
+TEST_F(FSIORadosCreate, ReopenAnEmptyPublishedFile)
+{
+  std::unique_ptr<FO> w;
+  ASSERT_EQ(0, create("empty", false, &w));
+  ASSERT_EQ(0, w->close(env->dpp.get(), 0));
+  w.reset();
+  int64_t size = -1;
+  ASSERT_EQ(0, s3_size("empty", &size));
+  EXPECT_EQ(0, size);
+  ASSERT_EQ(0, open_flags("empty", FO::OPEN_FLAG_WRITE, &w));
+  ASSERT_EQ(0, write(w, 0, {"x"}));
+  ASSERT_EQ(0, w->close(env->dpp.get(), 0));
+  std::string now;
+  ASSERT_EQ(0, get("empty", &now));
+  EXPECT_EQ("x", now);
+}
+
 TEST_F(FSIORadosCreate, CreateSetsTheSpecAttributes)
 {
   rgw::sal::Attrs attrs;

@@ -458,6 +458,11 @@ int RadosFSIOObject::clone_chunks(const DoutPrefixProvider* dpp,
     if (raw.oid == skip_oid) {
       continue;
     }
+    /* a zero-length object's data chunk holds nothing, and an FSIO
+     * publish's was never written */
+    if (g.size() == 0) {
+      continue;
+    }
     auto ioc = iocs.find(raw.pool);
     if (ioc == iocs.end()) {
       try {
