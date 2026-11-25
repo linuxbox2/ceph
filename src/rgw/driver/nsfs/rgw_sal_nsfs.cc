@@ -9570,6 +9570,43 @@ int NSFSDriver::driver_hint(const DoutPrefixProvider* dpp,
     return 0;
   }
 
+  if (hint == "fsio-inspect") {
+    /* {bucket, name}:  the name's FSIO state, for tests.  nsfs's only
+     * durable FSIO state is the shadow file:  out["shadow"] is "ready"
+     * while .shadow/<leaf> exists beside the name, else "none", and
+     * out["held"] is "1" exactly then (cf. RadosStore::driver_hint()) */
+    const auto b = params.find("bucket");
+    const auto n = params.find("name");
+    if (! out || b == params.end() || n == params.end()) {
+      return -EINVAL;
+    }
+    std::unique_ptr<rgw::sal::Bucket> bucket;
+    if (int r = load_bucket(dpp, rgw_bucket(std::string(), b->second),
+			    &bucket, null_yield); r < 0) {
+      return r;
+    }
+    auto obj = bucket->get_object(rgw_obj_key(n->second));
+    auto* nobj = dynamic_cast<NSFSObject*>(obj.get());
+    bool exists = false;
+    std::vector<std::unique_ptr<nsfs::Directory>> chain;
+    nsfs::Directory* dir{nullptr};
+    std::string leaf;
+    if (nobj && nobj->resolve_parent_dir(dpp, /*create_dirs=*/false, chain,
+					  dir, leaf) == 0 && dir) {
+      int parent_fd = dir->get_fd();
+      if (parent_fd < 0) {
+	dir->open(dpp);
+	parent_fd = dir->get_fd();
+      }
+      const std::string rel = HIDDEN_SHADOW_PATH + "/" + leaf;
+      exists = parent_fd >= 0 &&
+	::faccessat(parent_fd, rel.c_str(), F_OK, AT_SYMLINK_NOFOLLOW) == 0;
+    }
+    (*out)["shadow"] = exists ? "ready" : "none";
+    (*out)["held"] = exists ? "1" : "0";
+    return 0;
+  }
+
   if (hint == "fs-features") {
     if (! out) {
       return -EINVAL;

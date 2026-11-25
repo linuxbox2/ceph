@@ -139,6 +139,10 @@ class RadosStore : public StoreDriver {
     virtual int initialize(CephContext *cct, const DoutPrefixProvider *dpp) override;
     /* FSIO_RADOS_DESIGN.md §7:  the gate's zone-wide part */
     bool have_fsio() const override;
+    /* test hints:  "fsio-inspect" (rgw_fsio_object.cc) */
+    int driver_hint(const DoutPrefixProvider* dpp, const std::string& hint,
+		    const std::map<std::string, std::string>& params,
+		    std::map<std::string, std::string>* out = nullptr) override;
     virtual const std::string get_name() const override {
       return "rados";
     }

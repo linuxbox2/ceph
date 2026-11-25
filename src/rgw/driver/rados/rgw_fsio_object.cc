@@ -2713,6 +2713,109 @@ Object::FSIOResult RadosObject::get_fsio_handle(const DoutPrefixProvider* dpp,
   return FSIOResult{0, std::move(hdl)};
 }
 
+/* "fsio-inspect", {bucket, name}:  the name's FSIO state on its head (the
+ * OLH in a versioned bucket), for tests.  out["shadow"] is the current
+ * shadow's state, "none", "constructing", "ready" or "publishing";
+ * out["held"] is "1" while an open record counts an open on the head or
+ * an open hint names the name in the head's hint shard, else "0".  An
+ * instance head's own counts and hints are not shown.  -ENOTSUP where the
+ * bucket's gate declines:  it has no FSIO state to show */
+int RadosStore::driver_hint(const DoutPrefixProvider* dpp,
+			    const std::string& hint,
+			    const std::map<std::string, std::string>& params,
+			    std::map<std::string, std::string>* out)
+{
+  if (hint != "fsio-inspect") {
+    return -ENOTSUP;
+  }
+  const auto b = params.find("bucket");
+  const auto n = params.find("name");
+  if (!out || b == params.end() || n == params.end()) {
+    return -EINVAL;
+  }
+  std::unique_ptr<Bucket> bucket;
+  if (int r = load_bucket(dpp, rgw_bucket(std::string(), b->second), &bucket,
+			  null_yield); r < 0) {
+    return r;
+  }
+  if (!bucket->have_fsio()) {
+    return -ENOTSUP;
+  }
+  const auto& info = bucket->get_info();
+  rgw_raw_obj raw;
+  rados->obj_to_raw(info.placement_rule,
+		    rgw_obj(info.bucket, rgw_obj_key(n->second)), &raw);
+  boost::container::flat_map<std::string, ceph::buffer::list> attrs;
+  sys::error_code ec;
+  try {
+    auto ioc = rgw::init_iocontext(dpp, neorados, raw.pool,
+				   ceph::async::use_blocked);
+    neorados.execute(neorados::Object{raw.oid}, ioc,
+		     neorados::ReadOp{}.get_xattrs(&attrs, nullptr), nullptr,
+		     ceph::async::use_blocked[ec]);
+  } catch (const sys::system_error& e) {
+    return ceph::from_error_code(e.code());
+  }
+  if (ec && ec != sys::errc::no_such_file_or_directory) {
+    return ceph::from_error_code(ec);
+  }
+  std::string shadow = "none";
+  bool held = false;
+  for (const auto& [k, v] : attrs) {
+    try {
+      auto it = v.cbegin();
+      if (k == "user.rgw.fsio.hdr") {
+	cls_rgw_fsio_hdr hdr;
+	decode(hdr, it);
+	for (const auto& e : hdr.chunk_sets) {
+	  if (!hdr.cur_shadow || e.id != *hdr.cur_shadow) {
+	    continue;
+	  }
+	  switch (e.state) {
+	  case cls_rgw_fsio_cs_state::CONSTRUCTING: shadow = "constructing"; break;
+	  case cls_rgw_fsio_cs_state::READY:        shadow = "ready"; break;
+	  case cls_rgw_fsio_cs_state::PUBLISHING:   shadow = "publishing"; break;
+	  default: break;
+	  }
+	}
+      } else if (k.starts_with("user.rgw.fsio.m.")) {
+	cls_rgw_fsio_opens rec;
+	decode(rec, it);
+	for (const auto& [h, o] : rec.handles) {
+	  for (const auto& [cs, cnt] : o.chunk_sets) {
+	    held |= cnt.readers > 0 || cnt.writers > 0;
+	  }
+	}
+      }
+    } catch (const ceph::buffer::error&) {
+      return -EIO;
+    }
+  }
+  if (!held) {
+    const auto shards = static_cast<uint32_t>(
+      ctx()->_conf.get_val<uint64_t>("rgw_fsio_open_hints_num_shards"));
+    cls_rgw_fsio_hint_list_op in;
+    in.bucket = info.bucket;
+    cls_rgw_fsio_hint_list_ret ret;
+    neorados::ReadOp op;
+    op.exec(neorados::cls::rgw_fsio::open_hint_list(in, &ret));
+    neorados.execute(
+      neorados::Object{rgw::fsio::open_hint_shard_oid(
+	  rgw::fsio::open_hint_shard(raw.oid, shards))},
+      rados->fsio_hint_ioc(), std::move(op), nullptr,
+      ceph::async::use_blocked[ec]);
+    if (ec && ec != sys::errc::no_such_file_or_directory) {
+      return ceph::from_error_code(ec);
+    }
+    for (const auto& h : ret.hints) {
+      held |= h.key.name == n->second;
+    }
+  }
+  (*out)["shadow"] = shadow;
+  (*out)["held"] = held ? "1" : "0";
+  return 0;
+}
+
 int RadosObject::stat_fsio_view(const DoutPrefixProvider* dpp,
 				struct stat* st, Attrs* attrs, uint32_t flags)
 {

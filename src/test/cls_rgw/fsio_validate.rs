@@ -10,7 +10,13 @@ edition = "2021"
 //!   fsio_validate.rs [--dry-run] [--no-build] [--build DIR]
 //!                    [--filter PATTERN] [--timeout SECS] [--reuse]
 //!                    [--tests] [--progress] [--debug-rgw LEVEL]
-//!                    [--clone-latency] STEP|PRESET...
+//!                    [--clone-latency] [--ramdisk] [--no-vstart-debug]
+//!                    STEP|PRESET...
+//!
+//! `--ramdisk` puts the RADOS cluster's mon and OSD data in
+//! `/dev/shm/fsio-validate-dev`, a 32G BlueStore block file, removed when
+//! the cluster stops;  `--no-vstart-debug` starts it without vstart's
+//! `-d` (debug osd 20, debug ms 1).  The nsfs phase is unchanged.
 //!
 //! Steps:
 //!   cls            the core's unit tests (no cluster), the CLS head
@@ -19,11 +25,12 @@ edition = "2021"
 //!   librgw-rados   ceph_test_librgw_file_fsio_put            (RADOS)
 //!   harness        unittest_rgw_fsio_geometry (no cluster), then
 //!                  ceph_test_rgw_fsio_rados, the driver's harness (RADOS)
+//!   write2-rados   write2, and nfsns with every group flag    (RADOS)
 //!   cluster-tier   the model's cluster tier, the origin check off (RADOS)
 //!   model          the model's in-memory tiers:  quick vectors skips
 //!   nsfs-librgw    write2, and nfsns with every group flag    (nsfs)
 //! Presets:
-//!   driver   cls librgw-rados harness
+//!   driver   cls librgw-rados harness write2-rados
 //!   core     cls cluster-tier model
 //!   full     every step
 //!
@@ -100,8 +107,9 @@ use std::process::{Command, Stdio};
 const AWS_KEY: &str = "0555b35654ad1656d804";
 const AWS_SECRET: &str = "h7GhxuBLTrlhVUyxSPUKUV8r/2EI4ngqJxD7iBdBYLhwluN30JaT3Q==";
 
-const STEPS: &[&str] = &["cls", "librgw-rados", "harness", "cluster-tier", "model", "nsfs-librgw"];
-const RADOS: &[&str] = &["cls", "librgw-rados", "harness", "cluster-tier"];
+const STEPS: &[&str] = &["cls", "librgw-rados", "harness", "write2-rados", "cluster-tier", "model",
+                         "nsfs-librgw"];
+const RADOS: &[&str] = &["cls", "librgw-rados", "harness", "write2-rados", "cluster-tier"];
 
 struct Opts {
     dry_run: bool,
@@ -116,7 +124,12 @@ struct Opts {
     progress: bool,
     debug_rgw: Option<u32>,
     clone_latency: bool,
+    ramdisk: bool,
+    vstart_debug: bool,
 }
+
+/// --ramdisk:  the RADOS cluster's dev directory
+const RAMDISK_DEV: &str = "/dev/shm/fsio-validate-dev";
 
 /// A step's command's limit, in seconds
 fn step_timeout(o: &Opts, step: &str) -> u64 {
@@ -128,7 +141,7 @@ fn step_timeout(o: &Opts, step: &str) -> u64 {
         "build" => 1200,
         "model" => 1800,
         "cluster-tier" => 1200,
-        "nsfs-librgw" => 300,
+        "nsfs-librgw" | "write2-rados" => 300,
         "rados-stop" | "rados-chown" => 120,
         _ => 180,
     })
@@ -178,7 +191,8 @@ fn main() {
                 "librgw-rados" => &["rgw", "ceph_test_librgw_file_fsio_put"][..],
                 "harness" => &["unittest_rgw_fsio_geometry", "ceph_test_rgw_fsio_rados"][..],
                 "cluster-tier" | "model" => &["ceph_test_cls_rgw_fsio_model"][..],
-                "nsfs-librgw" => &["rgw", "ceph_test_librgw_file_write2", "ceph_test_librgw_file_nfsns"][..],
+                "nsfs-librgw" | "write2-rados" =>
+                    &["rgw", "ceph_test_librgw_file_write2", "ceph_test_librgw_file_nfsns"][..],
                 _ => &[][..],
             });
         }
@@ -240,7 +254,11 @@ fn rados_phase(o: &Opts, steps: &[&'static str], run_dir: &Path, summary: &mut V
     let setup = [
         sh("rados-stop", "stop whatever is running", "../src/stop.sh".into()),
         sh("rados-vstart", "a fresh RADOS vstart",
-           "env MON=1 OSD=1 RGW=1 MGR=0 MDS=0 ../src/vstart.sh -n -d -o 'bluestore_block_size = 2T'".into()),
+           format!("{}env MON=1 OSD=1 RGW=1 MGR=1 MDS=0{} ../src/vstart.sh -n{} -o 'bluestore_block_size = {}'",
+                   if o.ramdisk { format!("mkdir -p {RAMDISK_DEV} && ") } else { String::new() },
+                   if o.ramdisk { format!(" CEPH_DEV_DIR={RAMDISK_DEV}") } else { String::new() },
+                   if o.vstart_debug { " -d" } else { "" },
+                   if o.ramdisk { "32G" } else { "2T" })),
         sh("rados-fsio", "enable the fsio zonegroup feature",
            "bin/radosgw-admin -c ceph.conf zonegroup modify --rgw-zonegroup=default --enable-feature=fsio \
             && bin/radosgw-admin -c ceph.conf zonegroup modify --rgw-zonegroup=default --enable-feature=gc-manifest".into()),
@@ -273,6 +291,21 @@ fn rados_phase(o: &Opts, steps: &[&'static str], run_dir: &Path, summary: &mut V
                     "env CEPH_CONF={conf} AWS_ACCESS_KEY_ID={AWS_KEY} AWS_SECRET_ACCESS_KEY='{AWS_SECRET}' \
                      bin/ceph_test_librgw_file_fsio_put --debug-rgw={} --log-to-stderr=true{gf}",
                     o.debug_rgw.unwrap_or(10)))],
+                /* the librgw suites against the RADOS gateway, as against
+                 * nsfs's:  the suite's backend-neutral tests answer through
+                 * the fsio-inspect driver hint, its nsfs-only ones skip.
+                 * No --filter:  their main() cannot take a gtest flag */
+                "write2-rados" => {
+                    let keys = format!("env CEPH_CONF={conf} AWS_ACCESS_KEY_ID={AWS_KEY} \
+                                        AWS_SECRET_ACCESS_KEY='{AWS_SECRET}'{dbg}");
+                    vec![
+                        sh("write2-rados", "write2", format!(
+                            "{keys} bin/ceph_test_librgw_file_write2 --create --userid testid \"-c {conf}\"")),
+                        sh("write2-rados", "nfsns, every group", format!(
+                            "{keys} bin/ceph_test_librgw_file_nfsns --create --userid testid \
+                             --hier1 --dirs1 --marker1 --setattr --rename --readf --writef \"-c {conf}\"")),
+                    ]
+                }
                 "harness" if o.clone_latency => vec![sh("harness", "the clone latency", format!(
                     "env CEPH_CONF={conf} bin/ceph_test_rgw_fsio_rados \
                      --gtest_also_run_disabled_tests --gtest_filter='*CloneLatency*'"))],
@@ -313,7 +346,8 @@ fn rados_phase(o: &Opts, steps: &[&'static str], run_dir: &Path, summary: &mut V
     }
     let (user, group) = (id("-un"), id("-gn"));
     let teardown = [
-        sh("rados-stop", "stop the cluster", "../src/stop.sh".into()),
+        sh("rados-stop", "stop the cluster",
+           if o.ramdisk { format!("../src/stop.sh && rm -rf {RAMDISK_DEV}") } else { "../src/stop.sh".into() }),
         sh("rados-chown", "the run's files back to you", format!(
             "chown -R {user}:{group} asok dev out ceph.conf keyring rgwlib_readf.out {} 2>/dev/null; true",
             run_dir.display())),
@@ -357,7 +391,12 @@ fn nsfs_phase(o: &Opts, run_dir: &Path, summary: &mut Vec<String>) -> bool {
             break;
         }
     }
-    failed |= !exec(o, &sh("stop the gateway", "../src/stop.sh".into()), run_dir, summary, |_| None);
+    /* as rgw-vstart.sh says to:  stop.sh's "all" asks sudo about cephadm
+     * first, which waits on a password when no RADOS phase cached one */
+    failed |= !exec(o, &sh("stop the gateway",
+                           "pid=$(cat out/radosgw.8000.pid) && kill $pid \
+                            && while kill -0 $pid 2>/dev/null; do sleep 1; done".into()),
+                    run_dir, summary, |_| None);
     failed
 }
 
@@ -606,6 +645,8 @@ fn parse_args() -> Opts {
     let mut progress = false;
     let mut debug_rgw: Option<u32> = None;
     let mut clone_latency = false;
+    let mut ramdisk = false;
+    let mut vstart_debug = true;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
@@ -616,16 +657,18 @@ fn parse_args() -> Opts {
             "--debug-rgw" => debug_rgw = Some(args.next().and_then(|v| v.parse().ok())
                                               .unwrap_or_else(|| die("--debug-rgw needs a level"))),
             "--clone-latency" => clone_latency = true,
+            "--ramdisk" => ramdisk = true,
+            "--no-vstart-debug" => vstart_debug = false,
             "--no-build" => build = false,
             "--build" => build_dir = Some(PathBuf::from(args.next().unwrap_or_else(|| die("--build needs a directory")))),
             "--filter" => filter = Some(args.next().unwrap_or_else(|| die("--filter needs a pattern"))),
             "--timeout" => timeout = Some(args.next().and_then(|v| v.parse().ok())
                                           .unwrap_or_else(|| die("--timeout needs a number of seconds"))),
-            "driver" => steps.extend(["cls", "librgw-rados", "harness"]),
+            "driver" => steps.extend(["cls", "librgw-rados", "harness", "write2-rados"]),
             "core" => steps.extend(["cls", "cluster-tier", "model"]),
             "full" => steps.extend(STEPS),
             "-h" | "--help" => {
-                println!("usage:  fsio_validate.rs [--dry-run] [--no-build] [--build DIR] [--filter PATTERN] [--timeout SECS] [--reuse] [--tests] [--progress] [--debug-rgw LEVEL] [--clone-latency] STEP|PRESET...\n\
+                println!("usage:  fsio_validate.rs [--dry-run] [--no-build] [--build DIR] [--filter PATTERN] [--timeout SECS] [--reuse] [--tests] [--progress] [--debug-rgw LEVEL] [--clone-latency] [--ramdisk] [--no-vstart-debug] STEP|PRESET...\n\
                           steps:  {}\npresets:  driver core full", STEPS.join(" "));
                 std::process::exit(0);
             }
@@ -654,7 +697,7 @@ fn parse_args() -> Opts {
         die("--clone-latency runs the harness:  name the harness step");
     }
     Opts { dry_run, build, build_dir, src, steps: ordered, filter, timeout, reuse, tests, progress,
-           debug_rgw, clone_latency }
+           debug_rgw, clone_latency, ramdisk, vstart_debug }
 }
 
 fn capture(cwd: &Path, argv: &[&str]) -> String {

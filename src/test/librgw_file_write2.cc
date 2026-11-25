@@ -34,6 +34,7 @@
 #include <linux/fs.h>
 #include <linux/fiemap.h>
 #include <map>
+#include <optional>
 #include <random>
 #include "xxhash.h"
 
@@ -905,6 +906,110 @@ static int fsio_inject_out(const DoutPrefixProvider* dpp, const char* hint,
 			     {{"enable", on ? "true" : "false"}}, out);
 }
 
+/* Backend-neutral checks (plan step 9).  A test asks what a name's FSIO
+ * state is through the fsio-inspect driver hint, and reads published
+ * content as S3 does, through the SAL read op;  so one suite runs on any
+ * driver that answers the hint (nsfs from its tree, RADOS from the
+ * head), where checking nsfs's files directly ran on nsfs alone. */
+struct FsioState {
+  std::string shadow;	// "none", "constructing", "ready" or "publishing"
+  bool held = false;	// FSIO state still held for an open
+};
+
+static std::optional<FsioState> fsio_inspect(const std::string& name,
+					     const std::string& bucket = bucket_name)
+{
+  const DoutPrefix dp(g_ceph_context, dout_subsys, "write2 test: ");
+  std::map<std::string, std::string> out;
+  if (rgw::g_rgwlib->get_driver()->driver_hint(
+	&dp, "fsio-inspect", {{"bucket", bucket}, {"name", name}}, &out) < 0) {
+    return std::nullopt;
+  }
+  return FsioState{out["shadow"], out["held"] == "1"};
+}
+
+/* a driver that shows its FSIO state:  the suite's backend-neutral tests */
+static bool fsio_inspectable()
+{
+  return fsio_inspect("fsio-inspect-probe", bucket_name).has_value();
+}
+
+/* the name has an unpublished write */
+static bool shadow_exists(const std::string& name,
+			  const std::string& bucket = bucket_name)
+{
+  auto s = fsio_inspect(name, bucket);
+  return s && s->shadow != "none";
+}
+
+/* the object as S3 reads it:  0 and its bytes, or -ENOENT */
+static int s3_read(const std::string& name, std::string* data,
+		   const std::string& bucket = bucket_name)
+{
+  const DoutPrefix dp(g_ceph_context, dout_subsys, "write2 test: ");
+  auto* driver = rgw::g_rgwlib->get_driver();
+  std::unique_ptr<rgw::sal::Bucket> b;
+  if (int r = driver->load_bucket(&dp, rgw_bucket(std::string(), bucket), &b,
+				  null_yield); r < 0) {
+    return r;
+  }
+  auto obj = b->get_object(rgw_obj_key(name));
+  auto rop = obj->get_read_op();
+  if (int r = rop->prepare(null_yield, &dp); r < 0) {
+    return r;
+  }
+  ceph::buffer::list bl;
+  const int64_t size = obj->get_size();
+  for (int64_t ofs = 0; ofs < size; ) {
+    ceph::buffer::list part;
+    int r = rop->read(ofs, size - 1, part, null_yield, &dp);
+    if (r <= 0) {
+      return r < 0 ? r : -EIO;
+    }
+    ofs += r;
+    bl.claim_append(part);
+  }
+  if (data) {
+    *data = bl.to_str();
+  }
+  return 0;
+}
+
+/* the object's attributes as S3 holds them:  0 and the set, or -ENOENT */
+static int s3_attrs(const std::string& name, rgw::sal::Attrs* attrs,
+		    const std::string& bucket = bucket_name)
+{
+  const DoutPrefix dp(g_ceph_context, dout_subsys, "write2 test: ");
+  auto* driver = rgw::g_rgwlib->get_driver();
+  std::unique_ptr<rgw::sal::Bucket> b;
+  if (int r = driver->load_bucket(&dp, rgw_bucket(std::string(), bucket), &b,
+				  null_yield); r < 0) {
+    return r;
+  }
+  auto obj = b->get_object(rgw_obj_key(name));
+  if (int r = obj->load_obj_state(&dp, null_yield); r < 0) {
+    return r;
+  }
+  if (!obj->exists()) {
+    return -ENOENT;
+  }
+  *attrs = obj->get_attrs();
+  return 0;
+}
+
+static bool s3_exists(const std::string& name,
+		      const std::string& bucket = bucket_name)
+{
+  return s3_read(name, nullptr, bucket) == 0;
+}
+
+static std::string s3_contents(const std::string& name,
+			       const std::string& bucket = bucket_name)
+{
+  std::string data;
+  return s3_read(name, &data, bucket) == 0 ? data : std::string{};
+}
+
 /* first differing offset, or npos.  Comparing multi-megabyte strings with
  * EXPECT_EQ prints both of them on failure, which is unreadable and slow. */
 static size_t first_difference(const std::string& a, const std::string& b)
@@ -1116,6 +1221,9 @@ TEST(OPEN2, LEFTOVER_SHADOW_REFUSES_EXCLUSIVE_CREATE)
 
 TEST(OPEN2, SHADOW_COW_FAILURE_LEAVES_NO_TEMP)
 {
+  if (!have_fs_layout()) {
+    GTEST_SKIP() << "nsfs's shadow files";
+  }
   const DoutPrefix dp(g_ceph_context, dout_subsys, "write2 test: ");
   const std::string name{"sb-cow"};
   (void) rgw_unlink(fs, bucket_fh, name.c_str(), RGW_UNLINK_FLAG_NONE);
@@ -2581,8 +2689,8 @@ TEST(OPEN2, SHADOW_NOT_CREATED_BY_READER)
 {
   /* direct evidence for the invariant the other tests only imply:  a
    * read open binds the published object and leaves no shadow behind */
-  if (! have_fs_layout()) {
-    GTEST_SKIP() << "not a filesystem-backed driver";
+  if (! fsio_inspectable()) {
+    GTEST_SKIP() << "no fsio-inspect driver hint";
   }
 
   std::unique_ptr<Open2Helper> o2h =
@@ -2597,13 +2705,13 @@ TEST(OPEN2, SHADOW_NOT_CREATED_BY_READER)
   ASSERT_EQ(get<0>(ofw), 0);
   auto w0 = get<1>(ofw);
   /* while the write open is held the object lives in the shadow */
-  ASSERT_TRUE(sf::exists(shadow_path("noshadow1")));
+  ASSERT_TRUE(shadow_exists("noshadow1"));
   ASSERT_EQ(get<0>(o2h->write(w0, a4, 0, a4.length())), 0);
   ASSERT_EQ(o2h->close(w0), 0);
 
   /* published:  shadow gone, object present */
-  ASSERT_FALSE(sf::exists(shadow_path("noshadow1")));
-  ASSERT_TRUE(sf::exists(published_path("noshadow1")));
+  ASSERT_FALSE(shadow_exists("noshadow1"));
+  ASSERT_TRUE(s3_exists("noshadow1"));
 
   /* a reader must not fork one */
   auto ofr = o2h->open(O_RDONLY, RGW_OPEN_FLAG_NONE);
@@ -2612,9 +2720,9 @@ TEST(OPEN2, SHADOW_NOT_CREATED_BY_READER)
   auto rdr = o2h->read(r1, 0, a4.length());
   ASSERT_EQ(get<0>(rdr), 0);
   ASSERT_EQ(get<1>(rdr), a4);
-  ASSERT_FALSE(sf::exists(shadow_path("noshadow1")));
+  ASSERT_FALSE(shadow_exists("noshadow1"));
   ASSERT_EQ(o2h->close(r1), 0);
-  ASSERT_FALSE(sf::exists(shadow_path("noshadow1")));
+  ASSERT_FALSE(shadow_exists("noshadow1"));
 }
 
 TEST(OPEN2, RESUME_EXISTING_SHADOW)
@@ -2721,8 +2829,8 @@ static int fsio_write(rgw::sal::Object::FSIOObject* h, std::string data,
 
 TEST(OPEN2, CLOSE_PUBLISHES_A_HELD_WRITE)
 {
-  if (! have_fs_layout()) {
-    GTEST_SKIP() << "not a filesystem-backed driver";
+  if (! fsio_inspectable()) {
+    GTEST_SKIP() << "no fsio-inspect driver hint";
   }
   using FSIO = rgw::sal::Object::FSIOObject;
   const DoutPrefix dp(g_ceph_context, dout_subsys, "write2 test: ");
@@ -2736,16 +2844,16 @@ TEST(OPEN2, CLOSE_PUBLISHES_A_HELD_WRITE)
   auto [r, w] = obj->get_fsio_handle(&dp, FSIO::OPEN_FLAG_WRITE);
   ASSERT_EQ(r, 0);
   ASSERT_EQ(fsio_write(w.get(), "QQ", 0), 0);
-  EXPECT_EQ(contents_of(published_path(name)), "PPPP");
+  EXPECT_EQ(s3_contents(name), "PPPP");
   ASSERT_EQ(w->close(&dp, FSIO::CLOSE_FLAG_NONE), 0);
-  EXPECT_EQ(contents_of(published_path(name)), "QQPP");
-  EXPECT_FALSE(sf::exists(shadow_path(name)));
+  EXPECT_EQ(s3_contents(name), "QQPP");
+  EXPECT_FALSE(shadow_exists(name));
 }
 
 TEST(OPEN2, CLOSE_OF_A_JOINED_READER_PUBLISHES_NOTHING)
 {
-  if (! have_fs_layout()) {
-    GTEST_SKIP() << "not a filesystem-backed driver";
+  if (! fsio_inspectable()) {
+    GTEST_SKIP() << "no fsio-inspect driver hint";
   }
   using FSIO = rgw::sal::Object::FSIOObject;
   const DoutPrefix dp(g_ceph_context, dout_subsys, "write2 test: ");
@@ -2764,16 +2872,16 @@ TEST(OPEN2, CLOSE_OF_A_JOINED_READER_PUBLISHES_NOTHING)
   ASSERT_EQ(rr, 0);
   ASSERT_TRUE(rd->resumed()) << "the reader should join the writer's shadow";
   ASSERT_EQ(rd->close(&dp, FSIO::CLOSE_FLAG_NONE), 0);
-  EXPECT_EQ(contents_of(published_path(name)), "PPPP");
-  EXPECT_TRUE(sf::exists(shadow_path(name)));
+  EXPECT_EQ(s3_contents(name), "PPPP");
+  EXPECT_TRUE(shadow_exists(name));
   ASSERT_EQ(w->close(&dp, FSIO::CLOSE_FLAG_NONE), 0);
-  EXPECT_EQ(contents_of(published_path(name)), "QQPP");
+  EXPECT_EQ(s3_contents(name), "QQPP");
 }
 
 TEST(OPEN2, DESTROYED_WHILE_OPEN_PUBLISHES)
 {
-  if (! have_fs_layout()) {
-    GTEST_SKIP() << "not a filesystem-backed driver";
+  if (! fsio_inspectable()) {
+    GTEST_SKIP() << "no fsio-inspect driver hint";
   }
   using FSIO = rgw::sal::Object::FSIOObject;
   const DoutPrefix dp(g_ceph_context, dout_subsys, "write2 test: ");
@@ -2789,8 +2897,8 @@ TEST(OPEN2, DESTROYED_WHILE_OPEN_PUBLISHES)
     ASSERT_EQ(r, 0);
     ASSERT_EQ(fsio_write(w.get(), "QQ", 0), 0);
   }
-  EXPECT_EQ(contents_of(published_path(name)), "QQPP");
-  EXPECT_FALSE(sf::exists(shadow_path(name)));
+  EXPECT_EQ(s3_contents(name), "QQPP");
+  EXPECT_FALSE(shadow_exists(name));
 }
 
 /* librgw:  the last write open returned while a read open remains
@@ -2798,8 +2906,8 @@ TEST(OPEN2, DESTROYED_WHILE_OPEN_PUBLISHES)
  * nothing more */
 TEST(OPEN2, WRITER_CLOSE_WITH_A_READER_PUBLISHES)
 {
-  if (! have_fs_layout()) {
-    GTEST_SKIP() << "not a filesystem-backed driver";
+  if (! fsio_inspectable()) {
+    GTEST_SKIP() << "no fsio-inspect driver hint";
   }
   const std::string name{"close-wr"};
   reset_object(name);
@@ -2813,10 +2921,10 @@ TEST(OPEN2, WRITER_CLOSE_WITH_A_READER_PUBLISHES)
   ASSERT_EQ(get<0>(ofr), 0);
   ASSERT_EQ(get<0>(o2h.write(get<1>(ofw), std::string{"QQ"}, 0, 2)), 0);
   ASSERT_EQ(o2h.close(get<1>(ofw)), 0);
-  EXPECT_EQ(contents_of(published_path(name)), "QQPP");
+  EXPECT_EQ(s3_contents(name), "QQPP");
   ASSERT_EQ(o2h.close(get<1>(ofr)), 0);
-  EXPECT_EQ(contents_of(published_path(name)), "QQPP");
-  EXPECT_FALSE(sf::exists(shadow_path(name)));
+  EXPECT_EQ(s3_contents(name), "QQPP");
+  EXPECT_FALSE(shadow_exists(name));
 }
 
 /* FSIO design §3.5 item 4, 8h:  a close refused by policy leaves the
@@ -2824,8 +2932,8 @@ TEST(OPEN2, WRITER_CLOSE_WITH_A_READER_PUBLISHES)
  * reclones from the published object */
 TEST(OPEN2, REFUSED_CLOSE_DISCARDS_THE_SHADOW)
 {
-  if (! have_fs_layout()) {
-    GTEST_SKIP() << "not a filesystem-backed driver";
+  if (! fsio_inspectable()) {
+    GTEST_SKIP() << "no fsio-inspect driver hint";
   }
   using FSIO = rgw::sal::Object::FSIOObject;
   const DoutPrefix dp(g_ceph_context, dout_subsys, "write2 test: ");
@@ -2839,24 +2947,24 @@ TEST(OPEN2, REFUSED_CLOSE_DISCARDS_THE_SHADOW)
   auto [r, w] = obj->get_fsio_handle(&dp, FSIO::OPEN_FLAG_WRITE);
   ASSERT_EQ(r, 0);
   ASSERT_EQ(fsio_write(w.get(), "QQ", 0), 0);
-  ASSERT_TRUE(sf::exists(shadow_path(name)));
+  ASSERT_TRUE(shadow_exists(name));
   ASSERT_EQ(w->close(&dp, FSIO::CLOSE_FLAG_DISCARD), 0);
-  EXPECT_EQ(contents_of(published_path(name)), "PPPP");
-  EXPECT_FALSE(sf::exists(shadow_path(name)));
+  EXPECT_EQ(s3_contents(name), "PPPP");
+  EXPECT_FALSE(shadow_exists(name));
 
   auto [r2, w2] = obj->get_fsio_handle(&dp, FSIO::OPEN_FLAG_WRITE);
   ASSERT_EQ(r2, 0);
   ASSERT_EQ(fsio_write(w2.get(), "RR", 2), 0);
   ASSERT_EQ(w2->close(&dp, FSIO::CLOSE_FLAG_NONE), 0);
-  EXPECT_EQ(contents_of(published_path(name)), "PPRR");
+  EXPECT_EQ(s3_contents(name), "PPRR");
 }
 
 /* end_write() refused on a handle that stays open as a reader:  its next
  * begin_write() reclones from the published object */
 TEST(OPEN2, REFUSED_END_WRITE_RECLONES_AT_THE_NEXT_WRITE)
 {
-  if (! have_fs_layout()) {
-    GTEST_SKIP() << "not a filesystem-backed driver";
+  if (! fsio_inspectable()) {
+    GTEST_SKIP() << "no fsio-inspect driver hint";
   }
   using FSIO = rgw::sal::Object::FSIOObject;
   const DoutPrefix dp(g_ceph_context, dout_subsys, "write2 test: ");
@@ -2871,12 +2979,12 @@ TEST(OPEN2, REFUSED_END_WRITE_RECLONES_AT_THE_NEXT_WRITE)
   ASSERT_EQ(r, 0);
   ASSERT_EQ(fsio_write(w.get(), "QQ", 0), 0);
   ASSERT_EQ(w->end_write(&dp, FSIO::WRITE_FLAG_DISCARD), 0);
-  EXPECT_EQ(contents_of(published_path(name)), "PPPP");
-  EXPECT_FALSE(sf::exists(shadow_path(name)));
+  EXPECT_EQ(s3_contents(name), "PPPP");
+  EXPECT_FALSE(shadow_exists(name));
   ASSERT_EQ(w->begin_write(&dp, FSIO::WRITE_FLAG_NONE), 0);
   ASSERT_EQ(fsio_write(w.get(), "RR", 2), 0);
   ASSERT_EQ(w->close(&dp, FSIO::CLOSE_FLAG_NONE), 0);
-  EXPECT_EQ(contents_of(published_path(name)), "PPRR");
+  EXPECT_EQ(s3_contents(name), "PPRR");
 }
 
 /* FSIO_RADOS_DESIGN.md §4.3, the orderly shutdown's drain, through
@@ -2905,8 +3013,8 @@ static int mount_bucket(rgw_fs** m, rgw_file_handle** bfh)
 /* a file still open at the unmount is closed by it, and published */
 TEST(OPEN2, UMOUNT_PUBLISHES_AN_UNCLOSED_WRITE)
 {
-  if (! have_fs_layout()) {
-    GTEST_SKIP() << "not a filesystem-backed driver";
+  if (! fsio_inspectable()) {
+    GTEST_SKIP() << "no fsio-inspect driver hint";
   }
   const std::string name{"drain-pub"};
   reset_object(name);
@@ -2926,18 +3034,18 @@ TEST(OPEN2, UMOUNT_PUBLISHES_AN_UNCLOSED_WRITE)
      * closed, keeps the handle */
   }
   ASSERT_EQ(rgw_fh_rele(fs2, bfh2, RGW_FH_RELE_FLAG_NONE), 0);
-  EXPECT_EQ(contents_of(published_path(name)), "PPPP");
+  EXPECT_EQ(s3_contents(name), "PPPP");
   ASSERT_EQ(rgw_umount(fs2, RGW_UMOUNT_FLAG_NONE), 0);
-  EXPECT_EQ(contents_of(published_path(name)), "QQPP");
-  EXPECT_FALSE(sf::exists(shadow_path(name)));
+  EXPECT_EQ(s3_contents(name), "QQPP");
+  EXPECT_FALSE(shadow_exists(name));
 }
 
 /* while the unmount waits for clients, a new open fails with EAGAIN, and
  * the last close ends the wait before the grace is out */
 TEST(OPEN2, UMOUNT_WAITS_FOR_A_CLOSE_AND_FAILS_NEW_OPENS)
 {
-  if (! have_fs_layout()) {
-    GTEST_SKIP() << "not a filesystem-backed driver";
+  if (! fsio_inspectable()) {
+    GTEST_SKIP() << "no fsio-inspect driver hint";
   }
   const std::string name{"drain-wait"};
   const std::string other{"drain-new"};
@@ -2981,15 +3089,15 @@ TEST(OPEN2, UMOUNT_WAITS_FOR_A_CLOSE_AND_FAILS_NEW_OPENS)
   EXPECT_EQ(umount_rc, 0);
   EXPECT_LT(took, std::chrono::seconds(4))
     << "the unmount waited out its grace after the last close";
-  EXPECT_EQ(contents_of(published_path(name)), "QQPP");
+  EXPECT_EQ(s3_contents(name), "QQPP");
 }
 
 TEST(OPEN2, UNLINK_LEAVES_NO_SHADOW)
 {
   /* direct evidence for UNLINK1:  the doomed shadow loses its name at
    * unlink and its storage at last close */
-  if (! have_fs_layout()) {
-    GTEST_SKIP() << "not a filesystem-backed driver";
+  if (! fsio_inspectable()) {
+    GTEST_SKIP() << "no fsio-inspect driver hint";
   }
 
   std::unique_ptr<Open2Helper> o2h =
@@ -3009,14 +3117,14 @@ TEST(OPEN2, UNLINK_LEAVES_NO_SHADOW)
   auto ofw1 = o2h->open(O_RDWR, RGW_OPEN_FLAG_NONE);
   ASSERT_EQ(get<0>(ofw1), 0);
   auto w1 = get<1>(ofw1);
-  ASSERT_TRUE(sf::exists(shadow_path("unlink2")));
+  ASSERT_TRUE(shadow_exists("unlink2"));
 
   ASSERT_EQ(rgw_unlink(fs, bucket_fh, "unlink2", RGW_UNLINK_FLAG_NONE), 0);
 
   /* the name is gone immediately;  on the nsfs/posix drivers that is
    * observable in both the namespace and .shadow */
-  ASSERT_FALSE(sf::exists(published_path("unlink2")));
-  ASSERT_FALSE(sf::exists(shadow_path("unlink2")));
+  ASSERT_FALSE(s3_exists("unlink2"));
+  ASSERT_FALSE(shadow_exists("unlink2"));
 
   /* but the open still works on it */
   auto rdr = o2h->read(w1, 0, a4.length());
@@ -3024,8 +3132,8 @@ TEST(OPEN2, UNLINK_LEAVES_NO_SHADOW)
   ASSERT_EQ(get<1>(rdr), a4);
 
   ASSERT_EQ(o2h->close(w1), 0);
-  ASSERT_FALSE(sf::exists(published_path("unlink2")));
-  ASSERT_FALSE(sf::exists(shadow_path("unlink2")));
+  ASSERT_FALSE(s3_exists("unlink2"));
+  ASSERT_FALSE(shadow_exists("unlink2"));
 }
 
 TEST(OPEN2, UNLINK_WITH_READER_ONLY)
@@ -3033,8 +3141,8 @@ TEST(OPEN2, UNLINK_WITH_READER_ONLY)
   /* unlink while only a read open is held:  the handle is bound to the
    * published object, not to a shadow, so discard() has no shadow to
    * drop--but the open must keep working and nothing may be published */
-  if (! have_fs_layout()) {
-    GTEST_SKIP() << "not a filesystem-backed driver";
+  if (! fsio_inspectable()) {
+    GTEST_SKIP() << "no fsio-inspect driver hint";
   }
 
   std::unique_ptr<Open2Helper> o2h =
@@ -3054,10 +3162,10 @@ TEST(OPEN2, UNLINK_WITH_READER_ONLY)
   auto ofr = o2h->open(O_RDONLY, RGW_OPEN_FLAG_NONE);
   ASSERT_EQ(get<0>(ofr), 0);
   auto r1 = get<1>(ofr);
-  ASSERT_FALSE(sf::exists(shadow_path("rdonly1")));
+  ASSERT_FALSE(shadow_exists("rdonly1"));
 
   ASSERT_EQ(rgw_unlink(fs, bucket_fh, "rdonly1", RGW_UNLINK_FLAG_NONE), 0);
-  ASSERT_FALSE(sf::exists(published_path("rdonly1")));
+  ASSERT_FALSE(s3_exists("rdonly1"));
 
   /* the reader's fd holds the unlinked inode */
   auto rdr = o2h->read(r1, 0, a4.length());
@@ -3065,8 +3173,8 @@ TEST(OPEN2, UNLINK_WITH_READER_ONLY)
   ASSERT_EQ(get<1>(rdr), a4);
 
   ASSERT_EQ(o2h->close(r1), 0);
-  ASSERT_FALSE(sf::exists(published_path("rdonly1")));
-  ASSERT_FALSE(sf::exists(shadow_path("rdonly1")));
+  ASSERT_FALSE(s3_exists("rdonly1"));
+  ASSERT_FALSE(shadow_exists("rdonly1"));
 }
 
 TEST(OPEN2, STATELESS_IDLE_FINALIZE)
@@ -3074,8 +3182,8 @@ TEST(OPEN2, STATELESS_IDLE_FINALIZE)
   /* the idle finalizer publishes an unclosed stateless writer without
    * closing it, and a write which follows must re-fork the shadow
    * rather than mutate the object it just published */
-  if (! have_fs_layout()) {
-    GTEST_SKIP() << "not a filesystem-backed driver";
+  if (! fsio_inspectable()) {
+    GTEST_SKIP() << "no fsio-inspect driver hint";
   }
 
   g_conf().set_val("rgw_nfs_stateless_finalize_secs", "1");
@@ -3098,15 +3206,15 @@ TEST(OPEN2, STATELESS_IDLE_FINALIZE)
 		  RGW_OPEN_FLAG_V3);
   ASSERT_EQ(ret, 0);
 
-  ASSERT_TRUE(sf::exists(shadow_path("idle1")));
-  ASSERT_FALSE(sf::exists(published_path("idle1")));
+  ASSERT_TRUE(shadow_exists("idle1"));
+  ASSERT_FALSE(s3_exists("idle1"));
 
   /* no close;  the idle timer finalizes */
   std::this_thread::sleep_for(std::chrono::seconds(4));
 
-  ASSERT_TRUE(sf::exists(published_path("idle1")));
-  ASSERT_FALSE(sf::exists(shadow_path("idle1")));
-  ASSERT_EQ(sf::file_size(published_path("idle1")), a4.length());
+  ASSERT_TRUE(s3_exists("idle1"));
+  ASSERT_FALSE(shadow_exists("idle1"));
+  ASSERT_EQ(s3_contents("idle1").size(), a4.length());
 
   /* the open is still live:  a further write must re-fork, not mutate
    * the published object */
@@ -3114,14 +3222,14 @@ TEST(OPEN2, STATELESS_IDLE_FINALIZE)
 		  (void*) b4.c_str(), RGW_OPEN_FLAG_V3);
   ASSERT_EQ(ret, 0);
 
-  ASSERT_TRUE(sf::exists(shadow_path("idle1")));
-  ASSERT_EQ(sf::file_size(published_path("idle1")), a4.length());
+  ASSERT_TRUE(shadow_exists("idle1"));
+  ASSERT_EQ(s3_contents("idle1").size(), a4.length());
 
   ret = rgw_close(fs, fh, RGW_CLOSE_FLAG_NONE);
   ASSERT_EQ(ret, 0);
 
-  ASSERT_FALSE(sf::exists(shadow_path("idle1")));
-  ASSERT_EQ(sf::file_size(published_path("idle1")),
+  ASSERT_FALSE(shadow_exists("idle1"));
+  ASSERT_EQ(s3_contents("idle1").size(),
 	    a4.length() + b4.length());
 
   (void) rgw_fh_rele(fs, fh, RGW_FH_RELE_FLAG_NONE);
@@ -3136,8 +3244,8 @@ TEST(OPEN2, FORK_RACE_JOINS_WINNER)
    * exclusive, so the loser gets EEXIST and joins the winner's shadow
    * rather than cloning over it.  the race is injected through a driver
    * hint, so it is deterministic from a single process */
-  if (! have_fs_layout()) {
-    GTEST_SKIP() << "not a filesystem-backed driver";
+  if (! fsio_inspectable()) {
+    GTEST_SKIP() << "no fsio-inspect driver hint";
   }
 
   auto* driver = rgw::g_rgwlib->get_driver();
@@ -3171,10 +3279,10 @@ TEST(OPEN2, FORK_RACE_JOINS_WINNER)
     ASSERT_EQ(get<0>(rdr), 0);
     ASSERT_EQ(get<1>(rdr), won);
 
-    ASSERT_TRUE(sf::exists(shadow_path("racenew1")));
+    ASSERT_TRUE(shadow_exists("racenew1"));
     ASSERT_EQ(o2h->close(w0), 0);
-    ASSERT_FALSE(sf::exists(shadow_path("racenew1")));
-    ASSERT_EQ(sf::file_size(published_path("racenew1")), won.length());
+    ASSERT_FALSE(shadow_exists("racenew1"));
+    ASSERT_EQ(s3_contents("racenew1").size(), won.length());
   }
 
   /* (b) forking an existing object:  the racers take the COW clone arm,
@@ -3194,7 +3302,7 @@ TEST(OPEN2, FORK_RACE_JOINS_WINNER)
     auto w0 = get<1>(ofw);
     ASSERT_EQ(get<0>(o2h->write(w0, published, 0, published.length())), 0);
     ASSERT_EQ(o2h->close(w0), 0);
-    ASSERT_EQ(sf::file_size(published_path("race1")), published.length());
+    ASSERT_EQ(s3_contents("race1").size(), published.length());
 
     ASSERT_EQ(driver->driver_hint(&dp, "inject-fork-race",
 				  {{"enable", "true"}}), 0);
@@ -3209,10 +3317,10 @@ TEST(OPEN2, FORK_RACE_JOINS_WINNER)
     ASSERT_EQ(get<0>(rdr), 0);
     ASSERT_EQ(get<1>(rdr), won);
 
-    ASSERT_TRUE(sf::exists(shadow_path("race1")));
+    ASSERT_TRUE(shadow_exists("race1"));
     ASSERT_EQ(o2h->close(w1), 0);
-    ASSERT_FALSE(sf::exists(shadow_path("race1")));
-    ASSERT_EQ(sf::file_size(published_path("race1")), won.length());
+    ASSERT_FALSE(shadow_exists("race1"));
+    ASSERT_EQ(s3_contents("race1").size(), won.length());
   }
 
   ASSERT_EQ(driver->driver_hint(&dp, "inject-fork-race",
@@ -3225,8 +3333,8 @@ TEST(OPEN2, GUARDS_ON_PUBLISHED_BINDING)
    * the published object.  every caller reclones first, so they are
    * unreachable through the API;  inject-skip-reclone makes reclone() a
    * no-op so the binding stays PUBLISHED and the guards are reached */
-  if (! have_fs_layout()) {
-    GTEST_SKIP() << "not a filesystem-backed driver";
+  if (! fsio_inspectable()) {
+    GTEST_SKIP() << "no fsio-inspect driver hint";
   }
 
   auto* driver = rgw::g_rgwlib->get_driver();
@@ -3269,7 +3377,7 @@ TEST(OPEN2, GUARDS_ON_PUBLISHED_BINDING)
     ASSERT_EQ(o2h->close(get<1>(ofr)), 0);
 
     /* the published object was not truncated */
-    ASSERT_EQ(sf::file_size(published_path("guard1")), a4.length());
+    ASSERT_EQ(s3_contents("guard1").size(), a4.length());
   }
 
   /* publish() refuses, and close2 reports it rather than swallowing it
@@ -3300,8 +3408,8 @@ TEST(OPEN2, GUARDS_ON_PUBLISHED_BINDING)
 				  {{"enable", "false"}}), 0);
     ASSERT_EQ(o2h->close(get<1>(ofr)), 0);
 
-    ASSERT_EQ(sf::file_size(published_path("guard2")), a4.length());
-    ASSERT_FALSE(sf::exists(shadow_path("guard2")));
+    ASSERT_EQ(s3_contents("guard2").size(), a4.length());
+    ASSERT_FALSE(shadow_exists("guard2"));
   }
 }
 
@@ -3311,8 +3419,8 @@ TEST(OPEN2, TRUNCATE_API)
    * calls it directly and then rgw_setattr for the remaining attrs, so
    * the RGW_SETATTR_SIZE route which SETATTR_SIZE covers is never used
    * by the FSAL */
-  if (! have_fs_layout()) {
-    GTEST_SKIP() << "not a filesystem-backed driver";
+  if (! fsio_inspectable()) {
+    GTEST_SKIP() << "no fsio-inspect driver hint";
   }
 
   reset_object("trunc2");
@@ -3327,7 +3435,7 @@ TEST(OPEN2, TRUNCATE_API)
   ASSERT_EQ(get<0>(ofw), 0);
   ASSERT_EQ(get<0>(o2h->write(get<1>(ofw), a8, 0, a8.length())), 0);
   ASSERT_EQ(o2h->close(get<1>(ofw)), 0);
-  ASSERT_EQ(sf::file_size(published_path("trunc2")), a8.length());
+  ASSERT_EQ(s3_contents("trunc2").size(), a8.length());
 
   /* Look the object up again now that it exists.  stat_leaf sets its
    * etag onto the handle, and that cached value is precisely what a
@@ -3345,7 +3453,7 @@ TEST(OPEN2, TRUNCATE_API)
 
   /* shrink, with no open held */
   ASSERT_EQ(rgw_truncate(fs, o2h->object_fh, 4, RGW_TRUNCATE_FLAG_NONE), 0);
-  ASSERT_EQ(sf::file_size(published_path("trunc2")), 4u);
+  ASSERT_EQ(s3_contents("trunc2").size(), 4u);
 
   auto sr = o2h->stat();
   ASSERT_EQ(get<0>(sr), 0);
@@ -3373,16 +3481,16 @@ TEST(OPEN2, TRUNCATE_API)
 
   /* extend */
   ASSERT_EQ(rgw_truncate(fs, o2h->object_fh, 12, RGW_TRUNCATE_FLAG_NONE), 0);
-  ASSERT_EQ(sf::file_size(published_path("trunc2")), 12u);
+  ASSERT_EQ(s3_contents("trunc2").size(), 12u);
 
   /* while a writer holds the shadow it applies there, and the writer's
    * close publishes it */
   auto ofw1 = o2h->open(O_RDWR, RGW_OPEN_FLAG_NONE);
   ASSERT_EQ(get<0>(ofw1), 0);
   ASSERT_EQ(rgw_truncate(fs, o2h->object_fh, 2, RGW_TRUNCATE_FLAG_NONE), 0);
-  ASSERT_EQ(sf::file_size(published_path("trunc2")), 12u);
+  ASSERT_EQ(s3_contents("trunc2").size(), 12u);
   ASSERT_EQ(o2h->close(get<1>(ofw1)), 0);
-  ASSERT_EQ(sf::file_size(published_path("trunc2")), 2u);
+  ASSERT_EQ(s3_contents("trunc2").size(), 2u);
 
   /* a directory is not truncatable */
   ASSERT_EQ(rgw_truncate(fs, bucket_fh, 0, RGW_TRUNCATE_FLAG_NONE), -EISDIR);
@@ -3397,8 +3505,8 @@ TEST(OPEN2, LOOKUP_FINDS_UNPUBLISHED)
    * helper's lookup uses RGW_LOOKUP_FLAG_CREATE, so a handle is already
    * cached and the lookup below can be answered from it.
    * SAL_RESOLVES_UNPUBLISHED_SHADOW is the discriminating assertion. */
-  if (! have_fs_layout()) {
-    GTEST_SKIP() << "not a filesystem-backed driver";
+  if (! fsio_inspectable()) {
+    GTEST_SKIP() << "no fsio-inspect driver hint";
   }
 
   reset_object("unpub1");
@@ -3415,8 +3523,8 @@ TEST(OPEN2, LOOKUP_FINDS_UNPUBLISHED)
 
   /* deliberately not closed, so it stays unpublished;  on the
    * nsfs/posix drivers that means it exists only in .shadow/ */
-  ASSERT_TRUE(sf::exists(shadow_path("unpub1")));
-  ASSERT_FALSE(sf::exists(published_path("unpub1")));
+  ASSERT_TRUE(shadow_exists("unpub1"));
+  ASSERT_FALSE(s3_exists("unpub1"));
 
   /* a lookup without CREATE has to find it anyway */
   struct rgw_file_handle* fh{nullptr};
@@ -3432,7 +3540,7 @@ TEST(OPEN2, LOOKUP_FINDS_UNPUBLISHED)
   ASSERT_EQ(o2h->close(get<1>(ofw)), 0);
 
   /* and once published it is still found, by the same path */
-  ASSERT_TRUE(sf::exists(published_path("unpub1")));
+  ASSERT_TRUE(s3_exists("unpub1"));
   ASSERT_EQ(rgw_lookup(fs, bucket_fh, "unpub1", &fh, nullptr, 0,
 		       RGW_LOOKUP_FLAG_NONE), 0);
   (void) rgw_fh_rele(fs, fh, RGW_FH_RELE_FLAG_NONE);
@@ -3451,8 +3559,8 @@ TEST(OPEN2, SAL_RESOLVES_UNPUBLISHED_SHADOW)
    * bucket carries no RGWFileHandle state, so a hit here can only come
    * from stat_fsio_view() resolving .shadow/ -- which is what decides
    * whether the unpublished-shadow gap is actually closed. */
-  if (! have_fs_layout()) {
-    GTEST_SKIP() << "not a filesystem-backed driver";
+  if (! fsio_inspectable()) {
+    GTEST_SKIP() << "no fsio-inspect driver hint";
   }
 
   reset_object("unpub2");
@@ -3469,8 +3577,8 @@ TEST(OPEN2, SAL_RESOLVES_UNPUBLISHED_SHADOW)
 
   /* deliberately not closed:  unpublished, which on the nsfs/posix
    * drivers means it exists only in .shadow/ */
-  ASSERT_TRUE(sf::exists(shadow_path("unpub2")));
-  ASSERT_FALSE(sf::exists(published_path("unpub2")));
+  ASSERT_TRUE(shadow_exists("unpub2"));
+  ASSERT_FALSE(s3_exists("unpub2"));
 
   auto* driver = rgw::g_rgwlib->get_driver();
   const DoutPrefix dp(g_ceph_context, dout_subsys, "write2 test: ");
@@ -3495,7 +3603,7 @@ TEST(OPEN2, SAL_RESOLVES_UNPUBLISHED_SHADOW)
   ASSERT_EQ(st.st_size, (off_t) a4.length());
 
   ASSERT_EQ(o2h->close(get<1>(ofw)), 0);
-  ASSERT_TRUE(sf::exists(published_path("unpub2")));
+  ASSERT_TRUE(s3_exists("unpub2"));
 }
 
 TEST(OPEN2, NESTED_OBJECT)
@@ -3505,8 +3613,8 @@ TEST(OPEN2, NESTED_OBJECT)
    * which the parent's name and the bucket's name agree, and open2
    * relied on them agreeing -- a nested object looked its bucket up by
    * the name of its containing directory. */
-  if (! have_fs_layout()) {
-    GTEST_SKIP() << "not a filesystem-backed driver";
+  if (! fsio_inspectable()) {
+    GTEST_SKIP() << "no fsio-inspect driver hint";
   }
 
   struct stat st;
@@ -3548,8 +3656,8 @@ TEST(OPEN2, NESTED_OBJECT)
   ASSERT_EQ(get<0>(o2h->write(w0, a8, 0, a8.length())), 0);
 
   /* the shadow sits beside its object, not at the bucket root */
-  ASSERT_TRUE(sf::exists(shadow_path(rel)));
-  ASSERT_FALSE(sf::exists(published_path(rel)));
+  ASSERT_TRUE(shadow_exists(rel));
+  ASSERT_FALSE(s3_exists(rel));
 
   /* and a lookup resolves the hierarchical key while unpublished */
   struct rgw_file_handle* fh{nullptr};
@@ -3563,9 +3671,9 @@ TEST(OPEN2, NESTED_OBJECT)
   ASSERT_EQ(get<1>(rdr), a8);
 
   ASSERT_EQ(o2h->close(w0), 0);
-  ASSERT_FALSE(sf::exists(shadow_path(rel)));
-  ASSERT_TRUE(sf::exists(published_path(rel)));
-  ASSERT_EQ(sf::file_size(published_path(rel)), a8.length());
+  ASSERT_FALSE(shadow_exists(rel));
+  ASSERT_TRUE(s3_exists(rel));
+  ASSERT_EQ(s3_contents(rel).size(), a8.length());
 
   /* reopen the published nested object, and truncate it through the
    * path ganesha uses */
@@ -3577,7 +3685,7 @@ TEST(OPEN2, NESTED_OBJECT)
   ASSERT_EQ(o2h->close(get<1>(ofr)), 0);
 
   ASSERT_EQ(rgw_truncate(fs, o2h->object_fh, 6, RGW_TRUNCATE_FLAG_NONE), 0);
-  ASSERT_EQ(sf::file_size(published_path(rel)), 6u);
+  ASSERT_EQ(s3_contents(rel).size(), 6u);
 
   (void) rgw_fh_rele(fs, d2, RGW_FH_RELE_FLAG_NONE);
   (void) rgw_fh_rele(fs, d1, RGW_FH_RELE_FLAG_NONE);
@@ -3596,8 +3704,8 @@ TEST(OPEN2, STATELESS_READ_RECLAIMED)
    * outstanding right now, which stops being true as soon as
    * reclamation is deferred by design;  what matters is that it comes
    * back. */
-  if (! have_fs_layout()) {
-    GTEST_SKIP() << "not a filesystem-backed driver";
+  if (! fsio_inspectable()) {
+    GTEST_SKIP() << "no fsio-inspect driver hint";
   }
 
   g_conf().set_val("rgw_nfs_stateless_finalize_secs", "1");
@@ -3660,8 +3768,8 @@ TEST(OPEN2, REOPEN2)
   /* NFSv4 reopen: change the access mode of an open the caller already
    * holds, rather than taking another.  The FSAL reaches this on its
    * first v4 open which changes share mode. */
-  if (! have_fs_layout()) {
-    GTEST_SKIP() << "not a filesystem-backed driver";
+  if (! fsio_inspectable()) {
+    GTEST_SKIP() << "no fsio-inspect driver hint";
   }
 
   reset_object("reopen1");
@@ -3682,7 +3790,7 @@ TEST(OPEN2, REOPEN2)
   auto ofr = o2h->open(O_RDONLY, RGW_OPEN_FLAG_NONE);
   ASSERT_EQ(get<0>(ofr), 0);
   auto r1 = get<1>(ofr);
-  ASSERT_FALSE(sf::exists(shadow_path("reopen1")));
+  ASSERT_FALSE(shadow_exists("reopen1"));
 
   /* writing through it is refused while it is read-only */
   auto nbw = o2h->write(r1, b4, 0, b4.length());
@@ -3690,7 +3798,7 @@ TEST(OPEN2, REOPEN2)
 
   /* upgrade in place:  same open, now a writer, and the shadow exists */
   ASSERT_EQ(rgw_reopen2(r1, O_RDWR, RGW_OPEN_FLAG_NONE), 0);
-  ASSERT_TRUE(sf::exists(shadow_path("reopen1")));
+  ASSERT_TRUE(shadow_exists("reopen1"));
 
   ASSERT_EQ(get<0>(o2h->write(r1, b4, 0, b4.length())), 0);
   auto rdr = o2h->read(r1, 0, b4.length());
@@ -3704,7 +3812,7 @@ TEST(OPEN2, REOPEN2)
    * reader */
   ASSERT_EQ(rgw_reopen2(r1, O_RDONLY, RGW_OPEN_FLAG_NONE), 0);
   ASSERT_EQ(get<0>(o2h->write(r1, a4, 0, a4.length())), -EBADF);
-  ASSERT_FALSE(sf::exists(shadow_path("reopen1")));
+  ASSERT_FALSE(shadow_exists("reopen1"));
 
   /* the reader follows the publish, and sees what was written */
   rdr = o2h->read(r1, 0, b4.length());
@@ -3712,7 +3820,7 @@ TEST(OPEN2, REOPEN2)
   ASSERT_EQ(get<1>(rdr), b4);
 
   ASSERT_EQ(o2h->close(r1), 0);
-  ASSERT_FALSE(sf::exists(shadow_path("reopen1")));
+  ASSERT_FALSE(shadow_exists("reopen1"));
 
   auto ofr2 = o2h->open(O_RDONLY, RGW_OPEN_FLAG_NONE);
   ASSERT_EQ(get<0>(ofr2), 0);
@@ -3730,8 +3838,8 @@ TEST(OPEN2, REOPEN2_MULTI_WRITER)
    * downgrade passes it identically.  Two writers discriminates, and
    * it also covers the thing a share-mode change is for -- the other
    * writer keeps working. */
-  if (! have_fs_layout()) {
-    GTEST_SKIP() << "not a filesystem-backed driver";
+  if (! fsio_inspectable()) {
+    GTEST_SKIP() << "no fsio-inspect driver hint";
   }
 
   reset_object("reopen2");
@@ -3749,7 +3857,7 @@ TEST(OPEN2, REOPEN2_MULTI_WRITER)
   ASSERT_EQ(get<0>(ofw), 0);
   ASSERT_EQ(get<0>(o2h->write(get<1>(ofw), a4, 0, a4.length())), 0);
   ASSERT_EQ(o2h->close(get<1>(ofw)), 0);
-  ASSERT_EQ(sf::file_size(published_path("reopen2")), a4.length());
+  ASSERT_EQ(s3_contents("reopen2").size(), a4.length());
 
   /* two writers on the one shadow */
   auto ofw0 = o2h->open(O_RDWR, RGW_OPEN_FLAG_NONE);
@@ -3760,12 +3868,12 @@ TEST(OPEN2, REOPEN2_MULTI_WRITER)
   auto w1 = get<1>(ofw1);
 
   ASSERT_EQ(get<0>(o2h->write(w0, b4, 0, b4.length())), 0);
-  ASSERT_TRUE(sf::exists(shadow_path("reopen2")));
+  ASSERT_TRUE(shadow_exists("reopen2"));
 
   /* downgrade w0:  a writer remains, so nothing is published */
   ASSERT_EQ(rgw_reopen2(w0, O_RDONLY, RGW_OPEN_FLAG_NONE), 0);
-  ASSERT_TRUE(sf::exists(shadow_path("reopen2")));
-  ASSERT_EQ(sf::file_size(published_path("reopen2")), a4.length());
+  ASSERT_TRUE(shadow_exists("reopen2"));
+  ASSERT_EQ(s3_contents("reopen2").size(), a4.length());
 
   /* w0 may no longer write, w1 still may */
   ASSERT_EQ(get<0>(o2h->write(w0, c4, 0, c4.length())), -EBADF);
@@ -3779,8 +3887,8 @@ TEST(OPEN2, REOPEN2_MULTI_WRITER)
   /* closing the remaining writer returns the last write open:  now it
    * publishes */
   ASSERT_EQ(o2h->close(w1), 0);
-  ASSERT_FALSE(sf::exists(shadow_path("reopen2")));
-  ASSERT_EQ(sf::file_size(published_path("reopen2")),
+  ASSERT_FALSE(shadow_exists("reopen2"));
+  ASSERT_EQ(s3_contents("reopen2").size(),
 	    b4.length() + c4.length());
 
   ASSERT_EQ(o2h->close(w0), 0);
@@ -3803,8 +3911,8 @@ TEST(OPEN2, UNIX_ATTRS_PERSIST)
    * The lookup on a fresh handle is the part that matters: a handle
    * which is still live answers getattr from memory and would pass
    * whether or not anything reached the object. */
-  if (! have_fs_layout()) {
-    GTEST_SKIP() << "not a filesystem-backed driver";
+  if (! fsio_inspectable()) {
+    GTEST_SKIP() << "no fsio-inspect driver hint";
   }
 
   reset_object("uxattr1");
@@ -3835,9 +3943,9 @@ TEST(OPEN2, UNIX_ATTRS_PERSIST)
    * passes vacuously: rgw_lookup() may hand back the cached handle,
    * whose state still holds what create_stat() set, and decode_attrs()
    * only overwrites it when the attrs are actually present. */
-  ASSERT_TRUE(sf::exists(published_path("uxattr1")));
-  ASSERT_GE(::getxattr(published_path("uxattr1").c_str(),
-		       "user.nsfs.rgw.unix1", nullptr, 0), 0)
+  rgw::sal::Attrs ua;
+  ASSERT_EQ(s3_attrs("uxattr1", &ua), 0);
+  ASSERT_TRUE(ua.count(RGW_ATTR_UNIX1))
       << "unix attrs were not written to the object";
 
   /* and come back on a handle which never saw them set */
@@ -4021,8 +4129,8 @@ TEST(OPEN2, PUBLISHED_ETAG_IS_BARE)
    *
    * The S3 side of that cannot be asserted from librgw;  the stored
    * length is the invariant which produces it. */
-  if (! have_fs_layout()) {
-    GTEST_SKIP() << "not a filesystem-backed driver";
+  if (! fsio_inspectable()) {
+    GTEST_SKIP() << "no fsio-inspect driver hint";
   }
 
   reset_object("baretag1");
@@ -4036,7 +4144,7 @@ TEST(OPEN2, PUBLISHED_ETAG_IS_BARE)
   ASSERT_EQ(get<0>(ofw), 0);
   ASSERT_EQ(get<0>(o2h->write(get<1>(ofw), body, 0, body.length())), 0);
   ASSERT_EQ(o2h->close(get<1>(ofw)), 0);
-  ASSERT_TRUE(sf::exists(published_path("baretag1")));
+  ASSERT_TRUE(s3_exists("baretag1"));
 
   auto* driver = rgw::g_rgwlib->get_driver();
   const DoutPrefix dp(g_ceph_context, dout_subsys, "write2 test: ");
@@ -5758,6 +5866,9 @@ TEST(OPEN2, VER_TIMER_LONGER_IN_VERSIONED_BUCKET)
   if (! ver_bucket_fh) {
     GTEST_SKIP() << "versioned bucket unavailable";
   }
+  if (! fsio_inspectable()) {
+    GTEST_SKIP() << "no fsio-inspect driver hint";
+  }
 
   /* a short SLA and a long still-writing tolerance */
   g_conf().set_val("rgw_nfs_stateless_finalize_secs", "1");
@@ -5788,24 +5899,24 @@ TEST(OPEN2, VER_TIMER_LONGER_IN_VERSIONED_BUCKET)
   ASSERT_EQ(rgw_write(fs, vfh, 0, body.length(), &nbytes,
 		      (void*) body.c_str(), RGW_OPEN_FLAG_V3), 0);
 
-  ASSERT_TRUE(sf::exists(ver_shadow_path("timerver")));
+  ASSERT_TRUE(shadow_exists("timerver", ver_bucket_name));
 
   std::this_thread::sleep_for(std::chrono::seconds(4));
 
-  EXPECT_TRUE(sf::exists(published_path("timerctl")))
+  EXPECT_TRUE(s3_exists("timerctl"))
     << "control: an unversioned stateless write did not finalize on the "
        "short interval, so this test cannot distinguish anything";
 
-  EXPECT_FALSE(sf::exists(ver_published_path("timerver")))
+  EXPECT_FALSE(s3_exists("timerver", ver_bucket_name))
     << "a versioned bucket finalized on the unversioned interval";
-  EXPECT_TRUE(sf::exists(ver_shadow_path("timerver")))
+  EXPECT_TRUE(shadow_exists("timerver", ver_bucket_name))
     << "the versioned write's shadow went away without publishing";
 
   /* close both:  the versioned one publishes here, on the last write
    * open being returned, which is the rule the timer only stands in for */
   ASSERT_EQ(rgw_close(fs, pfh, RGW_CLOSE_FLAG_NONE), 0);
   ASSERT_EQ(rgw_close(fs, vfh, RGW_CLOSE_FLAG_NONE), 0);
-  ASSERT_TRUE(sf::exists(ver_published_path("timerver")));
+  ASSERT_TRUE(s3_exists("timerver", ver_bucket_name));
 
   g_conf().set_val("rgw_nfs_stateless_finalize_secs", "300");
   g_conf().set_val("rgw_nfs_stateless_finalize_versioned_secs", "1800");
