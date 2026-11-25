@@ -753,9 +753,10 @@ TEST_F(FsioHead, PublishComparesTags)
 
 /* §3.1 steps 0 and 1, Z24:  a writer's create of an absent name makes
  * the head object, holding only its FSIO records, the header created and
- * no head clone;  a plain open, a reader, and an exclusive create of the
- * created name fail;  an unchecked one joins it;  an exclusive create of
- * an S3 object fails */
+ * no head clone;  an exclusive create of the created name fails, and the
+ * name exists from its create (§3.1, 2026-11-25):  a reader, a plain
+ * write open and an unchecked create join it, the reader bound to its
+ * shadow;  an exclusive create of an S3 object fails */
 TEST_F(FsioHead, CreateMakesACreatedHead)
 {
   const auto head = MARKER + fmt::format("_created{}", next++);
@@ -802,11 +803,13 @@ TEST_F(FsioHead, CreateMakesACreatedHead)
   rop.cs = ret.bound;
   ASSERT_EQ(0, call(head, cls::rgw::method::fsio_ready, rop,
 		    (cls_rgw_fsio_flags_ret*)nullptr));
-  cls_rgw_fsio_join_ret r2;
+  cls_rgw_fsio_join_ret r2, rr, rw;
   EXPECT_EQ(-EEXIST, create(2, true, GW2, 1, &r2));
-  EXPECT_EQ(-ENOENT, create(0, true, GW2, 1, &r2));
-  EXPECT_EQ(-ENOENT, create(0, false, GW2, 1, &r2));
-  ASSERT_EQ(0, create(1, true, GW2, 1, &r2));
+  ASSERT_EQ(0, create(0, false, GW2, 1, &rr));
+  EXPECT_EQ(ret.bound, rr.bound) << "a reader of a created name binds its shadow";
+  ASSERT_EQ(0, create(0, true, GW2, 2, &rw));
+  EXPECT_EQ(ret.bound, rw.bound) << "a plain write open joins the creation";
+  ASSERT_EQ(0, create(1, true, GW2, 3, &r2));
   EXPECT_EQ(ret.bound, r2.bound) << "two creators meet on one file";
   {
     std::string key;

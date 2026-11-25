@@ -409,14 +409,22 @@ int join_once(cls_rgw_fsio_head& h, const join_in& in, join_out& out,
     creating = true;
   } else if (h.tracking_only()) {
     /* 1. a tracking-only head:  the name is deleted, unless it is being
-     * created, which a create joins, unchecked */
-    if (!h.hdr || !h.hdr->created || !in.writer ||
-	in.create == create_mode::NONE) {
+     * created, which exists from its create:  any open joins it but an
+     * exclusive create */
+    if (!h.hdr || !h.hdr->created) {
       return -ENOENT;
     }
-    if (in.create == create_mode::EXCLUSIVE) {
+    if (in.writer && in.create == create_mode::EXCLUSIVE) {
       return -EEXIST;
     }
+  } else if (!in.writer && h.olh && in.instance.empty() &&
+	     !h.manifest.length() && !(h.hdr && h.hdr->created)) {
+    /* a reader naming no version of a head with an OLH and no content of
+     * its own:  a delete marker, the name with no current version;  only
+     * a name being created is joined (§3.1, 2026-11-25), which an
+     * abandoned or completed creation no longer is.  A head holding the
+     * null version's content under an OLH is joined at the head (§2.5a) */
+    return -ENOENT;
   } else if (in.writer && in.create == create_mode::EXCLUSIVE &&
 	     !h.id_tag.empty() && !in.absent) {
     /* the OLH's ID tag says nothing of a name whose current version is
@@ -497,6 +505,16 @@ int join_once(cls_rgw_fsio_head& h, const join_in& in, join_out& out,
   cls_rgw_fsio_id bind;
   if (linked) {
     bind = linked->id;
+  } else if (!in.writer && hdr.created) {
+    /* §3.1:  a name being created has only its shadow */
+    auto* sh = current_shadow(hdr);
+    if (!sh) {
+      return -ENOENT;
+    }
+    if (sh->state != state::READY) {
+      return -CLS_RGW_ERR_FSIO_BUSY;
+    }
+    bind = sh->id;
   } else if (!in.writer) {
     auto* p = published_chunk_set(hdr);
     if (!p) {

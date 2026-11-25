@@ -1,0 +1,20 @@
+# gw2 opened a name with no current version to read, not bound to its creation's ready shadow
+# Found by quick-v-wr-create-marker, 2026-11-25:  gw1 creates over a
+# delete marker and crashes while constructing;  gw2's reader reads the
+# OLH and the header (being created) and goes on to join;  the expirer
+# abandons the shadow, which leaves nothing to track, and the header
+# goes;  the reader's join, its OLH guard unchanged, made a header and
+# bound a published chunk set the name does not have.  The join now
+# returns ENOENT to a reader naming no version of a head with an OLH,
+# unless the name is being created.  Kept as a regression, expected clean.
+# replay: walk
+# env: FSIO_MODEL_VERSIONED=1 FSIO_MODEL_VSTART=marker FSIO_MODEL_ROLES=wr FSIO_MODEL_S3_OPS=0 FSIO_MODEL_CREATE=1 FSIO_MODEL_RESENDS=0 FSIO_MODEL_ZOMBIES=0
+gw1 read-olh-write
+gw1 open-write 
+gw1 construct-gc S1.10
+gw1 crash
+gw2 read-olh-read
+expirer grace 1
+expirer abandon S1.10
+gw2 open-read 
+# => (clean;  was:  gw2 opened a name with no current version to read, not bound to its creation's ready shadow)

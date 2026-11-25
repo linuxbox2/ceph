@@ -31,7 +31,8 @@
  * FSIO_MODEL_CRASHES, FSIO_MODEL_ZOMBIES, FSIO_MODEL_EXPIRER_CRASHES.
  * FSIO_MODEL_CREATE=1 starts with no head:  every write open is a
  * create, unchecked or exclusive, and checks what each returns, that a
- * read of a created name fails before its publish, and that every
+ * read of a created name before its publish binds its ready shadow
+ * (2026-11-25:  the name exists from its create), and that every
  * created name is published (§3.1 steps 0 and 1, Z24);  unversioned.
  * FSIO_MODEL_HANDOFF=1 lets a writer's publish fail and be handed off
  * (§4.2, 8j):  released, the uncompleted-publish hint, the hand-off
@@ -1979,21 +1980,29 @@ void gw_actions(const World& w0, size_t gi, std::vector<Action>& acts)
 	  fsio::join_out out;
 	  cls_rgw_fsio_effects fx;
 	  auto save = w.head;
-	  /* Z24:  a name being created is absent until its first publish */
+	  /* Z24, 2026-11-25:  a name being created exists from its create;
+	   * its only content is its shadow */
 	  const bool unpublished = !w.head.exists || w.head.tracking_only();
 	  if (counted_join(w.head, g, in, out, fx) < 0) {
 	    w.head = save;
 	    return std::nullopt;
 	  }
 	  if (unpublished) {
-	    return fmt::format("gw{} opened a name with no S3 object to read",
-			       inc);
+	    const auto* sh = save.hdr && save.hdr->created &&
+	      save.hdr->cur_shadow ? save.hdr->find(*save.hdr->cur_shadow)
+				   : nullptr;
+	    if (!sh || sh->state != state::READY || out.bound != sh->id) {
+	      return fmt::format("gw{} opened a name with no S3 object to read, "
+				 "not bound to its creation's ready shadow",
+				 inc);
+	    }
 	  }
 	  w.took_nonce();
 	  if (lost) {
 	    return lose_join(g, in);
 	  }
-	  g.opens.push_back(LOpen{false, out.bound, w.head_tok()});
+	  g.opens.push_back(LOpen{false, out.bound,
+				  unpublished ? sname(out.bound) : w.head_tok()});
 	  g.read_tok = w.head_tok();
 	  return std::nullopt;
 	}});
@@ -2499,6 +2508,20 @@ void gw_actions_v(const World& w0, size_t gi, std::vector<Action>& acts)
 				 "version {}", inc, g.pending);
 	    }
 	    w.took_nonce();
+	    if (g.pending.empty() && !g.pending_writer) {
+	      /* 2026-11-25:  a read of a name being created binds its ready
+	       * shadow, its only content */
+	      const auto* sh = save.hdr && save.hdr->created &&
+		save.hdr->cur_shadow ? save.hdr->find(*save.hdr->cur_shadow)
+				     : nullptr;
+	      if (!sh || sh->state != state::READY || out.bound != sh->id) {
+		return fmt::format("gw{} opened a name with no current version "
+				   "to read, not bound to its creation's ready "
+				   "shadow", inc);
+	      }
+	      g.opens.push_back(LOpen{false, out.bound, sname(out.bound), ""});
+	      return std::nullopt;
+	    }
 	    if (g.pending.empty()) {
 	      /* 8i:  a create of a name with no current version:  the null
 	       * path, nothing cloned, the attribute clone the gateway's */
@@ -2928,8 +2951,11 @@ void gw_actions_v(const World& w0, size_t gi, std::vector<Action>& acts)
 	    (writer ? g.did_write : g.did_read) = 1;
 	  }
 	  const bool create = writer && cfg.create;
-	  if (w.olh_cur.empty() && !create) {
-	    return std::nullopt;   // a delete marker, or no OLH:  ENOENT (§4.1)
+	  /* a delete marker, or no OLH:  ENOENT (§4.1), unless the name is
+	   * being created, which exists from its create (2026-11-25) */
+	  if (w.olh_cur.empty() && !create &&
+	      !(w.head.hdr && w.head.hdr->created)) {
+	    return std::nullopt;
 	  }
 	  g.pending = w.olh_cur;
 	  g.pending_writer = writer;

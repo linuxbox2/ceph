@@ -2430,7 +2430,7 @@ TEST_F(FSIORadosCreate, TwoUncheckedCreatorsMeet)
 }
 
 /* an exclusive create fails on an S3 object and on a name being
- * created;  a plain open of a name being created fails as absent */
+ * created;  a plain open of a name being created joins it */
 TEST_F(FSIORadosCreate, ExclusiveAndPlainOpens)
 {
   ASSERT_EQ(0, put("obj", "data"));
@@ -2439,8 +2439,13 @@ TEST_F(FSIORadosCreate, ExclusiveAndPlainOpens)
   std::unique_ptr<FO> w;
   ASSERT_EQ(0, create("new", true, &w));
   EXPECT_EQ(-EEXIST, create("new", true, &x));
-  EXPECT_EQ(-ENOENT, open_flags("new", FO::OPEN_FLAG_NONE, &x));
-  EXPECT_EQ(-ENOENT, open_flags("new", FO::OPEN_FLAG_WRITE, &x));
+  /* the name exists from its create (§3.1, 2026-11-25) */
+  ASSERT_EQ(0, open_flags("new", FO::OPEN_FLAG_NONE, &x));
+  ASSERT_EQ(0, x->close(env->dpp.get(), 0));
+  x.reset();
+  ASSERT_EQ(0, open_flags("new", FO::OPEN_FLAG_WRITE, &x));
+  ASSERT_EQ(0, x->close(env->dpp.get(), 0));
+  x.reset();
   ASSERT_EQ(0, w->end_write(env->dpp.get(), 0));
   EXPECT_EQ(0, open_flags("new", FO::OPEN_FLAG_NONE, &x));
 }
@@ -3641,18 +3646,94 @@ TEST_F(FSIORadosStatView, CurrentShadowBeforeClose)
   ASSERT_EQ(0, w->close(env->dpp.get(), 0));
 }
 
-/* a name being created, and a name with no head:  the S3 op path's */
+/* a name being created exists from its create (§3.1, 2026-11-25):  the
+ * view is its shadow's, with the create's attributes;  a name with no
+ * head is the S3 op path's */
 TEST_F(FSIORadosStatView, CreatedNameAndNoHead)
+{
+  set_versioning(0);
+  rgw::sal::Attrs cattrs;
+  cattrs[RGW_ATTR_UNIX1].append("unix-attrs");
+  rgw::sal::Object::FSIOCreateSpec spec;
+  spec.attrs = &cattrs;
+  auto obj = bucket->get_object(rgw_obj_key("new"));
+  auto [r, w] = obj->get_fsio_handle(
+    env->dpp.get(), FO::OPEN_FLAG_WRITE | FO::OPEN_FLAG_CREATE |
+    FO::OPEN_FLAG_EXCL, &spec);
+  ASSERT_EQ(0, r);
+  ASSERT_EQ(0, w->ftruncate(env->dpp.get(), 3, 0));
+  struct stat st;
+  rgw::sal::Attrs attrs;
+  ASSERT_EQ(0, bucket->get_object(rgw_obj_key("new"))->stat_fsio_view(
+		 env->dpp.get(), &st, &attrs, 0));
+  EXPECT_TRUE(S_ISREG(st.st_mode));
+  EXPECT_EQ(3, st.st_size);
+  ASSERT_TRUE(attrs.count(RGW_ATTR_UNIX1));
+  EXPECT_EQ("unix-attrs", attrs[RGW_ATTR_UNIX1].to_str());
+  for (const auto& [k, v] : attrs) {
+    EXPECT_FALSE(k.starts_with("user.rgw.fsio.")) << k;
+  }
+  EXPECT_EQ(-ENOTSUP, stat("nothing", &st));
+  ASSERT_EQ(0, w->close(env->dpp.get(), 0));
+  ASSERT_EQ(0, stat("new", &st));
+  EXPECT_EQ(3, st.st_size);
+}
+
+/* a reader of a name being created reads its creator's writes, as a
+ * follower does, and keeps them across the publish (§3.1, 2026-11-25) */
+TEST_F(FSIORadosStatView, ReaderOfACreatedName)
 {
   set_versioning(0);
   std::unique_ptr<FO> w;
   ASSERT_EQ(0, create("new", true, &w));
-  struct stat st;
-  EXPECT_EQ(-ENOTSUP, stat("new", &st));
-  EXPECT_EQ(-ENOTSUP, stat("nothing", &st));
+  ASSERT_EQ(0, write(w, 0, {"hello"}));
+  ASSERT_EQ(0, w->ftruncate(env->dpp.get(), 5, 0));
+  auto r = open("new", false);
+  ASSERT_TRUE(r) << "a reader of a name being created failed to open";
+  std::string got;
+  ASSERT_EQ(0, read(r, 0, {5}, &got));
+  EXPECT_EQ("hello", got);
   ASSERT_EQ(0, w->close(env->dpp.get(), 0));
-  ASSERT_EQ(0, stat("new", &st));
-  EXPECT_EQ(0, st.st_size);
+  got.clear();
+  ASSERT_EQ(0, read(r, 0, {5}, &got));
+  EXPECT_EQ("hello", got);
+  ASSERT_EQ(0, r->close(env->dpp.get(), 0));
+}
+
+/* versioned:  a name created over no OLH is joined the same way */
+TEST_F(FSIORadosStatView, VersionedReaderOfACreatedName)
+{
+  std::unique_ptr<FO> w;
+  ASSERT_EQ(0, create("new", true, &w));
+  ASSERT_EQ(0, write(w, 0, {"hello"}));
+  ASSERT_EQ(0, w->ftruncate(env->dpp.get(), 5, 0));
+  auto r = open("new", false);
+  ASSERT_TRUE(r) << "a reader of a name being created failed to open";
+  std::string got;
+  ASSERT_EQ(0, read(r, 0, {5}, &got));
+  EXPECT_EQ("hello", got);
+  ASSERT_EQ(0, r->close(env->dpp.get(), 0));
+  ASSERT_EQ(0, w->close(env->dpp.get(), 0));
+}
+
+/* §3.6:  after an S3 PUT over a name an FSIO writer holds, a reader binds
+ * the PUT's content, never the superseded generation's shadow */
+TEST_F(FSIORadosStatView, ReaderAfterAnS3PutBindsThePut)
+{
+  set_versioning(0);
+  ASSERT_EQ(0, put("obj", pattern(MiB, 1)));
+  auto w = open("obj", true);
+  ASSERT_TRUE(w);
+  ASSERT_EQ(0, write(w, 0, {"WRITER"}));
+  ASSERT_EQ(0, put("obj", pattern(MiB, 2)));
+  auto r = open("obj", false);
+  ASSERT_TRUE(r);
+  EXPECT_FALSE(r->resumed());
+  std::string got;
+  ASSERT_EQ(0, read(r, 0, {MiB}, &got));
+  EXPECT_EQ(pattern(MiB, 2), got);
+  ASSERT_EQ(0, r->close(env->dpp.get(), 0));
+  ASSERT_EQ(0, w->close(env->dpp.get(), 0));
 }
 
 /* versioned:  the current version's */

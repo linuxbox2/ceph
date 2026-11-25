@@ -2856,7 +2856,11 @@ TEST(OPEN2, CLOSE_PUBLISHES_A_HELD_WRITE)
   EXPECT_FALSE(shadow_exists(name));
 }
 
-TEST(OPEN2, CLOSE_OF_A_JOINED_READER_PUBLISHES_NOTHING)
+/* close-to-open (FSIO_RADOS_DESIGN.md §7, 2026-11-25):  a reader on a
+ * handle of its own, opened while a writer's shadow exists, binds to the
+ * published content;  its close publishes nothing, and the writer's
+ * close publishes the writer's content */
+TEST(OPEN2, READER_OPENED_DURING_A_WRITE_BINDS_PUBLISHED)
 {
   if (! fsio_inspectable()) {
     GTEST_SKIP() << "no fsio-inspect driver hint";
@@ -2876,7 +2880,14 @@ TEST(OPEN2, CLOSE_OF_A_JOINED_READER_PUBLISHES_NOTHING)
   ASSERT_EQ(fsio_write(w.get(), "QQ", 0), 0);
   auto [rr, rd] = robj->get_fsio_handle(&dp, FSIO::OPEN_FLAG_NONE);
   ASSERT_EQ(rr, 0);
-  ASSERT_TRUE(rd->resumed()) << "the reader should join the writer's shadow";
+  EXPECT_FALSE(rd->resumed()) << "the reader joined the writer's shadow";
+  {
+    char buf[4];
+    struct iovec iov{buf, sizeof(buf)};
+    uint64_t n = 0;
+    ASSERT_EQ(rd->preadv(&iov, 1, 0, &n, 0), 0);
+    EXPECT_EQ(std::string(buf, n), "PPPP") << "the reader saw the write";
+  }
   ASSERT_EQ(rd->close(&dp, FSIO::CLOSE_FLAG_NONE), 0);
   EXPECT_EQ(s3_contents(name), "PPPP");
   EXPECT_TRUE(shadow_exists(name));
@@ -3605,9 +3616,16 @@ TEST(OPEN2, SAL_RESOLVES_UNPUBLISHED_SHADOW)
   }
   ASSERT_EQ(rc, 0) << "unpublished shadow did not resolve";
 
-  /* the published object does not exist, so a size which matches what
-   * was written can only have come from the shadow */
-  ASSERT_EQ(st.st_size, (off_t) a4.length());
+  /* the published object does not exist, so resolving at all is the
+   * shadow's doing.  nsfs's view is the shadow file itself, so its size
+   * is what was written;  RADOS's is the shadow's size hint, which another
+   * handle of the same incarnation sees refreshed only by a truncate or
+   * the close (FSIO_RADOS_DESIGN.md §7), never more than was written */
+  if (have_fs_layout()) {
+    ASSERT_EQ(st.st_size, (off_t) a4.length());
+  } else {
+    ASSERT_LE(st.st_size, (off_t) a4.length());
+  }
 
   ASSERT_EQ(o2h->close(get<1>(ofw)), 0);
   ASSERT_TRUE(s3_exists("unpub2"));

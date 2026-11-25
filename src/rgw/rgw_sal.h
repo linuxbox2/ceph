@@ -1496,10 +1496,10 @@ class Object {
      *  driver has no positional view of this name:  a driver with none,
      *  a bucket that does not serve one, or a name only the S3 op path
      *  can resolve.  On RADOS that is any name with no head, since its
-     *  directories are prefixes, and a name being created, which no
-     *  lookup finds until its publish (FSIO_RADOS_DESIGN.md §3.1).  A
-     *  caller which gets -ENOTSUP falls back to resolving through the
-     *  S3 op path, which is frozen legacy and should not be extended.
+     *  directories are prefixes;  a name being created is answered from
+     *  its shadow (FSIO_RADOS_DESIGN.md §3.1).  A caller which gets
+     *  -ENOTSUP falls back to resolving through the S3 op path, which is
+     *  frozen legacy and should not be extended.
      */
     virtual int stat_fsio_view(const DoutPrefixProvider* dpp,
 			       struct stat* st, Attrs* attrs,

@@ -375,8 +375,8 @@ int create_join(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& inc,
 
 /* §3.1 steps 0 and 1, Z24:  only a writer's create makes a head;  it is
  * a tracking-only head marked created, whose shadow is constructed with
- * nothing cloned;  a second unchecked create joins it, an exclusive one
- * or a plain open fails */
+ * nothing cloned;  the name exists from its create (2026-11-25):  any
+ * open joins it, a reader bound to its shadow, but an exclusive create */
 TEST(cls_rgw_fsio, Z24_create_makes_a_created_head)
 {
   cls_rgw_fsio_head h;
@@ -394,16 +394,30 @@ TEST(cls_rgw_fsio, Z24_create_makes_a_created_head)
   EXPECT_TRUE(fx.clones.empty()) << "a created head has nothing to clone";
   EXPECT_FALSE(fx.remove_head) << "the head it made, removed";
   const auto s = out.bound;
-  /* while it is constructing, a second writer waits */
+  /* while it is constructing, a second writer waits, and a reader */
   fsio::join_out o2;
   cls_rgw_fsio_effects fx2;
   EXPECT_EQ(-CLS_RGW_ERR_FSIO_BUSY,
 	    create_join(h, GW2, fsio::create_mode::UNCHECKED, o2, fx2));
+  EXPECT_EQ(-CLS_RGW_ERR_FSIO_BUSY,
+	    create_join(h, GW2, fsio::create_mode::NONE, o2, fx2, false));
   ASSERT_EQ(0, fsio::ready(h, GW1, s, {}));
   EXPECT_EQ(-EEXIST, create_join(h, GW2, fsio::create_mode::EXCLUSIVE, o2, fx2));
-  EXPECT_EQ(-ENOENT, create_join(h, GW2, fsio::create_mode::NONE, o2, fx2));
-  EXPECT_EQ(-ENOENT, create_join(h, GW2, fsio::create_mode::NONE, o2, fx2,
-				 false));
+  {
+    fsio::join_out r;
+    cls_rgw_fsio_effects rfx;
+    ASSERT_EQ(0, create_join(h, GW3, fsio::create_mode::NONE, r, rfx, false));
+    EXPECT_EQ(s, r.bound) << "a reader of a name being created binds its shadow";
+    EXPECT_FALSE(r.construct);
+    EXPECT_EQ(1u, h.counts(GW3, s).readers);
+  }
+  {
+    fsio::join_out w;
+    cls_rgw_fsio_effects wfx;
+    ASSERT_EQ(0, create_join(h, GW3, fsio::create_mode::NONE, w, wfx));
+    EXPECT_EQ(s, w.bound) << "a plain write open joins the creation";
+    EXPECT_FALSE(w.construct);
+  }
   ASSERT_EQ(0, create_join(h, GW2, fsio::create_mode::UNCHECKED, o2, fx2));
   EXPECT_EQ(s, o2.bound) << "two creators meet on one file";
   EXPECT_FALSE(o2.construct);
@@ -422,6 +436,42 @@ TEST(cls_rgw_fsio, Z24_create_of_an_s3_object)
   EXPECT_FALSE(h.hdr->created);
   EXPECT_TRUE(out.construct);
   EXPECT_EQ(1u, fx.clones.size());
+}
+
+/* 2026-11-25:  a reader of a name being created stays bound across its
+ * publish, as any follower does, and a reader after an S3 PUT over it
+ * binds the PUT's content, never the superseded shadow (§3.1, §3.6) */
+TEST(cls_rgw_fsio, Z24_reader_of_a_created_name)
+{
+  {
+    cls_rgw_fsio_head h;
+    fsio::join_out out, r;
+    cls_rgw_fsio_effects fx, rfx;
+    ASSERT_EQ(0, create_join(h, GW1, fsio::create_mode::UNCHECKED, out, fx));
+    const auto s = out.bound;
+    ASSERT_EQ(0, fsio::ready(h, GW1, s, {}));
+    ASSERT_EQ(0, create_join(h, GW2, fsio::create_mode::NONE, r, rfx, false));
+    ASSERT_EQ(s, r.bound);
+    leave_writer(h, GW1, s);
+    ASSERT_EQ(0, publish(h, GW1, s));
+    EXPECT_FALSE(h.hdr->created);
+    const auto* e = h.hdr->find(s);
+    ASSERT_TRUE(e);
+    EXPECT_EQ(state::PUBLISHED, e->state);
+    EXPECT_EQ(1u, h.counts(GW2, s).readers) << "the follower stays bound";
+  }
+  {
+    cls_rgw_fsio_head h;
+    fsio::join_out out, r;
+    cls_rgw_fsio_effects fx, rfx;
+    ASSERT_EQ(0, create_join(h, GW1, fsio::create_mode::UNCHECKED, out, fx));
+    const auto s = out.bound;
+    ASSERT_EQ(0, fsio::ready(h, GW1, s, {}));
+    ASSERT_EQ(0, supersede(h));
+    h.id_tag = "s3-put";		// the PUT's head write, which RGW makes
+    ASSERT_EQ(0, create_join(h, GW2, fsio::create_mode::NONE, r, rfx, false));
+    EXPECT_NE(s, r.bound) << "a reader after an S3 PUT joined the old shadow";
+  }
 }
 
 /* Z24:  a publish makes the created name an S3 object, as an S3 PUT
@@ -463,6 +513,64 @@ TEST(cls_rgw_fsio, Z24_abandoned_create_removes_the_head)
   ASSERT_EQ(0, fsio::leave(h, GW1, next_seq(), out.bound, true, {}, lout, lfx));
   EXPECT_TRUE(lout.abandoned);
   EXPECT_TRUE(lfx.remove_head);
+}
+
+/* 2026-11-25, found by the model (quick-v-wr-create-marker,
+ * quick-v-wr-create-none):  a reader naming no version of a head with an
+ * OLH, a delete marker, joins only a name being created;  once the
+ * creation is abandoned or completed it fails, and makes no published
+ * chunk set for content the name does not have */
+TEST(cls_rgw_fsio, Z24_reader_of_a_delete_marker)
+{
+  auto reader = [] (cls_rgw_fsio_head& h, fsio::join_out& out) {
+    cls_rgw_fsio_effects fx;
+    fsio::join_in in{GW2, next_seq(), false, 1, 10, {}};
+    return fsio::join(h, in, out, fx);
+  };
+  {
+    cls_rgw_fsio_head h;		// a delete marker, no FSIO state
+    h.exists = true;
+    h.olh = true;
+    fsio::join_out out;
+    EXPECT_EQ(-ENOENT, reader(h, out));
+    EXPECT_FALSE(h.hdr) << "a failed join made a header";
+  }
+  {
+    cls_rgw_fsio_head h;		// its creation completed or abandoned
+    h.exists = true;
+    h.olh = true;
+    h.hdr.emplace();
+    fsio::join_out out;
+    EXPECT_EQ(-ENOENT, reader(h, out));
+    EXPECT_TRUE(h.hdr->chunk_sets.empty());
+  }
+  {
+    cls_rgw_fsio_head h;		// the null version's content under the OLH
+    h.exists = true;
+    h.olh = true;
+    h.id_tag = "t0";
+    h.manifest.append("C0");
+    fsio::join_out out;
+    ASSERT_EQ(0, reader(h, out)) << "a reader of the head's content (§2.5a)";
+    const auto* e = h.hdr->find(out.bound);
+    ASSERT_TRUE(e);
+    EXPECT_EQ(state::PUBLISHED, e->state);
+  }
+  {
+    cls_rgw_fsio_head h;		// being created over the marker
+    h.exists = true;
+    h.olh = true;
+    fsio::join_out w;
+    cls_rgw_fsio_effects fx;
+    fsio::join_in in{GW1, next_seq(), true, 1, 10, {}};
+    in.create = fsio::create_mode::UNCHECKED;
+    in.absent = true;
+    ASSERT_EQ(0, fsio::join(h, in, w, fx));
+    ASSERT_EQ(0, fsio::ready(h, GW1, w.bound, {}));
+    fsio::join_out out;
+    ASSERT_EQ(0, reader(h, out));
+    EXPECT_EQ(w.bound, out.bound) << "a reader of the creation binds its shadow";
+  }
 }
 
 /* the head's content replaced:  its tags go with it */
@@ -1151,6 +1259,7 @@ TEST(cls_rgw_fsio, I8_created_publish_is_versioned)
 {
   auto h = olh();
   h.id_tag = "t0";
+  h.manifest.append("C0");	// the null version's content under the OLH
   const auto c0 = join_reader(h, GW2);
   fsio::join_out o1;
   cls_rgw_fsio_effects fx;

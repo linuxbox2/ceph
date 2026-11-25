@@ -145,6 +145,9 @@ int RadosFSIOObject::read_olh(const DoutPrefixProvider* dpp, Olh* olh)
   store->get_neorados().execute(neorados::Object{head_oid}, head_ioc,
 				std::move(op), nullptr,
 				ceph::async::use_blocked[ec]);
+  if (ec == sys::errc::no_message_available) {
+    return -ENOENT;		// no OLH attributes:  the head is the object's
+  }
   if (ec) {
     return ceph::from_error_code(ec);
   }
@@ -268,16 +271,22 @@ int RadosFSIOObject::join(const DoutPrefixProvider* dpp, bool writer,
     if (r == 0 && olh.removed) {
       /* §3.1 step 0, §4.1, 8i:  a delete marker:  the name has no current
        * version;  only a writer's create joins, absent, guarded by the
-       * OLH it read, so a version linked since fails it */
+       * OLH it read, so a version linked since fails it.  A name being
+       * created over it exists from its create (§3.1, 2026-11-25):  any
+       * open joins it, under the same guard */
       if (!writer || !create) {
-	return -ENOENT;
+	cls_rgw_fsio_hdr hdr;
+	if (read_header(dpp, &hdr) < 0 || !hdr.created) {
+	  return -ENOENT;
+	}
+      } else {
+	absent = true;
       }
       if (counted) {
 	if (int u = uncount(dpp); u < 0) {
 	  return u;
 	}
       }
-      absent = true;
       *src = Source{};
       src->oid = head_oid;
       op.cmpxattr(RGW_ATTR_OLH_ID_TAG, neorados::cmp_op::eq, olh.id_tag);
@@ -317,10 +326,12 @@ int RadosFSIOObject::join(const DoutPrefixProvider* dpp, bool writer,
 	return s;
       }
       /* §2.2:  no head, or a tracking-only one (no ID tag, no manifest):
-       * the name has no S3 object, and only a writer's create joins it,
-       * with no guard, since it read no tag (§3.1 step 0, Z24) */
+       * the name has no S3 object;  a writer's create joins it, with no
+       * guard, since it read no tag (§3.1 step 0, Z24), and so does any
+       * open of a name being created, which the join decides from the
+       * header (§3.1 step 1, 2026-11-25) */
       if (s == -ENOENT || (!src->id_tag.length() && !src->manifest.length())) {
-	if (!writer || !create) {
+	if (s == -ENOENT && (!writer || !create)) {
 	  return -ENOENT;
 	}
 	if (s == -ENOENT) {
@@ -1141,6 +1152,23 @@ int RadosFSIOObject::open(const DoutPrefixProvider* dpp, bool writer,
     reading = true;
     if (!writing) {
       binding = Binding::PUBLISHED;
+    }
+    /* §3.1, 2026-11-25:  a name being created has only its shadow,
+     * which the reader reads as a follower does */
+    if (!counted && !src.id_tag.length() && !src.manifest.length() &&
+	!writing) {
+      ceph::buffer::list pm;
+      if (int r = shadow_pm(dpp, cs, &pm); r < 0) {
+	return r;
+      }
+      if (int r = make_geometry(dpp, pm, &wgeo); r < 0) {
+	return r;
+      }
+      wcs = cs;
+      wsize = ret.size_hint;
+      wmtime_hint = ret.mtime_hint;
+      reader_on_shadow = true;
+      binding = Binding::SHADOW;
     }
     return 0;
   }
@@ -2987,9 +3015,10 @@ int RadosObject::stat_fsio_view(const DoutPrefixProvider* dpp,
   std::optional<cls_rgw_fsio_hdr> hdr;
   ceph::buffer::list bl;
   sys::error_code ec;
+  neorados::IOContext ioc;
   try {
-    auto ioc = rgw::init_iocontext(dpp, store->get_neorados(), raw.pool,
-				   ceph::async::use_blocked);
+    ioc = rgw::init_iocontext(dpp, store->get_neorados(), raw.pool,
+			      ceph::async::use_blocked);
     store->get_neorados().execute(
       neorados::Object{raw.oid}, ioc,
       neorados::ReadOp{}.get_xattr("user.rgw.fsio.hdr", &bl), nullptr,
@@ -3008,9 +3037,43 @@ int RadosObject::stat_fsio_view(const DoutPrefixProvider* dpp,
 	     ec != sys::errc::no_message_available) {
     return ceph::from_error_code(ec);
   }
-  /* a name being created:  no lookup finds it until its publish (§3.1) */
+  /* a name being created exists from its create (§3.1, 2026-11-25):
+   * its current shadow's hints, and the attributes on its attribute
+   * clone (§2.4), role 'a' beside the head */
   if (hdr && hdr->created) {
-    return -ENOTSUP;
+    memset(st, 0, sizeof(*st));
+    st->st_mode = S_IFREG;
+    st->st_nlink = 1;
+    const cls_rgw_fsio_chunk_set* sh = nullptr;
+    for (const auto& e : hdr->chunk_sets) {
+      if (hdr->cur_shadow && e.id == *hdr->cur_shadow && e.shadow) {
+	sh = &e;
+      }
+    }
+    if (sh) {
+      st->st_size = sh->shadow->size_hint;
+      if (!ceph::real_clock::is_zero(sh->shadow->mtime_hint)) {
+	st->st_mtim = ceph::real_clock::to_timespec(sh->shadow->mtime_hint);
+      }
+    }
+    if (attrs && sh) {
+      boost::container::flat_map<std::string, ceph::buffer::list> x;
+      auto aioc = ioc;
+      aioc.set_key(raw.oid);
+      sys::error_code aec;
+      store->get_neorados().execute(
+	neorados::Object{cls_rgw_fsio_clone_name(info.bucket.marker, 'a',
+						 sh->id, raw.oid)},
+	aioc, neorados::ReadOp{}.get_xattrs(&x), nullptr,
+	ceph::async::use_blocked[aec]);
+      attrs->clear();
+      for (auto& [k, v] : x) {
+	if (!k.starts_with("user.rgw.fsio.")) {
+	  (*attrs)[k] = std::move(v);
+	}
+      }
+    }
+    return 0;
   }
   /* no head, a tracking-only one, or a prefix:  the S3 op path's */
   if (int r = load_obj_state(dpp, null_yield, true); r < 0) {

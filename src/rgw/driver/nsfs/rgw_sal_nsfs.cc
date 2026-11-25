@@ -5837,7 +5837,18 @@ Object::FSIOResult NSFSObject::get_fsio_handle(const DoutPrefixProvider* dpp,
     return FSIOResult{-EEXIST, nullptr};
   }
 
-  if (shadow_exists) {
+  /* Ask the resolved parent directly rather than going through ent,
+   * which is null for a hierarchical key even when the object is on
+   * disk.  reclone() already tests it this way. */
+  bool src_exists = (::faccessat(parent_fd, leaf.c_str(), F_OK, 0) == 0);
+
+  /* close-to-open (FSIO_RADOS_DESIGN.md §7, 2026-11-25):  a reader on a
+   * handle of its own binds to the published object even while a shadow
+   * exists;  where nothing is published yet, the name is being created
+   * and its shadow is its only content (§3.1) */
+  const bool join_shadow = shadow_exists && (for_write || !src_exists);
+
+  if (join_shadow) {
     /* rendezvous: reuse existing shadow */
     hdl->shadow_fd = ::openat(sdir_fd, leaf.c_str(), O_RDWR);
     if (hdl->shadow_fd < 0) {
@@ -5858,11 +5869,6 @@ Object::FSIOResult NSFSObject::get_fsio_handle(const DoutPrefixProvider* dpp,
     hdl->writing = for_write;
     return FSIOResult{0, std::move(hdl)};
   }
-
-  /* Ask the resolved parent directly rather than going through ent,
-   * which is null for a hierarchical key even when the object is on
-   * disk.  reclone() already tests it this way. */
-  bool src_exists = (::faccessat(parent_fd, leaf.c_str(), F_OK, 0) == 0);
 
   if (!src_exists && !(flags & FSIOObject::OPEN_FLAG_CREATE)) {
     ::close(sdir_fd);
