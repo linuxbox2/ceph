@@ -809,15 +809,19 @@ TEST(OPEN2, CREATEMODE_ATTRS_ARE_DURABLE_BEFORE_PUBLISH)
    * while the object is still unpublished and the open still live.  Left to
    * write_unix_attrs() it would not appear until close, and an exclusive
    * create replay arriving here would read "exists, no verifier". */
-  const auto sp = shadow_path(name);
-  ASSERT_TRUE(sf::exists(sp))
-      << "no shadow -- this test is not measuring what it thinks";
-  char buf[512];
-  /* make_xattr_name() maps RGW_ATTR_PREFIX ("user.rgw.") onto nsfs's own
-   * namespace, so the name on disk is user.nsfs.rgw.unix1 */
-  EXPECT_GT(::getxattr(sp.c_str(), "user.nsfs.rgw.unix1", buf, sizeof(buf)), 0)
-      << "initial attributes were not made durable at create;  they would "
-	 "not be readable until publish";
+  if (have_fs_layout()) {
+    /* on RADOS, the harness's CreateSetsTheSpecAttributes:  the attribute
+     * clone holds them before the publish */
+    const auto sp = shadow_path(name);
+    ASSERT_TRUE(sf::exists(sp))
+	<< "no shadow -- this test is not measuring what it thinks";
+    char buf[512];
+    /* make_xattr_name() maps RGW_ATTR_PREFIX ("user.rgw.") onto nsfs's own
+     * namespace, so the name on disk is user.nsfs.rgw.unix1 */
+    EXPECT_GT(::getxattr(sp.c_str(), "user.nsfs.rgw.unix1", buf, sizeof(buf)), 0)
+	<< "initial attributes were not made durable at create;  they would "
+	   "not be readable until publish";
+  }
 
   const std::string data{"durable"};
   ASSERT_EQ(get<0>(o2h.write(get<1>(ofw), data, 0, data.length())), 0);

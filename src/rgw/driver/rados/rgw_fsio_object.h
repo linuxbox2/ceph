@@ -86,16 +86,20 @@ public:
    * then fsio_truncate */
   int ftruncate(const DoutPrefixProvider* dpp, uint64_t size,
 		uint32_t flags) override;
+  /* §2.4:  a writer's attributes are its shadow's attribute clone's,
+   * which the publish carries to the head;  a reader's, the content it is
+   * bound to, and it sets none (-EBADF).  FSIO's own records, under
+   * user.rgw.fsio., are neither shown nor set (-EINVAL) */
   int fgetattr(const DoutPrefixProvider* dpp, const std::string& name,
-	       buffer::list& dest, uint32_t flags) override { return -ENOTSUP; }
+	       buffer::list& dest, uint32_t flags) override;
   int fsetattr(const DoutPrefixProvider* dpp, const std::string& name,
-	       const buffer::list& val, uint32_t flags) override { return -ENOTSUP; }
+	       const buffer::list& val, uint32_t flags) override;
   int fgetattrs(const DoutPrefixProvider* dpp, Attrs& attrs,
-		uint32_t flags) override { return -ENOTSUP; }
+		uint32_t flags) override;
   int fsetattrs(const DoutPrefixProvider* dpp, Attrs& attrs,
-		uint32_t flags) override { return -ENOTSUP; }
+		uint32_t flags) override;
   int fremovexattr(const DoutPrefixProvider* dpp, const std::string& name,
-		   uint32_t flags) override { return -ENOTSUP; }
+		   uint32_t flags) override;
 
   const cls_rgw_fsio_handle& handle() const { return h; }
   const cls_rgw_fsio_id& bound() const { return cs; }
@@ -335,6 +339,12 @@ private:
   /* §2.7:  this handle's presence hint on the head or the instance head */
   int presence_hint(const DoutPrefixProvider* dpp, bool add, bool on_instance);
   /* a write op, synchronously;  0 or its error */
+  /* §2.4:  the writer's attribute clone f(head_oid, id), role 'd' where
+   * the head segment is inline, else 'a', beside the instance head it was
+   * cloned from in a versioned bucket (§4.1);  its xattrs, if asked */
+  int attr_clone(const DoutPrefixProvider* dpp, std::string* oid,
+		 neorados::IOContext* ioc,
+		 boost::container::flat_map<std::string, ceph::buffer::list>* xattrs);
   int exec(const std::string& oid, const neorados::IOContext& ioc,
 	   neorados::WriteOp op);
 

@@ -1768,6 +1768,145 @@ int RadosFSIOObject::scan_size(const DoutPrefixProvider* dpp, uint64_t* size)
   return 0;
 }
 
+int RadosFSIOObject::attr_clone(
+  const DoutPrefixProvider* dpp, std::string* oid, neorados::IOContext* ioc,
+  boost::container::flat_map<std::string, ceph::buffer::list>* xattrs)
+{
+  const auto& marker = info.bucket.marker;
+  const auto& base = counted ? inst_oid : head_oid;
+  auto aioc = counted ? inst_ioc : head_ioc;
+  aioc.set_key(base);
+  for (const char role : {'d', 'a'}) {
+    boost::container::flat_map<std::string, ceph::buffer::list> x;
+    const auto name = cls_rgw_fsio_clone_name(marker, role, wcs, base);
+    sys::error_code ec;
+    store->get_neorados().execute(neorados::Object{name}, aioc,
+				  neorados::ReadOp{}.get_xattrs(&x), nullptr,
+				  ceph::async::use_blocked[ec]);
+    if (!ec && x.count("user.rgw.fsio.pm")) {
+      if (oid) {
+	*oid = name;
+      }
+      if (ioc) {
+	*ioc = aioc;
+      }
+      if (xattrs) {
+	*xattrs = std::move(x);
+      }
+      return 0;
+    }
+  }
+  ldpp_dout(dpp, 0) << "ERROR: FSIO:  no attribute clone for "
+		    << wcs.to_str() << " on " << base << dendl;
+  return -EIO;
+}
+
+namespace {
+/* FSIO's own records, never a client's attribute (§2.6) */
+bool fsio_record(const std::string& name)
+{
+  return name.starts_with("user.rgw.fsio.");
+}
+} // anonymous namespace
+
+int RadosFSIOObject::fgetattrs(const DoutPrefixProvider* dpp, Attrs& attrs,
+			       uint32_t flags)
+{
+  boost::container::flat_map<std::string, ceph::buffer::list> x;
+  if (writing) {
+    if (int r = attr_clone(dpp, nullptr, nullptr, &x); r < 0) {
+      return r;
+    }
+  } else {
+    /* the content it is bound to:  the version it counted, else the head */
+    sys::error_code ec;
+    store->get_neorados().execute(
+      neorados::Object{counted ? inst_oid : head_oid},
+      counted ? inst_ioc : head_ioc, neorados::ReadOp{}.get_xattrs(&x),
+      nullptr, ceph::async::use_blocked[ec]);
+    if (ec) {
+      return ceph::from_error_code(ec);
+    }
+  }
+  attrs.clear();
+  for (auto& [k, v] : x) {
+    if (!fsio_record(k)) {
+      attrs[k] = std::move(v);
+    }
+  }
+  return 0;
+}
+
+int RadosFSIOObject::fgetattr(const DoutPrefixProvider* dpp,
+			      const std::string& name, buffer::list& dest,
+			      uint32_t flags)
+{
+  if (fsio_record(name)) {
+    return -ENODATA;
+  }
+  Attrs attrs;
+  if (int r = fgetattrs(dpp, attrs, flags); r < 0) {
+    return r;
+  }
+  auto i = attrs.find(name);
+  if (i == attrs.end()) {
+    return -ENODATA;
+  }
+  dest = i->second;
+  return 0;
+}
+
+int RadosFSIOObject::fsetattrs(const DoutPrefixProvider* dpp, Attrs& attrs,
+			       uint32_t flags)
+{
+  if (!writing) {
+    return -EBADF;
+  }
+  for (const auto& [k, v] : attrs) {
+    if (fsio_record(k)) {
+      return -EINVAL;
+    }
+  }
+  std::string oid;
+  neorados::IOContext ioc;
+  if (int r = attr_clone(dpp, &oid, &ioc, nullptr); r < 0) {
+    return r;
+  }
+  neorados::WriteOp op;
+  for (const auto& [k, v] : attrs) {
+    op.setxattr(k, ceph::buffer::list(v));
+  }
+  return exec(oid, ioc, std::move(op));
+}
+
+int RadosFSIOObject::fsetattr(const DoutPrefixProvider* dpp,
+			      const std::string& name,
+			      const buffer::list& val, uint32_t flags)
+{
+  Attrs attrs;
+  attrs[name] = val;
+  return fsetattrs(dpp, attrs, flags);
+}
+
+int RadosFSIOObject::fremovexattr(const DoutPrefixProvider* dpp,
+				  const std::string& name, uint32_t flags)
+{
+  if (!writing) {
+    return -EBADF;
+  }
+  if (fsio_record(name)) {
+    return -EINVAL;
+  }
+  std::string oid;
+  neorados::IOContext ioc;
+  if (int r = attr_clone(dpp, &oid, &ioc, nullptr); r < 0) {
+    return r;
+  }
+  neorados::WriteOp op;
+  op.rmxattr(name);
+  return exec(oid, ioc, std::move(op));
+}
+
 int RadosFSIOObject::prepare_publish(const DoutPrefixProvider* dpp,
 				     Prepared* p)
 {
@@ -1779,25 +1918,9 @@ int RadosFSIOObject::prepare_publish(const DoutPrefixProvider* dpp,
   if (int e = scan_size(dpp, &size); e < 0) {
     return e;
   }
-  const auto& base = counted ? inst_oid : head_oid;
-  auto aioc = counted ? inst_ioc : head_ioc;
-  aioc.set_key(base);
   boost::container::flat_map<std::string, ceph::buffer::list> xattrs;
-  for (const char role : {'d', 'a'}) {
-    xattrs.clear();
-    sys::error_code ec;
-    store->get_neorados().execute(
-      neorados::Object{cls_rgw_fsio_clone_name(marker, role, wcs, base)},
-      aioc, neorados::ReadOp{}.get_xattrs(&xattrs), nullptr,
-      ceph::async::use_blocked[ec]);
-    if (!ec && xattrs.count("user.rgw.fsio.pm")) {
-      break;
-    }
-  }
-  if (!xattrs.count("user.rgw.fsio.pm")) {
-    ldpp_dout(dpp, 0) << "ERROR: FSIO:  no attribute clone for "
-		      << wcs.to_str() << " on " << base << dendl;
-    return -EIO;
+  if (int r = attr_clone(dpp, nullptr, nullptr, &xattrs); r < 0) {
+    return r;
   }
   /* 3:  the manifest:  the pseudo-manifest under the shadow's id */
   RGWObjManifest& m = p->m;

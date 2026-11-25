@@ -2454,6 +2454,11 @@ TEST_F(FSIORadosCreate, CreateSetsTheSpecAttributes)
   spec.attrs = &attrs;
   std::unique_ptr<FO> w;
   ASSERT_EQ(0, create("attrs", false, &w, &spec));
+  /* durable before the publish:  on the attribute clone (§2.4), where an
+   * exclusive create's replay reads its verifier */
+  ceph::buffer::list early;
+  ASSERT_EQ(0, w->fgetattr(env->dpp.get(), RGW_ATTR_UNIX1, early, 0));
+  EXPECT_EQ("unix-attrs", early.to_str());
   ASSERT_EQ(0, w->end_write(env->dpp.get(), 0));
   const auto head = head_of("attrs");
   boost::container::flat_map<std::string, ceph::buffer::list> got;
@@ -3595,6 +3600,123 @@ TEST_F(FSIORadosStatView, CurrentVersion)
   struct stat st;
   ASSERT_EQ(0, stat("obj", &st));
   EXPECT_EQ(int64_t(2 * MiB), st.st_size);
+}
+
+/* §2.4, plan step 9b:  a handle's attributes.  A writer's are its
+ * shadow's attribute clone's, carried to the head by the publish;  a
+ * reader's are its bound content's, and it sets none;  FSIO's own records
+ * are neither shown nor set */
+class FSIORadosAttrOps : public FSIORadosStatView {
+protected:
+  static ceph::buffer::list bl_of(const std::string& v) {
+    ceph::buffer::list bl;
+    bl.append(v);
+    return bl;
+  }
+  /* the current version's attributes, as S3 reads them */
+  rgw::sal::Attrs s3_attrs(const std::string& key) {
+    auto obj = bucket->get_object(rgw_obj_key(key));
+    EXPECT_EQ(0, obj->load_obj_state(env->dpp.get(), null_yield));
+    return obj->get_attrs();
+  }
+};
+
+TEST_F(FSIORadosAttrOps, WriterSetsAndThePublishCarries)
+{
+  set_versioning(0);
+  ASSERT_EQ(0, put("obj", pattern(MiB, 1)));
+  auto w = open("obj", true);
+  ASSERT_TRUE(w);
+  const std::string name = "user.rgw.x-amz-meta-color";
+  ASSERT_EQ(0, w->fsetattr(env->dpp.get(), name, bl_of("blue"), 0));
+  ceph::buffer::list got;
+  ASSERT_EQ(0, w->fgetattr(env->dpp.get(), name, got, 0));
+  EXPECT_EQ("blue", got.to_str());
+  EXPECT_FALSE(head_attr("obj", name)) << "set on the head before the publish";
+  ASSERT_EQ(0, w->close(env->dpp.get(), 0));
+  auto after = head_attr("obj", name);
+  ASSERT_TRUE(after) << "the publish did not carry it";
+  EXPECT_EQ("blue", after->to_str());
+}
+
+TEST_F(FSIORadosAttrOps, WriterRemovesOne)
+{
+  set_versioning(0);
+  ASSERT_EQ(0, put("obj", pattern(MiB, 1)));
+  auto w = open("obj", true);
+  ASSERT_TRUE(w);
+  const std::string name = "user.rgw.x-amz-meta-shape";
+  ASSERT_EQ(0, w->fsetattr(env->dpp.get(), name, bl_of("round"), 0));
+  ASSERT_EQ(0, w->fremovexattr(env->dpp.get(), name, 0));
+  ceph::buffer::list got;
+  EXPECT_EQ(-ENODATA, w->fgetattr(env->dpp.get(), name, got, 0));
+  ASSERT_EQ(0, w->close(env->dpp.get(), 0));
+  EXPECT_FALSE(head_attr("obj", name));
+}
+
+TEST_F(FSIORadosAttrOps, ReaderReadsItsContentAndSetsNone)
+{
+  set_versioning(0);
+  ASSERT_EQ(0, put("obj", pattern(MiB, 1)));
+  /* a published attribute:  put() writes none of its own */
+  const std::string name = "user.rgw.x-amz-meta-color";
+  {
+    auto w = open("obj", true);
+    ASSERT_TRUE(w);
+    ASSERT_EQ(0, w->fsetattr(env->dpp.get(), name, bl_of("red"), 0));
+    ASSERT_EQ(0, w->close(env->dpp.get(), 0));
+  }
+  auto r = open("obj", false);
+  ASSERT_TRUE(r);
+  rgw::sal::Attrs attrs;
+  ASSERT_EQ(0, r->fgetattrs(env->dpp.get(), attrs, 0));
+  ASSERT_TRUE(attrs.count(name));
+  EXPECT_EQ("red", attrs[name].to_str());
+  ceph::buffer::list one;
+  ASSERT_EQ(0, r->fgetattr(env->dpp.get(), name, one, 0));
+  EXPECT_EQ("red", one.to_str());
+  for (const auto& [k, v] : attrs) {
+    EXPECT_FALSE(k.starts_with("user.rgw.fsio.")) << k;
+  }
+  EXPECT_EQ(-EBADF, r->fsetattr(env->dpp.get(), "user.rgw.x-amz-meta-a",
+				bl_of("b"), 0));
+  EXPECT_EQ(-EBADF, r->fremovexattr(env->dpp.get(), name, 0));
+  ASSERT_EQ(0, r->close(env->dpp.get(), 0));
+}
+
+TEST_F(FSIORadosAttrOps, FsioRecordsAreNotAttributes)
+{
+  set_versioning(0);
+  ASSERT_EQ(0, put("obj", pattern(MiB, 1)));
+  auto w = open("obj", true);
+  ASSERT_TRUE(w);
+  rgw::sal::Attrs attrs;
+  ASSERT_EQ(0, w->fgetattrs(env->dpp.get(), attrs, 0));
+  for (const auto& [k, v] : attrs) {
+    EXPECT_FALSE(k.starts_with("user.rgw.fsio.")) << k;
+  }
+  ceph::buffer::list got;
+  EXPECT_EQ(-ENODATA, w->fgetattr(env->dpp.get(), "user.rgw.fsio.pm", got, 0));
+  EXPECT_EQ(-EINVAL, w->fsetattr(env->dpp.get(), "user.rgw.fsio.pm",
+				 bl_of("x"), 0));
+  EXPECT_EQ(-EINVAL, w->fremovexattr(env->dpp.get(), "user.rgw.fsio.pm", 0));
+  ASSERT_EQ(0, w->close(env->dpp.get(), 0));
+}
+
+/* versioned:  the clone beside the version it was built from;  the new
+ * version carries the attribute */
+TEST_F(FSIORadosAttrOps, VersionedWriterSetsAndThePublishCarries)
+{
+  ASSERT_EQ(0, put("obj", pattern(MiB, 1)));
+  auto w = open("obj", true);
+  ASSERT_TRUE(w);
+  const std::string name = "user.rgw.x-amz-meta-color";
+  ASSERT_EQ(0, w->fsetattr(env->dpp.get(), name, bl_of("green"), 0));
+  ASSERT_EQ(0, write(w, 0, {"Z"}));
+  ASSERT_EQ(0, w->close(env->dpp.get(), 0));
+  auto attrs = s3_attrs("obj");
+  ASSERT_TRUE(attrs.count(name));
+  EXPECT_EQ("green", attrs[name].to_str());
 }
 
 int main(int argc, char** argv)
