@@ -130,6 +130,11 @@ void put(const std::string& name, char fill,
 std::vector<std::pair<std::string, std::string>> objects()
 {
   std::vector<std::pair<std::string, std::string>> v;
+  if (!data.is_valid() &&
+      cluster.ioctx_create(data_pool.c_str(), data) < 0) {
+    ADD_FAILURE() << "no data pool " << data_pool << " (--data-pool)";
+    return v;
+  }
   for (auto i = data.nobjects_begin(); i != data.nobjects_end(); ++i) {
     v.emplace_back(i->get_oid(), i->get_locator());
   }
