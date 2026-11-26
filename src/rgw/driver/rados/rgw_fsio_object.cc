@@ -164,10 +164,8 @@ std::optional<RadosFSIOObject::Phases> RadosFSIOObject::phases() const
 }
 #endif
 
-int RadosFSIOObject::presence_hint(const DoutPrefixProvider* dpp, bool add,
-				   bool on_instance)
+cls_rgw_fsio_hint_op RadosFSIOObject::presence_op(bool on_instance) const
 {
-  Timed timed{*this, add ? Phase::hint_in : Phase::hint_out};	// plan 9g
   cls_rgw_fsio_hint_op in;
   in.hint.kind = cls_rgw_fsio_hint_kind::PRESENCE;
   in.hint.target = on_instance ? cls_rgw_fsio_hint_target::INSTANCE_HEAD
@@ -177,16 +175,63 @@ int RadosFSIOObject::presence_hint(const DoutPrefixProvider* dpp, bool add,
   in.hint.incarnation = h.incarnation;
   in.hint.handle = h.handle;
   in.oid = on_instance ? inst_oid : head_oid;
+  return in;
+}
+
+cls_rgw_fsio_hint_op RadosFSIOObject::publish_op(const cls_rgw_fsio_id& r) const
+{
+  cls_rgw_fsio_hint_op in;
+  in.hint.kind = cls_rgw_fsio_hint_kind::PUBLISH;
+  in.hint.target = cls_rgw_fsio_hint_target::HEAD;
+  in.hint.bucket = info.bucket;
+  in.hint.key = rgw_obj_key(key.name);
+  in.hint.incarnation = h.incarnation;
+  in.hint.handle = h.handle;
+  in.hint.r = r;
+  in.oid = head_oid;
+  return in;
+}
+
+std::string RadosFSIOObject::hint_shard(const DoutPrefixProvider* dpp,
+					const std::string& oid) const
+{
   const auto shards = static_cast<uint32_t>(
     dpp->get_cct()->_conf.get_val<uint64_t>("rgw_fsio_open_hints_num_shards"));
-  const auto shard = rgw::fsio::open_hint_shard_oid(
-    rgw::fsio::open_hint_shard(in.oid, shards));
+  return rgw::fsio::open_hint_shard_oid(rgw::fsio::open_hint_shard(oid, shards));
+}
+
+int RadosFSIOObject::unhint_both(const DoutPrefixProvider* dpp,
+				 const cls_rgw_fsio_id& r)
+{
+  Timed timed{*this, Phase::hint_out};	// plan 9g
+  /* both on the head's shard;  the publish hint first, as when apart */
+  neorados::WriteOp op;
+  op.exec(neorados::cls::rgw_fsio::open_hint_remove(publish_op(r)));
+  op.exec(neorados::cls::rgw_fsio::open_hint_remove(presence_op(false)));
+  ++n_hint_ops;
+  int e = exec(hint_shard(dpp, head_oid), store->getRados()->fsio_hint_ioc(),
+	       std::move(op));
+  if (e < 0) {
+    ldpp_dout_fmt(dpp, 0, "ERROR: FSIO:  removing the publish hint for {} and "
+		  "the presence hint of {}.{} on {}:  {}", r.to_str(),
+		  h.incarnation, h.handle, head_oid, cpp_strerror(-e));
+  }
+  return e;
+}
+
+int RadosFSIOObject::presence_hint(const DoutPrefixProvider* dpp, bool add,
+				   bool on_instance)
+{
+  Timed timed{*this, add ? Phase::hint_in : Phase::hint_out};	// plan 9g
+  const auto in = presence_op(on_instance);
+  const auto shard = hint_shard(dpp, in.oid);
   neorados::WriteOp op;
   if (add) {
     op.exec(neorados::cls::rgw_fsio::open_hint_add(in));
   } else {
     op.exec(neorados::cls::rgw_fsio::open_hint_remove(in));
   }
+  ++n_hint_ops;
   int r = exec(shard, store->getRados()->fsio_hint_ioc(), std::move(op));
   if (r < 0) {
     ldpp_dout_fmt(dpp, 0, "ERROR: FSIO:  {} the presence hint of {}.{} on "
@@ -2046,26 +2091,16 @@ int RadosFSIOObject::publish_hint(const DoutPrefixProvider* dpp, bool add,
 				  const cls_rgw_fsio_id& r)
 {
   Timed timed{*this, add ? Phase::pub_hint : Phase::cleanup};	// plan 9g
-  cls_rgw_fsio_hint_op in;
-  in.hint.kind = cls_rgw_fsio_hint_kind::PUBLISH;
-  in.hint.target = cls_rgw_fsio_hint_target::HEAD;
-  in.hint.bucket = info.bucket;
-  in.hint.key = rgw_obj_key(key.name);
-  in.hint.incarnation = h.incarnation;
-  in.hint.handle = h.handle;
-  in.hint.r = r;
-  in.oid = head_oid;
-  const auto shards = static_cast<uint32_t>(
-    dpp->get_cct()->_conf.get_val<uint64_t>("rgw_fsio_open_hints_num_shards"));
+  const auto in = publish_op(r);
   neorados::WriteOp op;
   if (add) {
     op.exec(neorados::cls::rgw_fsio::open_hint_add(in));
   } else {
     op.exec(neorados::cls::rgw_fsio::open_hint_remove(in));
   }
-  int e = exec(rgw::fsio::open_hint_shard_oid(
-		 rgw::fsio::open_hint_shard(in.oid, shards)),
-	       store->getRados()->fsio_hint_ioc(), std::move(op));
+  ++n_hint_ops;
+  int e = exec(hint_shard(dpp, in.oid), store->getRados()->fsio_hint_ioc(),
+	       std::move(op));
   if (e < 0) {
     ldpp_dout_fmt(dpp, 0, "ERROR: FSIO:  {} the publish hint for {} on {}:  {}",
 		  (add ? "adding" : "removing"), r.to_str(), head_oid,
@@ -2639,8 +2674,10 @@ int RadosFSIOObject::publish(const DoutPrefixProvider* dpp)
   }
   if (ret.drained) {
     drain(dpp, *ret.drained);
+    publish_hint(dpp, false, r);
+  } else {
+    unhint = r;			// §4.3:  with the presence hint, if it goes next
   }
-  publish_hint(dpp, false, r);
   return 0;
 }
 
@@ -3128,7 +3165,14 @@ int RadosFSIOObject::end_write(const DoutPrefixProvider* dpp, uint32_t flags)
   /* the end of a write session, once its publish completed */
   auto finished = [&] (const std::optional<cls_rgw_fsio_id>& drained) {
     writing = false;
+    /* §4.3:  a publish hint not yet removed goes before a drain, and with
+     * the presence hint when the handle then holds nothing */
+    auto pending = std::exchange(unhint, std::nullopt);
     if (drained) {
+      if (pending) {
+	publish_hint(dpp, false, *pending);
+	pending.reset();
+      }
       if (int d = drain(dpp, *drained); d < 0) {
 	return d;
       }
@@ -3136,9 +3180,13 @@ int RadosFSIOObject::end_write(const DoutPrefixProvider* dpp, uint32_t flags)
     if (!reading) {
       uncount(dpp);
       hinted = false;
-      const int r = presence_hint(dpp, false, false);
+      const int r = pending ? unhint_both(dpp, *pending)
+			    : presence_hint(dpp, false, false);
       log_phases(dpp);
       return r;
+    }
+    if (pending) {
+      publish_hint(dpp, false, *pending);
     }
     log_phases(dpp);
     return 0;

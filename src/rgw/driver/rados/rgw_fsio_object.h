@@ -172,6 +172,8 @@ public:
   };
   /* nullopt when built without the option */
   std::optional<Phases> phases() const;
+  /* test only:  ops sent to the hint shard (§4.3) */
+  uint64_t hint_ops() const { return n_hint_ops; }
   /* test only:  reads of the attribute clone (plan 9g) */
   uint64_t clone_reads() const { return n_clone_reads; }
   /* test only:  write ops sent to chunks (§4.5) */
@@ -365,6 +367,14 @@ private:
 
   /* §2.7:  this handle's presence hint on the head or the instance head */
   int presence_hint(const DoutPrefixProvider* dpp, bool add, bool on_instance);
+  /* the hint ops, and their shard:  the presence hint, a publish hint */
+  cls_rgw_fsio_hint_op presence_op(bool on_instance) const;
+  cls_rgw_fsio_hint_op publish_op(const cls_rgw_fsio_id& r) const;
+  std::string hint_shard(const DoutPrefixProvider* dpp,
+			 const std::string& oid) const;
+  /* §4.3:  a publish's hint and the head's presence hint, removed in one
+   * op when nothing comes between them */
+  int unhint_both(const DoutPrefixProvider* dpp, const cls_rgw_fsio_id& r);
   /* a write op, synchronously;  0 or its error */
   /* §2.4:  the writer's attribute clone f(head_oid, id), role 'd' where
    * the head segment is inline, else 'a', beside the instance head it was
@@ -470,6 +480,9 @@ private:
   /* plan 9g:  the writer's attribute clone's role, 'd' or 'a', once its
    * construction or a probe found it;  0 unknown */
   std::atomic<char> attr_role{0};
+  /* §4.3:  a publish hint still to remove, with the presence hint */
+  std::optional<cls_rgw_fsio_id> unhint;
+  std::atomic<uint64_t> n_hint_ops{0};
   std::atomic<uint64_t> n_clone_reads{0};
 #ifdef WITH_RGW_FSIO_PHASES
   Phases phases_;			// under state_lock

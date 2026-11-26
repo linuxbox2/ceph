@@ -2742,6 +2742,24 @@ TEST_F(FSIORadosCreate, CreateReservesItsFirstRun)
   EXPECT_EQ(4096, size);
 }
 
+/* §4.3, 2026-11-25:  a close with nothing to drain removes its publish
+ * hint and its presence hint in one op:  two ops to the shard, the
+ * publish hint's add and the removal, and neither hint left */
+TEST_F(FSIORadosCreate, CloseRemovesBothHintsInOneOp)
+{
+  std::unique_ptr<FO> w;
+  ASSERT_EQ(0, create("hints", false, &w));
+  ASSERT_EQ(0, write(w, 0, {"x"}));
+  const auto hdl = rados_fsio(w)->handle();
+  const auto before = rados_fsio(w)->hint_ops();
+  ASSERT_EQ(0, w->close(env->dpp.get(), 0));
+  EXPECT_EQ(before + 2, rados_fsio(w)->hint_ops());
+  const auto head = head_of("hints");
+  EXPECT_EQ(0, presence_hints(head, hdl));
+  EXPECT_EQ(0, presence_hints(head, hdl, cls_rgw_fsio_hint_target::HEAD,
+			      cls_rgw_fsio_hint_kind::PUBLISH));
+}
+
 TEST_F(FSIORadosCreate, CreateSetsTheSpecAttributes)
 {
   rgw::sal::Attrs attrs;
