@@ -5,6 +5,8 @@
  * head writes are (FSIO_RADOS_DESIGN.md §3):  the leaf clone, the
  * recreated head, the ordering rule, the publish. */
 
+#include <cstdlib>
+
 #include <fmt/format.h>
 
 #include "cls/rgw/cls_rgw_client.h"
@@ -29,19 +31,32 @@ class FsioHead : public ::testing::Test {
 protected:
   static Rados rados, rados2;
   static std::string pool;
+  static bool own_pool;
   IoCtx ioctx, ioctx2;
   static uint64_t next;
 
   static void SetUpTestSuite() {
-    pool = get_temp_pool_name();
-    ASSERT_EQ("", create_one_pool_pp(pool, rados));
+    /* FSIO_TEST_POOL:  an existing pool to run on, kept;  else one of
+     * the test's own */
+    if (const char* p = std::getenv("FSIO_TEST_POOL")) {
+      pool = p;
+      ASSERT_EQ("", connect_cluster_pp(rados));
+    } else {
+      pool = get_temp_pool_name();
+      ASSERT_EQ("", create_one_pool_pp(pool, rados));
+      own_pool = true;
+    }
     ASSERT_EQ("", connect_cluster_pp(rados2));
     GW1 = cls_rgw_fsio_handle{rados.get_instance_id(), 1};
     GW2 = cls_rgw_fsio_handle{rados2.get_instance_id(), 1};
   }
   static void TearDownTestSuite() {
     rados2.shutdown();
-    ASSERT_EQ(0, destroy_one_pool_pp(pool, rados));
+    if (own_pool) {
+      ASSERT_EQ(0, destroy_one_pool_pp(pool, rados));
+    } else {
+      rados.shutdown();
+    }
   }
   void SetUp() override {
     ASSERT_EQ(0, rados.ioctx_create(pool.c_str(), ioctx));
@@ -184,6 +199,7 @@ protected:
 Rados FsioHead::rados;
 Rados FsioHead::rados2;
 std::string FsioHead::pool;
+bool FsioHead::own_pool = false;
 uint64_t FsioHead::next = 0;
 
 } // anonymous namespace

@@ -9,6 +9,7 @@
  * hint and truncate (§3.3):  their replies and the stored record. */
 
 #include <coroutine>
+#include <cstdlib>
 #include <string>
 
 #include <boost/container/flat_set.hpp>
@@ -29,8 +30,9 @@ namespace {
 
 using namespace std::literals;
 
-/* each test has its own pool, so one key serves */
-constexpr auto oid = "key"sv;
+/* the test's key, key.<test name>:  on FSIO_TEST_POOL the tests share
+ * one pool;  set by FsioTest for each test */
+std::string oid;
 /* the test's gateway:  its own RADOS client, an incarnation being the
  * op's origin (§3, Z28);  set by FsioTest for each test */
 cls_rgw_fsio_handle GW1;
@@ -70,10 +72,33 @@ cls_rgw_fsio_join_op join_op(uint64_t seq, bool writer,
 const std::string HDR = "user.rgw.fsio.hdr";
 std::string M1;                      // GW1's FSIO-open record
 
-class FsioTest : public NeoRadosTest {
+class FsioTest : public NeoRadosTestBase {
+  const char* test_pool() const {
+    return use_test_pool ? std::getenv("FSIO_TEST_POOL") : nullptr;
+  }
+  /* FSIO_TEST_POOL:  an existing pool to run on, kept;  else the
+   * test's own, as NeoRadosTest makes */
+  boost::asio::awaitable<uint64_t> create_pool() override {
+    if (const char* p = test_pool()) {
+      co_return co_await rados().lookup_pool(p, boost::asio::use_awaitable);
+    }
+    co_return co_await ::create_pool(rados(), pool_name(),
+				     boost::asio::use_awaitable);
+  }
+  boost::asio::awaitable<void> clean_pool() override {
+    if (!test_pool()) {
+      co_await rados().delete_pool(pool().get_pool(),
+				   boost::asio::use_awaitable);
+    }
+  }
+
 protected:
+  bool use_test_pool = true;
+
   boost::asio::awaitable<void> CoSetUp() override {
-    co_await NeoRadosTest::CoSetUp();
+    oid = fmt::format(
+      "key.{}", ::testing::UnitTest::GetInstance()->current_test_info()->name());
+    co_await NeoRadosTestBase::CoSetUp();
     GW1 = cls_rgw_fsio_handle{rados().instance_id(), 1};
     M1 = fmt::format("user.rgw.fsio.m.{:016x}", GW1.incarnation);
     co_return;
@@ -201,6 +226,14 @@ namespace {
 
 constexpr auto shard = "fsio_open_hint.0000000000"sv;
 
+/* hint shards are omap, in the bucket's index pool, never a data pool:
+ * these tests keep a replicated pool of their own whatever FSIO_TEST_POOL
+ * names */
+class FsioHintTest : public FsioTest {
+public:
+  FsioHintTest() { use_test_pool = false; }
+};
+
 rgw_bucket bucket_named(const std::string& name)
 {
   rgw_bucket b;
@@ -229,7 +262,7 @@ cls_rgw_fsio_hint_op hint_op(uint64_t incarnation, uint64_t handle,
 
 /* the key the class builds:  {incarnation:016x}_{handle:016x}_{kind}_
  * {target oid}[_{r}] */
-CORO_TEST_F(NeoRadosClsRgwFsio, OpenHintKey, FsioTest) {
+CORO_TEST_F(NeoRadosClsRgwFsioHint, OpenHintKey, FsioHintTest) {
   auto presence = hint_op(0xa1, 2, "b1", "k1");
   auto publish = hint_op(0xa1, 2, "b1", "k1");
   publish.hint.kind = cls_rgw_fsio_hint_kind::PUBLISH;
@@ -252,7 +285,7 @@ CORO_TEST_F(NeoRadosClsRgwFsio, OpenHintKey, FsioTest) {
 
 /* the record comes back whole;  pages follow the marker;  a removal, and
  * a removal of an absent hint, succeed */
-CORO_TEST_F(NeoRadosClsRgwFsio, OpenHintAddListRemove, FsioTest) {
+CORO_TEST_F(NeoRadosClsRgwFsioHint, OpenHintAddListRemove, FsioHintTest) {
   for (uint64_t h = 1; h <= 3; ++h) {
     co_await execute(shard, WriteOp{}.exec(
                        f::open_hint_add(hint_op(0xa1, h, "b1", "k1"))));
@@ -302,7 +335,7 @@ CORO_TEST_F(NeoRadosClsRgwFsio, OpenHintAddListRemove, FsioTest) {
 
 /* by incarnation:  only its hints, the others' keys not read;  by
  * bucket:  only the hints naming it */
-CORO_TEST_F(NeoRadosClsRgwFsio, OpenHintListFilters, FsioTest) {
+CORO_TEST_F(NeoRadosClsRgwFsioHint, OpenHintListFilters, FsioHintTest) {
   co_await execute(shard, WriteOp{}.exec(
                      f::open_hint_add(hint_op(0xa1, 1, "b1", "k1"))));
   co_await execute(shard, WriteOp{}.exec(
@@ -347,7 +380,7 @@ CORO_TEST_F(NeoRadosClsRgwFsio, OpenHintListFilters, FsioTest) {
 /* §4.3, 8j:  an uncompleted-publish hint is keyed by its head and
  * shadow;  its own listing returns it alone, an incarnation's never, a
  * bucket's with the rest */
-CORO_TEST_F(NeoRadosClsRgwFsio, OpenHintListUncompleted, FsioTest) {
+CORO_TEST_F(NeoRadosClsRgwFsioHint, OpenHintListUncompleted, FsioHintTest) {
   co_await execute(shard, WriteOp{}.exec(
                      f::open_hint_add(hint_op(0xa1, 1, "b1", "k1"))));
   auto u = hint_op(0xa1, 1, "b1", "k2");
