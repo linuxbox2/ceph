@@ -62,9 +62,82 @@ int RadosFSIOObject::exec(const std::string& oid,
   return ceph::from_error_code(ec);
 }
 
+const char* RadosFSIOObject::phase_name(Phase p)
+{
+  static constexpr const char* names[] = {
+    "hint_in", "join", "construct", "ready", "extend", "write", "attrs",
+    "report", "leave", "pub_hint", "prepare", "head_write", "cleanup",
+    "hint_out"};
+  return names[size_t(p)];
+}
+
+#ifdef WITH_RGW_FSIO_PHASES
+RadosFSIOObject::Timed::~Timed()
+{
+  const auto d = ceph::mono_clock::now() - t0;
+  std::lock_guard l{o.state_lock};
+  o.phases_.t[size_t(p)] += d;
+  ++o.phases_.calls[size_t(p)];
+}
+
+void RadosFSIOObject::phase_busy(ceph::timespan slept)
+{
+  std::lock_guard l{state_lock};
+  ++phases_.busy;
+  phases_.slept += slept;
+}
+
+void RadosFSIOObject::phase_retry()
+{
+  std::lock_guard l{state_lock};
+  ++phases_.publish_retries;
+}
+
+std::optional<RadosFSIOObject::Phases> RadosFSIOObject::phases() const
+{
+  std::lock_guard l{state_lock};
+  return phases_;
+}
+
+void RadosFSIOObject::log_phases(const DoutPrefixProvider* dpp)
+{
+  if (!dpp->get_cct()->_conf->subsys.should_gather(ceph_subsys_rgw, 5)) {
+    return;
+  }
+  const auto p = *phases();
+  auto us = [&p] (Phase ph) {
+    return std::chrono::duration<double, std::micro>(p.t[size_t(ph)]).count();
+  };
+  double total = 0;
+  std::string parts;
+  for (size_t i = 0; i < size_t(Phase::n); ++i) {
+    const auto ph = Phase(i);
+    double v = us(ph);
+    /* the nested ones out of their outer phase */
+    if (ph == Phase::construct) {
+      v -= us(Phase::ready);
+    } else if (ph == Phase::write) {
+      v -= us(Phase::extend);
+    }
+    total += v;
+    parts += fmt::format(" {} {:.0f}", phase_name(ph), v);
+  }
+  ldpp_dout_fmt(dpp, 5, "FSIO session {} {}:  {:.0f} us;{} (busy {}, slept {:.0f} us, "
+		"head write retries {})", head_oid, wcs.to_str(), total, parts,
+		p.busy, std::chrono::duration<double, std::micro>(p.slept).count(),
+		p.publish_retries);
+}
+#else
+std::optional<RadosFSIOObject::Phases> RadosFSIOObject::phases() const
+{
+  return std::nullopt;
+}
+#endif
+
 int RadosFSIOObject::presence_hint(const DoutPrefixProvider* dpp, bool add,
 				   bool on_instance)
 {
+  Timed timed{*this, add ? Phase::hint_in : Phase::hint_out};	// plan 9g
   cls_rgw_fsio_hint_op in;
   in.hint.kind = cls_rgw_fsio_hint_kind::PRESENCE;
   in.hint.target = on_instance ? cls_rgw_fsio_hint_target::INSTANCE_HEAD
@@ -255,6 +328,7 @@ int RadosFSIOObject::join(const DoutPrefixProvider* dpp, bool writer,
 			  Source* src, FSIOGeometry* g,
 			  cls_rgw_fsio_join_ret* ret)
 {
+  Timed timed{*this, Phase::join};	// plan 9g
   /* §4.1, W13:  a join that must wait (§3.1 step 5) is retried with
    * backoff, for at most rgw_fsio_join_wait */
   const auto wait = dpp->get_cct()->_conf.get_val<std::chrono::seconds>(
@@ -380,6 +454,7 @@ int RadosFSIOObject::join(const DoutPrefixProvider* dpp, bool writer,
 			  << wait.count() << "s:  EAGAIN" << dendl;
 	return -EAGAIN;
       }
+      phase_busy(std::min<ceph::timespan>(backoff, until - now));
       std::this_thread::sleep_for(std::min<ceph::timespan>(backoff, until - now));
       backoff = std::min(backoff * 2, std::chrono::milliseconds(1000));
       continue;
@@ -506,6 +581,7 @@ int RadosFSIOObject::clone_chunks(const DoutPrefixProvider* dpp,
 int RadosFSIOObject::construct(const DoutPrefixProvider* dpp,
 			       const Source& src, const cls_rgw_fsio_id& id)
 {
+  Timed timed{*this, Phase::construct};	// plan 9g
   const auto& marker = info.bucket.marker;
   const FSIOGeometry* g = &wgeo;
   FSIOGeometry deferred;
@@ -575,7 +651,11 @@ int RadosFSIOObject::construct(const DoutPrefixProvider* dpp,
   in.mtime = src.mtime;
   neorados::WriteOp op;
   op.exec(neorados::cls::rgw_fsio::ready(in));
-  int r = exec(head_oid, head_ioc, std::move(op));
+  int r;
+  {
+    Timed timed{*this, Phase::ready};	// plan 9g
+    r = exec(head_oid, head_ioc, std::move(op));
+  }
   if (r == 0) {
     wsize = size;		// the join saw the shadow before fsio_ready set it
     know({0, n - 1});
@@ -1087,7 +1167,11 @@ int RadosFSIOObject::reserve(const DoutPrefixProvider* dpp, uint64_t index)
   in.runs = {run};
   neorados::WriteOp op;
   op.exec(neorados::cls::rgw_fsio::extend(in));
-  int r = exec(head_oid, head_ioc, std::move(op));
+  int r;
+  {
+    Timed timed{*this, Phase::extend};	// plan 9g
+    r = exec(head_oid, head_ioc, std::move(op));
+  }
   if (r == -CLS_RGW_ERR_FSIO_BUSY) {
     /* §3.7:  the shadow is publishing:  a fenced finalize froze its extent,
      * this gateway having been presumed dead;  as a fenced chunk, -EIO */
@@ -1207,6 +1291,7 @@ int RadosFSIOObject::pwritev(const struct iovec* iov, int iovcnt,
   const DoutPrefixProvider* dpp = &*ndp;
   io_begin();
   struct End { RadosFSIOObject* o; ~End() { o->io_end(); } } end_io{this};
+  Timed timed{*this, Phase::write};	// plan 9g
   ceph::buffer::list all;
   for (int i = 0; i < iovcnt; ++i) {
     all.append(static_cast<const char*>(iov[i].iov_base), iov[i].iov_len);
@@ -1305,6 +1390,7 @@ int RadosFSIOObject::pwritev(const struct iovec* iov, int iovcnt,
 
 int RadosFSIOObject::report_hint(const DoutPrefixProvider* dpp)
 {
+  Timed timed{*this, Phase::report};	// plan 9g
   std::lock_guard rl{report_lock};
   return do_report_hint(dpp);
 }
@@ -1525,6 +1611,7 @@ int RadosFSIOObject::fresh_layout(const DoutPrefixProvider* dpp,
 int RadosFSIOObject::construct_created(const DoutPrefixProvider* dpp,
 				       const cls_rgw_fsio_id& id)
 {
+  Timed timed{*this, Phase::construct};	// plan 9g
   ceph::buffer::list pm;
   if (int r = fresh_layout(dpp, &pm); r < 0) {
     return r;
@@ -1556,7 +1643,12 @@ int RadosFSIOObject::construct_created(const DoutPrefixProvider* dpp,
 					       : wmtime;
   neorados::WriteOp rop;
   rop.exec(neorados::cls::rgw_fsio::ready(in));
-  if (int r = exec(head_oid, head_ioc, std::move(rop)); r < 0) {
+  int rr;
+  {
+    Timed timed{*this, Phase::ready};	// plan 9g
+    rr = exec(head_oid, head_ioc, std::move(rop));
+  }
+  if (int r = rr; r < 0) {
     ldpp_dout(dpp, 0) << "ERROR: FSIO:  fsio_ready of " << id.to_str()
 		      << " on " << head_oid << ":  " << cpp_strerror(-r) << dendl;
     return r;
@@ -1670,6 +1762,7 @@ int RadosFSIOObject::leave(const DoutPrefixProvider* dpp,
 			   const cls_rgw_fsio_intent* intent, bool handoff,
 			   bool discard)
 {
+  Timed timed{*this, Phase::leave};	// plan 9g
   int r = sequenced(dpp, [&] (neorados::WriteOp& op) {
     cls_rgw_fsio_leave_op in;
     in.caller = h;
@@ -1779,6 +1872,7 @@ int RadosFSIOObject::collect_shadow(const DoutPrefixProvider* dpp,
 
 int RadosFSIOObject::drain(const DoutPrefixProvider* dpp, cls_rgw_fsio_id id)
 {
+  Timed timed{*this, Phase::cleanup};	// plan 9g
   const auto& marker = info.bucket.marker;
   for (;;) {
     cls_rgw_fsio_hdr hdr;
@@ -1949,6 +2043,7 @@ int RadosFSIOObject::close(const DoutPrefixProvider* dpp, uint32_t flags)
 int RadosFSIOObject::publish_hint(const DoutPrefixProvider* dpp, bool add,
 				  const cls_rgw_fsio_id& r)
 {
+  Timed timed{*this, add ? Phase::pub_hint : Phase::cleanup};	// plan 9g
   cls_rgw_fsio_hint_op in;
   in.hint.kind = cls_rgw_fsio_hint_kind::PUBLISH;
   in.hint.target = cls_rgw_fsio_hint_target::HEAD;
@@ -2167,6 +2262,7 @@ int RadosFSIOObject::fgetattr(const DoutPrefixProvider* dpp,
 int RadosFSIOObject::fsetattrs(const DoutPrefixProvider* dpp, Attrs& attrs,
 			       uint32_t flags)
 {
+  Timed timed{*this, Phase::attrs};	// plan 9g
   if (!writing) {
     return -EBADF;
   }
@@ -2218,6 +2314,7 @@ int RadosFSIOObject::fremovexattr(const DoutPrefixProvider* dpp,
 int RadosFSIOObject::prepare_publish(const DoutPrefixProvider* dpp,
 				     Prepared* p)
 {
+  Timed timed{*this, Phase::prepare};	// plan 9g
   const auto& marker = info.bucket.marker;
   /* 2:  the size from the chunks, final while the shadow is publishing;
    * the attributes and the pseudo-manifest from its attribute clone, the
@@ -2944,6 +3041,7 @@ int RadosFSIOObject::publish_wait(const DoutPrefixProvider* dpp,
 				  ceph::mono_time until,
 				  fu2::function_view<int()> call)
 {
+  Timed timed{*this, Phase::head_write};	// plan 9g
   auto backoff = std::chrono::milliseconds(50);
   for (;;) {
     int r;
@@ -2963,6 +3061,7 @@ int RadosFSIOObject::publish_wait(const DoutPrefixProvider* dpp,
 			<< dendl;
       return r;
     }
+    phase_retry();
     std::this_thread::sleep_for(std::min<ceph::timespan>(backoff, until - now));
     backoff = std::min(backoff * 2, std::chrono::milliseconds(1000));
   }
@@ -3008,8 +3107,11 @@ int RadosFSIOObject::end_write(const DoutPrefixProvider* dpp, uint32_t flags)
     if (!reading) {
       uncount(dpp);
       hinted = false;
-      return presence_hint(dpp, false, false);
+      const int r = presence_hint(dpp, false, false);
+      log_phases(dpp);
+      return r;
     }
+    log_phases(dpp);
     return 0;
   };
   if (linking) {

@@ -355,6 +355,9 @@
 /* Defined if OpenSSL is available for the rgw beast frontend */
 #cmakedefine WITH_RADOSGW_BEAST_OPENSSL
 
+/* Defined if the RADOS Gateway's FSIO driver times its sessions' phases */
+#cmakedefine WITH_RGW_FSIO_PHASES
+
 /* Defined if rabbitmq-c is available for rgw amqp push endpoint */
 #cmakedefine WITH_RADOSGW_AMQP_ENDPOINT
 

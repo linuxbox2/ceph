@@ -2825,6 +2825,102 @@ TEST_F(FSIORadosWait, JoinWaitsForReady)
   }
 }
 
+/* plan 9g:  where a small file's session goes, in the bench step beside
+ * IoBench;  disabled, and skipped when built without
+ * WITH_RGW_FSIO_PHASES.  128 sessions of a 4 KiB write each, as librgw
+ * runs them (the open, the write, the attributes at close, the close), on
+ * new names (create) and on existing objects (existing);  each mode three
+ * times, its median session time reported, and each phase's time and
+ * calls per session over all of them:  [ bench ] session lines, and
+ * [ phase ] mode, name, microseconds and calls per session */
+TEST_F(FSIORados, DISABLED_SessionBench)
+{
+  using FO = rgw::sal::Object::FSIOObject;
+  using Phase = rgw::sal::RadosFSIOObject::Phase;
+  using bench_clock = std::chrono::steady_clock;
+  {
+    ASSERT_EQ(0, put("probe", "x"));
+    auto w = open("probe", true);
+    ASSERT_TRUE(w);
+    const bool on = rados_fsio(w)->phases().has_value();
+    ASSERT_EQ(0, w->close(env->dpp.get(), FO::CLOSE_FLAG_DISCARD));
+    if (!on) {
+      GTEST_SKIP() << "built without WITH_RGW_FSIO_PHASES";
+    }
+  }
+  constexpr int n = 128, reps = 3;
+  constexpr uint64_t size = 4 * 1024;
+  const std::string data = pattern(size, 3);
+  for (const bool create : {true, false}) {
+    const char* mode = create ? "create" : "existing";
+    rgw::sal::RadosFSIOObject::Phases sum;
+    std::vector<double> times;
+    for (int t = 0; t < reps; ++t) {
+      std::vector<std::string> keys;
+      for (int i = 0; i < n; ++i) {
+	keys.push_back(fmt::format("session-{}-{}-{}", mode, t, i));
+	if (!create) {
+	  ASSERT_EQ(0, put(keys.back(), "old"));
+	}
+      }
+      const auto t0 = bench_clock::now();
+      for (const auto& key : keys) {
+	auto obj = bucket->get_object(rgw_obj_key(key));
+	auto [r, w] = obj->get_fsio_handle(
+	  env->dpp.get(), FO::OPEN_FLAG_WRITE |
+	  (create ? FO::OPEN_FLAG_CREATE | FO::OPEN_FLAG_EXCL : 0));
+	ASSERT_EQ(0, r) << key;
+	ASSERT_EQ(0, write(w, 0, {data})) << key;
+	rgw::sal::Attrs attrs;
+	attrs[RGW_ATTR_UNIX1].append("unix-attrs");
+	ASSERT_EQ(0, w->fsetattrs(env->dpp.get(), attrs, 0)) << key;
+	ASSERT_EQ(0, w->close(env->dpp.get(), 0)) << key;
+	const auto p = *rados_fsio(w)->phases();
+	for (size_t k = 0; k < size_t(Phase::n); ++k) {
+	  sum.t[k] += p.t[k];
+	  sum.calls[k] += p.calls[k];
+	}
+	sum.busy += p.busy;
+	sum.slept += p.slept;
+	sum.publish_retries += p.publish_retries;
+      }
+      times.push_back(
+	std::chrono::duration<double>(bench_clock::now() - t0).count());
+    }
+    std::sort(times.begin(), times.end());
+    const double secs = times[times.size() / 2];
+    std::cout << "[ bench ] session\t" << size << '\t' << mode << '\t'
+	      << fmt::format("{:.1f}\t{:.1f}", n * size / double(MiB) / secs,
+			     secs * 1e6 / n) << std::endl;
+    const double sessions = double(n) * reps;
+    auto us = [&] (Phase ph) {
+      return std::chrono::duration<double, std::micro>(
+	sum.t[size_t(ph)]).count() / sessions;
+    };
+    for (size_t k = 0; k < size_t(Phase::n); ++k) {
+      const auto ph = Phase(k);
+      double v = us(ph);
+      if (ph == Phase::construct) {
+	v -= us(Phase::ready);
+      } else if (ph == Phase::write) {
+	v -= us(Phase::extend);
+      }
+      std::cout << "[ phase ] " << mode << '\t'
+		<< rgw::sal::RadosFSIOObject::phase_name(ph) << '\t'
+		<< fmt::format("{:.1f}\t{:.2f}", v, sum.calls[k] / sessions)
+		<< std::endl;
+    }
+    std::cout << "[ phase ] " << mode << "\tbusy\t"
+	      << fmt::format("{:.1f}\t{:.2f}",
+			     std::chrono::duration<double, std::micro>(
+			       sum.slept).count() / sessions,
+			     sum.busy / sessions) << std::endl;
+    std::cout << "[ phase ] " << mode << "\tretries\t0.0\t"
+	      << fmt::format("{:.2f}", sum.publish_retries / sessions)
+	      << std::endl;
+  }
+}
+
 /* §4.5, plan 9f:  the I/O benchmark fsio_validate.rs's bench step runs;
  * disabled, since it measures rather than tests.  Only each case's I/O is
  * timed:  writes and reads by call size, with one chunk operation at a

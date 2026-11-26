@@ -25,8 +25,9 @@ edition = "2021"
 //!   librgw-rados   ceph_test_librgw_file_fsio_put            (RADOS)
 //!   harness        unittest_rgw_fsio_geometry (no cluster), then
 //!                  ceph_test_rgw_fsio_rados, the driver's harness (RADOS)
-//!   bench          the harness's I/O benchmark:  reads and writes by call
-//!                  size and mode, against RGW PUT and GET   (RADOS)
+//!   bench          the harness's benchmarks:  reads and writes by call
+//!                  size and mode, against RGW PUT and GET;  a small file's
+//!                  session by phase, with WITH_RGW_FSIO_PHASES  (RADOS)
 //!   write2-rados   write2, and nfsns with every group flag    (RADOS)
 //!   cluster-tier   the model's cluster tier, the origin check off (RADOS)
 //!   model          the model's in-memory tiers:  quick vectors skips
@@ -314,7 +315,7 @@ fn rados_phase(o: &Opts, steps: &[&'static str], run_dir: &Path, summary: &mut V
                     let extra = std::cell::RefCell::new(Vec::new());
                     let c = sh("bench", "the I/O benchmark", format!(
                         "env CEPH_CONF={conf} bin/ceph_test_rgw_fsio_rados \
-                         --gtest_also_run_disabled_tests --gtest_filter='*IoBench*'"));
+                         --gtest_also_run_disabled_tests --gtest_filter='*IoBench*:*SessionBench*'"));
                     failed |= !exec(o, &c, run_dir, summary, |text| {
                         let (note, lines) = bench_report(text, run_dir);
                         *extra.borrow_mut() = lines;
@@ -572,7 +573,8 @@ fn bench_report(text: &str, run_dir: &Path) -> (String, Vec<String>) {
     let find = |cs: &[BenchCase], op: &str, bytes: u64, mode: &str| {
         cs.iter().find(|c| c.op == op && c.bytes == bytes && c.mode == mode).map(|c| c.mibs)
     };
-    let mut keys: Vec<(String, u64)> = cases.iter().map(|c| (c.op.clone(), c.bytes)).collect();
+    let mut keys: Vec<(String, u64)> = cases.iter().filter(|c| c.op != "session")
+        .map(|c| (c.op.clone(), c.bytes)).collect();
     keys.dedup();
     let mut lines = vec![];
     for (op, bytes) in keys {
@@ -592,6 +594,32 @@ fn bench_report(text: &str, run_dir: &Path) -> (String, Vec<String>) {
             l += &format!(";  {:+.0}% on {d}", (best.mibs / was - 1.0) * 100.0);
         }
         lines.push(format!("{:<14} {l}", "bench"));
+    }
+    /* plan 9g:  the sessions' phases, saved as phases.tsv;  a line per
+     * mode, its session time and its three largest phases */
+    let phases: Vec<Vec<String>> = text.lines()
+        .filter_map(|l| l.trim().strip_prefix("[ phase ]"))
+        .map(|l| l.trim().split('\t').map(String::from).collect::<Vec<_>>())
+        .filter(|f| f.len() == 4).collect();
+    if !phases.is_empty() {
+        let mut tsv = String::from("mode\tphase\tusec/session\tcalls/session\n");
+        for f in &phases {
+            tsv += &format!("{}\n", f.join("\t"));
+        }
+        let _ = std::fs::write(run_dir.join("phases.tsv"), &tsv);
+    }
+    for c in cases.iter().filter(|c| c.op == "session") {
+        let mut top: Vec<(&str, f64)> = phases.iter()
+            .filter(|f| f[0] == c.mode && f[1] != "busy" && f[1] != "retries")
+            .filter_map(|f| Some((f[1].as_str(), f[2].parse::<f64>().ok()?))).collect();
+        top.sort_by(|a, b| b.1.total_cmp(&a.1));
+        let top: Vec<String> = top.iter().take(3)
+            .map(|(n, v)| format!("{n} {:.2} ms", v / 1000.0)).collect();
+        lines.push(format!("{:<14} session {:<8}:  {:.2} ms;  {}", "bench", c.mode,
+                           c.usec / 1000.0, top.join(", ")));
+    }
+    if text.contains("built without WITH_RGW_FSIO_PHASES") {
+        lines.push(format!("{:<14} session:  skipped, built without WITH_RGW_FSIO_PHASES", "bench"));
     }
     let note = match &earlier {
         Some(d) => format!("{} cases;  against {}", cases.len(),

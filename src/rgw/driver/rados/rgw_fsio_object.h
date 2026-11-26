@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <array>
 #include <atomic>
 #include <cstdint>
 #include <memory>
@@ -12,7 +13,9 @@
 #include <string>
 #include <vector>
 
+#include "acconfig.h"
 #include "common/ceph_mutex.h"
+#include "common/ceph_time.h"
 #include "include/function2.hpp"
 #include "include/neorados/RADOS.hpp"
 #include "cls/rgw/cls_rgw_fsio_ops.h"
@@ -153,6 +156,22 @@ public:
 
   /* the fsio_extend calls this handle has made */
   uint64_t extends() const { return n_extends; }
+  /* plan 9g:  where a write session's time goes;  timed only when built
+   * WITH_RGW_FSIO_PHASES.  construct excludes its ready, write its
+   * extend, when reported */
+  enum class Phase : uint8_t { hint_in, join, construct, ready, extend,
+			       write, attrs, report, leave, pub_hint, prepare,
+			       head_write, cleanup, hint_out, n };
+  static const char* phase_name(Phase p);
+  struct Phases {
+    std::array<ceph::timespan, size_t(Phase::n)> t{};
+    std::array<uint32_t, size_t(Phase::n)> calls{};
+    uint32_t busy = 0;			// fsio_join BUSY replies
+    ceph::timespan slept{};		// its backoff sleeps
+    uint32_t publish_retries = 0;	// head writes retried
+  };
+  /* nullopt when built without the option */
+  std::optional<Phases> phases() const;
   /* test only:  write ops sent to chunks (§4.5) */
   uint64_t chunk_writes() const { return n_chunk_writes; }
 
@@ -435,7 +454,7 @@ private:
   /* §4.5:  what concurrent reads and writes share (the runs held, hwm,
    * wsize, wmtime, trunc_epoch, others, dirty, unsure, last_report,
    * n_extends, seg_moved, iocs), never held across a RADOS operation */
-  ceph::mutex state_lock = ceph::make_mutex("RadosFSIOObject::state");
+  mutable ceph::mutex state_lock = ceph::make_mutex("RadosFSIOObject::state");
   ceph::condition_variable io_cond;
   unsigned in_flight = 0;		// reads and writes in progress
   /* §4.5:  fsio_extend calls one at a time;  one size report at a time */
@@ -445,6 +464,28 @@ private:
   ceph::mutex queue_lock = ceph::make_mutex("RadosFSIOObject::queue");
   std::map<uint64_t, ChunkQueue> chunkq;	// by chunk index
   std::atomic<uint64_t> n_chunk_writes{0};
+#ifdef WITH_RGW_FSIO_PHASES
+  Phases phases_;			// under state_lock
+  class Timed {
+    RadosFSIOObject& o;
+    Phase p;
+    ceph::mono_time t0;
+  public:
+    Timed(RadosFSIOObject& o, Phase p)
+      : o(o), p(p), t0(ceph::mono_clock::now()) {}
+    ~Timed();
+  };
+  void phase_busy(ceph::timespan slept);
+  void phase_retry();
+  void log_phases(const DoutPrefixProvider* dpp);
+#else
+  struct Timed {
+    Timed(RadosFSIOObject&, Phase) {}
+  };
+  void phase_busy(ceph::timespan) {}
+  void phase_retry() {}
+  void log_phases(const DoutPrefixProvider*) {}
+#endif
 };
 
 } // namespace rgw::sal

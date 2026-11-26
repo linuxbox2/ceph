@@ -602,6 +602,7 @@ option(WITH_RADOSGW_LUA_PACKAGES "RADOS Gateway's support for dynamically adding
 option(WITH_RADOSGW_FDB "FoundationDB support for RADOS Gateway (experimental)" OFF)
 option(WITH_RADOSGW_DBSTORE "DBStore backend for RADOS Gateway" ON)
 option(WITH_RADOSGW_DAOS "DAOS backend for RADOS Gateway" OFF)
+option(WITH_RGW_FSIO_PHASES "RADOS Gateway FSIO driver times its sessions' phases" OFF)
 if(WITH_RADOSGW_DAOS)
     message(WARNING "The DAOS SAL has been unmaintained and does not compile against DAOS libraries.")
 endif(WITH_RADOSGW_DAOS)
