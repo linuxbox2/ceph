@@ -1644,6 +1644,10 @@ int RadosFSIOObject::construct_created(const DoutPrefixProvider* dpp,
   in.size = 0;
   in.mtime = ceph::real_clock::is_zero(wmtime) ? ceph::real_clock::now()
 					       : wmtime;
+  /* §3.2, 2026-11-25:  the run its first write would reserve */
+  const uint64_t base = dpp->get_cct()->_conf.get_val<uint64_t>(
+    "rgw_fsio_extent_reserve");
+  in.runs = {cls_rgw_fsio_run{0, base - 1}};
   neorados::WriteOp rop;
   rop.exec(neorados::cls::rgw_fsio::ready(in));
   int rr;
@@ -1657,6 +1661,8 @@ int RadosFSIOObject::construct_created(const DoutPrefixProvider* dpp,
     return r;
   }
   wsize = 0;
+  std::lock_guard l{state_lock};
+  know(in.runs.front());
   return 0;
 }
 

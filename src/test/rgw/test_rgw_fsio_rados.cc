@@ -2696,7 +2696,9 @@ TEST_F(FSIORadosCreate, ScanSizeOfACreateIsTheWrittenEnd)
   std::unique_ptr<FO> w;
   ASSERT_EQ(0, create("scan", false, &w));
   ASSERT_EQ(0, write(w, 0, {pattern(4096, 2)}));
-  ASSERT_GE(rados_fsio(w)->extends(), 1u) << "no run reserved";
+  const auto extent = extent_of("scan", rados_fsio(w)->writing_to());
+  ASSERT_FALSE(extent.empty());
+  EXPECT_EQ(15u, extent.back().last) << "not the create's 16-chunk run";
   ASSERT_EQ(0, w->close(env->dpp.get(), 0));
   int64_t size = -1;
   ASSERT_EQ(0, s3_size("scan", &size));
@@ -2724,6 +2726,20 @@ TEST_F(FSIORadosCreate, AttrCloneRoleIsRemembered)
 		ceph::async::use_blocked);
   ASSERT_TRUE(got.count(RGW_ATTR_UNIX1));
   EXPECT_EQ("unix-attrs", got[RGW_ATTR_UNIX1].to_str());
+}
+
+/* §3.2, 2026-11-25:  a create's fsio_ready reserves the run its first
+ * write would:  that write makes no fsio_extend */
+TEST_F(FSIORadosCreate, CreateReservesItsFirstRun)
+{
+  std::unique_ptr<FO> w;
+  ASSERT_EQ(0, create("firstrun", false, &w));
+  ASSERT_EQ(0, write(w, 0, {pattern(4096, 4)}));
+  EXPECT_EQ(0u, rados_fsio(w)->extends()) << "the first write extended";
+  ASSERT_EQ(0, w->close(env->dpp.get(), 0));
+  int64_t size = -1;
+  ASSERT_EQ(0, s3_size("firstrun", &size));
+  EXPECT_EQ(4096, size);
 }
 
 TEST_F(FSIORadosCreate, CreateSetsTheSpecAttributes)
