@@ -2838,6 +2838,14 @@ bool RGWRados::fsio_enabled(const DoutPrefixProvider *dpp,
       pools.push_back(*sc.data_pool);
     }
   }
+  /* RGWZoneParams::get_head_data_pool():  an explicit data pool takes
+   * every object of the bucket, heads and tails, whatever its rule */
+  const auto& ep = info.bucket.explicit_placement;
+  for (const auto* p : {&ep.data_pool, &ep.data_extra_pool, &ep.index_pool}) {
+    if (!p->empty()) {
+      pools.push_back(*p);
+    }
+  }
   auto& neo = driver->get_neorados();
   for (const auto& pool : pools) {
     if (pool.name.empty()) {

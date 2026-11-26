@@ -4309,6 +4309,72 @@ TEST_F(FSIORadosNewPool, CreateMakesTheDataPool)
   EXPECT_EQ("hello", now);
 }
 
+/* the gate checks a bucket's explicit data pool, which takes every object
+ * of the bucket whatever its rule (RGWZoneParams::get_head_data_pool()):
+ * an EC one serves only with overwrites (design §7).  The gate reads the
+ * OSDMap only, so the pool's PGs need not be active */
+class FSIORadosExplicitPool : public FSIORadosCreate {
+protected:
+  std::string pool_name;
+
+  void mon(const std::string& cmd) {
+    sys::error_code ec;
+    std::string outs;
+    neo().mon_command({cmd}, {}, &outs, nullptr,
+		      ceph::async::use_blocked[ec]);
+    ASSERT_FALSE(ec) << cmd << ":  " << outs;
+  }
+  /* a 2+1 EC pool, with overwrites if asked, as the bucket's explicit
+   * data pool */
+  void ec_pool(bool overwrites) {
+    pool_name = "fsio-test-ec-" +
+      gen_rand_alphanumeric_lower(g_ceph_context, 12);
+    mon(fmt::format(
+	  R"({{"prefix": "osd erasure-code-profile set", "name": "{}", )"
+	  R"("profile": ["k=2", "m=1", "crush-failure-domain=osd"]}})",
+	  pool_name));
+    mon(fmt::format(
+	  R"({{"prefix": "osd pool create", "pool": "{}", "pool_type": "erasure", )"
+	  R"("pg_num": 8, "pgp_num": 8, "erasure_code_profile": "{}"}})",
+	  pool_name, pool_name));
+    if (overwrites) {
+      mon(fmt::format(
+	    R"({{"prefix": "osd pool set", "pool": "{}", )"
+	    R"("var": "allow_ec_overwrites", "val": "true"}})", pool_name));
+    }
+    bucket->get_info().bucket.explicit_placement.data_pool =
+      rgw_pool(pool_name);
+  }
+  void TearDown() override {
+    FSIORadosCreate::TearDown();
+    if (pool_name.empty()) {
+      return;
+    }
+    sys::error_code ec;
+    neo().delete_pool(pool_name, ceph::async::use_blocked[ec]);
+    std::string outs;
+    neo().mon_command(
+      {fmt::format(R"({{"prefix": "osd erasure-code-profile rm", "name": "{}"}})",
+		   pool_name)}, {}, &outs, nullptr, ceph::async::use_blocked[ec]);
+    neo().mon_command(
+      {fmt::format(R"({{"prefix": "osd crush rule rm", "name": "{}"}})",
+		   pool_name)}, {}, &outs, nullptr, ceph::async::use_blocked[ec]);
+  }
+};
+
+TEST_F(FSIORadosExplicitPool, ECWithoutOverwritesDeclines)
+{
+  ASSERT_TRUE(bucket->have_fsio());
+  ASSERT_NO_FATAL_FAILURE(ec_pool(false));
+  EXPECT_FALSE(bucket->have_fsio());
+}
+
+TEST_F(FSIORadosExplicitPool, ECWithOverwritesServes)
+{
+  ASSERT_NO_FATAL_FAILURE(ec_pool(true));
+  EXPECT_TRUE(bucket->have_fsio());
+}
+
 /* §2.4, plan step 9b:  a handle's attributes.  A writer's are its
  * shadow's attribute clone's, carried to the head by the publish;  a
  * reader's are its bound content's, and it sets none;  FSIO's own records
