@@ -189,10 +189,9 @@ int RadosFSIOObject::presence_hint(const DoutPrefixProvider* dpp, bool add,
   }
   int r = exec(shard, store->getRados()->fsio_hint_ioc(), std::move(op));
   if (r < 0) {
-    ldpp_dout(dpp, 0) << "ERROR: FSIO:  " << (add ? "adding" : "removing")
-		      << " the presence hint of " << h.incarnation << "."
-		      << h.handle << " on " << in.oid << ":  "
-		      << cpp_strerror(-r) << dendl;
+    ldpp_dout_fmt(dpp, 0, "ERROR: FSIO:  {} the presence hint of {}.{} on "
+		  "{}:  {}", (add ? "adding" : "removing"), h.incarnation,
+		  h.handle, in.oid, cpp_strerror(-r));
   }
   return r;
 }
@@ -231,8 +230,8 @@ int RadosFSIOObject::read_source(const DoutPrefixProvider* dpp,
       decode(m, it);
       src->size = m.get_obj_size();
     } catch (const ceph::buffer::error& e) {
-      ldpp_dout(dpp, 0) << "ERROR: FSIO:  undecodable manifest on " << oid
-			<< ":  " << e.what() << dendl;
+      ldpp_dout_fmt(dpp, 0, "ERROR: FSIO:  undecodable manifest on {}:  {}",
+		    oid, e.what());
       return -EIO;
     }
   }
@@ -270,8 +269,8 @@ int RadosFSIOObject::read_olh(const DoutPrefixProvider* dpp, Olh* olh)
     }
     olh->instance = oi.target.key.instance;
   } catch (const ceph::buffer::error& e) {
-    ldpp_dout(dpp, 0) << "ERROR: FSIO:  undecodable OLH info on " << head_oid
-		      << ":  " << e.what() << dendl;
+    ldpp_dout_fmt(dpp, 0, "ERROR: FSIO:  undecodable OLH info on {}:  {}",
+		  head_oid, e.what());
     return -EIO;
   }
   return 0;
@@ -336,8 +335,8 @@ int RadosFSIOObject::uncount(const DoutPrefixProvider* dpp)
     neorados::WriteOp op;
     op.exec(neorados::cls::rgw_fsio::ocnt_remove(in, &ret));
     if (int r = exec(inst_oid, inst_ioc, std::move(op)); r < 0) {
-      ldpp_dout(dpp, 0) << "ERROR: FSIO:  fsio_ocnt_remove on " << inst_oid
-			<< ":  " << cpp_strerror(-r) << dendl;
+      ldpp_dout_fmt(dpp, 0, "ERROR: FSIO:  fsio_ocnt_remove on {}:  {}",
+		    inst_oid, cpp_strerror(-r));
       return r;
     }
     counted = false;
@@ -480,8 +479,8 @@ int RadosFSIOObject::join(const DoutPrefixProvider* dpp, bool writer,
        * a last try at its end */
       const auto now = ceph::mono_clock::now();
       if (now >= until) {
-	ldpp_dout(dpp, 1) << "FSIO:  fsio_join on " << head_oid << " waited "
-			  << wait.count() << "s:  EAGAIN" << dendl;
+	ldpp_dout_fmt(dpp, 1, "FSIO:  fsio_join on {} waited {}s:  EAGAIN",
+		      head_oid, wait.count());
 	return -EAGAIN;
       }
       phase_busy(std::min<ceph::timespan>(backoff, until - now));
@@ -490,9 +489,9 @@ int RadosFSIOObject::join(const DoutPrefixProvider* dpp, bool writer,
       continue;
     }
     if (r < 0) {
-      ldpp_dout(dpp, 1) << "FSIO:  fsio_join as " << (writer ? "writer" : "reader")
-			<< " of " << head_oid << " by " << h.incarnation << "."
-			<< h.handle << ":  " << cpp_strerror(-r) << dendl;
+      ldpp_dout_fmt(dpp, 1, "FSIO:  fsio_join as {} of {} by {}.{}:  {}",
+		    (writer ? "writer" : "reader"), head_oid, h.incarnation,
+		    h.handle, cpp_strerror(-r));
       return r;
     }
     seq = in.seq;
@@ -527,9 +526,9 @@ int RadosFSIOObject::find_deferred(const DoutPrefixProvider* dpp,
       return 0;
     }
   }
-  ldpp_dout(dpp, 0) << "ERROR: FSIO:  the content " << counted_gc_tag
-		    << " counted on " << inst_oid << " is neither the instance "
-		    << "head's nor deferred" << dendl;
+  ldpp_dout_fmt(dpp, 0, "ERROR: FSIO:  the content {} counted on {} is "
+		"neither the instance head's nor deferred", counted_gc_tag,
+		inst_oid);
   return -ENOENT;
 }
 
@@ -557,9 +556,8 @@ int RadosFSIOObject::clone_chunks(const DoutPrefixProvider* dpp,
     for (auto& d : done) {
       if (d.result < 0 && d.result != -EEXIST && !first) {
 	first = d.result;
-	ldpp_dout(dpp, 0) << "ERROR: FSIO:  cloning " << d.obj.oid << " for "
-			  << id.to_str() << ":  " << cpp_strerror(-first)
-			  << dendl;
+	ldpp_dout_fmt(dpp, 0, "ERROR: FSIO:  cloning {} for {}:  {}", d.obj.oid,
+		      id.to_str(), cpp_strerror(-first));
       }
     }
     done.clear_and_dispose(std::default_delete<rgw::AioResultEntry>{});
@@ -663,9 +661,8 @@ int RadosFSIOObject::construct(const DoutPrefixProvider* dpp,
       size = deferred.size();
     }
     if (r < 0 && r != -EEXIST) {
-      ldpp_dout(dpp, 0) << "ERROR: FSIO:  cloning the instance head "
-			<< inst_oid << " for " << id.to_str() << ":  "
-			<< cpp_strerror(-r) << dendl;
+      ldpp_dout_fmt(dpp, 0, "ERROR: FSIO:  cloning the instance head {} for "
+		    "{}:  {}", inst_oid, id.to_str(), cpp_strerror(-r));
       return r;
     }
   }
@@ -692,8 +689,8 @@ int RadosFSIOObject::construct(const DoutPrefixProvider* dpp,
     know({0, n - 1});
   }
   if (r < 0) {
-    ldpp_dout(dpp, 0) << "ERROR: FSIO:  fsio_ready of " << id.to_str()
-		      << " on " << head_oid << ":  " << cpp_strerror(-r) << dendl;
+    ldpp_dout_fmt(dpp, 0, "ERROR: FSIO:  fsio_ready of {} on {}:  {}",
+		  id.to_str(), head_oid, cpp_strerror(-r));
   }
   return r;
 }
@@ -827,9 +824,8 @@ int RadosFSIOObject::ftruncate(const DoutPrefixProvider* dpp, uint64_t size,
     body(op);
     int r = exec(raw.oid, ioc, std::move(op));
     if (r == -ECANCELED) {
-      ldpp_dout(dpp, 0) << "ERROR: FSIO:  truncating chunk " << c.index
-			<< " (" << raw.oid << ") of " << wcs.to_str()
-			<< ":  it is fenced" << dendl;
+      ldpp_dout_fmt(dpp, 0, "ERROR: FSIO:  truncating chunk {} ({}) of {}:  "
+		    "it is fenced", c.index, raw.oid, wcs.to_str());
       return -EIO;
     }
     return r;
@@ -895,13 +891,13 @@ int RadosFSIOObject::ftruncate(const DoutPrefixProvider* dpp, uint64_t size,
     op.exec(neorados::cls::rgw_fsio::truncate(in, &ret));
   });
   if (r == -CLS_RGW_ERR_FSIO_BUSY) {
-    ldpp_dout(dpp, 0) << "ERROR: FSIO:  fsio_truncate of " << wcs.to_str()
-		      << " on " << head_oid << ":  publishing" << dendl;
+    ldpp_dout_fmt(dpp, 0, "ERROR: FSIO:  fsio_truncate of {} on {}:  "
+		  "publishing", wcs.to_str(), head_oid);
     return -EIO;
   }
   if (r < 0) {
-    ldpp_dout(dpp, 0) << "ERROR: FSIO:  fsio_truncate of " << wcs.to_str()
-		      << " on " << head_oid << ":  " << cpp_strerror(-r) << dendl;
+    ldpp_dout_fmt(dpp, 0, "ERROR: FSIO:  fsio_truncate of {} on {}:  {}",
+		  wcs.to_str(), head_oid, cpp_strerror(-r));
     return r;
   }
   hwm = size;
@@ -910,8 +906,8 @@ int RadosFSIOObject::ftruncate(const DoutPrefixProvider* dpp, uint64_t size,
     /* §3.3:  applied, its reply lost:  the epoch it carried cannot be
      * recovered from the head, which may show a later truncate's;  keep
      * the one it knew, owe a report, and rebase before trusting a length */
-    ldpp_dout(dpp, 1) << "FSIO:  fsio_truncate of " << wcs.to_str()
-		      << " was applied, its reply lost" << dendl;
+    ldpp_dout_fmt(dpp, 1, "FSIO:  fsio_truncate of {} was applied, its reply "
+		  "lost", wcs.to_str());
     unsure = true;
     dirty = true;
     return 0;
@@ -948,9 +944,8 @@ int RadosFSIOObject::find_moved_segment(const DoutPrefixProvider* dpp)
       return 0;
     }
   }
-  ldpp_dout(dpp, 0) << "ERROR: FSIO:  the head segment of " << cs.to_str()
-		    << " moved from " << seg_oid << ", but its chunk set "
-		    << "names no clone" << dendl;
+  ldpp_dout_fmt(dpp, 0, "ERROR: FSIO:  the head segment of {} moved from {}, "
+		"but its chunk set names no clone", cs.to_str(), seg_oid);
   return -EIO;
 }
 
@@ -991,9 +986,8 @@ int RadosFSIOObject::read_piece(const DoutPrefixProvider* dpp,
 	return m;
       }
       std::lock_guard l{state_lock};
-      ldpp_dout(dpp, 1) << "FSIO:  the head segment of " << seg_oid
-			<< " moved to " << *seg_moved << " (" << cpp_strerror(-r)
-			<< ")" << dendl;
+      ldpp_dout_fmt(dpp, 1, "FSIO:  the head segment of {} moved to {} ({})",
+		    seg_oid, *seg_moved, cpp_strerror(-r));
       bl->clear();
       continue;
     }
@@ -1097,9 +1091,9 @@ int RadosFSIOObject::preadv(const struct iovec* iov, int iovcnt, uint64_t ofs,
     if (r == -ENOENT && shadow) {
       bl.clear();		// a hole in the shadow:  zeros (Z11)
     } else if (r < 0 || (!shadow && bl.length() < len)) {
-      ldpp_dout(dpp, 0) << "ERROR: FSIO:  reading chunk " << c.index << " ("
-			<< c.anchor.oid << ") of " << head_oid << ":  "
-			<< (r < 0 ? cpp_strerror(-r) : "short") << dendl;
+      ldpp_dout_fmt(dpp, 0, "ERROR: FSIO:  reading chunk {} ({}) of {}:  {}",
+		    c.index, c.anchor.oid, head_oid,
+		    (r < 0 ? cpp_strerror(-r) : "short"));
       return -EIO;
     }
     for (const auto& buf : bl.buffers()) {
@@ -1176,13 +1170,13 @@ int RadosFSIOObject::reserve(const DoutPrefixProvider* dpp, uint64_t index)
   if (r == -CLS_RGW_ERR_FSIO_BUSY) {
     /* §3.7:  the shadow is publishing:  a fenced finalize froze its extent,
      * this gateway having been presumed dead;  as a fenced chunk, -EIO */
-    ldpp_dout(dpp, 0) << "ERROR: FSIO:  fsio_extend of " << wcs.to_str()
-		      << " on " << head_oid << ":  its extent is frozen" << dendl;
+    ldpp_dout_fmt(dpp, 0, "ERROR: FSIO:  fsio_extend of {} on {}:  its extent "
+		  "is frozen", wcs.to_str(), head_oid);
     return -EIO;
   }
   if (r < 0) {
-    ldpp_dout(dpp, 0) << "ERROR: FSIO:  fsio_extend of " << wcs.to_str()
-		      << " on " << head_oid << ":  " << cpp_strerror(-r) << dendl;
+    ldpp_dout_fmt(dpp, 0, "ERROR: FSIO:  fsio_extend of {} on {}:  {}",
+		  wcs.to_str(), head_oid, cpp_strerror(-r));
     return r;
   }
   std::lock_guard l{state_lock};
@@ -1418,9 +1412,8 @@ int RadosFSIOObject::do_report_hint(const DoutPrefixProvider* dpp)
     neorados::WriteOp op;
     op.exec(neorados::cls::rgw_fsio::hint(in, &ret));
     if (int r = exec(head_oid, head_ioc, std::move(op)); r < 0) {
-      ldpp_dout(dpp, 0) << "ERROR: FSIO:  fsio_hint of " << wcs.to_str()
-			<< " on " << head_oid << ":  " << cpp_strerror(-r)
-			<< dendl;
+      ldpp_dout_fmt(dpp, 0, "ERROR: FSIO:  fsio_hint of {} on {}:  {}",
+		    wcs.to_str(), head_oid, cpp_strerror(-r));
       return r;
     }
     {
@@ -1464,9 +1457,9 @@ int RadosFSIOObject::do_report_hint(const DoutPrefixProvider* dpp)
       }
     }
     std::lock_guard l{state_lock};
-    ldpp_dout(dpp, 10) << "FSIO:  " << wcs.to_str() << " truncated since its "
-		       << "last report:  rebased from " << seen_hwm << " to "
-		       << end << " at epoch " << trunc_epoch << dendl;
+    ldpp_dout_fmt(dpp, 10, "FSIO:  {} truncated since its last report:  "
+		  "rebased from {} to {} at epoch {}", wcs.to_str(), seen_hwm,
+		  end, trunc_epoch);
     /* §4.5:  a write that landed since it read hwm wrote past the truncate */
     hwm = hwm == seen_hwm ? end : std::max(hwm, end);
     wsize = ret.size;
@@ -1634,8 +1627,8 @@ int RadosFSIOObject::construct_created(const DoutPrefixProvider* dpp,
   const auto attr_oid = cls_rgw_fsio_clone_name(info.bucket.marker, 'a', id,
 						head_oid);
   if (int r = exec(attr_oid, aioc, std::move(op)); r < 0 && r != -EEXIST) {
-    ldpp_dout(dpp, 0) << "ERROR: FSIO:  writing " << attr_oid << ":  "
-		      << cpp_strerror(-r) << dendl;
+    ldpp_dout_fmt(dpp, 0, "ERROR: FSIO:  writing {}:  {}", attr_oid,
+		  cpp_strerror(-r));
     return r;
   }
   cls_rgw_fsio_runs_op in;
@@ -1656,8 +1649,8 @@ int RadosFSIOObject::construct_created(const DoutPrefixProvider* dpp,
     rr = exec(head_oid, head_ioc, std::move(rop));
   }
   if (int r = rr; r < 0) {
-    ldpp_dout(dpp, 0) << "ERROR: FSIO:  fsio_ready of " << id.to_str()
-		      << " on " << head_oid << ":  " << cpp_strerror(-r) << dendl;
+    ldpp_dout_fmt(dpp, 0, "ERROR: FSIO:  fsio_ready of {} on {}:  {}",
+		  id.to_str(), head_oid, cpp_strerror(-r));
     return r;
   }
   wsize = 0;
@@ -1683,8 +1676,8 @@ int RadosFSIOObject::shadow_pm(const DoutPrefixProvider* dpp,
       return 0;
     }
   }
-  ldpp_dout(dpp, 0) << "ERROR: FSIO:  no attribute clone for " << id.to_str()
-		    << " on " << head_oid << dendl;
+  ldpp_dout_fmt(dpp, 0, "ERROR: FSIO:  no attribute clone for {} on {}",
+		id.to_str(), head_oid);
   return -EIO;
 }
 
@@ -1700,11 +1693,11 @@ int RadosFSIOObject::abandon(const DoutPrefixProvider* dpp, const Source& src)
   int r = leave(dpp, wcs, true, &ret);
   writing = false;
   if (r == 0 && !ret.abandoned) {
-    ldpp_dout(dpp, 0) << "ERROR: FSIO:  fsio_leave of the constructing "
-		      << wcs.to_str() << " did not abandon it" << dendl;
+    ldpp_dout_fmt(dpp, 0, "ERROR: FSIO:  fsio_leave of the constructing {} "
+		  "did not abandon it", wcs.to_str());
   }
-  ldpp_dout(dpp, 1) << "FSIO:  construction of " << wcs.to_str() << " on "
-		    << head_oid << " failed;  abandoned" << dendl;
+  ldpp_dout_fmt(dpp, 1, "FSIO:  construction of {} on {} failed;  abandoned",
+		wcs.to_str(), head_oid);
   if (!reading) {
     uncount(dpp);
     presence_hint(dpp, false, false);
@@ -1726,8 +1719,8 @@ int RadosFSIOObject::begin_write(const DoutPrefixProvider* dpp, uint32_t flags,
       op.exec(neorados::cls::rgw_fsio::writer_identity(
 		cls_rgw_fsio_identity_op{h, wcs, identity}));
       if (int r = exec(head_oid, head_ioc, std::move(op)); r < 0) {
-	ldpp_dout(dpp, 0) << "ERROR: FSIO:  fsio_writer_identity on "
-			  << head_oid << ":  " << cpp_strerror(-r) << dendl;
+	ldpp_dout_fmt(dpp, 0, "ERROR: FSIO:  fsio_writer_identity on {}:  {}",
+		      head_oid, cpp_strerror(-r));
 	return r;
       }
     }
@@ -1752,9 +1745,8 @@ int RadosFSIOObject::begin_write(const DoutPrefixProvider* dpp, uint32_t flags,
     op.exec(neorados::cls::rgw_fsio::rebind(in, &ret));
   });
   if (r < 0) {
-    ldpp_dout(dpp, 0) << "ERROR: FSIO:  fsio_rebind of " << cs.to_str()
-		      << " to " << wcs.to_str() << ":  " << cpp_strerror(-r)
-		      << dendl;
+    ldpp_dout_fmt(dpp, 0, "ERROR: FSIO:  fsio_rebind of {} to {}:  {}",
+		  cs.to_str(), wcs.to_str(), cpp_strerror(-r));
     return 0;			// the reader stays where it was
   }
   cs = wcs;
@@ -1789,10 +1781,9 @@ int RadosFSIOObject::leave(const DoutPrefixProvider* dpp,
     op.exec(neorados::cls::rgw_fsio::leave(in, ret));
   });
   if (r < 0 && r != -EINVAL) {
-    ldpp_dout(dpp, 0) << "ERROR: FSIO:  fsio_leave as "
-		      << (writer ? "writer" : "reader") << " of " << head_oid
-		      << " by " << h.incarnation << "." << h.handle << ":  "
-		      << cpp_strerror(-r) << dendl;
+    ldpp_dout_fmt(dpp, 0, "ERROR: FSIO:  fsio_leave as {} of {} by {}.{}:  {}",
+		  (writer ? "writer" : "reader"), head_oid, h.incarnation,
+		  h.handle, cpp_strerror(-r));
   }
   return r;
 }
@@ -1873,8 +1864,8 @@ int RadosFSIOObject::collect_shadow(const DoutPrefixProvider* dpp,
     }
   }
   if (ec || !pm.length()) {
-    ldpp_dout(dpp, 0) << "ERROR: FSIO:  no pseudo-manifest for "
-		      << id.to_str() << " on " << base << dendl;
+    ldpp_dout_fmt(dpp, 0, "ERROR: FSIO:  no pseudo-manifest for {} on {}",
+		  id.to_str(), base);
     return -EIO;
   }
   return store->getRados()->send_manifest_to_gc(
@@ -1914,9 +1905,8 @@ int RadosFSIOObject::drain(const DoutPrefixProvider* dpp, cls_rgw_fsio_id id)
     neorados::WriteOp op;
     op.exec(neorados::cls::rgw_fsio::forget(cls_rgw_fsio_cs_op{h, id}, &ret));
     if (int r = exec(head_oid, head_ioc, std::move(op)); r < 0) {
-      ldpp_dout(dpp, 0) << "ERROR: FSIO:  fsio_forget of " << id.to_str()
-			<< " on " << head_oid << ":  " << cpp_strerror(-r)
-			<< dendl;
+      ldpp_dout_fmt(dpp, 0, "ERROR: FSIO:  fsio_forget of {} on {}:  {}",
+		    id.to_str(), head_oid, cpp_strerror(-r));
       return r;
     }
     if (!ret.drained) {
@@ -2077,9 +2067,9 @@ int RadosFSIOObject::publish_hint(const DoutPrefixProvider* dpp, bool add,
 		 rgw::fsio::open_hint_shard(in.oid, shards)),
 	       store->getRados()->fsio_hint_ioc(), std::move(op));
   if (e < 0) {
-    ldpp_dout(dpp, 0) << "ERROR: FSIO:  " << (add ? "adding" : "removing")
-		      << " the publish hint for " << r.to_str() << " on "
-		      << head_oid << ":  " << cpp_strerror(-e) << dendl;
+    ldpp_dout_fmt(dpp, 0, "ERROR: FSIO:  {} the publish hint for {} on {}:  {}",
+		  (add ? "adding" : "removing"), r.to_str(), head_oid,
+		  cpp_strerror(-e));
   }
   return e;
 }
@@ -2244,8 +2234,8 @@ int RadosFSIOObject::attr_clone(
       return 0;
     }
   }
-  ldpp_dout(dpp, 0) << "ERROR: FSIO:  no attribute clone for "
-		    << wcs.to_str() << " on " << base << dendl;
+  ldpp_dout_fmt(dpp, 0, "ERROR: FSIO:  no attribute clone for {} on {}",
+		wcs.to_str(), base);
   return -EIO;
 }
 
@@ -2413,8 +2403,8 @@ int RadosFSIOObject::prepare_publish(const DoutPrefixProvider* dpp,
   if (int e = rgw::s3::create_canned_acl(
 	writer, bowner, rgw::s3::get_object_ownership(bucket->get_attrs()),
 	"", p->policy, why); e < 0) {
-    ldpp_dout(dpp, 0) << "ERROR: FSIO:  the publish's ACL for " << head_oid
-		      << ":  " << why << dendl;
+    ldpp_dout_fmt(dpp, 0, "ERROR: FSIO:  the publish's ACL for {}:  {}",
+		  head_oid, why);
     return e;
   }
   /* the attribute set:  the clone's, as copy_obj() handles a source's,
@@ -2444,8 +2434,8 @@ int RadosFSIOObject::prepare_publish(const DoutPrefixProvider* dpp,
   }
   if (int e = store->get_sync_policy_handler(dpp, std::nullopt, info.bucket,
 					     &p->sync, null_yield); e < 0) {
-    ldpp_dout(dpp, 0) << "ERROR: FSIO:  the sync policy for " << info.bucket
-		      << ":  " << cpp_strerror(-e) << dendl;
+    ldpp_dout_fmt(dpp, 0, "ERROR: FSIO:  the sync policy for {}:  {}",
+		  info.bucket, cpp_strerror(-e));
     return e;
   }
   p->policy.encode(attrs[RGW_ATTR_ACL]);
@@ -2483,8 +2473,7 @@ int RadosFSIOObject::replication_status(const DoutPrefixProvider* dpp,
       auto ti = tags.cbegin();
       obj_tags.decode(ti);
     } catch (const ceph::buffer::error&) {
-      ldpp_dout(dpp, 0) << "ERROR: FSIO:  undecodable tags on " << head_oid
-			<< dendl;
+      ldpp_dout_fmt(dpp, 0, "ERROR: FSIO:  undecodable tags on {}", head_oid);
       return -EIO;
     }
   }
@@ -2630,15 +2619,14 @@ int RadosFSIOObject::publish(const DoutPrefixProvider* dpp)
       } catch (const ceph::buffer::error&) {}
     }
     publish_hint(dpp, false, r);
-    ldpp_dout(dpp, 1) << "FSIO:  the publish of " << wcs.to_str() << " on "
-		      << head_oid << " had no reply:  "
-		      << (published ? "published" : "not published") << dendl;
+    ldpp_dout_fmt(dpp, 1, "FSIO:  the publish of {} on {} had no reply:  {}",
+		  wcs.to_str(), head_oid,
+		  (published ? "published" : "not published"));
     return published ? 0 : -EAGAIN;
   }
   if (w < 0) {
-    ldpp_dout(dpp, 0) << "ERROR: FSIO:  the publish of " << wcs.to_str()
-		      << " on " << head_oid << ":  " << cpp_strerror(-w)
-		      << dendl;
+    ldpp_dout_fmt(dpp, 0, "ERROR: FSIO:  the publish of {} on {}:  {}",
+		  wcs.to_str(), head_oid, cpp_strerror(-w));
     publish_hint(dpp, false, r);
     /* the tries or the wait spent:  the caller may try again (W13) */
     return (w == -ECANCELED || w == -ERR_BUSY_RESHARDING || w == -EAGAIN)
@@ -2701,9 +2689,9 @@ int RadosFSIOObject::instance_hint(const DoutPrefixProvider* dpp, bool add,
 		 rgw::fsio::open_hint_shard(in.oid, shards)),
 	       store->getRados()->fsio_hint_ioc(), std::move(op));
   if (r < 0) {
-    ldpp_dout(dpp, 0) << "ERROR: FSIO:  " << (add ? "adding" : "removing")
-		      << " a hint of " << who.incarnation << "." << who.handle
-		      << " on " << in.oid << ":  " << cpp_strerror(-r) << dendl;
+    ldpp_dout_fmt(dpp, 0, "ERROR: FSIO:  {} a hint of {}.{} on {}:  {}",
+		  (add ? "adding" : "removing"), who.incarnation, who.handle,
+		  in.oid, cpp_strerror(-r));
   }
   return r;
 }
@@ -2768,9 +2756,8 @@ int RadosFSIOObject::place(const DoutPrefixProvider* dpp,
     r = exec(oid, ioc, std::move(op));
   }
   if (r < 0) {
-    ldpp_dout(dpp, 0) << "ERROR: FSIO:  the placeholder for "
-		      << intent->instance << " of " << head_oid << ":  "
-		      << cpp_strerror(-r) << dendl;
+    ldpp_dout_fmt(dpp, 0, "ERROR: FSIO:  the placeholder for {} of {}:  {}",
+		  intent->instance, head_oid, cpp_strerror(-r));
     instance_hint(dpp, false, cls_rgw_fsio_hint_kind::PUBLISH,
 		  intent->instance, h);
   }
@@ -2838,8 +2825,8 @@ int RadosFSIOObject::release_versioned(const DoutPrefixProvider* dpp,
     rop.exec(neorados::cls::rgw_fsio::publish_release(
 	       cls_rgw_fsio_cs_op{h, wcs}));
     if (int e = exec(head_oid, head_ioc, std::move(rop)); e < 0) {
-      ldpp_dout(dpp, 0) << "ERROR: FSIO:  fsio_publish_release of "
-			<< wcs.to_str() << ":  " << cpp_strerror(-e) << dendl;
+      ldpp_dout_fmt(dpp, 0, "ERROR: FSIO:  fsio_publish_release of {}:  {}",
+		    wcs.to_str(), cpp_strerror(-e));
     }
   }
   /* aborted already:  the expirer owns the shadow, and this cleans up */
@@ -2987,8 +2974,8 @@ int RadosFSIOObject::complete_versioned(const DoutPrefixProvider* dpp,
   /* Z34:  removed since its write, the index entry with it:  link_olh
    * returns ENOENT;  nothing to link, the publish completes */
   if ((l < 0 && l != -ENOENT) || (l == -ENOENT && written())) {
-    ldpp_dout(dpp, 0) << "ERROR: FSIO:  linking " << intent.instance << " of "
-		      << head_oid << ":  " << cpp_strerror(-l) << dendl;
+    ldpp_dout_fmt(dpp, 0, "ERROR: FSIO:  linking {} of {}:  {}",
+		  intent.instance, head_oid, cpp_strerror(-l));
     linking.emplace(intent, epoch);	// written:  never released (W10)
     return (l == -ERR_BUSY_RESHARDING || l == -EAGAIN) ? -EAGAIN : l;
   }
@@ -2998,8 +2985,8 @@ int RadosFSIOObject::complete_versioned(const DoutPrefixProvider* dpp,
     RGWObjectCtx uctx(store);
     if (int u = store->getRados()->unlink_obj_instance(
 	  dpp, uctx, info, obj, 0, null_yield, 0, false); u < 0) {
-      ldpp_dout(dpp, 0) << "ERROR: FSIO:  unlinking the removed "
-			<< intent.instance << ":  " << cpp_strerror(-u) << dendl;
+      ldpp_dout_fmt(dpp, 0, "ERROR: FSIO:  unlinking the removed {}:  {}",
+		    intent.instance, cpp_strerror(-u));
     }
   }
   if (linked) {
@@ -3018,9 +3005,8 @@ int RadosFSIOObject::complete_versioned(const DoutPrefixProvider* dpp,
 	op.exec(neorados::cls::rgw_fsio::replace_head(in, &ret));
 	return exec(head_oid, head_ioc, std::move(op));
       }); r < 0) {
-    ldpp_dout(dpp, 0) << "ERROR: FSIO:  fsio_publish of " << wcs.to_str()
-		      << " on " << head_oid << ":  " << cpp_strerror(-r)
-		      << dendl;
+    ldpp_dout_fmt(dpp, 0, "ERROR: FSIO:  fsio_publish of {} on {}:  {}",
+		  wcs.to_str(), head_oid, cpp_strerror(-r));
     linking.emplace(intent, epoch);	// keeps its hint (H1)
     return (r == -ERR_BUSY_RESHARDING || r == -EAGAIN) ? -EAGAIN : r;
   }
@@ -3052,17 +3038,16 @@ int RadosFSIOObject::handoff(const DoutPrefixProvider* dpp)
   if (int r = exec(rgw::fsio::open_hint_shard_oid(
 		     rgw::fsio::open_hint_shard(in.oid, shards)),
 		   store->getRados()->fsio_hint_ioc(), std::move(op)); r < 0) {
-    ldpp_dout(dpp, 0) << "ERROR: FSIO:  the uncompleted-publish hint for "
-		      << wcs.to_str() << " on " << head_oid << ":  "
-		      << cpp_strerror(-r) << dendl;
+    ldpp_dout_fmt(dpp, 0, "ERROR: FSIO:  the uncompleted-publish hint for {} "
+		  "on {}:  {}", wcs.to_str(), head_oid, cpp_strerror(-r));
     return r;
   }
   cls_rgw_fsio_leave_ret ret;
   if (int r = leave(dpp, wcs, true, &ret, nullptr, true); r < 0) {
     return r;			// the hint stays, as a failed release's (H1)
   }
-  ldpp_dout(dpp, 1) << "FSIO:  the publish of " << wcs.to_str() << " on "
-		    << head_oid << " handed off" << dendl;
+  ldpp_dout_fmt(dpp, 1, "FSIO:  the publish of {} on {} handed off",
+		wcs.to_str(), head_oid);
   /* a written version's publish hint:  the uncompleted-publish hint
    * leads the expirer to it now */
   if (linking) {
@@ -3101,9 +3086,8 @@ int RadosFSIOObject::publish_wait(const DoutPrefixProvider* dpp,
     }
     const auto now = ceph::mono_clock::now();
     if (now >= until) {
-      ldpp_dout(dpp, 1) << "FSIO:  a publish call on " << head_oid
-			<< " still busy at the end of rgw_fsio_publish_wait"
-			<< dendl;
+      ldpp_dout_fmt(dpp, 1, "FSIO:  a publish call on {} still busy at the "
+		    "end of rgw_fsio_publish_wait", head_oid);
       return r;
     }
     phase_retry();
@@ -3126,8 +3110,8 @@ int RadosFSIOObject::leave_count(const DoutPrefixProvider* dpp,
   neorados::WriteOp op;
   op.exec(neorados::cls::rgw_fsio::ocnt_remove(in, &ret));
   if (int r = exec(oid, ioc, std::move(op)); r < 0 && r != -ENOENT) {
-    ldpp_dout(dpp, 0) << "ERROR: FSIO:  fsio_ocnt_remove on " << oid << ":  "
-		      << cpp_strerror(-r) << dendl;
+    ldpp_dout_fmt(dpp, 0, "ERROR: FSIO:  fsio_ocnt_remove on {}:  {}", oid,
+		  cpp_strerror(-r));
     return r;
   }
   /* its hint goes once it is off the count (§4.3) */
@@ -3253,8 +3237,8 @@ int RadosFSIOObject::end_write(const DoutPrefixProvider* dpp, uint32_t flags)
       op.exec(neorados::cls::rgw_fsio::publish_release(
 		cls_rgw_fsio_cs_op{h, wcs}));
       if (int r = exec(head_oid, head_ioc, std::move(op)); r < 0) {
-	ldpp_dout(dpp, 0) << "ERROR: FSIO:  fsio_publish_release of "
-			  << wcs.to_str() << ":  " << cpp_strerror(-r) << dendl;
+	ldpp_dout_fmt(dpp, 0, "ERROR: FSIO:  fsio_publish_release of {}:  {}",
+		      wcs.to_str(), cpp_strerror(-r));
       }
       return p;
     }

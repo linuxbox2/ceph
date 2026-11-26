@@ -1555,8 +1555,8 @@ int RGWBucketAdminOp::remove_bucket(rgw::sal::Driver* driver, const rgw::SiteCon
     ret = static_cast<rgw::sal::RadosStore*>(driver)->getRados()->fsio_purge(
       dpp, bucket->get_info(), y);
     if (ret < 0) {
-      ldpp_dout(dpp, 0) << "ERROR: failed to purge the bucket's FSIO state: "
-                        << ret << dendl;
+      ldpp_dout_fmt(dpp, 0, "ERROR: failed to purge the bucket's FSIO state: "
+		    "{}", ret);
       return ret;
     }
   }

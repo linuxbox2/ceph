@@ -558,8 +558,8 @@ int fsio_content_md5(const DoutPrefixProvider* dpp,
     struct iovec iov{buf.data(), std::min(piece, size - ofs)};
     uint64_t n = 0;
     if (int r = h.preadv(&iov, 1, ofs, &n, 0); r < 0) {
-      ldpp_dout(dpp, 0) << "ERROR: FSIO:  reading the content at " << ofs
-			<< " for its MD5:  " << cpp_strerror(-r) << dendl;
+      ldpp_dout_fmt(dpp, 0, "ERROR: FSIO:  reading the content at {} for its "
+		    "MD5:  {}", ofs, cpp_strerror(-r));
       return r;
     }
     if (n == 0) {

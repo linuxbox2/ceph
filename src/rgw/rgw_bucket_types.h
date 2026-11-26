@@ -204,6 +204,17 @@ struct hash<rgw_bucket>
 };
 }
 
+#if FMT_VERSION >= 90000
+/* as operator<< below prints it, for ldpp_dout_fmt */
+template<> struct fmt::formatter<rgw_bucket> : fmt::formatter<std::string_view> {
+  template <typename FormatContext>
+  auto format(const rgw_bucket& b, FormatContext& ctx) const {
+    return fmt::format_to(ctx.out(), "{}:{}[{}])", b.tenant, b.name,
+                          b.bucket_id);
+  }
+};
+#endif
+
 inline std::ostream& operator<<(std::ostream& out, const rgw_bucket &b) {
   out << b.tenant << ":" << b.name << "[" << b.bucket_id << "])";
   return out;

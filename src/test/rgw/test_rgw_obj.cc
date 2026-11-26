@@ -13,6 +13,9 @@
  *
  */
 #include <iostream>
+#include <sstream>
+#include <tuple>
+#include <fmt/format.h>
 #include "common/ceph_json.h"
 #include "common/Formatter.h"
 #include "rgw_common.h"
@@ -125,6 +128,22 @@ void test_obj(const string& name, const string& ns, const string& instance)
   ASSERT_EQ(obj1, new_obj);
 
   delete formatter;
+}
+
+/* the fmt formatter of rgw_bucket, for ldpp_dout_fmt, prints what its
+ * operator<< prints, with a tenant and without */
+TEST(TestRGWObj, bucket_formatter_matches_operator) {
+  for (const auto& [tenant, name, id] :
+	 {std::tuple<std::string, std::string, std::string>{"", "bkt", "id.1"},
+	  {"tenant", "bkt", "id.2"}, {"", "", ""}}) {
+    rgw_bucket b;
+    b.tenant = tenant;
+    b.name = name;
+    b.bucket_id = id;
+    std::ostringstream os;
+    os << b;
+    EXPECT_EQ(os.str(), fmt::format("{}", b));
+  }
 }
 
 TEST(TestRGWObj, underscore) {

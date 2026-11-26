@@ -9,6 +9,7 @@
 
 #include "common/async/blocked_completion.h"
 #include "common/dout.h"
+#include "common/dout_fmt.h"
 #include "common/error_code.h"
 #include "rgw_tools.h"
 
@@ -23,8 +24,8 @@ int RGWFSIOWatch::start(const DoutPrefixProvider* dpp,
     ioc = rgw::init_iocontext(dpp, rados, control_pool, rgw::create,
 			      ceph::async::use_blocked);
   } catch (const sys::system_error& e) {
-    ldpp_dout(dpp, 0) << "ERROR: FSIO:  no ioctx for the control pool "
-		      << control_pool << ":  " << e.what() << dendl;
+    ldpp_dout_fmt(dpp, 0, "ERROR: FSIO:  no ioctx for the control pool {}:  {}",
+		  control_pool.to_str(), e.what());
     return ceph::from_error_code(e.code());
   }
   {
@@ -40,8 +41,8 @@ int RGWFSIOWatch::start(const DoutPrefixProvider* dpp,
     rados.execute(neorados::Object{oid(i)}, ioc, std::move(op),
 		  ceph::async::use_blocked[ec]);
     if (ec && ec != sys::errc::file_exists) {
-      ldpp_dout(dpp, 0) << "ERROR: FSIO:  cannot create " << oid(i)
-			<< ":  " << ec.message() << dendl;
+      ldpp_dout_fmt(dpp, 0, "ERROR: FSIO:  cannot create {}:  {}", oid(i),
+		    ec.message());
       std::lock_guard l{mtx};
       retry(i);
       continue;
@@ -52,17 +53,16 @@ int RGWFSIOWatch::start(const DoutPrefixProvider* dpp,
 			      ceph::async::use_blocked[ec]);
     std::lock_guard l{mtx};
     if (ec) {
-      ldpp_dout(dpp, 0) << "ERROR: FSIO:  cannot watch " << oid(i)
-			<< ":  " << ec.message() << dendl;
+      ldpp_dout_fmt(dpp, 0, "ERROR: FSIO:  cannot watch {}:  {}", oid(i),
+		    ec.message());
       retry(i);
       continue;
     }
     cookies[i] = cookie;
     ++registered;
   }
-  ldpp_dout(dpp, 1) << "FSIO:  incarnation " << rados.instance_id()
-		    << " watches " << registered << " of " << n
-		    << " liveness objects" << dendl;
+  ldpp_dout_fmt(dpp, 1, "FSIO:  incarnation {} watches {} of {} liveness "
+		"objects", rados.instance_id(), registered, n);
   return registered ? 0 : -EIO;
 }
 

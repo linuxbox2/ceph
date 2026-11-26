@@ -4,6 +4,7 @@
 #include "rgw_fsio_geometry.h"
 
 #include "common/dout.h"
+#include "common/dout_fmt.h"
 
 #define dout_subsys ceph_subsys_rgw
 
@@ -18,8 +19,7 @@ int FSIOGeometry::make(const DoutPrefixProvider* dpp,
 		       FSIOGeometry* g)
 {
   if (!manifest.length()) {
-    ldpp_dout(dpp, 0) << "FSIO:  an object with no manifest cannot be served"
-		      << dendl;
+    ldpp_dout_fmt(dpp, 0, "FSIO:  an object with no manifest cannot be served");
     return -ENXIO;
   }
   try {
@@ -29,8 +29,8 @@ int FSIOGeometry::make(const DoutPrefixProvider* dpp,
     return -EIO;
   }
   if (g->m.has_explicit_objs() || g->m.get_rules().empty()) {
-    ldpp_dout(dpp, 0) << "FSIO:  an object with an explicit manifest cannot "
-		      << "be served (design §6.2)" << dendl;
+    ldpp_dout_fmt(dpp, 0, "FSIO:  an object with an explicit manifest cannot "
+		  "be served (design §6.2)");
     return -ENXIO;
   }
   g->obj_size = g->m.get_obj_size();

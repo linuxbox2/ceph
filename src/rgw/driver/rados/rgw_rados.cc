@@ -1562,8 +1562,8 @@ int RGWRados::init_complete(const DoutPrefixProvider *dpp, optional_yield y, rgw
     ret = fsio_watch->start(dpp, svc.zone->get_zone_params().control_pool,
 			    cct->_conf->rgw_num_control_oids);
     if (ret < 0) {
-      ldpp_dout(dpp, 0) << "ERROR: FSIO:  cannot watch the liveness objects: "
-			<< cpp_strerror(-ret) << dendl;
+      ldpp_dout_fmt(dpp, 0, "ERROR: FSIO:  cannot watch the liveness objects: "
+		    "{}", cpp_strerror(-ret));
       return ret;
     }
   }
@@ -1645,8 +1645,8 @@ int RGWRados::open_log_pool_neo_ctx(const DoutPrefixProvider *dpp)
                                            svc.zone->get_zone_params().log_pool,
                                            rgw::create, ceph::async::use_blocked);
   } catch (const boost::system::system_error& e) {
-    ldpp_dout(dpp, -1) << __PRETTY_FUNCTION__ << ": Failed to initialize ioctx: "
-                       << e.what() << ", for log pool" << dendl;
+    ldpp_dout_fmt(dpp, -1, "{}: Failed to initialize ioctx: {}, for log pool",
+		  __PRETTY_FUNCTION__, e.what());
     return ceph::from_error_code(e.code());
   }
   return 0;
@@ -2800,16 +2800,14 @@ int RGWRados::create_vector_bucket(const DoutPrefixProvider* dpp,
 bool RGWRados::fsio_zone_enabled(const DoutPrefixProvider *dpp)
 {
   if (!svc.zone->get_zonegroup().supports(rgw::zone_features::fsio)) {
-    ldpp_dout(dpp, 10) << "FSIO: off:  the zonegroup lacks the fsio feature"
-                       << dendl;
+    ldpp_dout_fmt(dpp, 10, "FSIO: off:  the zonegroup lacks the fsio feature");
     return false;
   }
   int8_t release = 0;
   if (int r = get_rados_handle()->get_min_compatible_osd(&release);
       r < 0 || release < static_cast<int8_t>(ceph_release_t::vampire)) {
-    ldpp_dout(dpp, 10) << "FSIO: off:  the OSDs' release floor is "
-                       << int(release) << " (r=" << r << "), below vampire"
-                       << dendl;
+    ldpp_dout_fmt(dpp, 10, "FSIO: off:  the OSDs' release floor is {} (r={}), "
+		  "below vampire", int(release), r);
     return false;
   }
   return true;
@@ -2822,16 +2820,16 @@ bool RGWRados::fsio_enabled(const DoutPrefixProvider *dpp,
     return false;
   }
   if (info.bucket.marker.find('~') != std::string::npos) {
-    ldpp_dout(dpp, 1) << "FSIO: off for bucket " << info.bucket
-                      << ":  its marker contains '~'" << dendl;
+    ldpp_dout_fmt(dpp, 1, "FSIO: off for bucket {}:  its marker contains '~'",
+		  info.bucket);
     return false;
   }
   const auto& rule = info.placement_rule.name.empty() ?
     svc.zone->get_zonegroup().default_placement : info.placement_rule;
   RGWZonePlacementInfo placement;
   if (!svc.zone->get_zone_params().get_placement(rule.name, &placement)) {
-    ldpp_dout(dpp, 10) << "FSIO: off for bucket " << info.bucket
-                       << ":  no placement " << rule.name << dendl;
+    ldpp_dout_fmt(dpp, 10, "FSIO: off for bucket {}:  no placement {}",
+		  info.bucket, rule.name);
     return false;
   }
   std::vector<rgw_pool> pools{placement.index_pool, placement.data_extra_pool};
@@ -2850,9 +2848,8 @@ bool RGWRados::fsio_enabled(const DoutPrefixProvider *dpp,
       continue;                // not created yet:  RGW creates it replicated
     }
     if (id < 0) {
-      ldpp_dout(dpp, 10) << "FSIO: off for bucket " << info.bucket
-                         << ":  pool " << pool << " lookup returned " << id
-                         << dendl;
+      ldpp_dout_fmt(dpp, 10, "FSIO: off for bucket {}:  pool {} lookup "
+		    "returned {}", info.bucket, pool.to_str(), id);
       return false;
     }
     /* neorados is its own client:  a pool RGW just created may not be
@@ -2876,14 +2873,13 @@ bool RGWRados::fsio_enabled(const DoutPrefixProvider *dpp,
       bad = ec ? std::nullopt : is_ec_or_crimson();
     }
     if (!bad) {
-      ldpp_dout(dpp, 10) << "FSIO: off for bucket " << info.bucket
-                         << ":  pool " << pool << " not in neorados's OSDMap"
-                         << dendl;
+      ldpp_dout_fmt(dpp, 10, "FSIO: off for bucket {}:  pool {} not in "
+		    "neorados's OSDMap", info.bucket, pool.to_str());
       return false;
     }
     if (*bad) {
-      ldpp_dout(dpp, 10) << "FSIO: off for bucket " << info.bucket
-                         << ":  pool " << pool << " is EC or Crimson" << dendl;
+      ldpp_dout_fmt(dpp, 10, "FSIO: off for bucket {}:  pool {} is EC or "
+		    "Crimson", info.bucket, pool.to_str());
       return false;
     }
   }
@@ -3835,8 +3831,8 @@ int RGWRados::Object::Write::_do_write_meta(uint64_t size, uint64_t accounted_si
       auto it = target->fsio_replaced->out.cbegin();
       decode(*meta.fsio_published, it);
     } catch (const ceph::buffer::error&) {
-      ldpp_dout(rctx.dpp, 0) << "ERROR: an FSIO publish's reply was undecodable"
-                             << dendl;
+      ldpp_dout_fmt(rctx.dpp, 0, "ERROR: an FSIO publish's reply was "
+		    "undecodable");
     }
   }
 
@@ -6587,8 +6583,8 @@ int RGWRados::fsio_collect_replaced(const DoutPrefixProvider *dpp,
       auto it = manifest_bl.cbegin();
       decode(manifest, it);
     } catch (const ceph::buffer::error& e) {
-      ldpp_dout(dpp, 0) << "ERROR: FSIO: purge:  " << clone_oid
-                        << ":  undecodable manifest: " << e.what() << dendl;
+      ldpp_dout_fmt(dpp, 0, "ERROR: FSIO: purge:  {}:  undecodable manifest: "
+		    "{}", clone_oid, e.what());
       return -EIO;
     }
     if (manifest.has_tail()) {
@@ -6651,8 +6647,8 @@ int RGWRados::fsio_purge(const DoutPrefixProvider *dpp,
         break;
       }
       if (ec) {
-        ldpp_dout(dpp, 0) << "ERROR: FSIO: purge:  listing " << oid
-                          << " returned " << ec.message() << dendl;
+        ldpp_dout_fmt(dpp, 0, "ERROR: FSIO: purge:  listing {} returned {}",
+		      oid, ec.message());
         return ceph::from_error_code(ec);
       }
       for (auto& h : ret.hints) {
@@ -6746,8 +6742,8 @@ int RGWRados::fsio_purge(const DoutPrefixProvider *dpp,
           }
         }
       } catch (const ceph::buffer::error& e) {
-        ldpp_dout(dpp, 0) << "ERROR: FSIO: purge:  " << ref.obj.oid
-                          << ":  undecodable FSIO record: " << e.what() << dendl;
+        ldpp_dout_fmt(dpp, 0, "ERROR: FSIO: purge:  {}:  undecodable FSIO "
+		      "record: {}", ref.obj.oid, e.what());
         return -EIO;
       }
       /* strip FSIO's records;  a head they were all of goes.  A zero
@@ -6774,17 +6770,17 @@ int RGWRados::fsio_purge(const DoutPrefixProvider *dpp,
       }
       r = rgw_rados_operate(dpp, ref.ioctx, ref.obj.oid, std::move(op), y);
       if (r == -ERANGE && attempt < 10) {
-        ldpp_dout(dpp, 10) << "FSIO: purge:  " << ref.obj.oid
-                           << " changed since it was read;  again" << dendl;
+        ldpp_dout_fmt(dpp, 10, "FSIO: purge:  {} changed since it was read;  "
+		      "again", ref.obj.oid);
         continue;
       }
       if (r < 0 && r != -ENOENT) {
-        ldpp_dout(dpp, 0) << "ERROR: FSIO: purge:  stripping " << ref.obj.oid
-                          << " returned " << r << dendl;
+        ldpp_dout_fmt(dpp, 0, "ERROR: FSIO: purge:  stripping {} returned {}",
+		      ref.obj.oid, r);
         return r;
       }
-      ldpp_dout(dpp, 10) << "FSIO: purge:  " << ref.obj.oid
-                         << (only_fsio ? " removed" : " stripped") << dendl;
+      ldpp_dout_fmt(dpp, 10, "FSIO: purge:  {}{}", ref.obj.oid,
+		    (only_fsio ? " removed" : " stripped"));
       break;
     }
     /* only then the head's hints */
@@ -6796,8 +6792,8 @@ int RGWRados::fsio_purge(const DoutPrefixProvider *dpp,
       op.exec(neorados::cls::rgw_fsio::open_hint_remove(hop));
       if (auto ec = run(rgw::fsio::open_hint_shard_oid(lh.shard), std::move(op));
           ec && ec != boost::system::errc::no_such_file_or_directory) {
-        ldpp_dout(dpp, 0) << "ERROR: FSIO: purge:  dropping a hint on "
-                          << ref.obj.oid << " returned " << ec.message() << dendl;
+        ldpp_dout_fmt(dpp, 0, "ERROR: FSIO: purge:  dropping a hint on {} "
+		      "returned {}", ref.obj.oid, ec.message());
         return ceph::from_error_code(ec);
       }
     }
@@ -6836,17 +6832,15 @@ int RGWRados::fsio_check_no_hints(const DoutPrefixProvider *dpp,
         break;                 // a shard no hint was ever written to
       }
       if (ec) {
-        ldpp_dout(dpp, 0) << "ERROR: FSIO: listing " << oid << " for bucket "
-                          << info.bucket << " returned " << ec.message()
-                          << dendl;
+        ldpp_dout_fmt(dpp, 0, "ERROR: FSIO: listing {} for bucket {} returned "
+		      "{}", oid, info.bucket, ec.message());
         return ceph::from_error_code(ec);
       }
       if (!ret.hints.empty()) {
         const auto& h = ret.hints.front();
-        ldpp_dout(dpp, 1) << "FSIO: bucket " << info.bucket
-                          << " not empty:  " << oid << " has a hint on "
-                          << h.key << " for incarnation " << std::hex
-                          << h.incarnation << std::dec << dendl;
+        ldpp_dout_fmt(dpp, 1, "FSIO: bucket {} not empty:  {} has a hint on {} "
+                      "for incarnation {:x}", info.bucket, oid, h.key,
+                      h.incarnation);
         return -ENOTEMPTY;
       }
       if (!ret.truncated) {
@@ -7305,8 +7299,8 @@ int RGWRados::expand_gc_entry(const DoutPrefixProvider *dpp,
     auto hi = info.head.cbegin();
     decode(head, hi);
   } catch (const buffer::error&) {
-    ldpp_dout(dpp, 0) << "ERROR: expand_gc_entry - undecodable entry, tag="
-		      << info.tag << dendl;
+    ldpp_dout_fmt(dpp, 0, "ERROR: expand_gc_entry - undecodable entry, tag={}",
+		  info.tag);
     return -EIO;
   }
   rgw_raw_obj raw_head;
@@ -7402,9 +7396,8 @@ int RGWRados::send_manifest_to_gc(const DoutPrefixProvider *dpp,
       return 0;
     }
     if (r != -ECANCELED && r != -EPERM) {
-      ldpp_dout(dpp, 0) << "WARNING: manifest-form GC entry " << tag
-                        << " not sent: " << cpp_strerror(-r)
-                        << ";  sending it expanded" << dendl;
+      ldpp_dout_fmt(dpp, 0, "WARNING: manifest-form GC entry {} not sent: "
+		    "{};  sending it expanded", tag, cpp_strerror(-r));
     }
   }
   /* the expanded form:  a zone without the feature, or a legacy shard */
@@ -7416,7 +7409,7 @@ int RGWRados::send_manifest_to_gc(const DoutPrefixProvider *dpp,
     return r;
   }
   if (!gc) {
-    ldpp_dout(dpp, 0) << "deleting objects inline since gc isn't initialized" << dendl;
+    ldpp_dout_fmt(dpp, 0, "deleting objects inline since gc isn't initialized");
     delete_objs_inline(dpp, chain, tag, y);
     return 0;
   }
@@ -7657,9 +7650,8 @@ void RGWRados::Object::replace_head(const DoutPrefixProvider *dpp,
     if (fsio_publish) {
       /* §3.5:  a publish is FSIO's alone;  failed by the class, which
        * finds no shadow to publish, rather than written as a PUT */
-      ldpp_dout(dpp, 0) << "ERROR: an FSIO publish in bucket "
-                        << bucket_info.bucket << ", which FSIO does not serve"
-                        << dendl;
+      ldpp_dout_fmt(dpp, 0, "ERROR: an FSIO publish in bucket {}, which FSIO "
+		    "does not serve", bucket_info.bucket);
     } else {
       store->remove_rgw_head_obj(op);
       return;
@@ -8049,8 +8041,8 @@ fsio_retry:
                         target->fsio_replaced ? librados::OPERATION_RETURNVEC : 0,
                         nullptr, &epoch);
   if (r == -ERR_FSIO_CONFLICT && ++fsio_conflicts < 10) {
-    ldpp_dout(dpp, 10) << "FSIO: DELETE of " << obj
-                       << " raced a head write;  re-reading" << dendl;
+    ldpp_dout_fmt(dpp, 10, "FSIO: DELETE of {}:{} raced a head write;  "
+		  "re-reading", obj.bucket.name, obj.get_oid());
     index_op.cancel(dpp, params.remove_objs, y, log_op);
     target->invalidate_state();
     goto fsio_retry;

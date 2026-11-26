@@ -123,8 +123,8 @@ int RGWGC::send_manifest(const cls_rgw_gc_obj_info& info, optional_yield y)
   ObjectWriteOperation op;
   gc_log_enqueue2(op, cct->_conf->rgw_gc_obj_min_wait, info);
   int i = tag_index(info.tag);
-  ldpp_dout(this, 20) << "RGWGC::send_manifest - on object name: "
-		      << obj_names[i] << " tag is: " << info.tag << dendl;
+  ldpp_dout_fmt(this, 20, "RGWGC::send_manifest - on object name: {} tag is: "
+		"{}", obj_names[i], info.tag);
   return store->gc_operate(this, obj_names[i], std::move(op), y);
 }
 
@@ -605,8 +605,8 @@ int RGWGC::process(int index, int max_secs, bool expired_only,
 	 * again from its start, puts and ENOENT being idempotent.  Only
 	 * the queue holds this form */
 	if (! transitioned_objects_cache[index]) {
-	  ldpp_dout(this, 0) << "ERROR: RGWGC::process manifest-form entry "
-			     << info.tag << " in a legacy shard" << dendl;
+	  ldpp_dout_fmt(this, 0, "ERROR: RGWGC::process manifest-form entry "
+			"{} in a legacy shard", info.tag);
 	  continue;
 	}
 	static constexpr size_t batch = 1000;
@@ -630,8 +630,8 @@ int RGWGC::process(int index, int max_secs, bool expired_only,
 	    }
 	    ctx->locator_set_key(obj.loc);
 	    ctx->set_pool_full_try();
-	    ldpp_dout(this, 5) << "RGWGC::process removing " << obj.pool <<
-	      ":" << obj.key.name << dendl;
+	    ldpp_dout_fmt(this, 5, "RGWGC::process removing {}:{}", obj.pool,
+			  obj.key.name);
 	    ObjectWriteOperation op;
 	    cls_refcount_put(op, info.tag, true);
 	    if (io_manager.schedule_io(ctx, obj.key.name, &op, index,
@@ -661,9 +661,9 @@ int RGWGC::process(int index, int max_secs, bool expired_only,
 	   * the geometry declines) fails the same way on every pass:  it is
 	   * removed with its batch, its objects left, rather than holding
 	   * every entry behind it in the shard */
-	  ldpp_dout(this, 0) << "ERROR: RGWGC::process manifest-form entry "
-			     << info.tag << " not expanded: " << cpp_strerror(-r)
-			     << ";  removed, its objects left" << dendl;
+	  ldpp_dout_fmt(this, 0, "ERROR: RGWGC::process manifest-form entry "
+			"{} not expanded: {};  removed, its objects left",
+			info.tag, cpp_strerror(-r));
 	}
 	continue;
       }
