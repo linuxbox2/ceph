@@ -42,6 +42,36 @@ namespace sys = boost::system;
 
 namespace rgw::sal {
 
+/* §4.5:  one call's chunk operations in flight together, at most a window
+ * of them;  it completes when the last does, keeping the error of the
+ * piece at the lowest offset */
+struct RadosFSIOObject::IoBatch {
+  ceph::mutex lock = ceph::make_mutex("RadosFSIOObject::IoBatch");
+  ceph::condition_variable cond;
+  unsigned outstanding = 0;
+  int first = 0;
+  uint64_t first_bad = std::numeric_limits<uint64_t>::max();
+
+  void start(uint64_t window) {
+    std::unique_lock l{lock};
+    cond.wait(l, [&] { return outstanding < window; });
+    ++outstanding;
+  }
+  void done(uint64_t ofs, int r) {
+    std::lock_guard l{lock};
+    if (r < 0 && ofs < first_bad) {
+      first_bad = ofs;
+      first = r;
+    }
+    --outstanding;
+    cond.notify_all();
+  }
+  void wait() {
+    std::unique_lock l{lock};
+    cond.wait(l, [&] { return outstanding == 0; });
+  }
+};
+
 namespace {
 /* the FSIO prefix, RGW's manifest and cls_refcount's tags:  what every
  * FSIO clone drops (§2.4, plan §6.7, X16) */
@@ -582,6 +612,7 @@ int RadosFSIOObject::construct(const DoutPrefixProvider* dpp,
 			       const Source& src, const cls_rgw_fsio_id& id)
 {
   Timed timed{*this, Phase::construct};	// plan 9g
+  attr_role = src.head_size ? 'd' : 'a';	// the clone it makes (§2.4)
   const auto& marker = info.bucket.marker;
   const FSIOGeometry* g = &wgeo;
   FSIOGeometry deferred;
@@ -970,36 +1001,6 @@ int RadosFSIOObject::read_piece(const DoutPrefixProvider* dpp,
   }
   return -EIO;
 }
-
-/* §4.5:  one call's chunk operations in flight together, at most a window
- * of them;  it completes when the last does, keeping the error of the
- * piece at the lowest offset */
-struct RadosFSIOObject::IoBatch {
-  ceph::mutex lock = ceph::make_mutex("RadosFSIOObject::IoBatch");
-  ceph::condition_variable cond;
-  unsigned outstanding = 0;
-  int first = 0;
-  uint64_t first_bad = std::numeric_limits<uint64_t>::max();
-
-  void start(uint64_t window) {
-    std::unique_lock l{lock};
-    cond.wait(l, [&] { return outstanding < window; });
-    ++outstanding;
-  }
-  void done(uint64_t ofs, int r) {
-    std::lock_guard l{lock};
-    if (r < 0 && ofs < first_bad) {
-      first_bad = ofs;
-      first = r;
-    }
-    --outstanding;
-    cond.notify_all();
-  }
-  void wait() {
-    std::unique_lock l{lock};
-    cond.wait(l, [&] { return outstanding == 0; });
-  }
-};
 
 int RadosFSIOObject::preadv(const struct iovec* iov, int iovcnt, uint64_t ofs,
 			    uint64_t* bytes_read, uint32_t flags)
@@ -1532,6 +1533,7 @@ int RadosFSIOObject::open(const DoutPrefixProvider* dpp, bool writer,
     return 0;
   }
   wcs = ret.bound;
+  attr_role = 0;			// plan 9g:  a new shadow's clone
   wgeo = g;
   wsize = ret.size_hint;
   known.clear();
@@ -1612,6 +1614,7 @@ int RadosFSIOObject::construct_created(const DoutPrefixProvider* dpp,
 				       const cls_rgw_fsio_id& id)
 {
   Timed timed{*this, Phase::construct};	// plan 9g
+  attr_role = 'a';			// attributes only (§3.1 step 7)
   ceph::buffer::list pm;
   if (int r = fresh_layout(dpp, &pm); r < 0) {
     return r;
@@ -2135,22 +2138,49 @@ int RadosFSIOObject::scan_size(const DoutPrefixProvider* dpp, uint64_t* size)
       }
     }
   }
-  for (auto c = chunks.rbegin(); c != chunks.rend(); ++c) {
+  /* plan 9g:  every candidate chunk's stat in flight together, as a
+   * call's pieces are (§4.5);  then the size is the end of the highest one
+   * written that is not a fenced hole */
+  struct Stat {
+    FSIOChunk c;
+    uint64_t len = 0;
+    int r = 0;
+  };
+  std::vector<Stat> stats;
+  for (const auto& c : chunks) {
+    stats.push_back(Stat{c});
+  }
+  const uint64_t window = dpp->get_cct()->_conf.get_val<uint64_t>(
+    "rgw_fsio_io_window");
+  auto b = std::make_shared<IoBatch>();
+  for (auto& st : stats) {
+    const rgw_raw_obj raw = FSIOGeometry::named(st.c, info.bucket.marker, wcs);
+    neorados::IOContext ioc;
+    if (st.r = ioc_for(dpp, raw, &ioc); st.r < 0) {
+      continue;
+    }
+    b->start(window);
+    store->get_neorados().execute(
+      neorados::Object{raw.oid}, ioc, neorados::ReadOp{}.stat(&st.len, nullptr),
+      nullptr, [b, sp = &st] (sys::error_code ec) {
+	sp->r = ceph::from_error_code(ec);
+	b->done(sp->c.ofs, sp->r);
+      });
+  }
+  b->wait();
+  for (auto st = stats.rbegin(); st != stats.rend(); ++st) {
+    const FSIOChunk* c = &st->c;
+    const uint64_t len = st->len;
+    if (st->r == -ENOENT) {
+      continue;			// never written, or truncated away
+    }
+    if (st->r < 0) {
+      return st->r;
+    }
     const rgw_raw_obj raw = FSIOGeometry::named(*c, info.bucket.marker, wcs);
     neorados::IOContext ioc;
     if (int r = ioc_for(dpp, raw, &ioc); r < 0) {
       return r;
-    }
-    uint64_t len = 0;
-    sys::error_code ec;
-    store->get_neorados().execute(neorados::Object{raw.oid}, ioc,
-				  neorados::ReadOp{}.stat(&len, nullptr),
-				  nullptr, ceph::async::use_blocked[ec]);
-    if (ec == sys::errc::no_such_file_or_directory) {
-      continue;			// never written, or truncated away
-    }
-    if (ec) {
-      return ceph::from_error_code(ec);
     }
     if (len == 0) {
       /* an empty chunk may be a fenced hole (§3.7);  a separate read,
@@ -2179,14 +2209,20 @@ int RadosFSIOObject::attr_clone(
   const auto& base = counted ? inst_oid : head_oid;
   auto aioc = counted ? inst_ioc : head_ioc;
   aioc.set_key(base);
-  for (const char role : {'d', 'a'}) {
+  /* plan 9g:  the role its construction recorded first;  probed, and
+   * recorded, only when unknown */
+  const char known_role = attr_role;
+  const char other = known_role == 'a' ? 'd' : 'a';
+  for (const char role : {known_role ? known_role : 'd', other}) {
     boost::container::flat_map<std::string, ceph::buffer::list> x;
     const auto name = cls_rgw_fsio_clone_name(marker, role, wcs, base);
     sys::error_code ec;
+    ++n_clone_reads;
     store->get_neorados().execute(neorados::Object{name}, aioc,
 				  neorados::ReadOp{}.get_xattrs(&x), nullptr,
 				  ceph::async::use_blocked[ec]);
     if (!ec && x.count("user.rgw.fsio.pm")) {
+      attr_role = role;
       if (oid) {
 	*oid = name;
       }

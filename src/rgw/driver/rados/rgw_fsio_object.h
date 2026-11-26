@@ -172,6 +172,8 @@ public:
   };
   /* nullopt when built without the option */
   std::optional<Phases> phases() const;
+  /* test only:  reads of the attribute clone (plan 9g) */
+  uint64_t clone_reads() const { return n_clone_reads; }
   /* test only:  write ops sent to chunks (§4.5) */
   uint64_t chunk_writes() const { return n_chunk_writes; }
 
@@ -464,6 +466,10 @@ private:
   ceph::mutex queue_lock = ceph::make_mutex("RadosFSIOObject::queue");
   std::map<uint64_t, ChunkQueue> chunkq;	// by chunk index
   std::atomic<uint64_t> n_chunk_writes{0};
+  /* plan 9g:  the writer's attribute clone's role, 'd' or 'a', once its
+   * construction or a probe found it;  0 unknown */
+  std::atomic<char> attr_role{0};
+  std::atomic<uint64_t> n_clone_reads{0};
 #ifdef WITH_RGW_FSIO_PHASES
   Phases phases_;			// under state_lock
   class Timed {

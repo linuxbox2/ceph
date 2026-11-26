@@ -2688,6 +2688,44 @@ TEST_F(FSIORadosCreate, ReadOnlyExclusiveCreateOfAnExistingObject)
 				FO::OPEN_FLAG_EXCL, &r));
 }
 
+/* plan 9g:  the publish's size scan, its stats in flight together:  a
+ * create's one 4 KiB write in the run its first write reserved publishes
+ * at 4096 */
+TEST_F(FSIORadosCreate, ScanSizeOfACreateIsTheWrittenEnd)
+{
+  std::unique_ptr<FO> w;
+  ASSERT_EQ(0, create("scan", false, &w));
+  ASSERT_EQ(0, write(w, 0, {pattern(4096, 2)}));
+  ASSERT_GE(rados_fsio(w)->extends(), 1u) << "no run reserved";
+  ASSERT_EQ(0, w->close(env->dpp.get(), 0));
+  int64_t size = -1;
+  ASSERT_EQ(0, s3_size("scan", &size));
+  EXPECT_EQ(4096, size);
+}
+
+/* plan 9g:  the attribute clone's role, recorded at construction:  the
+ * close's attributes and the publish each read the clone once */
+TEST_F(FSIORadosCreate, AttrCloneRoleIsRemembered)
+{
+  std::unique_ptr<FO> w;
+  ASSERT_EQ(0, create("role", false, &w));
+  ASSERT_EQ(0, write(w, 0, {"x"}));
+  const auto before = rados_fsio(w)->clone_reads();
+  rgw::sal::Attrs attrs;
+  attrs[RGW_ATTR_UNIX1].append("unix-attrs");
+  ASSERT_EQ(0, w->fsetattrs(env->dpp.get(), attrs, 0));
+  ASSERT_EQ(0, w->close(env->dpp.get(), 0));
+  EXPECT_EQ(before + 2, rados_fsio(w)->clone_reads())
+    << "the clone's role was probed";
+  const auto head = head_of("role");
+  boost::container::flat_map<std::string, ceph::buffer::list> got;
+  neo().execute(neorados::Object{head.oid}, ioc_of(head.pool),
+		neorados::ReadOp{}.get_xattrs(&got, nullptr), nullptr,
+		ceph::async::use_blocked);
+  ASSERT_TRUE(got.count(RGW_ATTR_UNIX1));
+  EXPECT_EQ("unix-attrs", got[RGW_ATTR_UNIX1].to_str());
+}
+
 TEST_F(FSIORadosCreate, CreateSetsTheSpecAttributes)
 {
   rgw::sal::Attrs attrs;
