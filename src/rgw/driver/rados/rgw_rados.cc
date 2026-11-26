@@ -2794,8 +2794,8 @@ int RGWRados::create_vector_bucket(const DoutPrefixProvider* dpp,
 
 /* FSIO_RADOS_DESIGN.md §7:  the fsio zonegroup feature (X9);  the OSDs'
  * release floor at the one that brings the fsio_* methods (§2.7);  every
- * pool of the bucket's placement replicated and not Crimson, CLONE_TO
- * having neither (X17, Z21);  a marker without '~', the separator of
+ * pool of the bucket's placement not Crimson, which has no CLONE_TO, and
+ * if erasure-coded, with overwrites (X17, Z21);  a marker without '~', the separator of
  * FSIO's own names (§2.7, E2) */
 bool RGWRados::fsio_zone_enabled(const DoutPrefixProvider *dpp)
 {
@@ -2855,14 +2855,17 @@ bool RGWRados::fsio_enabled(const DoutPrefixProvider *dpp,
     /* neorados is its own client:  a pool RGW just created may not be
      * in its OSDMap yet, so on ENOENT it waits for the latest map and
      * asks again */
-    auto is_ec_or_crimson = [&]() -> std::optional<bool> {
+    /* §7:  Crimson has no CLONE_TO;  EC needs overwrites, for in-place
+     * shadow writes */
+    auto unsupported = [&]() -> std::optional<bool> {
       try {
-        return neo.pool_is_erasure(id) || neo.pool_is_crimson(id);
+        return neo.pool_is_crimson(id) ||
+	  (neo.pool_is_erasure(id) && !neo.pool_allows_ec_overwrites(id));
       } catch (const boost::system::system_error&) {
         return std::nullopt;
       }
     };
-    auto bad = is_ec_or_crimson();
+    auto bad = unsupported();
     if (!bad) {
       boost::system::error_code ec;
       if (y) {
@@ -2870,7 +2873,7 @@ bool RGWRados::fsio_enabled(const DoutPrefixProvider *dpp,
       } else {
         neo.wait_for_latest_osd_map(ceph::async::use_blocked[ec]);
       }
-      bad = ec ? std::nullopt : is_ec_or_crimson();
+      bad = ec ? std::nullopt : unsupported();
     }
     if (!bad) {
       ldpp_dout_fmt(dpp, 10, "FSIO: off for bucket {}:  pool {} not in "
@@ -2878,8 +2881,9 @@ bool RGWRados::fsio_enabled(const DoutPrefixProvider *dpp,
       return false;
     }
     if (*bad) {
-      ldpp_dout_fmt(dpp, 10, "FSIO: off for bucket {}:  pool {} is EC or "
-		    "Crimson", info.bucket, pool.to_str());
+      ldpp_dout_fmt(dpp, 10, "FSIO: off for bucket {}:  pool {} is "
+		    "Crimson, or EC without ec_overwrites", info.bucket,
+		    pool.to_str());
       return false;
     }
   }
