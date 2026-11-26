@@ -11,18 +11,38 @@ edition = "2021"
 //!                    [--filter PATTERN] [--timeout SECS] [--reuse]
 //!                    [--tests] [--progress] [--debug-rgw LEVEL]
 //!                    [--clone-latency] [--ramdisk] [--no-vstart-debug]
-//!                    STEP|PRESET...
+//!                    [--pool KIND[,KIND...]] STEP|PRESET...
 //!
 //! `--ramdisk` puts the RADOS cluster's mon and OSD data in
 //! `/dev/shm/fsio-validate-dev`, a 32G BlueStore block file, removed when
 //! the cluster stops;  `--no-vstart-debug` starts it without vstart's
 //! `-d` (debug osd 20, debug ms 1).  The nsfs phase is unchanged.
 //!
+//! `--pool` names the data pools the RADOS steps run on (plan 9h), each
+//! on its own fresh cluster, in the order given:
+//!   replicated     as before, on one OSD                     (the default)
+//!   ec             2+1 erasure-coded, the legacy backend, ec_overwrites
+//!   fastec         2+1 erasure-coded, ec_overwrites and ec_optimizations
+//!   all            the three
+//! An EC kind's cluster has three OSDs, and its setup makes the pool
+//! `fsio-ec-data`, checks its two flags with the mon, and makes it the
+//! default placement's STANDARD data pool, so every bucket's heads and
+//! tails are on it (its index and extra pools stay replicated).  The
+//! tests read the zone when they start;  vstart's own gateway is not
+//! restarted, since no step talks to it.  After its steps, a check that
+//! the pool took writes.  Its logs go to `<run>/<kind>/`, its summary
+//! lines read `harness@fastec`.  `clone-to` selects its tests' own pool
+//! parameters by kind;  `cls` and `cluster-tier` make their own
+//! replicated pools, so on an EC kind they are skipped until they read
+//! one (plan 9h).  `model` and `nsfs-librgw` take no pool.
+//!
 //! Steps:
 //!   cls            the core's unit tests (no cluster), the CLS head
 //!                  test and the neorados CLS test, and libcls_rgw
 //!                  calling no RGW symbol                     (RADOS)
 //!   librgw-rados   ceph_test_librgw_file_fsio_put            (RADOS)
+//!   clone-to       the neorados CLONE_TO and pool-type tests, on the
+//!                  kind's own pool parameters                (RADOS)
 //!   harness        unittest_rgw_fsio_geometry (no cluster), then
 //!                  ceph_test_rgw_fsio_rados, the driver's harness (RADOS)
 //!   bench          the harness's benchmarks:  reads and writes by call
@@ -33,7 +53,7 @@ edition = "2021"
 //!   model          the model's in-memory tiers:  quick vectors skips
 //!   nsfs-librgw    write2, and nfsns with every group flag    (nsfs)
 //! Presets:
-//!   driver   cls librgw-rados harness bench write2-rados
+//!   driver   cls librgw-rados clone-to harness bench write2-rados
 //!   core     cls cluster-tier model
 //!   full     every step
 //!
@@ -110,9 +130,52 @@ use std::process::{Command, Stdio};
 const AWS_KEY: &str = "0555b35654ad1656d804";
 const AWS_SECRET: &str = "h7GhxuBLTrlhVUyxSPUKUV8r/2EI4ngqJxD7iBdBYLhwluN30JaT3Q==";
 
-const STEPS: &[&str] = &["cls", "librgw-rados", "harness", "bench", "write2-rados", "cluster-tier",
-                         "model", "nsfs-librgw"];
-const RADOS: &[&str] = &["cls", "librgw-rados", "harness", "bench", "write2-rados", "cluster-tier"];
+const STEPS: &[&str] = &["cls", "librgw-rados", "clone-to", "harness", "bench", "write2-rados",
+                         "cluster-tier", "model", "nsfs-librgw"];
+const RADOS: &[&str] = &["cls", "librgw-rados", "clone-to", "harness", "bench", "write2-rados",
+                         "cluster-tier"];
+
+/// --pool:  the data pool kinds the RADOS steps run on (plan 9h)
+#[derive(Clone, Copy, PartialEq)]
+enum Pool {
+    Replicated,
+    Ec,
+    FastEc,
+}
+
+impl Pool {
+    fn name(self) -> &'static str {
+        match self {
+            Pool::Replicated => "replicated",
+            Pool::Ec => "ec",
+            Pool::FastEc => "fastec",
+        }
+    }
+    /// what a summary line's step carries:  nothing for replicated, so
+    /// earlier runs' lines still compare
+    fn tag(self) -> String {
+        if self == Pool::Replicated { String::new() } else { format!("@{}", self.name()) }
+    }
+    /// the run directory's subdirectory for its logs, none for replicated
+    fn sub(self) -> &'static str {
+        if self == Pool::Replicated { "" } else { self.name() }
+    }
+    /// {ec_overwrites, ec_optimizations}
+    fn ec_flags(self) -> (bool, bool) {
+        match self {
+            Pool::Replicated => (false, false),
+            Pool::Ec => (true, false),
+            Pool::FastEc => (true, true),
+        }
+    }
+    fn osds(self) -> u32 {
+        if self == Pool::Replicated { 1 } else { 3 }
+    }
+}
+
+/// the EC kinds' data pool and its profile
+const EC_POOL: &str = "fsio-ec-data";
+const EC_PROFILE: &str = "fsio-ec";
 
 struct Opts {
     dry_run: bool,
@@ -129,6 +192,7 @@ struct Opts {
     clone_latency: bool,
     ramdisk: bool,
     vstart_debug: bool,
+    pools: Vec<Pool>,
 }
 
 /// --ramdisk:  the RADOS cluster's dev directory
@@ -165,6 +229,8 @@ struct Cmd {
     argv: Vec<String>,
     cwd: PathBuf,
     sudo: bool,
+    /// --pool's kind, after the step in its lines:  `@fastec`
+    tag: String,
 }
 
 fn main() {
@@ -193,6 +259,7 @@ fn main() {
                 "cls" => &["cls_rgw", "unittest_cls_rgw_fsio", "ceph_test_cls_rgw_fsio_head",
                            "ceph_test_neorados_cls_rgw_fsio"][..],
                 "librgw-rados" => &["rgw", "ceph_test_librgw_file_fsio_put"][..],
+                "clone-to" => &["ceph_test_neorados_pool_type", "ceph_test_neorados_write_operations"][..],
                 "harness" => &["unittest_rgw_fsio_geometry", "ceph_test_rgw_fsio_rados"][..],
                 "bench" => &["ceph_test_rgw_fsio_rados"][..],
                 "cluster-tier" | "model" => &["ceph_test_cls_rgw_fsio_model"][..],
@@ -205,7 +272,8 @@ fn main() {
         targets.retain(|t| seen.insert(*t));
         let mut argv = vec!["ninja".to_string(), format!("-j{}", nproc())];
         argv.extend(targets.iter().map(|t| t.to_string()));
-        let c = Cmd { step: "build", what: "build what the steps run".into(), argv, cwd: o.build_dir.clone(), sudo: false };
+        let c = Cmd { step: "build", what: "build what the steps run".into(), argv, cwd: o.build_dir.clone(), sudo: false,
+                      tag: String::new() };
         if !exec(&o, &c, &run_dir, &mut summary, |_| None) {
             finish(&o, &run_dir, &summary, true);
         }
@@ -217,7 +285,13 @@ fn main() {
     let mut failed = false;
     let rados: Vec<_> = o.steps.iter().filter(|s| RADOS.contains(s)).copied().collect();
     if !rados.is_empty() {
-        failed |= rados_phase(&o, &rados, &run_dir, &mut summary);
+        for &pool in &o.pools {
+            let dir = run_dir.join(pool.sub());
+            if !o.dry_run {
+                std::fs::create_dir_all(&dir).unwrap_or_else(|e| die(&format!("{}:  {e}", dir.display())));
+            }
+            failed |= rados_phase(&o, pool, &rados, &run_dir, &mut summary);
+        }
     }
     if o.steps.contains(&"nsfs-librgw") {
         failed |= nsfs_phase(&o, &run_dir, &mut summary);
@@ -232,6 +306,7 @@ fn main() {
                        "--jobs".into(), "8".into(), "quick".into(), "vectors".into(), "skips".into()],
             cwd: o.src.clone(),
             sudo: false,
+            tag: String::new(),
         };
         failed |= !exec(&o, &c, &run_dir, &mut summary, expected_count);
     }
@@ -240,13 +315,15 @@ fn main() {
 
 /// A fresh RADOS vstart with fsio enabled, the RADOS steps, the cluster
 /// stopped and the run's files handed back.  True if any step failed.
-fn rados_phase(o: &Opts, steps: &[&'static str], run_dir: &Path, summary: &mut Vec<String>) -> bool {
+fn rados_phase(o: &Opts, pool: Pool, steps: &[&'static str], root: &Path, summary: &mut Vec<String>) -> bool {
     let b = &o.build_dir;
+    let run_dir = &root.join(pool.sub());
     let conf = b.join("ceph.conf").display().to_string();
     let gf = gtest_filter(o);
     let dbg = debug_env(o);
     let sh = |step: &'static str, what: &str, line: String| Cmd {
         step, what: what.into(), argv: vec!["sh".into(), "-c".into(), line], cwd: b.clone(), sudo: true,
+        tag: pool.tag(),
     };
     /* --reuse:  a cluster that answers is kept */
     let running = o.reuse && !o.dry_run && Command::new("sudo")
@@ -256,11 +333,12 @@ fn rados_phase(o: &Opts, steps: &[&'static str], run_dir: &Path, summary: &mut V
     if running {
         println!("== [rados] the running cluster kept (--reuse)");
     }
-    let setup = [
+    let mut setup = vec![
         sh("rados-stop", "stop whatever is running", "../src/stop.sh".into()),
         sh("rados-vstart", "a fresh RADOS vstart",
-           format!("{}env MON=1 OSD=1 RGW=1 MGR=1 MDS=0{} ../src/vstart.sh -n{} -o 'bluestore_block_size = {}'",
+           format!("{}env MON=1 OSD={} RGW=1 MGR=1 MDS=0{} ../src/vstart.sh -n{} -o 'bluestore_block_size = {}'",
                    if o.ramdisk { format!("mkdir -p {RAMDISK_DEV} && ") } else { String::new() },
+                   pool.osds(),
                    if o.ramdisk { format!(" CEPH_DEV_DIR={RAMDISK_DEV}") } else { String::new() },
                    if o.vstart_debug { " -d" } else { "" },
                    if o.ramdisk { "32G" } else { "2T" })),
@@ -268,9 +346,30 @@ fn rados_phase(o: &Opts, steps: &[&'static str], run_dir: &Path, summary: &mut V
            "bin/radosgw-admin -c ceph.conf zonegroup modify --rgw-zonegroup=default --enable-feature=fsio \
             && bin/radosgw-admin -c ceph.conf zonegroup modify --rgw-zonegroup=default --enable-feature=gc-manifest".into()),
     ];
+    if pool != Pool::Replicated {
+        let (overwrites, optimizations) = pool.ec_flags();
+        let ceph = "bin/ceph -c ceph.conf";
+        let mut make = format!(
+            "{ceph} osd erasure-code-profile set {EC_PROFILE} k=2 m=1 crush-failure-domain=osd \
+             && {ceph} osd pool create {EC_POOL} 8 8 erasure {EC_PROFILE}");
+        if overwrites {
+            make += &format!(" && {ceph} osd pool set {EC_POOL} allow_ec_overwrites true");
+        }
+        if optimizations {
+            make += &format!(" && {ceph} osd pool set {EC_POOL} allow_ec_optimizations true");
+        }
+        make += &format!(" && {ceph} osd pool application enable {EC_POOL} rgw");
+        setup.push(sh("rados-ec", &format!("the {} data pool", pool.name()), make));
+        setup.push(sh("rados-ec", "the pool's flags, from the mon", format!(
+            "{ceph} osd pool get {EC_POOL} allow_ec_overwrites | grep -qx 'allow_ec_overwrites: {overwrites}' \
+             && {ceph} osd pool get {EC_POOL} allow_ec_optimizations | grep -qx 'allow_ec_optimizations: {optimizations}'")));
+        setup.push(sh("rados-ec", "the default placement's data pool", format!(
+            "bin/radosgw-admin -c ceph.conf zone placement modify --rgw-zone=default \
+             --placement-id=default-placement --storage-class=STANDARD --data-pool={EC_POOL}")));
+    }
     let mut failed = false;
     for c in &setup {
-        if running && c.step != "rados-fsio" {
+        if running && c.step != "rados-fsio" && c.step != "rados-ec" {
             continue;
         }
         let vstart = c.step == "rados-vstart";
@@ -284,6 +383,13 @@ fn rados_phase(o: &Opts, steps: &[&'static str], run_dir: &Path, summary: &mut V
     }
     if !failed {
         for s in steps {
+            if pool != Pool::Replicated && ["cls", "cluster-tier"].contains(s) {
+                let l = format!("{:<14} skip {}", format!("{s}{}", pool.tag()),
+                                "makes its own replicated pool:  it reads no kind yet (plan 9h)");
+                println!("{l}");
+                summary.push(l);
+                continue;
+            }
             let cmds: Vec<Cmd> = match *s {
                 "cls" => vec![
                     sh("cls", "libcls_rgw calls no RGW symbol",
@@ -294,8 +400,24 @@ fn rados_phase(o: &Opts, steps: &[&'static str], run_dir: &Path, summary: &mut V
                 ],
                 "librgw-rados" => vec![sh("librgw-rados", "the librgw test", format!(
                     "env CEPH_CONF={conf} AWS_ACCESS_KEY_ID={AWS_KEY} AWS_SECRET_ACCESS_KEY='{AWS_SECRET}' \
-                     bin/ceph_test_librgw_file_fsio_put --debug-rgw={} --log-to-stderr=true{gf}",
-                    o.debug_rgw.unwrap_or(10)))],
+                     bin/ceph_test_librgw_file_fsio_put --debug-rgw={} --log-to-stderr=true{}{gf}",
+                    o.debug_rgw.unwrap_or(10),
+                    if pool == Pool::Replicated { String::new() } else { format!(" --data-pool {EC_POOL}") }))],
+                /* each kind's own parameters of the tests, which make
+                 * their own pools */
+                "clone-to" => {
+                    let (types, clones) = match pool {
+                        Pool::Replicated => ("NeoRadosPoolType.*", "NeoRadosWriteOps.CloneTo*:NeoRadosCloneTo.*/Replicated"),
+                        Pool::Ec => ("NeoRadosPoolTypeEC.*", "NeoRadosCloneTo.*/ECLegacy*"),
+                        Pool::FastEc => ("NeoRadosPoolTypeFastEC.*", "NeoRadosCloneTo.*/ECOptimized"),
+                    };
+                    vec![
+                        sh("clone-to", "the pool-type tests", format!(
+                            "env CEPH_CONF={conf} bin/ceph_test_neorados_pool_type --gtest_filter='{types}'")),
+                        sh("clone-to", "the CLONE_TO tests", format!(
+                            "env CEPH_CONF={conf} bin/ceph_test_neorados_write_operations --gtest_filter='{clones}'")),
+                    ]
+                }
                 /* the librgw suites against the RADOS gateway, as against
                  * nsfs's:  the suite's backend-neutral tests answer through
                  * the fsio-inspect driver hint, its nsfs-only ones skip.
@@ -317,7 +439,7 @@ fn rados_phase(o: &Opts, steps: &[&'static str], run_dir: &Path, summary: &mut V
                         "env CEPH_CONF={conf} bin/ceph_test_rgw_fsio_rados \
                          --gtest_also_run_disabled_tests --gtest_filter='*IoBench*:*SessionBench*'"));
                     failed |= !exec(o, &c, run_dir, summary, |text| {
-                        let (note, lines) = bench_report(text, run_dir);
+                        let (note, lines) = bench_report(text, root, pool);
                         *extra.borrow_mut() = lines;
                         Some(note)
                     });
@@ -343,7 +465,7 @@ fn rados_phase(o: &Opts, steps: &[&'static str], run_dir: &Path, summary: &mut V
                     vec![
                         sh("cluster-tier", "the origin check off, for the tier's many incarnations",
                            "bin/ceph -c ceph.conf config set osd rgw_fsio_check_origin false".into()),
-                        Cmd { step: "cluster-tier", what: "the model's cluster tier".into(),
+                        Cmd { step: "cluster-tier", what: "the model's cluster tier".into(), tag: pool.tag(),
                               argv: vec!["env".into(), format!("CEPH_CONF={conf}"), runner,
                                          "--bin".into(), b.join("bin/ceph_test_cls_rgw_fsio_model").display().to_string(),
                                          "--out".into(), run_dir.join("cluster-tier").display().to_string(),
@@ -357,6 +479,17 @@ fn rados_phase(o: &Opts, steps: &[&'static str], run_dir: &Path, summary: &mut V
                 failed |= !exec(o, c, run_dir, summary, expected_count);
             }
         }
+        /* the run tested what it says:  the steps whose buckets use the
+         * zone's placement wrote to the EC pool */
+        if pool != Pool::Replicated &&
+            steps.iter().any(|s| ["librgw-rados", "harness", "bench", "write2-rados"].contains(s)) {
+            let c = sh("rados-ec", "the data pool took writes", format!(
+                "bin/rados -c ceph.conf df --format=json | python3 -c \
+                 'import json,sys; p=[p for p in json.load(sys.stdin)[\"pools\"] if p[\"name\"]==\"{EC_POOL}\"]; \
+                  print(p[0][\"write_ops\"] if p else 0); sys.exit(0 if p and p[0][\"write_ops\"] > 0 else 1)'"));
+            failed |= !exec(o, &c, run_dir, summary, |t| t.lines().rev().map(str::trim).find(|l| !l.is_empty() && l.bytes().all(|c| c.is_ascii_digit()))
+                .map(|n| format!("{n} write ops")));
+        }
     }
     if o.reuse {
         println!("== [rados] the cluster left running (--reuse)");
@@ -368,7 +501,7 @@ fn rados_phase(o: &Opts, steps: &[&'static str], run_dir: &Path, summary: &mut V
            if o.ramdisk { format!("../src/stop.sh && rm -rf {RAMDISK_DEV}") } else { "../src/stop.sh".into() }),
         sh("rados-chown", "the run's files back to you", format!(
             "chown -R {user}:{group} asok dev out ceph.conf keyring rgwlib_readf.out {} 2>/dev/null; true",
-            run_dir.display())),
+            root.display())),
     ];
     for c in &teardown {
         failed |= !exec(o, c, run_dir, summary, |_| None);
@@ -391,6 +524,7 @@ fn nsfs_phase(o: &Opts, run_dir: &Path, summary: &mut Vec<String>) -> bool {
     let conf = format!("-c {}", b.join("ceph.conf").display());
     let sh = |what: &str, line: String| Cmd {
         step: "nsfs-librgw", what: what.into(), argv: vec!["sh".into(), "-c".into(), line], cwd: b.clone(), sudo: false,
+        tag: String::new(),
     };
     let keys = format!("env AWS_ACCESS_KEY_ID={AWS_KEY} AWS_SECRET_ACCESS_KEY='{AWS_SECRET}'{}",
                        debug_env(o));
@@ -428,13 +562,14 @@ fn exec(o: &Opts, c: &Cmd, run_dir: &Path, summary: &mut Vec<String>,
         argv.extend(["sudo".into(), "-n".into()]);
     }
     let limit = step_timeout(o, c.step);
+    let label = format!("{}{}", c.step, c.tag);
     argv.extend(["timeout".into(), "-k".into(), "10".into(), limit.to_string()]);
     argv.extend(c.argv.iter().cloned());
     if o.dry_run {
-        println!("[{}] {}\n  (cd {} && {})", c.step, c.what, c.cwd.display(), shell_words(&argv));
+        println!("[{label}] {}\n  (cd {} && {})", c.what, c.cwd.display(), shell_words(&argv));
         return true;
     }
-    println!("== [{}] {}", c.step, c.what);
+    println!("== [{label}] {}", c.what);
     let log = run_dir.join(format!("{}.log", c.step));
     let mut f = std::fs::OpenOptions::new().create(true).append(true).open(&log)
         .unwrap_or_else(|e| die(&format!("{}:  {e}", log.display())));
@@ -478,7 +613,7 @@ fn exec(o: &Opts, c: &Cmd, run_dir: &Path, summary: &mut Vec<String>,
         count(&text).unwrap_or_default()
     };
     let failed_note = !ok || timed_out || note.starts_with("a plugin");
-    let l = line(c.step, &c.what, !failed_note, &note);
+    let l = line(&label, &c.what, !failed_note, &note);
     println!("{l}");
     summary.push(l);
     if failed_note || o.tests {
@@ -547,7 +682,9 @@ fn size_name(b: u64) -> String {
 /// The benchmark's cases saved as bench.tsv in the run directory, against
 /// the newest earlier run that has one:  the step's note, and one summary
 /// line per operation and size
-fn bench_report(text: &str, run_dir: &Path) -> (String, Vec<String>) {
+fn bench_report(text: &str, root: &Path, pool: Pool) -> (String, Vec<String>) {
+    let run_dir = &root.join(pool.sub());
+    let label = format!("bench{}", pool.tag());
     let cases = bench_cases(text);
     if cases.is_empty() {
         return ("no cases".into(), vec![]);
@@ -557,16 +694,16 @@ fn bench_report(text: &str, run_dir: &Path) -> (String, Vec<String>) {
         tsv += &format!("{}\t{}\t{}\t{:.1}\t{:.1}\n", c.op, c.bytes, c.mode, c.mibs, c.usec);
     }
     let _ = std::fs::write(run_dir.join("bench.tsv"), &tsv);
-    /* the newest earlier run directory with a bench.tsv:  the names sort
-     * by time */
-    let earlier = run_dir.parent().and_then(|p| std::fs::read_dir(p).ok()).and_then(|rd| {
+    /* the newest earlier run directory with a bench.tsv of this kind:
+     * the names sort by time */
+    let earlier = root.parent().and_then(|p| std::fs::read_dir(p).ok()).and_then(|rd| {
         let mut dirs: Vec<PathBuf> = rd.filter_map(|e| e.ok().map(|e| e.path()))
-            .filter(|d| d != run_dir && d.join("bench.tsv").exists()).collect();
+            .filter(|d| d != root && d.join(pool.sub()).join("bench.tsv").exists()).collect();
         dirs.sort();
         dirs.pop()
     });
     let before: Vec<BenchCase> = earlier.as_ref()
-        .and_then(|d| std::fs::read_to_string(d.join("bench.tsv")).ok())
+        .and_then(|d| std::fs::read_to_string(d.join(pool.sub()).join("bench.tsv")).ok())
         .map(|t| bench_cases(&t.lines().skip(1).map(|l| format!("[ bench ] {l}"))
                              .collect::<Vec<_>>().join("\n")))
         .unwrap_or_default();
@@ -593,7 +730,7 @@ fn bench_report(text: &str, run_dir: &Path) -> (String, Vec<String>) {
                 .unwrap_or_default();
             l += &format!(";  {:+.0}% on {d}", (best.mibs / was - 1.0) * 100.0);
         }
-        lines.push(format!("{:<14} {l}", "bench"));
+        lines.push(format!("{:<14} {l}", label));
     }
     /* plan 9g:  the sessions' phases, saved as phases.tsv;  a line per
      * mode, its session time and its three largest phases */
@@ -615,11 +752,11 @@ fn bench_report(text: &str, run_dir: &Path) -> (String, Vec<String>) {
         top.sort_by(|a, b| b.1.total_cmp(&a.1));
         let top: Vec<String> = top.iter().take(3)
             .map(|(n, v)| format!("{n} {:.2} ms", v / 1000.0)).collect();
-        lines.push(format!("{:<14} session {:<8}:  {:.2} ms;  {}", "bench", c.mode,
+        lines.push(format!("{:<14} session {:<8}:  {:.2} ms;  {}", label, c.mode,
                            c.usec / 1000.0, top.join(", ")));
     }
     if text.contains("built without WITH_RGW_FSIO_PHASES") {
-        lines.push(format!("{:<14} session:  skipped, built without WITH_RGW_FSIO_PHASES", "bench"));
+        lines.push(format!("{:<14} session:  skipped, built without WITH_RGW_FSIO_PHASES", label));
     }
     let note = match &earlier {
         Some(d) => format!("{} cases;  against {}", cases.len(),
@@ -776,6 +913,7 @@ fn parse_args() -> Opts {
     let mut clone_latency = false;
     let mut ramdisk = false;
     let mut vstart_debug = true;
+    let mut pools: Vec<Pool> = Vec::new();
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
@@ -788,16 +926,28 @@ fn parse_args() -> Opts {
             "--clone-latency" => clone_latency = true,
             "--ramdisk" => ramdisk = true,
             "--no-vstart-debug" => vstart_debug = false,
+            "--pool" => {
+                let v = args.next().unwrap_or_else(|| die("--pool needs a kind:  replicated, ec, fastec or all"));
+                for k in v.split(',') {
+                    match k {
+                        "replicated" => pools.push(Pool::Replicated),
+                        "ec" => pools.push(Pool::Ec),
+                        "fastec" => pools.push(Pool::FastEc),
+                        "all" => pools.extend([Pool::Replicated, Pool::Ec, Pool::FastEc]),
+                        _ => die(&format!("unknown pool kind {k}:  replicated, ec, fastec or all")),
+                    }
+                }
+            }
             "--no-build" => build = false,
             "--build" => build_dir = Some(PathBuf::from(args.next().unwrap_or_else(|| die("--build needs a directory")))),
             "--filter" => filter = Some(args.next().unwrap_or_else(|| die("--filter needs a pattern"))),
             "--timeout" => timeout = Some(args.next().and_then(|v| v.parse().ok())
                                           .unwrap_or_else(|| die("--timeout needs a number of seconds"))),
-            "driver" => steps.extend(["cls", "librgw-rados", "harness", "bench", "write2-rados"]),
+            "driver" => steps.extend(["cls", "librgw-rados", "clone-to", "harness", "bench", "write2-rados"]),
             "core" => steps.extend(["cls", "cluster-tier", "model"]),
             "full" => steps.extend(STEPS),
             "-h" | "--help" => {
-                println!("usage:  fsio_validate.rs [--dry-run] [--no-build] [--build DIR] [--filter PATTERN] [--timeout SECS] [--reuse] [--tests] [--progress] [--debug-rgw LEVEL] [--clone-latency] [--ramdisk] [--no-vstart-debug] STEP|PRESET...\n\
+                println!("usage:  fsio_validate.rs [--dry-run] [--no-build] [--build DIR] [--filter PATTERN] [--timeout SECS] [--reuse] [--tests] [--progress] [--debug-rgw LEVEL] [--clone-latency] [--ramdisk] [--no-vstart-debug] [--pool KIND[,KIND...]] STEP|PRESET...\n\
                           steps:  {}\npresets:  driver core full", STEPS.join(" "));
                 std::process::exit(0);
             }
@@ -825,8 +975,16 @@ fn parse_args() -> Opts {
     if clone_latency && !steps.contains(&"harness") {
         die("--clone-latency runs the harness:  name the harness step");
     }
+    if pools.is_empty() {
+        pools.push(Pool::Replicated);
+    }
+    let mut seen = Vec::new();
+    pools.retain(|p| if seen.contains(p) { false } else { seen.push(*p); true });
+    if reuse && pools.len() > 1 {
+        die("--reuse keeps one cluster:  name one pool kind");
+    }
     Opts { dry_run, build, build_dir, src, steps: ordered, filter, timeout, reuse, tests, progress,
-           debug_rgw, clone_latency, ramdisk, vstart_debug }
+           debug_rgw, clone_latency, ramdisk, vstart_debug, pools }
 }
 
 fn capture(cwd: &Path, argv: &[&str]) -> String {
