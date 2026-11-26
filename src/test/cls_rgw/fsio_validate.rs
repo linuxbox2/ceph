@@ -32,9 +32,11 @@ edition = "2021"
 //! restarted, since no step talks to it.  After its steps, a check that
 //! the pool took writes.  Its logs go to `<run>/<kind>/`, its summary
 //! lines read `harness@fastec`.  `clone-to` selects its tests' own pool
-//! parameters by kind;  `cls` and `cluster-tier` make their own
-//! replicated pools, so on an EC kind they are skipped until they read
-//! one (plan 9h).  `model` and `nsfs-librgw` take no pool.
+//! parameters by kind.  On an EC kind, `cls` runs the CLS head test and
+//! the neorados CLS test on the kind's pool (`FSIO_TEST_POOL`, which
+//! they otherwise make for themselves), not the core's unit tests or the
+//! `nm` check, which take no pool;  `cluster-tier` runs on it
+//! (`FSIO_MODEL_POOL`).  `model` and `nsfs-librgw` take no pool.
 //!
 //! Steps:
 //!   cls            the core's unit tests (no cluster), the CLS head
@@ -383,14 +385,15 @@ fn rados_phase(o: &Opts, pool: Pool, steps: &[&'static str], root: &Path, summar
     }
     if !failed {
         for s in steps {
-            if pool != Pool::Replicated && ["cls", "cluster-tier"].contains(s) {
-                let l = format!("{:<14} skip {}", format!("{s}{}", pool.tag()),
-                                "makes its own replicated pool:  it reads no kind yet (plan 9h)");
-                println!("{l}");
-                summary.push(l);
-                continue;
-            }
+            /* an EC kind's pool for the tests that otherwise make their own */
+            let on_pool = if pool == Pool::Replicated { String::new() } else { format!(" FSIO_TEST_POOL={EC_POOL}") };
             let cmds: Vec<Cmd> = match *s {
+                /* the core's unit tests and the nm check take no pool:
+                 * the replicated pass covers them */
+                "cls" if pool != Pool::Replicated => vec![
+                    sh("cls", "the CLS head test", format!("env CEPH_CONF={conf}{on_pool} bin/ceph_test_cls_rgw_fsio_head{gf}")),
+                    sh("cls", "the neorados CLS test", format!("env CEPH_CONF={conf}{on_pool} bin/ceph_test_neorados_cls_rgw_fsio{gf}")),
+                ],
                 "cls" => vec![
                     sh("cls", "libcls_rgw calls no RGW symbol",
                        "! nm -D --undefined-only lib/libcls_rgw.so | c++filt | grep ' rgw_'".into()),
@@ -466,10 +469,14 @@ fn rados_phase(o: &Opts, pool: Pool, steps: &[&'static str], root: &Path, summar
                         sh("cluster-tier", "the origin check off, for the tier's many incarnations",
                            "bin/ceph -c ceph.conf config set osd rgw_fsio_check_origin false".into()),
                         Cmd { step: "cluster-tier", what: "the model's cluster tier".into(), tag: pool.tag(),
-                              argv: vec!["env".into(), format!("CEPH_CONF={conf}"), runner,
+                              argv: vec!["env".into(), format!("CEPH_CONF={conf}")]
+                                  .into_iter()
+                                  .chain((pool != Pool::Replicated).then(|| format!("FSIO_MODEL_POOL={EC_POOL}")))
+                                  .chain([runner,
                                          "--bin".into(), b.join("bin/ceph_test_cls_rgw_fsio_model").display().to_string(),
                                          "--out".into(), run_dir.join("cluster-tier").display().to_string(),
-                                         "--jobs".into(), "8".into(), "cluster".into()],
+                                         "--jobs".into(), "8".into(), "cluster".into()])
+                                  .collect(),
                               cwd: o.src.clone(), sudo: true },
                     ]
                 }
@@ -480,9 +487,10 @@ fn rados_phase(o: &Opts, pool: Pool, steps: &[&'static str], root: &Path, summar
             }
         }
         /* the run tested what it says:  the steps whose buckets use the
-         * zone's placement wrote to the EC pool */
+         * zone's placement, and those given the pool, wrote to it */
         if pool != Pool::Replicated &&
-            steps.iter().any(|s| ["librgw-rados", "harness", "bench", "write2-rados"].contains(s)) {
+            steps.iter().any(|s| ["cls", "librgw-rados", "harness", "bench", "write2-rados",
+                                  "cluster-tier"].contains(s)) {
             let c = sh("rados-ec", "the data pool took writes", format!(
                 "bin/rados -c ceph.conf df --format=json | python3 -c \
                  'import json,sys; p=[p for p in json.load(sys.stdin)[\"pools\"] if p[\"name\"]==\"{EC_POOL}\"]; \
