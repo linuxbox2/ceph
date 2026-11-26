@@ -1099,6 +1099,19 @@ bool RADOS::pool_is_crimson(int64_t pool_id)
     });
 }
 
+bool RADOS::pool_allows_ec_overwrites(int64_t pool_id)
+{
+  return impl->objecter->with_osdmap(
+    [pool_id](const OSDMap &o) {
+      if (!o.have_pg_pool(pool_id)) {
+	throw bs::system_error(
+	  ENOENT, bs::system_category(),
+	  "Cannot find pool in OSDMap.");
+      }
+      return o.get_pg_pool(pool_id)->allows_ecoverwrites();
+    });
+}
+
 void RADOS::list_pools_(LSPoolsComp c) {
   asio::dispatch(asio::append(std::move(c),
 			      impl->objecter->with_osdmap(

@@ -1464,6 +1464,12 @@ public:
   /// \throws boost::system::system_error ENOENT if the pool is not in it
   bool pool_is_crimson(int64_t pool_id);
 
+  /// \brief Whether an erasure-coded pool allows overwrites
+  /// (pg_pool_t::FLAG_EC_OVERWRITES), from the client's OSDMap
+  ///
+  /// \throws boost::system::system_error ENOENT if the pool is not in it
+  bool pool_allows_ec_overwrites(int64_t pool_id);
+
   using LSPoolsSig = void(std::vector<std::pair<std::int64_t, std::string>>);
   using LSPoolsComp = boost::asio::any_completion_handler<LSPoolsSig>;
   template<boost::asio::completion_token_for<LSPoolsSig> CompletionToken>
