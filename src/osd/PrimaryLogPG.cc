@@ -7187,10 +7187,8 @@ int PrimaryLogPG::do_osd_ops(OpContext *ctx, vector<OSDOp>& ops)
 	  result = -ENOENT;
 	  break;
 	}
-	/* RADOS manifest objects are not used by RGW;  erasure-coded pools
-	 * need the destination's attr cache filled, as make_writeable() does,
-	 * and come after replicated pools */
-	if (src_obs.oi.has_manifest() || pool.info.is_erasure()) {
+	/* RADOS manifest objects are not used by RGW */
+	if (src_obs.oi.has_manifest()) {
 	  result = -EOPNOTSUPP;
 	  break;
 	}
