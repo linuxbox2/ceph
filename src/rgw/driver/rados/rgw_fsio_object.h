@@ -302,7 +302,8 @@ private:
   int leave(const DoutPrefixProvider* dpp, const cls_rgw_fsio_id& cs,
 	    bool writer, cls_rgw_fsio_leave_ret* ret,
 	    const cls_rgw_fsio_intent* intent = nullptr, bool handoff = false,
-	    bool discard = false);
+	    bool discard = false,
+	    const cls_rgw_fsio_size_report* report = nullptr);
   /* §4.2, 8j:  a close whose publish could not complete hands it off:
    * the uncompleted-publish hint, then the hand-off leave;  the handle
    * then holds nothing of the write */

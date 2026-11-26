@@ -1769,7 +1769,7 @@ int RadosFSIOObject::leave(const DoutPrefixProvider* dpp,
 			   const cls_rgw_fsio_id& id, bool writer,
 			   cls_rgw_fsio_leave_ret* ret,
 			   const cls_rgw_fsio_intent* intent, bool handoff,
-			   bool discard)
+			   bool discard, const cls_rgw_fsio_size_report* report)
 {
   Timed timed{*this, Phase::leave};	// plan 9g
   int r = sequenced(dpp, [&] (neorados::WriteOp& op) {
@@ -1782,6 +1782,9 @@ int RadosFSIOObject::leave(const DoutPrefixProvider* dpp,
     in.discard = discard;
     if (intent) {
       in.intent = *intent;	// §4.2 step 2:  the claim, the epoch returned
+    }
+    if (report) {
+      in.report = *report;	// §3.4:  applied first
     }
     op.exec(neorados::cls::rgw_fsio::leave(in, ret));
   });
@@ -3180,7 +3183,16 @@ int RadosFSIOObject::end_write(const DoutPrefixProvider* dpp, uint32_t flags)
     }
     return finished(ret.drained);
   }
-  if (dirty || unsure) {
+  /* §3.4:  the size report rides the leave;  after a lost reply it goes
+   * on its own first, as it does when the leave finds it stale */
+  std::optional<cls_rgw_fsio_size_report> report;
+  {
+    std::lock_guard l{state_lock};
+    if (dirty && !unsure) {
+      report = cls_rgw_fsio_size_report{trunc_epoch, hwm, wmtime};
+    }
+  }
+  if (unsure) {
     if (int r = report_hint(dpp); r < 0) {
       return r;
     }
@@ -3201,8 +3213,24 @@ int RadosFSIOObject::end_write(const DoutPrefixProvider* dpp, uint32_t flags)
     }
   }
   cls_rgw_fsio_leave_ret ret;
-  if (int r = leave(dpp, wcs, true, &ret, intent ? &*intent : nullptr);
-      r < 0) {
+  int lr = leave(dpp, wcs, true, &ret, intent ? &*intent : nullptr, false,
+		 false, report ? &*report : nullptr);
+  if (lr == 0 && ret.stale) {
+    /* §3.4:  a truncate since its last report:  nothing applied;  the
+     * report with its rebase, then the leave */
+    ldpp_dout_fmt(dpp, 10, "FSIO:  fsio_leave of {} on {}:  its size report "
+		  "stale, reporting first", wcs.to_str(), head_oid);
+    lr = report_hint(dpp);
+    if (lr == 0) {
+      ret = cls_rgw_fsio_leave_ret{};
+      lr = leave(dpp, wcs, true, &ret, intent ? &*intent : nullptr);
+    }
+  } else if (lr == 0 && report) {
+    std::lock_guard l{state_lock};
+    dirty = false;
+    last_report = ceph::mono_clock::now();
+  }
+  if (int r = lr; r < 0) {
     if (intent) {
       unplace(dpp, *intent, intent->token);
     }

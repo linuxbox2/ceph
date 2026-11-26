@@ -572,7 +572,8 @@ int m_leave(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& caller,
 	    uint64_t seq, const fid_t& cs, bool writer,
 	    const fsio::expired_t& expired, fsio::leave_out& out,
 	    cls_rgw_fsio_effects& fx, const fsio::publish_intent* intent,
-	    bool handoff = false, bool discard = false)
+	    bool handoff = false, bool discard = false,
+	    const fsio::size_report* report = nullptr)
 {
   cls_rgw_fsio_leave_op op;
   op.caller = caller;
@@ -583,10 +584,14 @@ int m_leave(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& caller,
   op.intent = op_intent(intent);
   op.handoff = handoff;
   op.discard = discard;
+  if (report) {
+    op.report = cls_rgw_fsio_size_report{report->trunc_epoch, report->size,
+					 report->mtime};
+  }
   ceph::buffer::list reply;
   const int r = on_cluster_head("fsio_leave", cls::rgw::method::fsio_leave, h, fx, op, [&] {
       return fsio::leave(h, caller, seq, cs, writer, expired, out, fx, intent,
-			 handoff, discard);
+			 handoff, discard, report);
     }, &reply);
   if (cl.on && r == 0 && reply.length()) {
     if (auto ret = dec<cls_rgw_fsio_leave_ret>("fsio_leave", reply);
@@ -596,7 +601,8 @@ int m_leave(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& caller,
 		/* X31:  the OSD's time, where the core's is logical */
 		(out.olh_epoch ? !cl.in_call(ret->olh_epoch) :
 		 ret->olh_epoch != 0) ||
-		ret->instance != out.instance || ret->drained != out.drained)) {
+		ret->instance != out.instance || ret->drained != out.drained ||
+		ret->stale != out.stale)) {
       cl.reply_mismatch("fsio_leave", "differs from the core's leave_out");
     }
   }
@@ -1057,12 +1063,17 @@ int counted_leave(cls_rgw_fsio_head& h, Gw& g, const fid_t& cs, bool writer,
 		  const std::set<uint64_t>& expired, fsio::leave_out& out,
 		  cls_rgw_fsio_effects& fx,
 		  const fsio::publish_intent* intent = nullptr,
-		  bool handoff = false, bool discard = false)
+		  bool handoff = false, bool discard = false,
+		  const fsio::size_report* report = nullptr)
 {
   const auto seq = g.seq + 1;
   int r = m_leave(h, hd(g), seq, cs, writer, expired, out, fx, intent,
-		  handoff, discard);
+		  handoff, discard, report);
   g.resend.reset();
+  /* §3.4:  a stale report applied nothing, and took no sequence number */
+  if (r == 0 && out.stale) {
+    return r;
+  }
   if (r == 0) {
     g.seq = seq;
   }
@@ -2249,37 +2260,74 @@ void gw_actions(const World& w0, size_t gi, std::vector<Action>& acts)
 	[gi, oi, inc, lost, refused](World& w) -> std::optional<std::string> {
 	  auto& g = w.gws[gi];
 	  auto o = g.opens[oi];
-	  if (cfg.sizes && o.writer && !refused) {
-	    /* end_write():  the writer reports, rebasing once if stale;  then
-	     * the hint covers its writes in the current epoch (§2.7,
-	     * close-to-open) */
-	    for (int k = 0; k < 2 && g.owe_report; ++k) {
-	      if (auto v = report_size(w, g, o.cs)) {
-		return v;
-	      }
-	    }
-	    /* only while it is still a writer of the shadow:  a fenced
-	     * finalize that took a presumed-dead writer's shadow published
-	     * its writes, or fenced them */
+	  /* only while it is still a writer of the shadow:  a fenced finalize
+	   * that took a presumed-dead writer's shadow published its writes,
+	   * or fenced them;  after its leave, the hint covers its writes in
+	   * the current epoch (§2.7, close-to-open) */
+	  auto hint_short = [&w, &g, &o, gi] (bool writer, bool publishing)
+	    -> std::optional<std::string> {
 	    const auto* e = w.head.hdr ? w.head.hdr->find(o.cs) : nullptr;
-	    const auto* oc = w.head.find(hd(g));
-	    const bool writer = oc && oc->chunk_sets.count(o.cs) &&
-	      oc->chunk_sets.at(o.cs).writers > 0;
 	    auto ew = w.ep_writes[o.storage].find(gi);
-	    if (writer && e && e->shadow && e->state != state::PUBLISHING &&
+	    if (writer && e && e->shadow && !publishing &&
 		ew != w.ep_writes[o.storage].end() &&
 		e->shadow->size_hint < ew->second) {
 	      return fmt::format("gw{} closes {}, its hint {} short of its "
 				 "write to {}", glabel(g), o.storage,
 				 e->shadow->size_hint, ew->second);
 	    }
+	    return std::nullopt;
+	  };
+	  bool was_writer = false, was_publishing = false;
+	  if (cfg.sizes && o.writer && !refused) {
+	    const auto* e = w.head.hdr ? w.head.hdr->find(o.cs) : nullptr;
+	    const auto* oc = w.head.find(hd(g));
+	    was_writer = oc && oc->chunk_sets.count(o.cs) &&
+	      oc->chunk_sets.at(o.cs).writers > 0;
+	    was_publishing = e && e->state == state::PUBLISHING;
 	  }
 	  g.opens.erase(g.opens.begin() + oi);
 	  fsio::leave_out out;
 	  cls_rgw_fsio_effects fx;
 	  auto save = w.head;
-	  if (counted_leave(w.head, g, o.cs, o.writer, w.dead_for(g), out, fx,
-			    nullptr, false, refused) < 0) {
+	  /* end_write():  its size report rides the leave (§3.4, 2026-11-25) */
+	  std::optional<fsio::size_report> rep;
+	  if (cfg.sizes && o.writer && !refused && g.owe_report) {
+	    rep = fsio::size_report{g.hwm_epoch, g.hwm, {}};
+	  }
+	  int lr = counted_leave(w.head, g, o.cs, o.writer, w.dead_for(g), out,
+				 fx, nullptr, false, refused,
+				 rep ? &*rep : nullptr);
+	  if (lr == 0 && out.stale) {
+	    /* nothing applied:  the report on its own, rebasing once if
+	     * stale, then the leave */
+	    {
+	      ceph::buffer::list now, was;
+	      encode(w.head, now);
+	      encode(save, was);
+	      if (!now.contents_equal(was)) {
+		return fmt::format("gw{}'s stale leave of {} changed the head",
+				   glabel(g), o.storage);
+	      }
+	    }
+	    for (int k = 0; k < 2 && g.owe_report; ++k) {
+	      if (auto v = report_size(w, g, o.cs)) {
+		return v;
+	      }
+	    }
+	    if (auto v = hint_short(was_writer, was_publishing)) {
+	      return v;
+	    }
+	    out = fsio::leave_out{};
+	    save = w.head;
+	    lr = counted_leave(w.head, g, o.cs, o.writer, w.dead_for(g), out, fx,
+			       nullptr, false, refused);
+	  } else if (lr == 0 && rep) {
+	    g.owe_report = 0;
+	    if (auto v = hint_short(was_writer, was_publishing)) {
+	      return v;
+	    }
+	  }
+	  if (lr < 0) {
 	    w.head = save;
 	    g.release_failed = 1;         // keeps its hint (H1)
 	    return std::nullopt;

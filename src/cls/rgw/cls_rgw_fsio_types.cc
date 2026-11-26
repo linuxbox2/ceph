@@ -473,6 +473,14 @@ void cls_rgw_fsio_leave_op::dump(ceph::Formatter *f) const
   encode_json("intent", intent, f);
   encode_json("handoff", handoff, f);
   encode_json("discard", discard, f);
+  encode_json("report", report, f);
+}
+
+void cls_rgw_fsio_size_report::dump(ceph::Formatter *f) const
+{
+  encode_json("trunc_epoch", trunc_epoch, f);
+  encode_json("size", size, f);
+  encode_json("mtime", mtime, f);
 }
 
 std::list<cls_rgw_fsio_leave_op> cls_rgw_fsio_leave_op::generate_test_instances()
@@ -487,6 +495,7 @@ std::list<cls_rgw_fsio_leave_op> cls_rgw_fsio_leave_op::generate_test_instances(
   i.intent = cls_rgw_fsio_intent::generate_test_instances().front();
   i.handoff = true;
   i.discard = true;
+  i.report = cls_rgw_fsio_size_report{8, 9, {}};
   o.push_back(std::move(i));
   o.emplace_back();
   return o;
@@ -500,6 +509,7 @@ void cls_rgw_fsio_leave_ret::dump(ceph::Formatter *f) const
   encode_json("olh_epoch", olh_epoch, f);
   encode_json("instance", instance, f);
   encode_json("drained", drained, f);
+  encode_json("stale", stale, f);
 }
 
 std::list<cls_rgw_fsio_leave_ret> cls_rgw_fsio_leave_ret::generate_test_instances()
@@ -512,6 +522,7 @@ std::list<cls_rgw_fsio_leave_ret> cls_rgw_fsio_leave_ret::generate_test_instance
   i.olh_epoch = 4;
   i.instance = "v5";
   i.drained = cls_rgw_fsio_id{6, 7};
+  i.stale = true;
   o.push_back(std::move(i));
   o.emplace_back();
   return o;

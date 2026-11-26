@@ -4169,6 +4169,23 @@ TEST_F(FSIORadosStatView, CreatedNameAndNoHead)
   EXPECT_EQ(3, st.st_size);
 }
 
+/* §3.4, 2026-11-25:  a writer that is not the last closes with its size
+ * report in its leave:  a lookup sees its writes' size */
+TEST_F(FSIORadosStatView, WriterLeaveReportsItsSize)
+{
+  set_versioning(0);
+  ASSERT_EQ(0, put("obj", pattern(MiB, 1)));
+  auto w1 = open("obj", true);
+  auto w2 = open("obj", true);
+  ASSERT_TRUE(w1 && w2);
+  ASSERT_EQ(0, write(w1, 2 * MiB, {"x"}));
+  ASSERT_EQ(0, w1->close(env->dpp.get(), 0));
+  struct stat st;
+  ASSERT_EQ(0, stat("obj", &st));
+  EXPECT_EQ(int64_t(2 * MiB + 1), st.st_size) << "the leave's report was lost";
+  ASSERT_EQ(0, w2->close(env->dpp.get(), 0));
+}
+
 /* a reader of a name being created reads its creator's writes, as a
  * follower does, and keeps them across the publish (§3.1, 2026-11-25) */
 TEST_F(FSIORadosStatView, ReaderOfACreatedName)

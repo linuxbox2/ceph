@@ -313,8 +313,15 @@ struct publish_intent {
   uint64_t now_epoch = 0;           // the OSD's, set by the CLS wrapper (X31)
 };
 
+/* §3.4, 2026-11-25:  a writer's size report, carried by its leave */
+struct size_report {
+  uint64_t trunc_epoch = 0;
+  uint64_t size = 0;
+  ceph::real_time mtime;
+};
 struct leave_out {
   bool already_applied = false;
+  bool stale = false;               // its report was stale:  nothing applied
   bool publishing = false;
   bool abandoned = false;           // a constructing shadow, its constructor gave up (§3.4)
   uint64_t olh_epoch = 0;           // versioned:  recorded at the transition
@@ -325,7 +332,7 @@ int leave(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& caller,
 	  uint64_t seq, const cls_rgw_fsio_id& cs, bool writer,
 	  const expired_t& expired, leave_out& out, cls_rgw_fsio_effects& fx,
 	  const publish_intent* intent = nullptr, bool handoff = false,
-	  bool discard = false);
+	  bool discard = false, const size_report* report = nullptr);
 
 /* §3.8, 8j:  the expirer takes an uncompleted publish:  a ready shadow
  * with uncompleted_publish and no writer bound becomes publishing, the

@@ -1007,6 +1007,82 @@ TEST_F(FsioHead, JoinReplyCarriesTheShadow)
   EXPECT_EQ((cls_rgw_fsio_run{0, 2}), *w2.last_run);
 }
 
+/* §3.4, 2026-11-25:  through the OSD, a writer's leave carries its size
+ * report:  merged before the freeze;  stale, nothing applied, the call's
+ * number left for the plain leave that follows */
+TEST_F(FsioHead, LeaveCarriesTheSizeReport)
+{
+  auto hdr_of = [this] (const std::string& head) {
+    std::string hb;
+    EXPECT_LE(0, getxattr(head, HDR, &hb));
+    cls_rgw_fsio_hdr hdr;
+    buffer::list bl;
+    bl.append(hb);
+    auto it = bl.cbegin();
+    decode(hdr, it);
+    return std::make_pair(hdr, hb);
+  };
+  auto ready = [this] (const std::string& head, const cls_rgw_fsio_id& cs) {
+    cls_rgw_fsio_runs_op rop;
+    rop.caller = GW1;
+    rop.cs = cs;
+    rop.runs = {{0, 0}};
+    ASSERT_EQ(0, call(head, cls::rgw::method::fsio_ready, rop,
+		      (cls_rgw_fsio_flags_ret*)nullptr));
+  };
+  auto leave = [this] (const std::string& head, const cls_rgw_fsio_id& cs,
+		       uint64_t seq, std::optional<cls_rgw_fsio_size_report> rep,
+		       cls_rgw_fsio_leave_ret* ret) {
+    cls_rgw_fsio_leave_op lop;
+    lop.caller = GW1;
+    lop.seq = seq;
+    lop.cs = cs;
+    lop.writer = true;
+    lop.report = rep;
+    return call(head, cls::rgw::method::fsio_leave, lop, ret);
+  };
+  {
+    std::string key;
+    const auto head = make_head(key);
+    const auto w = join(head, 41, true);
+    ready(head, w.bound);
+    cls_rgw_fsio_leave_ret ret;
+    ASSERT_EQ(0, leave(head, w.bound, 42,
+		       cls_rgw_fsio_size_report{0, 77,
+			 ceph::real_time(std::chrono::seconds(11))}, &ret));
+    EXPECT_FALSE(ret.stale);
+    EXPECT_TRUE(ret.publishing);
+    const auto hdr = hdr_of(head).first;
+    const auto* e = hdr.find(w.bound);
+    ASSERT_TRUE(e && e->shadow);
+    EXPECT_EQ(77u, e->shadow->size_hint);
+  }
+  {
+    std::string key;
+    const auto head = make_head(key);
+    const auto w = join(head, 51, true);
+    ready(head, w.bound);
+    cls_rgw_fsio_truncate_op top;
+    top.caller = GW1;
+    top.seq = 52;
+    top.cs = w.bound;
+    top.size = 5;
+    cls_rgw_fsio_truncate_ret tret;
+    ASSERT_EQ(0, call(head, cls::rgw::method::fsio_truncate, top, &tret));
+    const auto before = hdr_of(head).second;
+    cls_rgw_fsio_leave_ret ret;
+    ASSERT_EQ(0, leave(head, w.bound, 53,
+		       cls_rgw_fsio_size_report{0, 77, {}}, &ret));
+    EXPECT_TRUE(ret.stale);
+    EXPECT_FALSE(ret.publishing);
+    EXPECT_EQ(before, hdr_of(head).second) << "a stale leave changed the header";
+    cls_rgw_fsio_leave_ret again;
+    ASSERT_EQ(0, leave(head, w.bound, 53, std::nullopt, &again));
+    EXPECT_FALSE(again.already_applied) << "the stale leave took its number";
+    EXPECT_TRUE(again.publishing);
+  }
+}
+
 /* §3, §4.3:  fsio_ocnt_add on a version that is gone adds nothing and
  * returns gone, with held;  on an absent instance head it creates
  * nothing */

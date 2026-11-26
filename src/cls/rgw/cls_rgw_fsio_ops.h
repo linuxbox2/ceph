@@ -194,6 +194,31 @@ struct cls_rgw_fsio_runs_op {
 WRITE_CLASS_ENCODER(cls_rgw_fsio_runs_op)
 
 /* fsio_leave */
+/* §3.4, 2026-11-25:  a writer's size report, carried by its leave under
+ * fsio_hint's rules (§3.3) */
+struct cls_rgw_fsio_size_report {
+  uint64_t trunc_epoch = 0;
+  uint64_t size = 0;
+  ceph::real_time mtime;
+
+  void encode(ceph::buffer::list& bl) const {
+    ENCODE_START(1, 1, bl);
+    encode(trunc_epoch, bl);
+    encode(size, bl);
+    encode(mtime, bl);
+    ENCODE_FINISH(bl);
+  }
+  void decode(ceph::buffer::list::const_iterator& bl) {
+    DECODE_START(1, bl);
+    decode(trunc_epoch, bl);
+    decode(size, bl);
+    decode(mtime, bl);
+    DECODE_FINISH(bl);
+  }
+  void dump(ceph::Formatter *f) const;
+};
+WRITE_CLASS_ENCODER(cls_rgw_fsio_size_report)
+
 struct cls_rgw_fsio_leave_op {
   cls_rgw_fsio_handle caller;
   uint64_t seq = 0;
@@ -203,9 +228,11 @@ struct cls_rgw_fsio_leave_op {
   std::optional<cls_rgw_fsio_intent> intent;
   bool handoff = false;          // a writer's:  its publish handed off (§3.4, 8j)
   bool discard = false;          // a writer's:  its publish refused (§3.4, 8h)
+  /* a writer's:  its size report, applied first (§3.4, 2026-11-25) */
+  std::optional<cls_rgw_fsio_size_report> report;
 
   void encode(ceph::buffer::list& bl) const {
-    ENCODE_START(1, 1, bl);
+    ENCODE_START(2, 1, bl);
     encode(caller, bl);
     encode(seq, bl);
     encode(cs, bl);
@@ -214,10 +241,11 @@ struct cls_rgw_fsio_leave_op {
     encode(intent, bl);
     encode(handoff, bl);
     encode(discard, bl);
+    encode(report, bl);
     ENCODE_FINISH(bl);
   }
   void decode(ceph::buffer::list::const_iterator& bl) {
-    DECODE_START(1, bl);
+    DECODE_START(2, bl);
     decode(caller, bl);
     decode(seq, bl);
     decode(cs, bl);
@@ -226,6 +254,9 @@ struct cls_rgw_fsio_leave_op {
     decode(intent, bl);
     decode(handoff, bl);
     decode(discard, bl);
+    if (struct_v >= 2) {
+      decode(report, bl);
+    }
     DECODE_FINISH(bl);
   }
   void dump(ceph::Formatter *f) const;
@@ -240,25 +271,32 @@ struct cls_rgw_fsio_leave_ret {
   uint64_t olh_epoch = 0;
   std::string instance;          // at most OBJ_INSTANCE_LEN, 32 bytes
   std::optional<cls_rgw_fsio_id> drained;
+  /* its report named another truncate epoch:  nothing applied, the leave
+   * included (§3.4) */
+  bool stale = false;
 
   void encode(ceph::buffer::list& bl) const {
-    ENCODE_START(1, 1, bl);
+    ENCODE_START(2, 1, bl);
     encode(already_applied, bl);
     encode(publishing, bl);
     encode(abandoned, bl);
     encode(olh_epoch, bl);
     encode(instance, bl);
     encode(drained, bl);
+    encode(stale, bl);
     ENCODE_FINISH(bl);
   }
   void decode(ceph::buffer::list::const_iterator& bl) {
-    DECODE_START(1, bl);
+    DECODE_START(2, bl);
     decode(already_applied, bl);
     decode(publishing, bl);
     decode(abandoned, bl);
     decode(olh_epoch, bl);
     decode(instance, bl);
     decode(drained, bl);
+    if (struct_v >= 2) {
+      decode(stale, bl);
+    }
     DECODE_FINISH(bl);
   }
   void dump(ceph::Formatter *f) const;

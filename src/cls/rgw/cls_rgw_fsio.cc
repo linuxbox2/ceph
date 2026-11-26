@@ -312,7 +312,8 @@ int join_once(cls_rgw_fsio_head& h, const join_in& in, join_out& out,
 int leave_once(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& caller,
 	       const cls_rgw_fsio_id& cs, bool writer, const expired_t& expired,
 	       leave_out& out, cls_rgw_fsio_effects& fx,
-	       const publish_intent* intent, bool handoff, bool discard);
+	       const publish_intent* intent, bool handoff, bool discard,
+	       const size_report* report);
 int rebind_once(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& caller,
 		const cls_rgw_fsio_id& from, const cls_rgw_fsio_id& to,
 		uint32_t readers, rebind_out& out);
@@ -336,15 +337,17 @@ int join(cls_rgw_fsio_head& h, const join_in& in, join_out& out,
 int leave(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& caller,
 	  uint64_t seq, const cls_rgw_fsio_id& cs, bool writer,
 	  const expired_t& expired, leave_out& out, cls_rgw_fsio_effects& fx,
-	  const publish_intent* intent, bool handoff, bool discard)
+	  const publish_intent* intent, bool handoff, bool discard,
+	  const size_report* report)
 {
   if (already_applied(h, caller, seq)) {
     out.already_applied = true;
     return 0;
   }
   int r = leave_once(h, caller, cs, writer, expired, out, fx, intent, handoff,
-		     discard);
-  if (r == 0) {
+		     discard, report);
+  /* a stale report applied nothing, so the call takes no sequence number */
+  if (r == 0 && !out.stale) {
     applied(h, caller, seq);
   }
   return r;
@@ -779,10 +782,29 @@ namespace {
 int leave_once(cls_rgw_fsio_head& h, const cls_rgw_fsio_handle& caller,
 	       const cls_rgw_fsio_id& cs, bool writer, const expired_t& expired,
 	       leave_out& out, cls_rgw_fsio_effects& fx,
-	       const publish_intent* intent, bool handoff, bool discard)
+	       const publish_intent* intent, bool handoff, bool discard,
+	       const size_report* report)
 {
   if (!h.hdr) {
     return -EINVAL;
+  }
+  /* §3.4, 2026-11-25:  a writer's size report first, under fsio_hint's
+   * rules (§3.3);  one naming another truncate epoch applies nothing, the
+   * leave included */
+  if (report && writer) {
+    if (auto* e = writer_shadow(h, caller, cs);
+	e && (e->state != state::PUBLISHING ||
+	      FSIO_SKIP_CHECK(W14_PUBLISHING_FREEZES_SIZE))) {
+      auto& sh = *e->shadow;
+      if (report->trunc_epoch == sh.trunc_epoch ||
+	  FSIO_SKIP_CHECK(HINT_STALE_MERGES_NOTHING)) {
+	sh.size_hint = std::max(sh.size_hint, report->size);
+	sh.mtime_hint = std::max(sh.mtime_hint, report->mtime);
+      } else {
+	out.stale = true;
+	return 0;
+      }
+    }
   }
   expire_readers(h, expired);
   auto* o = h.find(caller);

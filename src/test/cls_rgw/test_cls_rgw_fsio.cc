@@ -1775,6 +1775,53 @@ TEST(cls_rgw_fsio_size, hint_merges_by_max_within_an_epoch)
   EXPECT_EQ(secs(9), sh.mtime_hint);
 }
 
+/* §3.4, 2026-11-25:  a writer's leave carries its size report, merged
+ * before the leave, the last writer's before its freeze */
+TEST(cls_rgw_fsio_size, leave_carries_the_report)
+{
+  auto h = head("C0");
+  const auto s = construct(h, GW1);
+  const fsio::size_report rep{0, 120, secs(8)};
+  fsio::leave_out lout;
+  cls_rgw_fsio_effects fx;
+  ASSERT_EQ(0, fsio::leave(h, GW1, next_seq(), s, true, {}, lout, fx, nullptr,
+			   false, false, &rep));
+  EXPECT_FALSE(lout.stale);
+  EXPECT_TRUE(lout.publishing);
+  const auto& sh = *h.hdr->find(s)->shadow;
+  EXPECT_EQ(120u, sh.size_hint);
+  EXPECT_EQ(secs(8), sh.mtime_hint);
+}
+
+/* §3.4:  a report naming an earlier truncate epoch applies nothing, the
+ * leave included, and takes no sequence number:  the gateway's plain
+ * leave after its own report uses the same one */
+TEST(cls_rgw_fsio_size, stale_report_leaves_nothing_applied)
+{
+  auto h = head("C0");
+  const auto s = construct(h, GW1);
+  fsio::truncate_out tout;
+  ASSERT_EQ(0, fsio::truncate(h, GW1, next_seq(), s, 60, secs(6), tout));
+  ceph::buffer::list before;
+  encode(h, before);
+  const fsio::size_report rep{0, 120, secs(8)};	// before the truncate
+  const auto seq = next_seq();
+  fsio::leave_out lout;
+  cls_rgw_fsio_effects fx;
+  ASSERT_EQ(0, fsio::leave(h, GW1, seq, s, true, {}, lout, fx, nullptr, false,
+			   false, &rep));
+  EXPECT_TRUE(lout.stale);
+  EXPECT_FALSE(lout.publishing);
+  ceph::buffer::list after;
+  encode(h, after);
+  EXPECT_TRUE(before.contents_equal(after)) << "a stale leave changed the head";
+  fsio::leave_out l2;
+  cls_rgw_fsio_effects fx2;
+  ASSERT_EQ(0, fsio::leave(h, GW1, seq, s, true, {}, l2, fx2));
+  EXPECT_FALSE(l2.already_applied) << "the stale leave took its number";
+  EXPECT_TRUE(l2.publishing);
+}
+
 /* a truncate sets the size exactly in a new epoch, and lowers trunc_low
  * only when smaller */
 TEST(cls_rgw_fsio_size, truncate_sets_exactly)
