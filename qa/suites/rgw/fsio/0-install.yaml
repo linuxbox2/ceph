@@ -1,0 +1,9 @@
+# FSIO's librgw suites (plan step 9b):  write2 and nfsns against a RADOS
+# cluster serving FSIO.  The workunit enables the zonegroup's fsio and
+# gc-manifest features itself.  Replicated pools only:  the FSIO gate
+# declines an erasure-coded data pool, where the suites would run only the
+# S3 op path.
+tasks:
+- install:
+- ceph:
+- rgw: [client.0]
