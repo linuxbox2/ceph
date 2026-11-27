@@ -719,6 +719,9 @@ fn main() {
                 if let Ok(conf) = std::env::var("CEPH_CONF") {
                     c.arg(format!("CEPH_CONF={conf}"));
                 }
+                if let Ok(pool) = std::env::var("FSIO_MODEL_POOL") {
+                    c.arg(format!("FSIO_MODEL_POOL={pool}"));
+                }
                 for (k, v) in &env {
                     c.arg(format!("{k}={v}"));
                 }

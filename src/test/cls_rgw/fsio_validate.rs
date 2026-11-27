@@ -29,8 +29,11 @@ edition = "2021"
 //! default placement's STANDARD data pool, so every bucket's heads and
 //! tails are on it (its index and extra pools stay replicated).  The
 //! tests read the zone when they start;  vstart's own gateway is not
-//! restarted, since no step talks to it.  After its steps, a check that
-//! the pool took writes.  Its logs go to `<run>/<kind>/`, its summary
+//! restarted, since no step talks to it.  The pool's objects are listed
+//! before the steps, and after each step that uses it a check that the
+//! step added names of its own:  `cls` under its tests' marker,
+//! `cluster-tier` under `fsiom.`, the driver steps any (a bucket's
+//! marker is made with it).  Its logs go to `<run>/<kind>/`, its summary
 //! lines read `harness@fastec`.  `clone-to` selects its tests' own pool
 //! parameters by kind.  On an EC kind, `cls` runs the CLS head test and
 //! the neorados CLS test on the kind's pool (`FSIO_TEST_POOL`, which
@@ -384,6 +387,16 @@ fn rados_phase(o: &Opts, pool: Pool, steps: &[&'static str], root: &Path, summar
         }
     }
     if !failed {
+        /* the data pool's objects before the steps:  each step's check
+         * counts the names it added */
+        if steps.iter().any(|s| pool_names(pool, s).is_some()) {
+            let c = sh("rados-ec", "the data pool's objects before the steps", format!(
+                "bin/rados -c ceph.conf -p {EC_POOL} ls | sort > {d}/objects.prev && wc -l < {d}/objects.prev",
+                d = run_dir.display()));
+            failed |= !exec(o, &c, run_dir, summary, |t| last_number(t).map(|n| format!("{n} objects")));
+        }
+    }
+    if !failed {
         for s in steps {
             /* an EC kind's pool for the tests that otherwise make their own */
             let on_pool = if pool == Pool::Replicated { String::new() } else { format!(" FSIO_TEST_POOL={EC_POOL}") };
@@ -485,18 +498,17 @@ fn rados_phase(o: &Opts, pool: Pool, steps: &[&'static str], root: &Path, summar
             for c in &cmds {
                 failed |= !exec(o, c, run_dir, summary, expected_count);
             }
-        }
-        /* the run tested what it says:  the steps whose buckets use the
-         * zone's placement, and those given the pool, wrote to it */
-        if pool != Pool::Replicated &&
-            steps.iter().any(|s| ["cls", "librgw-rados", "harness", "bench", "write2-rados",
-                                  "cluster-tier"].contains(s)) {
-            let c = sh("rados-ec", "the data pool took writes", format!(
-                "bin/rados -c ceph.conf df --format=json | python3 -c \
-                 'import json,sys; p=[p for p in json.load(sys.stdin)[\"pools\"] if p[\"name\"]==\"{EC_POOL}\"]; \
-                  print(p[0][\"write_ops\"] if p else 0); sys.exit(0 if p and p[0][\"write_ops\"] > 0 else 1)'"));
-            failed |= !exec(o, &c, run_dir, summary, |t| t.lines().rev().map(str::trim).find(|l| !l.is_empty() && l.bytes().all(|c| c.is_ascii_digit()))
-                .map(|n| format!("{n} write ops")));
+            /* the step tested what it says:  it left objects of its own
+             * in the data pool, names not there before it ran */
+            if let Some(names) = pool_names(pool, s) {
+                let c = sh("rados-ec", &format!("{s}'s objects in the data pool"), format!(
+                    "bin/rados -c ceph.conf -p {EC_POOL} ls | sort > {d}/objects.{s} \
+                     && comm -13 {d}/objects.prev {d}/objects.{s} > {d}/objects.{s}.new \
+                     && cp {d}/objects.{s} {d}/objects.prev \
+                     && n=$(grep -cE '{names}' {d}/objects.{s}.new || true) && echo \"$n\" && [ \"$n\" -gt 0 ]",
+                    d = run_dir.display()));
+                failed |= !exec(o, &c, run_dir, summary, new_objects);
+            }
         }
     }
     if o.reuse {
@@ -772,6 +784,32 @@ fn bench_report(text: &str, root: &Path, pool: Pool) -> (String, Vec<String>) {
         None => format!("{} cases;  no earlier run", cases.len()),
     };
     (note, lines)
+}
+
+/// The names a step leaves in an EC kind's data pool, as an ERE:  the
+/// CLS tests' heads and siblings under their marker, the cluster tier's
+/// per-walk heads;  RGW's names start with a bucket's marker, made when
+/// the bucket is, so any new name is the driver steps'.  None for a step
+/// that does not use the pool, and on the replicated kind.
+fn pool_names(pool: Pool, step: &str) -> Option<&'static str> {
+    if pool == Pool::Replicated {
+        return None;
+    }
+    match step {
+        "cls" => Some(r"^zone\.4125\.1[_~]"),
+        "cluster-tier" => Some(r"^fsiom\."),
+        "librgw-rados" | "harness" | "bench" | "write2-rados" => Some("."),
+        _ => None,
+    }
+}
+
+/// The last line of a command's output that is a number.
+fn last_number(text: &str) -> Option<&str> {
+    text.lines().rev().map(str::trim).find(|l| !l.is_empty() && l.bytes().all(|c| c.is_ascii_digit()))
+}
+
+fn new_objects(text: &str) -> Option<String> {
+    last_number(text).map(|n| format!("{n} new objects"))
 }
 
 fn expected_count(text: &str) -> Option<String> {
